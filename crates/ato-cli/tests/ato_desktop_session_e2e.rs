@@ -67,7 +67,7 @@ mod tests {
     fn session_test_env(home: &Path, session_root: &Path) -> Vec<(&'static str, String)> {
         vec![
             ("HOME", home.display().to_string()),
-            ("DESKY_SESSION_ROOT", session_root.display().to_string()),
+            ("ATO_DESKTOP_SESSION_ROOT", session_root.display().to_string()),
         ]
     }
 
@@ -107,7 +107,7 @@ mod tests {
 
     fn assert_guest_mode_env(sample_name: &str, adapter: &str) {
         let home = TempDir::new().expect("temp home");
-        let session_root = home.path().join("desky-sessions");
+        let session_root = home.path().join("ato-desktop-sessions");
         fs::create_dir_all(&session_root).expect("create session root");
         let sample = sample_dir(sample_name);
 
@@ -162,7 +162,7 @@ mod tests {
 
     fn assert_roundtrip(sample_name: &str, adapter: &str, message: &str) {
         let home = TempDir::new().expect("temp home");
-        let session_root = home.path().join("desky-sessions");
+        let session_root = home.path().join("ato-desktop-sessions");
         fs::create_dir_all(&session_root).expect("create session root");
         let sample = sample_dir(sample_name);
 
@@ -218,9 +218,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn desky_session_roundtrip_for_tauri_mock() {
+    fn ato_desktop_session_roundtrip_for_tauri_mock() {
         let home = TempDir::new().expect("temp home");
-        let session_root = home.path().join("desky-sessions");
+        let session_root = home.path().join("ato-desktop-sessions");
         fs::create_dir_all(&session_root).expect("create session root");
         let sample = sample_dir("desky-mock-tauri");
 
@@ -278,27 +278,27 @@ mod tests {
 
     #[test]
     #[serial]
-    fn desky_session_injects_ato_guest_mode_env() {
+    fn ato_desktop_session_injects_ato_guest_mode_env() {
         assert_guest_mode_env("desky-mock-tauri", "tauri");
     }
 
     #[test]
     #[serial]
-    fn desky_session_injects_ato_guest_mode_env_for_wails_mock() {
+    fn ato_desktop_session_injects_ato_guest_mode_env_for_wails_mock() {
         assert_guest_mode_env("desky-mock-wails", "wails");
     }
 
     #[test]
     #[serial]
-    fn desky_session_injects_ato_guest_mode_env_for_electron_mock() {
+    fn ato_desktop_session_injects_ato_guest_mode_env_for_electron_mock() {
         assert_guest_mode_env("desky-mock-electron", "electron");
     }
 
     #[test]
     #[serial]
-    fn desky_session_start_smoke_for_wails_mock() {
+    fn ato_desktop_session_start_smoke_for_wails_mock() {
         let home = TempDir::new().expect("temp home");
-        let session_root = home.path().join("desky-sessions");
+        let session_root = home.path().join("ato-desktop-sessions");
         fs::create_dir_all(&session_root).expect("create session root");
         let sample = sample_dir("desky-mock-wails");
 
@@ -330,9 +330,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn desky_session_stop_reaps_backend_process() {
+    fn ato_desktop_session_stop_reaps_backend_process() {
         let home = TempDir::new().expect("temp home");
-        let session_root = home.path().join("desky-sessions");
+        let session_root = home.path().join("ato-desktop-sessions");
         fs::create_dir_all(&session_root).expect("create session root");
         let sample = sample_dir("desky-mock-tauri");
 
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires local Electron runtime from apps/desky/node_modules"]
-    fn desky_session_roundtrip_for_real_electron_sample() {
+    fn ato_desktop_session_roundtrip_for_real_electron_sample() {
         assert_roundtrip(
             "desky-real-electron",
             "electron",
@@ -382,14 +382,14 @@ mod tests {
 
     #[test]
     #[ignore = "requires Go toolchain and Wails runtime dependencies"]
-    fn desky_session_roundtrip_for_real_wails_sample() {
+    fn ato_desktop_session_roundtrip_for_real_wails_sample() {
         assert_roundtrip("desky-real-wails", "wails", "hello from real wails e2e");
         assert_guest_mode_env("desky-real-wails", "wails");
     }
 
     #[test]
     #[ignore = "requires local Tauri toolchain and macOS runtime dependencies"]
-    fn desky_session_roundtrip_for_real_tauri_sample() {
+    fn ato_desktop_session_roundtrip_for_real_tauri_sample() {
         assert_roundtrip("desky-real-tauri", "tauri", "hello from real tauri e2e");
         assert_guest_mode_env("desky-real-tauri", "tauri");
     }
