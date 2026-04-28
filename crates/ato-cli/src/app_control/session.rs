@@ -35,6 +35,14 @@ const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
 const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Interval between HTTP readiness polls while waiting for a freshly spawned
+/// session to bind its port. The value trades worst-case wasted wait time
+/// against syscall churn: 25ms is short enough that even fast servers
+/// (`next start` becomes ready in ~530ms standalone) lose <25ms on average,
+/// while still being far above the kernel's connect-syscall granularity.
+/// Paired with a per-attempt read/write timeout of 1s in `wait_for_http_ready`,
+/// so a hung connect cannot stall progress beyond that.
+const SESSION_READY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Serialize)]
 struct SessionStartEnvelope {
@@ -186,7 +194,13 @@ pub(super) fn start_guest_session(
     guest: super::guest_contract::GuestContract,
     notes: Vec<String>,
 ) -> Result<SessionInfo> {
+    use crate::application::pipeline::executor::PhaseStageTimer;
+    use crate::application::pipeline::hourglass::HourglassPhase;
+
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "reserve_port");
     let port = reserve_port(guest.default_port)?;
+    timer.finish_ok();
+
     let process_manager = ProcessManager::new()?;
     let session_root = session_root()?;
     fs::create_dir_all(&session_root)
@@ -230,6 +244,7 @@ pub(super) fn start_guest_session(
     command.env("ATO_DESKTOP_SESSION_HEALTH_PATH", &guest.health_path);
     command.env("ATO_GUEST_MODE", "1");
 
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_guest_process");
     let mut child = command.spawn().with_context(|| {
         format!(
             "failed to start guest backend '{}' from {}",
@@ -237,6 +252,7 @@ pub(super) fn start_guest_session(
             launch.working_dir.display()
         )
     })?;
+    timer.finish_ok();
 
     let session_id = format!("ato-desktop-session-{}", child.id());
     let runtime = runtime_descriptor(plan);
@@ -258,12 +274,18 @@ pub(super) fn start_guest_session(
         last_error: None,
         exit_code: None,
     };
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_pid");
     process_manager.write_pid(&process_info)?;
+    timer.finish_ok();
 
     let healthcheck_url = format!("http://127.0.0.1:{}{}", port, guest.health_path);
     let invoke_url = format!("http://127.0.0.1:{}{}", port, guest.rpc_path);
 
-    match wait_for_http_ready(&mut child, port, &guest.health_path, SESSION_READY_TIMEOUT) {
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "wait_http_ready");
+    let ready_result =
+        wait_for_http_ready(&mut child, port, &guest.health_path, SESSION_READY_TIMEOUT);
+    timer.finish_ok();
+    match ready_result {
         Ok(()) => {
             let _ = process_manager.update_pid(&session_id, |info| {
                 info.status = ProcessStatus::Ready;
@@ -289,6 +311,7 @@ pub(super) fn start_guest_session(
         }
     }
 
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
         handle: handle.to_string(),
@@ -318,6 +341,7 @@ pub(super) fn start_guest_session(
         service: None,
     };
     write_session_record(&session_root, &session)?;
+    timer.finish_ok();
     Ok(session_info_from_record(session))
 }
 
@@ -340,11 +364,19 @@ pub(super) fn start_runtime_session(
         );
     }
 
+    use crate::application::pipeline::executor::PhaseStageTimer;
+    use crate::application::pipeline::hourglass::HourglassPhase;
+
     let process_manager = ProcessManager::new()?;
     let session_root = session_root()?;
     fs::create_dir_all(&session_root)
         .with_context(|| format!("failed to create session root {}", session_root.display()))?;
+
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "prepare_session_execution");
     let prepared = prepare_session_execution(plan, raw_manifest)?;
+    timer.finish_ok();
+
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_runtime_process");
     let mut runtime_process = spawn_runtime_process(plan, &prepared, &display_strategy)
         .with_context(|| {
             format!(
@@ -352,6 +384,8 @@ pub(super) fn start_runtime_session(
                 manifest_path.display()
             )
         })?;
+    timer.finish_ok();
+
     let session_id = format!("ato-desktop-session-{}", runtime_process.child.id());
     let log_path = session_root.join(format!("{}.log", session_id));
     attach_process_logs(&mut runtime_process.child, &log_path)?;
@@ -365,12 +399,15 @@ pub(super) fn start_runtime_session(
             )
         })?;
         let health_path = "/";
-        match wait_for_http_ready(
+        let timer = PhaseStageTimer::start(HourglassPhase::Execute, "wait_http_ready");
+        let ready_result = wait_for_http_ready(
             &mut runtime_process.child,
             port,
             health_path,
             SESSION_READY_TIMEOUT,
-        ) {
+        );
+        timer.finish_ok();
+        match ready_result {
             Ok(()) => Some(format!("http://127.0.0.1:{port}/")),
             Err(err) => {
                 let _ = runtime_process.child.kill();
@@ -419,8 +456,11 @@ pub(super) fn start_runtime_session(
         last_error: None,
         exit_code: None,
     };
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_pid");
     process_manager.write_pid(&process_info)?;
+    timer.finish_ok();
 
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
     let session = StoredSessionInfo {
         session_id,
         handle: handle.to_string(),
@@ -455,6 +495,7 @@ pub(super) fn start_runtime_session(
         }),
     };
     write_session_record(&session_root, &session)?;
+    timer.finish_ok();
     Ok(session_info_from_record(session))
 }
 
@@ -925,7 +966,7 @@ fn wait_for_http_ready(
             anyhow::bail!("readiness timed out for http://127.0.0.1:{port}{path}");
         }
 
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(SESSION_READY_POLL_INTERVAL);
     }
 }
 
