@@ -32,11 +32,10 @@ pub use session::{start_session, stop_session};
 // App Session Materialization (RFC: APP_SESSION_MATERIALIZATION) consumes a
 // few in-module helpers from session. Re-exported as pub(crate) so the
 // materialization layer can share storage / probe primitives without
-// flipping the entire `session` module to public.
-pub(crate) use session::{
-    http_get_ok, session_root, GuestSessionDisplay, ServiceBackgroundDisplay, StoredSessionInfo,
-    TerminalSessionDisplay, WebSessionDisplay,
-};
+// flipping the entire `session` module to public. The session-record
+// schema itself now lives in `ato-session-core` (RFC §3.2 PR 4A.0);
+// `session::StoredSessionInfo` is a re-export of that shared type.
+pub(crate) use session::{http_get_ok, session_root, StoredSessionInfo};
 
 /// Canonical package identifier for the ato-desktop control-plane envelope.
 /// Renamed from the legacy `DESKY_PACKAGE_ID` (= "ato/desky") in line with the
