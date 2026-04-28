@@ -182,6 +182,16 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = false)]
         allow_unverified: bool,
 
+        /// Force the build phase to run even if a previous materialization is reusable.
+        /// See: docs/rfcs/draft/BUILD_MATERIALIZATION.md
+        #[arg(long = "rebuild", default_value_t = false, conflicts_with = "no_build")]
+        rebuild: bool,
+
+        /// Forbid the build phase from running. Fails if no usable materialization exists.
+        /// See: docs/rfcs/draft/BUILD_MATERIALIZATION.md
+        #[arg(long = "no-build", default_value_t = false, conflicts_with = "rebuild")]
+        no_build: bool,
+
         /// Grant read-only access to a host file or directory in sandbox mode
         #[arg(long = "read", value_name = "PATH")]
         read: Vec<String>,
