@@ -14,12 +14,14 @@ use gpui::{
 use gpui_component::input::InputState;
 use gpui_component::resizable::h_resizable;
 use gpui_component::skeleton::Skeleton;
+use gpui_component::spinner::Spinner;
+use gpui_component::{Sizable, Size};
 
 use crate::state::{
     ActivityTone, AppState, GuestRoute, PaneBounds, PaneSurface, WebPane, WebSessionState,
 };
 
-use super::theme::Theme;
+use super::theme::{task_hue, Theme};
 use super::STAGE_PADDING;
 use auth_handoff::render_auth_handoff_panel;
 use capsule_runtime::render_capsule_runtime_panel;
@@ -187,16 +189,7 @@ fn render_web_pane(web: &WebPane, state: &AppState, theme: &Theme) -> gpui::Div 
                     this.child(render_share_loading_overlay(web, theme))
                 })
                 .when(launching && !is_share, |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .p_4()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .children((0..5).map(|_| Skeleton::new())),
-                    )
+                    this.child(render_generic_loading_overlay(web, theme))
                 })
                 .when(failed, |this| {
                     this.child(render_launch_failed_overlay(web, state, theme))
@@ -226,6 +219,8 @@ fn render_share_loading_overlay(web: &WebPane, theme: &Theme) -> impl IntoElemen
         _ => "Loading…",
     };
 
+    let (label, hue) = web_pane_loading_identity(web);
+
     div()
         .absolute()
         .inset_0()
@@ -240,18 +235,7 @@ fn render_share_loading_overlay(web: &WebPane, theme: &Theme) -> impl IntoElemen
                 .items_center()
                 .gap(px(24.0))
                 .w(px(360.0))
-                // Icon placeholder
-                .child(
-                    div()
-                        .w(px(72.0))
-                        .h(px(72.0))
-                        .rounded(px(16.0))
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .overflow_hidden()
-                        .child(Skeleton::new()),
-                )
-                // Title + share ID
+                .child(render_app_loading_visual(&label, hue, 112.0, 60.0, theme))
                 .child(
                     div()
                         .flex()
@@ -272,26 +256,159 @@ fn render_share_loading_overlay(web: &WebPane, theme: &Theme) -> impl IntoElemen
                                 .child(share_id),
                         ),
                 )
-                // Step indicator
                 .child(render_step_indicator(active_step, theme))
-                // Current step label
                 .child(
                     div()
                         .text_size(px(12.0))
                         .text_color(theme.text_tertiary)
                         .child(step_label),
-                )
-                // Skeleton shimmer lines
+                ),
+        )
+}
+
+fn render_generic_loading_overlay(web: &WebPane, theme: &Theme) -> impl IntoElement {
+    let (label, hue) = web_pane_loading_identity(web);
+    let stage_label = match web.session {
+        WebSessionState::Resolving => "Resolving capsule…",
+        WebSessionState::Materializing => "Installing dependencies…",
+        WebSessionState::Launching => "Starting app…",
+        _ => "Loading…",
+    };
+    let title = web
+        .canonical_handle
+        .clone()
+        .or_else(|| match &web.route {
+            GuestRoute::ExternalUrl(url) => url.host_str().map(|h| h.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| web.route.to_string());
+
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .p(px(32.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(20.0))
+                .child(render_app_loading_visual(&label, hue, 112.0, 60.0, theme))
                 .child(
                     div()
-                        .w(px(360.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .child(Skeleton::new())
-                        .child(Skeleton::new())
-                        .child(Skeleton::new()),
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight(600.0))
+                        .text_color(theme.text_primary)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.text_tertiary)
+                        .child(stage_label),
                 ),
+        )
+}
+
+/// Pick a stable label/hue for the loading visual from the pane's
+/// own data (no need to walk up to the parent task). Prefers the
+/// canonical handle, then the URL host, then the pane title.
+/// `partition_id` is the seed because it is unique per pane and
+/// stable across reroutes; `task_hue` keeps the loader's color in
+/// sync with the rail icon for the same pane.
+fn web_pane_loading_identity(web: &WebPane) -> (String, f32) {
+    let label_source: String = web
+        .canonical_handle
+        .clone()
+        .or_else(|| match &web.route {
+            GuestRoute::ExternalUrl(url) => url.host_str().map(|h| h.to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| web.partition_id.clone());
+    let label: String = label_source
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "•".to_string());
+    let mut seed: u64 = 1469598103934665603; // FNV-1a offset basis, gives decent spread.
+    for byte in web.partition_id.as_bytes() {
+        seed ^= *byte as u64;
+        seed = seed.wrapping_mul(1099511628211);
+    }
+    (label, task_hue(seed))
+}
+
+/// Centered loading visual — a rotating spinner ring with the app's
+/// monogram in the middle. Replaces the Skeleton stripes that the
+/// stage rendered while a guest was resolving/materializing/launching;
+/// users now see *which* app is loading instead of a generic placeholder.
+///
+/// `outer_size` controls the spinner ring diameter, `inner_size`
+/// the monogram tile.
+fn render_app_loading_visual(
+    label: &str,
+    hue: f32,
+    outer_size: f32,
+    inner_size: f32,
+    theme: &Theme,
+) -> impl IntoElement {
+    let saturation = 0.55_f32;
+    let lightness = 0.50_f32;
+    let monogram_bg = linear_gradient(
+        135.,
+        linear_color_stop(gpui::hsla(hue / 360.0, saturation, lightness, 1.0), 0.),
+        linear_color_stop(
+            gpui::hsla(
+                ((hue + 30.0) % 360.0) / 360.0,
+                saturation * 0.9,
+                lightness * 0.85,
+                1.0,
+            ),
+            1.,
+        ),
+    );
+
+    div()
+        .relative()
+        .w(px(outer_size))
+        .h(px(outer_size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            // Rotating ring — gpui_component's Spinner handles the
+            // animation. Sized to the outer diameter so it visually
+            // wraps the monogram below.
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Spinner::new()
+                        .with_size(Size::Size(px(outer_size)))
+                        .color(gpui::hsla(hue / 360.0, saturation, lightness, 0.95)),
+                ),
+        )
+        .child(
+            div()
+                .w(px(inner_size))
+                .h(px(inner_size))
+                .rounded(px(inner_size * 0.22))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(monogram_bg)
+                .border_1()
+                .border_color(theme.border_default)
+                .text_color(gpui::white())
+                .text_size(px(inner_size * 0.42))
+                .font_weight(FontWeight::BOLD)
+                .child(label.to_string()),
         )
 }
 
