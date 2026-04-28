@@ -7,6 +7,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+// Session record schema and atomic writer now live in `ato-session-core`
+// so `ato-desktop` can read records without depending on `ato-cli`. We
+// re-export at `pub(crate)` so the rest of this crate continues to see
+// these names without prefix.
+pub(crate) use ato_session_core::{
+    write_session_record_atomic, GuestSessionDisplay, ServiceBackgroundDisplay, StoredSessionInfo,
+    TerminalSessionDisplay, WebSessionDisplay,
+};
 use capsule_core::ato_lock;
 use capsule_core::handle::{
     normalize_capsule_handle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
@@ -14,7 +22,7 @@ use capsule_core::handle::{
 };
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::application::pipeline::phases::run::DerivedBridgeManifest;
 use crate::application::pipeline::phases::run::PreparedRunContext;
@@ -105,76 +113,13 @@ impl SessionInfo {
     }
 }
 
-/// On-disk session record. Schema is forward-compatible: older record files
-/// (lacking `schema_version` / `launch_digest` / `process_start_time_unix_ms`)
-/// deserialize cleanly via `#[serde(default)]` and are treated as schema=1
-/// (reuse-incompatible) by the App Session Materialization layer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct StoredSessionInfo {
-    pub(crate) session_id: String,
-    pub(crate) handle: String,
-    pub(crate) normalized_handle: String,
-    pub(crate) canonical_handle: Option<String>,
-    pub(crate) trust_state: TrustState,
-    pub(crate) source: Option<String>,
-    pub(crate) restricted: bool,
-    pub(crate) snapshot: Option<ResolvedSnapshot>,
-    pub(crate) runtime: CapsuleRuntimeDescriptor,
-    pub(crate) display_strategy: CapsuleDisplayStrategy,
-    pub(crate) pid: i32,
-    pub(crate) log_path: String,
-    pub(crate) manifest_path: String,
-    pub(crate) target_label: String,
-    pub(crate) notes: Vec<String>,
-    pub(crate) guest: Option<GuestSessionDisplay>,
-    pub(crate) web: Option<WebSessionDisplay>,
-    pub(crate) terminal: Option<TerminalSessionDisplay>,
-    pub(crate) service: Option<ServiceBackgroundDisplay>,
-
-    // App Session Materialization v0 (RFC: APP_SESSION_MATERIALIZATION).
-    // All three are `Option` for forward compatibility with schema=1 records.
-    /// Schema version. Records written by v0 set this to `Some(2)`. Older
-    /// records (or hand-written ones) leave it as `None` and are treated as
-    /// schema=1 — they MAY be displayed but MUST NOT be reused.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) schema_version: Option<u32>,
-    /// blake3 launch digest of the LaunchSpec used to start this session.
-    /// Reuse requires this to match the current LaunchSpec digest exactly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) launch_digest: Option<String>,
-    /// Process creation time (unix ms). Used in conjunction with PID alive
-    /// to defeat OS PID reuse. macOS / Linux only at v0; unknown on Windows
-    /// and serializes as `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) process_start_time_unix_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct GuestSessionDisplay {
-    pub(crate) adapter: String,
-    pub(crate) frontend_entry: String,
-    pub(crate) transport: String,
-    pub(crate) healthcheck_url: String,
-    pub(crate) invoke_url: String,
-    pub(crate) capabilities: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WebSessionDisplay {
-    pub(crate) local_url: String,
-    pub(crate) healthcheck_url: String,
-    pub(crate) served_by: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TerminalSessionDisplay {
-    pub(crate) log_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ServiceBackgroundDisplay {
-    pub(crate) log_path: String,
-}
+// On-disk session record schema lives in `ato-session-core` (see top-of-
+// file `pub(crate) use`). Keep this comment as a back-pointer because
+// `git blame` for this file should still surface the design rationale:
+// schema is forward-compatible, schema_version < 2 records are
+// reuse-ineligible. Refactor of v0.4 (PR 4A.0 — RFC §3.2) moved the
+// types out so `ato-desktop` can read records without depending on
+// `ato-cli`.
 
 pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
     // Drive the same Hourglass pipeline `ato run` uses, with a
@@ -956,23 +901,20 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Thin wrapper around `ato_session_core::session_root` so existing
+/// CLI call sites keep using the unprefixed name. The shared helper
+/// honors the same `ATO_DESKTOP_SESSION_ROOT` env override, which is
+/// what the Desktop fast-path tests rely on.
 pub(crate) fn session_root() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("ATO_DESKTOP_SESSION_ROOT") {
-        return Ok(PathBuf::from(path));
-    }
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("failed to resolve home directory"))?;
-    Ok(home
-        .join(".ato")
-        .join("apps")
-        .join("ato-desktop")
-        .join("sessions"))
+    ato_session_core::session_root()
 }
 
+/// Writes the record atomically (temp + rename) via `ato_session_core`
+/// so the Desktop direct-read fast path can never observe a partial
+/// record. Replaces the legacy `fs::write` call (RFC v0.3 §9.4
+/// prerequisite for Phase 1).
 fn write_session_record(root: &Path, session: &StoredSessionInfo) -> Result<()> {
-    let path = root.join(format!("{}.json", session.session_id));
-    fs::write(&path, serde_json::to_vec_pretty(session)?)
-        .with_context(|| format!("failed to write session file {}", path.display()))
+    write_session_record_atomic(root, session)
 }
 
 fn reserve_port(default_port: Option<u16>) -> Result<u16> {
