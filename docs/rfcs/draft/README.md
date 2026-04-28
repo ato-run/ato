@@ -19,3 +19,4 @@
 - [ENGINE_AND_WORKLOAD_MODEL.md](ENGINE_AND_WORKLOAD_MODEL.md) — Engine / Workload / Provider Toolchain の 4 層モデル定義
 - [BUILD_MATERIALIZATION.md](BUILD_MATERIALIZATION.md) — Build を materialized artifact として扱うモデル (v0)
 - [APP_SESSION_MATERIALIZATION.md](APP_SESSION_MATERIALIZATION.md) — Execute phase を materialized session として扱うモデル (v0、Build Materialization の続編)
+- [SURFACE_MATERIALIZATION.md](SURFACE_MATERIALIZATION.md) — Desktop の WebView surface を materialized resource として扱うモデル (v0、App Session Materialization の続編)
