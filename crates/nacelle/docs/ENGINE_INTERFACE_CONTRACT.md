@@ -69,6 +69,8 @@ nacelle internal --input - pack
 - backend が 1 つも無い場合、`sandbox=[]` かつ `ipc_sandbox=false`
 - `languages` は `python` / `node` / `deno` / `bun` を返す
 - macOS backend は `macos-seatbelt` のみを返す
+- `ipc_sandbox=true` は engine が `ipc_socket_paths` を受け取って kernel-level
+  sandbox に動的注入できることを示す。詳細は §5「Sandbox semantics」
 
 ## 5. `internal exec`
 
@@ -135,6 +137,31 @@ nacelle internal --input - pack
 - `upper_overlays` は workspace root からの相対 target に重ねる
 - `derived_outputs` は workspace root からの相対 target に write target を注入し、`host_path` は lower_source 配下を指してはいけない
 - `runtime_artifacts` は `ato-cli` が解決済みの参照のみを渡す。`nacelle` は解決せず、存在検証と env/PATH 注入だけを行う
+
+### Sandbox semantics (Smart Build, Dumb Runtime)
+
+`ato-cli` (IPC Broker) が `ipc_socket_paths` と `ipc_env` を生成し、`nacelle` は
+それを kernel sandbox に注入するだけで内容には関与しない。
+
+- `ipc_socket_paths: string[]`
+  - capsule.toml の `[ipc.imports]` から `ato-cli` が解決したソケットパス
+  - `nacelle` は各パスを platform sandbox に追加する:
+    - **Linux**: Landlock ruleset に `path_beneath_rules(path, AccessFs::from_all)` を追加。
+      ソケットがまだ存在しない場合は親ディレクトリを許可（pre-bind）。
+    - **macOS**: SBPL profile に
+      `(allow file-read* file-write* (subpath "{path}"))` と
+      `(allow network* (remote unix-socket (subpath "{path}")))` /
+      `(allow network* (local unix-socket (subpath "{path}")))` を追加。
+  - パス以外への file/socket アクセスは引き続き deny される（deny-by-default）
+- `ipc_env: [[string, string]]`
+  - `CAPSULE_IPC_<SERVICE>_URL` / `_TOKEN` / `_SOCKET` などの環境変数
+  - `nacelle` は値を解釈せず、子プロセスに `cmd.env()` で透過するのみ
+- Keychain / authorisation 系の Mach IPC（macOS の `com.apple.secd` 等）は
+  `ipc_socket_paths` の有無に関わらず常に deny される。capsule は env 経由で
+  注入されたシークレットのみを使う設計。
+
+詳細は `claudedocs/research_phase13a_sandbox_best_practices_20260429.md` と
+`docs/rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md`。
 
 ### stdout contract
 
