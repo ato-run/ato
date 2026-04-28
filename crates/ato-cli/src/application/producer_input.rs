@@ -161,10 +161,7 @@ fn prompt_regenerate_lock(manifest_path: &Path) -> Result<bool> {
     Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
-fn regenerate_lockfile_blocking(
-    manifest_path: &Path,
-    reporter: Arc<CliReporter>,
-) -> Result<()> {
+fn regenerate_lockfile_blocking(manifest_path: &Path, reporter: Arc<CliReporter>) -> Result<()> {
     // The legacy implementation called `capsule_core::lockfile::
     // ensure_lockfile`, which only refreshes the **legacy**
     // `capsule.lock.json` (the `CapsuleLock` format kept under
@@ -828,10 +825,9 @@ run = "main.ts"
             "regenerated canonical lock must match capsule.toml name"
         );
 
-        let regenerated_lock = capsule_core::ato_lock::load_unvalidated_from_path(
-            &dir.path().join("ato.lock.json"),
-        )
-        .expect("regenerated lock must be readable");
+        let regenerated_lock =
+            capsule_core::ato_lock::load_unvalidated_from_path(&dir.path().join("ato.lock.json"))
+                .expect("regenerated lock must be readable");
         let metadata = regenerated_lock
             .contract
             .entries
