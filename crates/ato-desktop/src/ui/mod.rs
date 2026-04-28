@@ -1319,7 +1319,8 @@ impl Render for DesktopShell {
             || self.state.pending_config.is_some()
             || self.state.active_permission_prompt().is_some()
             || self.state.pending_quit_confirmation
-            || self.state.route_metadata_popover_open;
+            || self.state.route_metadata_popover_open
+            || self.state.settings_panel_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
         let theme = Theme::from_mode(self.state.theme_mode);
