@@ -1,9 +1,16 @@
 # 📄 App Session Materialization Specification
 
 **Document ID:** `APP_SESSION_MATERIALIZATION`
-**Status:** Draft v0.1
+**Status:** Draft v0.2
 **Target:** ato-cli v0.5.x
 **Last Updated:** 2026-04-29
+
+> **v0 implementation scope is narrow on purpose.** PR 2 only wires reuse
+> into `ato app session start` (the Desktop launch path), with no
+> destructive cleanup, no new `ato run` flags, and no strict port-owner
+> verification. Each of those is a separate v1 work item once the reuse
+> state machine is proven on the app-session entry point. See §5.2, §5.5,
+> §8, §9.1.
 
 ## 1. 概要 (Overview)
 
@@ -51,13 +58,18 @@ Ato 側の overhead は合計 **3–4ms** に過ぎない。
 - **Session は phase ではなく artifact**: `Execute` は process を回す step では
   なく、declared launch contract を満たす materialized session を返す step
   と再定義する。
+- **v0 は `ato app session start` のみが対象**: Desktop が呼ぶ唯一の reuse-
+  beneficial entry point に集中し、reuse state machine の正しさをそこで証明
+  してから他経路に拡張する（§5.2）。
+- **v0 action は Reuse / Spawn の 2 値のみ — destructive cleanup なし**:
+  既存 session が stale でも v0 では kill しない。Desktop が複数 window /
+  tab を持つ可能性があり、勝手な kill は UX を壊す。stale ハンドリングは
+  v1（§5.5）。
 - **Internal caching ではなく external reuse**: PR 1 の実測で Ato 内部処理は
   既に十分速いことが確定したため、**`prepare_session_execution` のキャッシュは
   本 RFC の対象外**。最適化対象は spawn そのものを回避することのみ。
 - **3 層モデルを汚さない**: 宣言（`capsule.toml`）／解決結果（`ato.lock.json`）／
   実機状態（`~/.ato/apps/<package_id>/sessions/`）を分離。
-- **Foreground は default-no-reuse**: `ato run` foreground は stdout streaming /
-  Ctrl+C / 終了コードの契約があるため、reuse は `--reuse` opt-in（§5.2）。
 - **Cross-host reuse は対象外**: portable session contract が未定義のため、
   cross-machine reuse は先送り（§8）。
 - **`materialized-session` という新 result_kind**: phase result は
@@ -94,9 +106,9 @@ session = launch_executor(LaunchSpec, ReadinessContract)
 - `ReadinessContract`: ready 判定の方法（HTTP path / interval / timeout）
 - 結果: `{ pid, port, local_url, status: ready }` を返す materialized record
 
-`ato app session start` および `ato run --background` / `ato run --reuse` は
-この関数の materialization 版を呼び、record が ready かつ valid なら spawn を
-スキップして既存 session の envelope を返す。
+v0 では **`ato app session start`** がこの関数の materialization 版を呼ぶ。
+record が ready かつ valid なら spawn をスキップして既存 session の envelope
+を返す。`ato run` 各 mode の materialization 化は v1（§5.2）。
 
 ### 2.2 LaunchSpec と Launch Digest
 
@@ -259,94 +271,135 @@ session 数 < 100 の host で < 5ms）。v1 で session 数が増えるなら i
 ~/.ato/apps/<package_id>/sessions/locks/<launch_key>.lock
 ```
 
-ここで:
+`launch_key` は **logical slot identifier** で、spec 変化に対して安定で
+なければならない（同じ slot を奪い合う 2 starts を排他するのが目的）。
+`launch_digest` とは異なる:
 
 ```
-launch_key = blake3(handle_normalized || "::" || target_label)
+launch_key = blake3(
+  schema_version_marker      ||  // "ato-launch-key-v1"
+  identity                   ||  // remote handle / store scoped id / canonical local manifest path
+  selected_target
+)
 ```
 
-注意: `launch_key` は `launch_digest` と異なる。`launch_digest` は spec 全体
-（version, env, build_digest 含む）から作るため、spec 変化のたびに変わる。
-`launch_key` は **同じ logical slot を奪い合う 2 starts を排他**したいので、
-spec 変化に対して安定でなければならない。
+`identity` の決定ルール:
+
+| Source | identity に使う値 |
+|---|---|
+| Remote handle (e.g. `github.com/owner/repo@vX`) | `normalized_handle`（`normalize_capsule_handle` の結果） |
+| Store scoped id (e.g. `publisher/slug`) | `normalized_handle` |
+| Local path (`./`, `~/`, absolute path) | `manifest_path` を `std::fs::canonicalize` した結果 |
+
+理由: local path 起動では同じ project への異なる handle 表現（`.`、相対 path、
+絶対 path、symlink 経由）が衝突しないよう、canonical な manifest path で
+identity を取る必要がある。
 
 `fs2::FileExt::lock_exclusive`（既存依存）で OS-level の advisory file lock
 を取る。`wait_http_ready` 中ずっと保持する（§5.4）。
 
 ## 5. 実行フロー
 
-### 5.1 Session Start with Reuse
+### 5.1 Session Start with Reuse (v0)
 
 ```text
-session start entry
+session start entry  (ato app session start のみ)
 ├─ resolve handle → manifest, plan, launch_spec
 ├─ compute launch_digest
 ├─ acquire lock(launch_key)              ← §5.4
-├─ lookup existing record by (handle, target)
-├─ policy + state machine                ← §5.3
-│    Reuse:    return existing envelope (skip spawn)
-│    Replace:  kill existing, spawn new, write record
-│    Spawn:    no existing or reuse disabled → spawn new, write record
-│    Fail:     --require-session and no reusable → ATO_ERR_MISSING_SESSION
+│    (lock holds across spawn + readiness + record write — §5.4 注釈)
+├─ lookup existing records by (handle, target)
+├─ state machine                          ← §5.3
+│    Reuse:  return existing envelope (skip spawn)
+│    Spawn:  spawn new, wait readiness, write new record
+│            (existing stale record/process は kill しない — §5.5)
 ├─ release lock
 └─ emit envelope
 ```
 
+v1 で追加予定の action: `Replace` (kill existing + spawn new), `Fail`
+(`--require-session` で reuse 不可) — §5.5 / §8。
+
 ### 5.2 Reuse Policy by Entry Point
 
-v0 は entry point ごとに default を変える:
+**v0 は `ato app session start` のみが対象。** その他の entry point は v1
+以降で扱う。
 
-| Entry point | Default reuse | Override |
-|---|---|---|
-| `ato app session start` | enabled | （Desktop 経由のみのため override 不要） |
-| `ato run --background` | enabled | `--respawn` で disable |
-| `ato run` (foreground) | **disabled** | `--reuse` で enable |
-| `ato run --reuse` | enabled | — |
-| `ato run --respawn` | disabled (force spawn + replace existing) | — |
+| Entry point | v0 |
+|---|---|
+| `ato app session start` | **reuse enabled (本 RFC の対象)** |
+| `ato run --background` | scope out (v1) |
+| `ato run` (foreground) | scope out (v1) |
+| `--reuse` flag | scope out (v1) |
+| `--respawn` flag | scope out (v1) |
+| `--require-session` flag | scope out (v1+) |
 
-理由:
-- foreground では stdout/stderr を stream する契約があり、既存 background
-  process に attach する意味論は曖昧。stdin / Ctrl+C の所有権も問題。
-- background / session start は最初から detached なので、reuse は単に
-  envelope を返すだけで安全。
+`ato app session start` から始める理由:
+- PR 1 の baseline 計測がこの entry point。改善効果が直接測れる
+- Desktop の orchestrator が呼ぶ唯一の経路で、UX への影響が最大
+- `--json` envelope 契約が完成しており、reuse 時に追加の出力契約変更が不要
+- detached session を返すだけで完結し、stdin / Ctrl+C / 終了コード等の
+  ownership 問題が起きない
+
+`ato run` foreground / background / 各 flag を後続にする理由:
+- foreground は stdout/stderr stream / Ctrl+C / 終了コード契約が重く、
+  既存 background process に attach する意味論が曖昧
+- flag を増やすと CLI UX レビューが必要
+- まずは reuse state machine の correctness を 1 経路で証明するのが筋
 
 ### 5.3 State Machine
 
-`launch_digest` 一致時の細分化された判定（reuse-enabled 経路）:
+v0 の action は **Reuse / Spawn の 2 値のみ**。既存 session を kill する
+Replace は v1 に降格（§5.5）。
 
 ```
 existing record found?
-  no  → Spawn
+  no  → Spawn (cold)
   yes:
-    pid alive (kill -0)?
-      no  → Spawn (clean stale record)
+    schema_version >= 2?                    (record was written before v0)
+      no  → Spawn (prior_kind=schema-too-old)
       yes:
-        process_start_time_unix_ms == record.start_time?
-          no  → Spawn (PID was reused by OS, clean record)
+        launch_digest match?
+          no  → Spawn (prior_kind=digest-mismatch, leave old record alone)
           yes:
-            launch_digest match?
-              no  → Replace (kill existing, spawn new)
+            pid alive (kill -0)?
+              no  → Spawn (prior_kind=stale-session)
               yes:
-                port still bound by this PID?
-                  no  → Replace (kill, spawn — port stolen)
+                process_start_time_unix_ms == record.start_time?
+                  no  → Spawn (prior_kind=pid-reuse-detected)
                   yes:
-                    healthcheck (interval=25ms, single attempt, timeout=1s)?
-                      no  → Replace (kill, spawn)
+                    healthcheck succeeds (single attempt, timeout=1s)?
+                      no  → Spawn (prior_kind=unhealthy-session)
                       yes → Reuse
 ```
 
-`Replace` は v0 で **既存プロセスを SIGTERM、500ms 待って SIGKILL**、record
-を消し、new spawn する。Multi-instance（同じ launch_key で複数 session 並走）は
-v0 では非対応（§8）。
+すべての miss path は **既存プロセスを kill しない**。`launch_digest` が
+変わっただけの古い session が別 UI（例: Desktop の別 tab、別 ato CLI 呼び出し）
+に使われている可能性があるため、ownership / lifecycle の policy が固まる
+までは spawn だけを行う。
+
+`port-bound-by-pid` 検証は v1（§9.1）。strict port owner 確認は OS-specific
+で実装重く、v0 の本筋から外れる。
+
+Spawn 時、新しい session record（schema=2、新 PID / 新 port）を write する。
+古い record はそのまま残す（multi-record state を許容、§8）。
 
 ### 5.4 Concurrent Start Locking
 
 `acquire_lock(launch_key)` は次を保証する:
 
 - 同じ `launch_key` を持つ 2 つの concurrent start は逐次化される
-- 先行者が spawn 完了 + record write 完了するまで後続は進めない
+- 先行者が spawn 完了 + readiness wait 完了 + record write 完了するまで
+  後続は進めない
 - 後続が lock を取った時点で record を再 lookup → 先行者が書いた record を
   reuse することになる（race-free に reuse される）
+
+**Lock の保持範囲は意図的に「lookup + spawn + readiness + record write」
+全体である。** Readiness 待ちの前に lock を release してしまうと、後続の
+caller は「ready な reusable record が無い」と観測して duplicate process を
+spawn してしまう。Readiness wait まで lock を保持することで、後続は先行者の
+session が ready になる瞬間まで待ち、その envelope を reuse できる
+（duplicate spawn を回避できる）。
 
 実装: `~/.ato/apps/<package_id>/sessions/locks/<launch_key>.lock` に
 `fs2::FileExt::lock_exclusive`。lock file は持続させる（次回も同じファイルに
@@ -354,48 +407,75 @@ v0 では非対応（§8）。
 
 別 capsule の起動はブロックしない（lock は per-launch_key なので独立）。
 
-### 5.5 Replace 時の cleanup 契約
+### 5.5 Stale record の扱い (v0) と Replace (v1+)
 
-`Replace` action で既存 process を kill する場合:
+**v0 では既存 process を kill しない。** stale / digest mismatch /
+unhealthy のいずれを観測しても、新しい session を spawn して新 record を
+write するだけで、古い record と古い process は残置する。
 
-- SIGTERM → 500ms wait → SIGKILL
-- `wait()` で zombie 化を防ぐ
-- 既存 record file を削除
-- ProcessManager の record を `Failed`/`Replaced` 状態に update
-- log file はそのまま残す（debugging 用、v0 では rotation/cleanup なし）
+理由:
 
-`Replace` は logically destructive なので、foreground reuse-disabled では
-発生しない（foreground は常に Spawn）。background reuse-enabled でも
-launch_digest 一致なら Reuse で済むため、Replace は spec 変更時のみ。
+- 古い session は別の UI（Desktop の別 tab、別 ato CLI 呼び出し）が依然
+  使っている可能性がある。invisible に kill すると UX が壊れる
+- 「誰が session を所有するか」(ownership) の policy が未定義のうちは
+  destructive cleanup を避けるのが安全
+- v0 のスコープ目的は「ready な session があるなら再利用する」ことであり、
+  古い session を整理することではない
+
+結果として v0 では同じ `launch_key` に対して **複数の record / 複数の
+process が並存しうる**。lookup 時は launch_digest 一致 + 5 条件 (§9.1)
+すべて pass するものを優先して reuse する。一致するものが無ければ
+spawn。
+
+**v1+** で以下を別 RFC として整理:
+
+- ownership policy（どの caller が session を kill する権利を持つか）
+- stale record の自動 GC（pid 死亡から N 時間で削除、TTL ベース、等）
+- multi-instance を `--session=<name>` で明示識別
+- log file rotation
+- `Replace` action（kill + spawn）の destructive cleanup 契約
 
 ## 6. Phase Timing 表現
 
 ### 6.1 新 result_kind
 
-BUILD_MATERIALIZATION §6.1 の値集合に Execute phase 用を追加:
+v0 の result_kind は **2 値のみ**:
 
 ```
-Existing:
+Existing (BUILD_MATERIALIZATION §6.1):
   executed
   not-applicable
+  ...
 
-Added by this RFC:
+Added by this RFC (v0):
   materialized-session         → reused, no spawn
-  replaced                     → existing was killed, new spawned
-  missing-session              → --require-session and no usable record (v1+)
-  stale-session                → diagnostic: existing pid dead/start_time mismatch
-  unhealthy-session            → diagnostic: pid alive but healthcheck failed
 ```
 
-`stale-session` / `unhealthy-session` は **action としては Spawn / Replace に
-帰着**するが、診断ログでは元の状態を区別したい。実装上は `result_kind` 1 つ
-だけ持ち、追加の context は `extras` として extra fields に出す:
+v0 で `executed` を返す経路は次のいずれか:
+
+- 既存 record なし（cold）
+- record はあるが §5.3 のいずれかで pass しなかった（spawn 経路に倒れた）
+
+reuse miss が起きた具体的な理由は **`prior_kind` extras** で診断する
+（`result_kind` を増やさない）:
 
 ```
-PHASE-TIMING phase=execute state=ok result_kind=replaced
-            elapsed_ms=1042 prior_kind="stale-session" prior_pid="64200"
-            launch_digest="blake3:..."
+PHASE-TIMING phase=execute state=ok result_kind=executed elapsed_ms=883
+            prior_kind="digest-mismatch" prior_pid="64200"
 ```
+
+`prior_kind` 値集合 (v0):
+
+| 値 | 意味 |
+|---|---|
+| `schema-too-old` | 既存 record が schema_version=1 |
+| `digest-mismatch` | launch_digest が一致しない |
+| `stale-session` | record の PID が死んでいる |
+| `pid-reuse-detected` | PID alive だが process_start_time が一致しない |
+| `unhealthy-session` | PID alive + start_time match だが healthcheck 失敗 |
+
+v1 で追加予定: `replaced` (kill + spawn)、`missing-session`
+(`--require-session` 付きで reuse 不可) — 本 RFC の対象外（§5.5、§8）。
 
 ### 6.2 Reuse path の sub-stages
 
@@ -415,35 +495,42 @@ PHASE-TIMING phase=execute stage=write_pid state=ok elapsed_ms=0
 PHASE-TIMING phase=execute stage=write_session_record state=ok elapsed_ms=1
 PHASE-TIMING phase=execute state=ok result_kind=executed elapsed_ms=883
 
-# Replace (digest mismatch / stale)
+# Spawn after reuse miss (digest mismatch / stale / unhealthy)
 PHASE-TIMING phase=execute stage=session_lookup state=ok elapsed_ms=2
-PHASE-TIMING phase=execute stage=session_kill state=ok elapsed_ms=520
+PHASE-TIMING phase=execute stage=session_validate state=ok elapsed_ms=8
 PHASE-TIMING phase=execute stage=spawn_runtime_process state=ok elapsed_ms=1
 PHASE-TIMING phase=execute stage=wait_http_ready state=ok elapsed_ms=874
-PHASE-TIMING phase=execute state=ok result_kind=replaced elapsed_ms=1402
+PHASE-TIMING phase=execute state=ok result_kind=executed elapsed_ms=890
+            prior_kind="digest-mismatch"
 ```
 
-`session_validate` が pid alive + start_time + digest + port + healthcheck を
-カバーする（細分化は v1）。
+`session_validate` が schema check + launch_digest match + pid alive +
+start_time match + healthcheck をカバーする（細分化は v1）。
 
 ## 7. CLI 互換性
 
-### 7.1 新フラグ
+### 7.1 新フラグ — v0 では追加しない
+
+v0 では新 CLI flag を追加しない。`ato app session start` の挙動が透過的に
+reuse-aware になるだけで、ユーザ向けの API 変更はない。
+
+v1 で導入予定の flag（参考）:
 
 | Flag | Entry points | 意味 |
 |---|---|---|
 | `--reuse` | `ato run` | foreground でも reuse を有効化（opt-in） |
-| `--respawn` | `ato run`, `ato run --background` | 既存 session があっても force replace |
-| `--require-session` | `ato run`, `ato app session start` | reuse できなければ fail with `ATO_ERR_MISSING_SESSION` (v1+) |
+| `--respawn` | `ato run`, `ato run --background`, `ato app session start` | 既存 session を kill して force spawn |
+| `--require-session` | `ato run`, `ato app session start` | reuse できなければ fail with `ATO_ERR_MISSING_SESSION` |
 
 ### 7.2 既存挙動との互換
 
 | 既存挙動 | v0 後 |
 |---|---|
-| `ato app session start <handle>` | reuse 有効。warm 2 回目以降 < 50ms |
-| `ato run .` (foreground) | reuse 無効（既存と同じく毎回 spawn） |
-| `ato run . --background` | reuse 有効 |
-| `ato run . --watch` | watch flow は本 RFC のスコープ外 |
+| `ato app session start <handle>` | **reuse 有効**。warm 2 回目以降 < 50ms。envelope 出力契約は不変 |
+| `ato app session start <handle> --json` | 同上。reuse hit でも `SessionStartEnvelope` schema は同じ |
+| `ato run .` (foreground) | 不変（毎回 spawn） |
+| `ato run . --background` | 不変（毎回 spawn）。reuse 化は v1 |
+| `ato run . --watch` | 不変。watch flow は本 RFC のスコープ外 |
 
 `--watch` および dev profile（`next dev`）の整理は別 RFC（BUILD_MATERIALIZATION
 §8 `Watch / Dev profile RFC` 参照）。
@@ -452,53 +539,69 @@ PHASE-TIMING phase=execute state=ok result_kind=replaced elapsed_ms=1402
 
 | 項目 | 先送り理由 |
 |---|---|
+| `ato run` foreground / background / `--reuse` / `--respawn` / `--require-session` | reuse state machine の正しさを `ato app session start` で先に証明する。foreground は stdout/Ctrl+C 契約が重く、別建てで議論したい。v1（§5.2、§7） |
+| **Replace（既存 session の kill）** | ownership policy 未定義のうちは destructive cleanup を避ける。v0 では古い record を残置し、新 record を並存させる。v1+（§5.5） |
+| **strict port-bound-by-pid 検証** | OS-specific（macOS `proc_pid_socket_info` / Linux `/proc/<pid>/net/tcp` / Windows `iphlpapi`）で実装重い。v0 では healthcheck で代替。v1（§9.1） |
 | `prepare_session_execution` キャッシュ | PR 1 実測で 0ms。最適化対象外 |
-| Multi-instance（同じ launch_key で複数 session 並走） | 識別子（`--session=<name>`）の設計が必要。v1 |
+| Multi-instance（同じ launch_key で複数 session 並走を identifier で区別） | 識別子（`--session=<name>`）の設計が必要。v1 |
+| Stale record の自動 GC（pid 死亡から N 時間で削除、TTL ベース、等） | ownership policy と一緒に v1+ で扱う |
 | Cross-host session reuse | portable session contract が未定義。L4 / L5（BUILD_MATERIALIZATION §8）と同じ整理 |
 | Persistent daemon 化（Ato が長寿命プロセスとして capsule supervisor を兼ねる） | アーキテクチャ大改修。別 RFC |
 | Desktop WebView preload / Surface materialization | Desktop 側の RFC で扱う |
 | `npm:<package>` で pnpm shell shim を resolve する改修 | Node package bin 解決の独立 issue |
-| `--require-session` の本実装 | 設計上は v0 で示すが、実装は v1（NoBuild 相当の運用ニーズが整理されてから） |
 | Identity endpoint（spawned process が `ATO_SESSION_ID` / `ATO_LAUNCH_DIGEST` を expose） | アプリ側協力が必要。v1+ |
 
 ## 9. セキュリティ / 整合性
 
-### 9.1 Stale PID 検出
+### 9.1 Reuse の必須検証セット（v0）
 
 `pid alive (kill -0)` だけでは不十分。OS は親死亡後に PID を再利用するため、
-他人のプロセスを「自分の session」と誤認するリスクがある。
+他人のプロセスを「自分の session」と誤認するリスクがある。v0 では次の
+**5 条件すべて**が pass で初めて Reuse 可（§5.3 の state machine と一致）:
 
-v0 で必須の検証セット:
+1. session record の `schema_version >= 2`（v0 で書かれた record である）
+2. `launch_digest` が現在の LaunchSpec と完全一致
+3. `kill(pid, 0) == 0`（PID が alive）
+4. `process_start_time_unix_ms` が record と完全一致（PID 再利用の検知）
+   - macOS: `proc_pidinfo(PROC_PIDTBSDINFO).pbi_start_tvsec/usec`
+   - Linux: `/proc/<pid>/stat` field 22 (`starttime` in jiffies) と
+     `/proc/stat` の `btime` を合成して unix ms に変換
+5. healthcheck が 1 回成功（§9.2 で定義した URL に対し、interval=25ms,
+   timeout=1s の単発リクエスト）
 
-1. `kill(pid, 0) == 0` (alive)
-2. `process_start_time_unix_ms` が record と完全一致
-   - macOS: `kinfo_proc.kp_proc.p_starttime`
-   - Linux: `/proc/<pid>/stat` field 22 (starttime in jiffies) と boot_time の合成
-3. record の `port` が今もその PID に bind されている
-   - `lsof -i :<port>` 相当を `socket2` の `Socket::peer_addr` 確認 + ProcessHandle 経由で取得
-4. healthcheck 1 回成功（interval=25ms, timeout=1s）
+5 条件のうち 1 つでも fail → Spawn（§5.5 のとおり、既存 process は kill
+しない）。
 
-これら 4 つすべて pass で初めて Reuse 可。1 つでも fail → Replace。
+**v1 で追加予定の条件**: port-bound-by-pid 検証（OS-specific な socket-to-PID
+mapping）。v0 では healthcheck で port 上のサービスが少なくとも応答することを
+代理確認する。port を別プロセスが奪っていても、healthcheck がその別
+プロセスからは返ってこなければ unhealthy として Spawn 経路に倒れる。
 
-### 9.2 ファイルシステム整合性
+### 9.2 Healthcheck URL の解決ルール
+
+reuse 判定で叩く URL は session record の display category により決まる:
+
+| Display category | URL の解決順 |
+|---|---|
+| `web` (runtime=web セッション) | `web.healthcheck_url` が record に書かれていればそれ。なければ `web.local_url` の host:port + `readiness.path`（v0 では `"/"`） |
+| `guest` (guest WebView セッション) | `guest.healthcheck_url`（必ず record に書かれている） |
+| `terminal` / `service` (非 HTTP) | reuse 判定対象外。常に Spawn（既存挙動と同じ） |
+
+`http_get_ok` の既存 helper を再利用する（PR 1 で polling 25ms 化済み）。
+
+### 9.3 ファイルシステム整合性
 
 - session record の write は atomic temp+rename（既存 `write_session_record`
   の挙動を維持）
 - lock file の lifecycle: 取得時に作成 / 残置（次回再利用）。stale lock は
-  `fs2` の advisory lock が prozess 終了時に自動解放するため、明示削除不要
+  `fs2` の advisory lock が process 終了時に自動解放するため、明示削除不要
 
-### 9.3 Secret / env 取り扱い
+### 9.4 Secret / env 取り扱い
 
 - `env_policy` は include set の **key 名** と **value の blake3 hash** のみ
   digest に取る（BUILD_MATERIALIZATION §4.3 と同じ）
 - raw secret value は session record に保存しない
 - spawn 時に inject される env は既存 `apply_allowlisted_env` の挙動を維持
-
-### 9.4 Replace 時の race
-
-Replace = kill + spawn の途中で別 client が session start を要求した場合、
-`launch_key` lock が排他するので race は起きない。後続は lock 取得後に
-record 再 lookup → 新しい session を reuse する。
 
 ## 10. 受け入れ条件 (Acceptance Criteria)
 
@@ -513,51 +616,79 @@ samples/byok-ai-chat warm `ato app session start --json`:
     └ everything else:          3–4 ms
 ```
 
-### 10.2 v0 達成目標
+### 10.2 v0 達成目標 (`ato app session start` のみ)
 
 - [ ] 同 sample で warm 2 回目以降 (reuse-eligible session 存在時):
   - `result_kind=materialized-session`
   - Execute `elapsed_ms < 50ms`
-  - new process が spawn されない（`pgrep -f next-server` で increment 0）
+  - new process が spawn されない（`pgrep -f next-server` の count が変わらない）
   - returned envelope の `pid` / `local_url` が既存 session を指す
 - [ ] cold (record 不在) での挙動は現状維持（Execute ~880ms `result_kind=executed`）
-- [ ] `--respawn` で既存 ready session があっても新規 spawn される（`result_kind=replaced`）
-- [ ] `ato run` foreground では default で reuse されない（spawn）。`--reuse` で reuse される
+- [ ] schema=1 の旧 record しか無い場合: spawn → schema=2 record を新規 write
+  （`prior_kind=schema-too-old`）
+- [ ] `ato run` foreground / `ato run --background` の挙動は不変（reuse 化は v1）
 
-### 10.3 Stale Detection
+### 10.3 Stale 判定 — Spawn に倒れる経路
 
-- [ ] PID 再利用シナリオ: record の PID を別プロセスが取得していた場合、`process_start_time` 不整合で Replace に倒れる
-- [ ] Port 奪取シナリオ: record の PID は alive だが port が他プロセスに奪われた場合、Replace
-- [ ] Healthcheck 不通シナリオ: PID alive + port 占有 + digest 一致だが `/` が 5xx を返す場合、Replace
+すべて **既存プロセスを kill せず、新 record を並存させて spawn する**こと
+を確認する:
+
+- [ ] PID 再利用シナリオ: record の PID を別プロセスが取得していた場合、
+  `process_start_time` 不整合で Spawn（`prior_kind=pid-reuse-detected`）
+- [ ] PID 死亡シナリオ: record の PID が無い場合、Spawn（`prior_kind=stale-session`）
+- [ ] digest mismatch: capsule.toml の `run` を変更した場合、Spawn
+  （`prior_kind=digest-mismatch`）
+- [ ] Healthcheck 不通シナリオ: PID alive + start_time match + digest 一致
+  だが `/` が 5xx / 接続不能を返す場合、Spawn（`prior_kind=unhealthy-session`）
 
 ### 10.4 並行 Start
 
-- [ ] 同じ capsule に対する 2 つの concurrent start で、spawn は 1 回のみ。後発は先発 session を reuse
-- [ ] 異なる capsule の concurrent start は互いをブロックしない
+- [ ] 同じ `launch_key` に対する 2 つの concurrent `ato app session start` で、
+  spawn は 1 回のみ。後発は lock 取得後に先発の record を reuse（envelope の
+  `pid` が一致する）
+- [ ] 異なる `launch_key`（別 capsule、別 target）の concurrent start は
+  互いをブロックしない
+- [ ] lock は spawn + readiness wait + record write 全体で保持される
+  （release タイミングが早すぎて duplicate spawn が起きない）
 
 ### 10.5 Phase Timing
 
-- [ ] `ATO_PHASE_TIMING=1` で reuse path の `session_lookup` / `session_validate` sub-stages が出る
-- [ ] `result_kind=materialized-session` が PHASE-TIMING に出る
-- [ ] `result_kind=replaced` 時に `prior_kind=stale-session|unhealthy-session|...` が extras で出る
+- [ ] `ATO_PHASE_TIMING=1` で reuse hit 時に `session_lookup` / `session_validate`
+  sub-stages が出る
+- [ ] reuse hit で `result_kind=materialized-session` が PHASE-TIMING に出る
+- [ ] reuse miss で spawn したとき、`prior_kind=...` extra が PHASE-TIMING に出る
+  （該当する場合）
 
 ## 11. 移行パス
 
-1. **v0 リリース直後**: 既存 capsule は `app session start` 経由で reuse の
-   恩恵を自動的に受ける（schema=1 record は reuse 不可だが、次回 spawn で
-   schema=2 で書き直される）。
-2. **v0.x の中で**: `ato run --reuse` を foreground 用途で促す（open question §12）
-3. **v1**: `[run.session]` 宣言を canonical にし、`reuse = "always" | "if-ready" | "never"` を capsule 側から制御可能にする
-4. **v1.x**: multi-instance（`--session=<name>`）、`--require-session` 本実装
-5. **v2**: cross-host portable session contract、daemon 化、Desktop Surface materialization との統合
+1. **v0 リリース直後**: 既存 capsule は `ato app session start` 経由で reuse
+   の恩恵を自動的に受ける（schema=1 record は reuse 不可だが、次回 spawn で
+   schema=2 で書き直される）。CLI flag は不変、Desktop の orchestrator も
+   無改修で warm が短縮される。
+2. **v1**: `ato run --reuse` / `--respawn` flag、`ato run --background` の
+   reuse 化、`Replace` action（kill 既存 → spawn 新）、stale record の自動 GC、
+   strict port-bound-by-pid 検証を追加。`[run.session].reuse` 宣言を
+   canonical 化。
+3. **v1.x**: multi-instance（`--session=<name>`）、`--require-session` 本実装、
+   identity endpoint contract（`ATO_SESSION_ID` / `ATO_LAUNCH_DIGEST`）。
+4. **v2**: cross-host portable session contract、daemon 化、Desktop Surface
+   materialization との統合。
 
 ## 12. オープンクエスチョン
 
-- **`--reuse` を foreground のデフォルトに昇格させるべきか**: stdout streaming
-  の semantics を「既存 log file に tail する」と再定義すれば可能。v1 の議論
-- **session record の retention**: 現状無限に残る。v1 で TTL or LRU 削除
-- **failed session の自動 cleanup**: `Failed` / `Replaced` record をどのタイミングで GC するか
-- **`launch_digest` への OS arch 包含**: 現状の `toolchain_fingerprint` は OS/arch を含むため不要だが、明示が必要なら独立 field に
+- **`process_start_time` 取得の Windows 対応**: macOS / Linux は §9.1 に書いた
+  方法で取れる。Windows は `GetProcessTimes` で取得可能だが v0 ターゲットで
+  ない。v0 では取得できなければ reuse 不可（spawn）に倒すことで安全側に
+  寄せる
+- **同 launch_key の record が複数並存したときの選択ロジック**: §5.5 で
+  multi-record を許容したため、lookup で複数 hit する可能性がある。v0 では
+  「`launch_digest` 一致 + 5 条件 pass のうち最も新しい `created_at`」を選ぶ
+  ルールでよいか
+- **`launch_digest` への OS arch 包含**: 現状の `toolchain_fingerprint` は
+  OS/arch を含むため不要だが、明示が必要なら独立 field に
+- **v1 で foreground reuse を入れるときの stdout/stderr semantics**: 「既存
+  log file に tail する」「`--detach` で envelope を返して exit する」など
+  複数案あり、v1 RFC で議論
 
 ## 13. 関連仕様 / 実装参照
 
