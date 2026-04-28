@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
+use crate::surface_timing::{ClickOrigin, SurfaceStageTimer};
 use crate::terminal::{TerminalCore, TryRecvOutput};
 
 /// Pending terminal processes spawned by share URL executor.
@@ -120,6 +121,12 @@ pub struct CapsuleLaunchSession {
     pub served_by: Option<String>,
     pub log_path: Option<PathBuf>,
     pub notes: Vec<String>,
+    /// Wall-clock anchor for SURFACE-TIMING (RFC v0.3 §5.1). Set by
+    /// `resolve_and_start_capsule` from the click handler entry; read
+    /// by `webview.rs` to emit the `total` line once the user-visible
+    /// signal fires. `None` only on launch paths that pre-date Phase 0
+    /// instrumentation.
+    pub click_origin: Option<ClickOrigin>,
 }
 
 impl CapsuleLaunchSession {
@@ -373,19 +380,53 @@ pub fn resolve_and_start_capsule(
     plain_configs: &[(String, String)],
 ) -> Result<CapsuleLaunchSession, LaunchError> {
     info!(handle, "resolving capsule");
+
+    // Phase 0 (RFC: SURFACE_MATERIALIZATION §3.1): every click anchors
+    // a `total` line that's emitted from `webview.rs` once the
+    // user-visible signal fires. Capture the wall-clock origin here
+    // and store it on the launch session so downstream consumers
+    // (WebView creation, navigation finished) can resolve it.
+    let click_origin = ClickOrigin::now();
+
     if is_share_url(handle) {
         // Share-URL launches don't go through preflight/E103 today —
         // any failure is opaque, matching pre-Day-3 behavior.
-        return resolve_and_start_from_share(handle).map_err(LaunchError::from);
+        return resolve_and_start_from_share(handle)
+            .map(|mut session| {
+                session.click_origin = Some(click_origin);
+                session
+            })
+            .map_err(LaunchError::from);
     }
     // `resolve_capsule` and `build_launch_session` return
     // `anyhow::Result`; the `?` operator lifts those into
     // `LaunchError::Other` via `From<anyhow::Error>`. `start_capsule`
     // already returns `Result<_, LaunchError>` so its `MissingConfig`
     // variant flows through unchanged.
-    let resolved = resolve_capsule(handle)?;
-    let started = start_capsule(handle, secrets, plain_configs)?;
-    let session = build_launch_session(handle, resolved, started)?;
+    //
+    // SURFACE-TIMING wraps each subprocess at the call site so the
+    // resolve / session-start halves of the hot path are measured
+    // independently (RFC §3.1 — Phase 1's two fast paths key on this
+    // separation).
+    let resolved = {
+        let timer = SurfaceStageTimer::start("resolve_subprocess");
+        let result = resolve_capsule(handle);
+        timer.finish_ok();
+        result?
+    };
+    let started = {
+        let timer = SurfaceStageTimer::start("session_start_subprocess");
+        let result = start_capsule(handle, secrets, plain_configs);
+        timer.finish_ok();
+        result?
+    };
+    let mut session = {
+        let timer = SurfaceStageTimer::start("build_launch_session");
+        let result = build_launch_session(handle, resolved, started);
+        timer.finish_ok();
+        result?
+    };
+    session.click_origin = Some(click_origin);
     info!(
         session_id = %session.session_id,
         handle,
@@ -859,6 +900,7 @@ fn build_launch_session(
             .or_else(|| service.as_ref().map(|item| PathBuf::from(&item.log_path)))
             .or_else(|| Some(PathBuf::from(&started.log_path))),
         notes,
+        click_origin: None,
     })
 }
 
@@ -1275,6 +1317,7 @@ fn start_web_service_from_workspace(
         notes: vec![format!(
             "Web dev server started via `{pm} run dev` (pid {pid})."
         )],
+        click_origin: None,
     })
 }
 
@@ -1489,6 +1532,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
                 served_by: Some("nacelle".to_string()),
                 log_path: None,
                 notes: vec!["Share URL executed via nacelle sandbox.".to_string()],
+                click_origin: None,
             })
         }
         capsule_core::share::ShareExecutionResult::Completed { exit_code } => {

@@ -8,6 +8,7 @@ mod egress_policy;
 mod egress_proxy;
 mod orchestrator;
 mod state;
+mod surface_timing;
 mod terminal;
 mod ui;
 mod userland;
