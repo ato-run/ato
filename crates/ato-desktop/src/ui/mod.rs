@@ -26,13 +26,14 @@ use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
-    CancelAuthHandoff, CancelConfigForm, CancelQuit, CloseTask, ConfirmQuitClear, ConfirmQuitKeep,
-    CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit, FocusCommandBar, MoveTask,
-    NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl,
-    NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry,
-    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
-    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
-    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
+    CancelAuthHandoff, CancelConfigForm, CancelQuit, CheckForUpdates, CloseTask, ConfirmQuitClear,
+    ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
+    FocusCommandBar, MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll,
+    NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
+    OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit,
+    ResumeAfterAuth, SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun,
+    SignOut, SplitPane, ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover,
+    ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -142,6 +143,97 @@ fn search_local_registry(query: &str) -> Vec<crate::state::CapsuleSearchResult> 
         .collect()
 }
 
+/// Hit GitHub's `releases/latest` and compare its tag to the local
+/// `CARGO_PKG_VERSION`. Returns the resulting [`UpdateCheck`] state
+/// to be assigned to AppState by the render-loop poller. Runs
+/// synchronously (call from a worker thread).
+///
+/// We do not implement semver-aware comparison — the `tag_name`
+/// already mirrors `Cargo.toml`'s version verbatim, and a simple
+/// string inequality is enough to detect "newer release exists".
+/// This keeps us free of a `semver` crate dependency and matches
+/// how cargo-dist labels its releases (`v0.4.97` ↔ `0.4.97`).
+fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
+    const ENDPOINT: &str = "https://api.github.com/repos/ato-run/ato/releases/latest";
+    let response = match ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .get(ENDPOINT)
+        // GitHub's API requires a User-Agent and recommends an
+        // explicit Accept header for stability across versions.
+        .set("User-Agent", "ato-desktop-updater")
+        .set("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(r) => r,
+        Err(error) => {
+            return crate::state::UpdateCheck::Failed {
+                message: format!("network error: {error}"),
+            }
+        }
+    };
+    let body = match response.into_string() {
+        Ok(b) => b,
+        Err(error) => {
+            return crate::state::UpdateCheck::Failed {
+                message: format!("read error: {error}"),
+            }
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(error) => {
+            return crate::state::UpdateCheck::Failed {
+                message: format!("parse error: {error}"),
+            }
+        }
+    };
+    let tag = json
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if tag.is_empty() {
+        return crate::state::UpdateCheck::Failed {
+            message: "release JSON missing tag_name".to_string(),
+        };
+    }
+    let latest = tag.trim_start_matches('v').to_string();
+    if latest == current {
+        return crate::state::UpdateCheck::UpToDate {
+            version: current.to_string(),
+        };
+    }
+    let html_url = json
+        .get("html_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("https://github.com/ato-run/ato/releases/tag/{tag}"));
+    crate::state::UpdateCheck::Available { latest, html_url }
+}
+
+/// Hand a URL to the OS so the user's default browser opens it.
+/// macOS/Linux/Windows fan-out — we only ship to those three so
+/// that's the entire matrix. Errors bubble up so the caller can
+/// surface them in the activity rail.
+fn open_external_url(url: &str) -> std::io::Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let status = command.arg(url).status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "browser-open exited with status {status}"
+        )));
+    }
+    Ok(())
+}
+
 pub struct DesktopShell {
     state: AppState,
     omnibar: Entity<InputState>,
@@ -160,6 +252,9 @@ pub struct DesktopShell {
     /// CLI bridge auth flow is in progress; the inner bool is true
     /// on successful exit (CLI wrote credentials), false otherwise.
     cli_login_rx: Option<std::sync::mpsc::Receiver<bool>>,
+    /// In-flight GitHub releases/latest fetch. The render loop polls
+    /// this and writes the resulting UpdateCheck onto AppState.
+    update_check_rx: Option<std::sync::mpsc::Receiver<crate::state::UpdateCheck>>,
     /// Lazy-allocated by `render` whenever `state.pending_config`
     /// flips from `None → Some` (or to a different request). Owns
     /// the per-field `InputState` entities so keystroke/cursor state
@@ -283,6 +378,7 @@ impl DesktopShell {
             open_url_bridge,
             capsule_search_rx: None,
             cli_login_rx: None,
+            update_check_rx: None,
             config_modal: None,
         }
     }
@@ -349,6 +445,59 @@ impl DesktopShell {
                 crate::state::ActivityTone::Warning,
                 "ato login exited without completing sign-in.",
             );
+        }
+    }
+
+    /// Drain the GitHub releases/latest fetch result and write it to
+    /// AppState so the Updates card re-renders with the new status.
+    fn poll_update_check(&mut self) {
+        let Some(rx) = self.update_check_rx.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        self.update_check_rx = None;
+        self.state.update_check = result;
+    }
+
+    fn on_check_for_updates(
+        &mut self,
+        _: &CheckForUpdates,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Idempotent: ignore re-entry while a fetch is already in flight.
+        if self.update_check_rx.is_some()
+            || matches!(self.state.update_check, crate::state::UpdateCheck::Checking)
+        {
+            return;
+        }
+        self.state.update_check = crate::state::UpdateCheck::Checking;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_check_rx = Some(rx);
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        std::thread::spawn(move || {
+            let result = fetch_latest_release(&current);
+            let _ = tx.send(result);
+        });
+        cx.notify();
+    }
+
+    fn on_open_latest_release_page(
+        &mut self,
+        _: &OpenLatestReleasePage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let crate::state::UpdateCheck::Available { html_url, .. } = &self.state.update_check {
+            if let Err(error) = open_external_url(html_url) {
+                self.state.push_activity(
+                    crate::state::ActivityTone::Error,
+                    format!("Failed to open release page: {error}"),
+                );
+                cx.notify();
+            }
         }
     }
 
@@ -1120,6 +1269,7 @@ impl Render for DesktopShell {
         self.sync_favicons(window, cx);
         self.poll_capsule_search();
         self.poll_cli_login();
+        self.poll_update_check();
         self.sync_config_modal(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
@@ -1235,6 +1385,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_deny_permission_prompt))
             .on_action(cx.listener(Self::on_save_config_form))
             .on_action(cx.listener(Self::on_cancel_config_form))
+            .on_action(cx.listener(Self::on_check_for_updates))
+            .on_action(cx.listener(Self::on_open_latest_release_page))
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, _cx| {
                 let path_vec = paths.paths().to_vec();
                 this.state.launch_dropped_paths(path_vec);
