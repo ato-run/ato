@@ -256,6 +256,16 @@ UI string (Japanese): `セッションを停止` (proposal).
 
 Both strings are draft and reviewed in the implementation PR.
 
+> **Status (PR 4B.2, 2026-04-29)**: NOT shipped yet. Adding a
+> right-click context menu pattern requires net-new GPUI plumbing
+> (overlay positioning, dismiss-on-outside-click, hover/select
+> interaction); no existing pane in `ato-desktop` ships a context
+> menu today. PR 4B.2 satisfies §6.4 via the chrome retention pill +
+> command-palette items, which together already give the user a
+> visible, single-click way to stop sessions. Pane context menu is
+> tracked for a follow-up PR (4B.3) so it can land without blocking
+> Phase 2A.
+
 ### 6.2 Required: command palette action
 
 The command palette MUST expose two related commands:
@@ -311,15 +321,24 @@ stops") is invisible by default — without a discoverability hook,
 users with hidden-process anxiety cannot tell that retention is
 working as designed.
 
-> **Status (PR 4B.1, 2026-04-29)**: the activity-panel approach
-> attempted in PR 4B.1 was a no-op for end users — `state.activity`
-> only renders error-toned entries (used by the launch-failed
-> overlay), so an Info push there is invisible. PR 4B.1 ships with a
-> `tracing::info!` surface (developer-only). The user-visible
-> discoverability surface is owed by **PR 4B.2 (Stop UI)**: the
-> command palette items `Stop capsule session` and `Stop all
-> retained sessions (N)` will satisfy §6.4 once they land. v0 hard
-> requirement is met when PR 4B.2 ships.
+> **Status (PR 4B.2, 2026-04-29)**: §6.4 hard requirement is **met**.
+> Three concurrent surfaces ship:
+>
+> 1. **Chrome retention pill**: `N kept warm` — small clickable pill
+>    near the omnibar, only rendered when `retention_count > 0`.
+>    Click dispatches `StopAllRetainedSessions`. This is the passive
+>    discoverability hook that satisfies "user must be able to tell
+>    retention exists without typing".
+> 2. **Command palette / omnibar**: `Stop capsule session` (active
+>    pane) and `Stop all retained sessions (N)` items appear when
+>    the user types `stop` (or implicitly when the bar is empty).
+> 3. **Developer log**: `tracing::info!` line on retain (`stderr`).
+>
+> The activity-panel approach attempted in PR 4B.1 stayed a no-op
+> for end users (`state.activity` only renders error-toned entries
+> for the launch-failed overlay). The Info push remains in the
+> retain path because it costs nothing and may help diagnose a
+> subsequent launch failure, but it does NOT count toward §6.4.
 
 ## 7. Resource safety
 
@@ -412,31 +431,46 @@ Non-normative pointers for the eventual implementation PR.
 
 ### 10.1 v0 (this RFC, pre-Phase 2A)
 
-- [ ] Pane close does **not** call `ato app session stop` immediately.
-- [ ] Reopen of the same capsule within TTL reuses the same
-  `session_id` (verified by SURFACE-TIMING log).
-- [ ] Explicit `Stop session` action removes the record and kills
-  the process.
-- [ ] After explicit Stop, reopen falls through the fallback / cold
-  path (verified by `resolve_subprocess` / `session_start_subprocess`
-  emission).
-- [ ] App quit stops all retained sessions before Desktop exits.
-- [ ] TTL expiry stops the session, removes the record, drops
-  retention. Stop is graceful (`ato app session stop` first), best-
-  effort (timeout-bounded), non-blocking (UI thread untouched).
-- [ ] Healthcheck-fail on reopen discards retained state and falls
-  back. Already implemented in PR 4A.1; this RFC requires it stays
-  consistent under the new contract.
-- [ ] Retention table is bounded at 8 entries; LRU eviction stops
-  the oldest non-active.
-- [ ] At least one discoverable indicator (toast, status, or palette
-  item) tells the user retained sessions exist (§6.4).
-- [ ] Right-click / overflow menu on every pane offers `Stop
-  session`.
-- [ ] Command palette offers `Stop capsule session` and `Stop all
-  retained sessions`.
-- [ ] Keyboard shortcut for Stop is registered (provisional binding
-  documented in implementation PR).
+Status legend: `[x]` shipped, `[~]` shipped with caveat, `[>]`
+deferred to follow-up PR (item still required for v0 close).
+
+- [x] Pane close does **not** call `ato app session stop` immediately.
+  (PR 4B.1 — `prune_panes` → `retain_launched_session`.)
+- [x] Reopen of the same capsule within TTL reuses the same
+  `session_id`. Verified in `/tmp/surface-pr4b1.log` (close →
+  re-click measured at 160 ms).
+- [x] Explicit `Stop session` action removes the record and kills
+  the process. (PR 4B.2 — `WebViewManager::stop_active_session`,
+  invoked from `Cmd+Shift+W` and the omnibar palette item.)
+- [x] After explicit Stop, reopen falls through the fallback / cold
+  path. Stop drops retention and deletes the record, so the next
+  click finds nothing to fast-path against.
+- [x] App quit stops all retained sessions before Desktop exits.
+  (PR 4B.1 — `Drop for WebViewManager` drains retention.)
+- [x] TTL expiry stops the session, removes the record, drops
+  retention. Stop is graceful (`spawn_graceful_stop`), best-effort,
+  non-blocking. (PR 4B.1 — `sweep_expired_retention` on every
+  `sync_from_state`.)
+- [x] Healthcheck-fail on reopen discards retained state and falls
+  back. (PR 4A.1, `RecordValidationOutcome::HealthcheckFailed`;
+  unchanged here.)
+- [x] Retention table is bounded at 8 entries; LRU eviction stops
+  the oldest non-active. (PR 4B.1 — `RetentionTable.retain` returns
+  `EvictionReason::LruOverflow` for graceful-stop.)
+- [x] At least one discoverable indicator tells the user retained
+  sessions exist (§6.4). (PR 4B.2 — chrome retention pill +
+  command-palette items, both showing the live count.)
+- [>] Right-click / overflow menu on every pane offers `Stop
+  session`. **Deferred to PR 4B.3** (no existing context-menu
+  pattern in ato-desktop; needs new GPUI plumbing). §6.4
+  discoverability is already met by the pill + palette so this
+  doesn't block Phase 2A.
+- [x] Command palette offers `Stop capsule session` and `Stop all
+  retained sessions`. (PR 4B.2 — omnibar suggestions on `stop`
+  query, with live count for the all-retained item.)
+- [~] Keyboard shortcut for Stop is registered. (PR 4B.2 —
+  `Cmd+Shift+W` bound to `StopActiveSession` as provisional; if a
+  platform/keymap conflict surfaces, rebind in a follow-up.)
 
 ### 10.2 Phase 2A additions (informative — owned by `SURFACE_MATERIALIZATION.md` §10.3)
 
