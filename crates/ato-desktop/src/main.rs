@@ -7,6 +7,7 @@ mod config;
 mod egress_policy;
 mod egress_proxy;
 mod orchestrator;
+mod retention;
 mod state;
 mod surface_timing;
 mod terminal;
