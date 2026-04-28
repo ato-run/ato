@@ -132,6 +132,29 @@ impl fmt::Display for GuestRoute {
     }
 }
 
+/// Result of a GitHub `releases/latest` check, surfaced in the
+/// Settings → Updates card. The shell only ever points users at
+/// the GitHub release page (`Available.html_url`) — actual
+/// download/install is left to the OS so we don't have to verify
+/// signatures from inside the app while the build pipeline is
+/// still ad-hoc-signed.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum UpdateCheck {
+    #[default]
+    Idle,
+    Checking,
+    UpToDate {
+        version: String,
+    },
+    Available {
+        latest: String,
+        html_url: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WebSessionState {
     Detached,
@@ -731,6 +754,11 @@ pub struct AppState {
     /// info chip. The popover surfaces source/runtime/trust/snapshot
     /// fields that previously cluttered the chrome as inline tags.
     pub route_metadata_popover_open: bool,
+    /// Status of the most recent GitHub-release version check. Drives
+    /// the Updates card in the settings panel — the actual fetch is
+    /// dispatched by `DesktopShell::on_check_for_updates`, which runs
+    /// the request on a worker thread and writes the result back here.
+    pub update_check: UpdateCheck,
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
@@ -826,6 +854,7 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
+            update_check: UpdateCheck::Idle,
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -1002,6 +1031,7 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
+            update_check: UpdateCheck::Idle,
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
