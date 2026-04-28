@@ -3,8 +3,11 @@ use gpui::{div, hsla, px, Div, FontWeight, MouseButton};
 use gpui_component::scroll::ScrollableElement;
 
 use super::super::theme::Theme;
-use crate::app::{SignInToAtoRun, SignOut, ToggleAutoDevtools, ToggleTheme};
-use crate::state::{AppState, DesktopAuthStatus, ThemeMode};
+use crate::app::{
+    CheckForUpdates, OpenLatestReleasePage, SignInToAtoRun, SignOut, ToggleAutoDevtools,
+    ToggleTheme,
+};
+use crate::state::{AppState, DesktopAuthStatus, ThemeMode, UpdateCheck};
 
 pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme) -> Div {
     let body_text = body.to_string();
@@ -28,6 +31,8 @@ pub(super) fn render_settings_panel(body: &str, state: &AppState, theme: &Theme)
                 .child(render_account_card(state, theme))
                 // Appearance section
                 .child(render_appearance_card(state, theme))
+                // Updates section
+                .child(render_updates_card(state, theme))
                 // Terminal section
                 .child(render_terminal_card(state, theme))
                 // Developer section
@@ -77,6 +82,96 @@ fn render_appearance_card(state: &AppState, theme: &Theme) -> Div {
                     theme,
                 )),
         )
+}
+
+fn render_updates_card(state: &AppState, theme: &Theme) -> Div {
+    let current = env!("CARGO_PKG_VERSION");
+    let (status_label, status_color, latest_value): (String, gpui::Hsla, Option<String>) =
+        match &state.update_check {
+            UpdateCheck::Idle => ("Not checked yet".to_string(), theme.text_disabled, None),
+            UpdateCheck::Checking => ("Checking…".to_string(), theme.text_secondary, None),
+            UpdateCheck::UpToDate { .. } => (
+                "Up to date".to_string(),
+                theme.accent,
+                Some(format!("v{current}")),
+            ),
+            UpdateCheck::Available { latest, .. } => (
+                format!("v{latest} available"),
+                hsla(38.0 / 360.0, 0.85, 0.50, 1.0),
+                Some(format!("v{latest}")),
+            ),
+            UpdateCheck::Failed { message } => (
+                format!("Check failed: {message}"),
+                hsla(0.0, 0.7, 0.5, 1.0),
+                None,
+            ),
+        };
+
+    let action_button: gpui::Stateful<Div> = match &state.update_check {
+        UpdateCheck::Available { .. } => updates_action_button(
+            "Open release",
+            theme,
+            true,
+            move |window, cx| {
+                window.dispatch_action(Box::new(OpenLatestReleasePage), cx);
+            },
+        ),
+        UpdateCheck::Checking => updates_action_button(
+            "Checking…",
+            theme,
+            false,
+            // No-op while in flight; the dispatcher's idempotency
+            // guard would also drop a re-entered CheckForUpdates,
+            // but disabling the button is the clearer signal.
+            move |_, _| {},
+        ),
+        _ => updates_action_button(
+            "Check now",
+            theme,
+            false,
+            move |window, cx| {
+                window.dispatch_action(Box::new(CheckForUpdates), cx);
+            },
+        ),
+    };
+
+    settings_card("Updates", theme)
+        .child(settings_row("Current", &format!("v{current}"), theme))
+        .when_some(latest_value, |this, latest| {
+            this.child(settings_row("Latest", &latest, theme))
+        })
+        .child(settings_row("Status", &status_label, theme).text_color(status_color))
+        .child(div().flex().justify_end().pt_2().child(action_button))
+}
+
+fn updates_action_button(
+    label: &'static str,
+    theme: &Theme,
+    accent: bool,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<Div> {
+    let (bg, fg, border) = if accent {
+        (theme.accent, gpui::white(), theme.accent)
+    } else {
+        (theme.surface_hover, theme.text_primary, theme.border_default)
+    };
+    div()
+        .id(label)
+        .px(px(14.0))
+        .py(px(7.0))
+        .rounded(px(6.0))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .text_color(fg)
+        .text_size(px(12.0))
+        .font_weight(FontWeight(500.0))
+        .cursor_pointer()
+        .child(label)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
 }
 
 fn render_account_card(state: &AppState, theme: &Theme) -> Div {

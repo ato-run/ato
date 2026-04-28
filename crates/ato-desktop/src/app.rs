@@ -58,6 +58,8 @@ actions!(
         ToggleRouteMetadataPopover,
         ToggleDevConsole,
         ToggleAutoDevtools,
+        CheckForUpdates,
+        OpenLatestReleasePage,
         Quit,
         ConfirmQuitKeep,
         ConfirmQuitClear,
