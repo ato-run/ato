@@ -325,19 +325,17 @@ fn resolve_local_plan_from_store(
         .join(".ato")
         .join("store");
 
-    let capsule_path =
-        crate::install::support::resolve_installed_capsule_archive_in_store(
-            &store_root.join(publisher),
-            slug,
-            version,
-        )
+    let capsule_path = crate::install::support::resolve_installed_capsule_archive_in_store(
+        &store_root.join(publisher),
+        slug,
+        version,
+    )
+    .ok()
+    .flatten()?;
+
+    let manifest_path = crate::runtime::tree::prepare_store_runtime_for_capsule(&capsule_path)
         .ok()
         .flatten()?;
-
-    let manifest_path =
-        crate::runtime::tree::prepare_store_runtime_for_capsule(&capsule_path)
-            .ok()
-            .flatten()?;
 
     resolve_local_plan(&manifest_path, target_label).ok()
 }
@@ -459,7 +457,9 @@ fn build_store_resolution(
         )),
         snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
-        target: plan_opt.as_ref().map(|p| build_target_summary(p, None, None)),
+        target: plan_opt
+            .as_ref()
+            .map(|p| build_target_summary(p, None, None)),
         launch: None,
         notes,
     })
