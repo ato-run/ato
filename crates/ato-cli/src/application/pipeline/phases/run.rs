@@ -1340,24 +1340,17 @@ where
 
     progress.start(HourglassPhase::Build);
 
-    state.build_observation = bm::observe_for_plan(&state.decision.plan, &state.launch_ctx)
-        .ok()
-        .flatten();
-
     let workspace_root = state.prepared.workspace_root.clone();
+    let prepared = bm::prepare_decision(
+        &state.decision.plan,
+        &state.launch_ctx,
+        request.build_policy,
+        &workspace_root,
+    );
+    state.build_observation = prepared.observation.clone();
+    state.build_decision_kind = Some(prepared.decision.result_kind);
 
-    let decision = match state.build_observation.as_ref() {
-        Some(observation) => bm::decide(request.build_policy, observation, &workspace_root),
-        None => bm::BuildDecision {
-            action: bm::DecisionAction::Execute,
-            result_kind: bm::BuildResultKind::NotApplicable,
-        },
-    };
-
-    let action = decision.action.clone();
-    state.build_decision_kind = Some(decision.result_kind);
-
-    match action {
+    match prepared.decision.action {
         bm::DecisionAction::Skip => {
             progress.ok(
                 HourglassPhase::Build,
@@ -1366,12 +1359,7 @@ where
             return Ok(state);
         }
         bm::DecisionAction::Fail => {
-            let detail = decision.result_kind.as_str().to_string();
-            anyhow::bail!(
-                "{}: {} (policy=no-build)",
-                crate::utils::error::ATO_ERR_MISSING_MATERIALIZATION,
-                detail
-            );
+            return Err(bm::no_build_error(&prepared.decision));
         }
         bm::DecisionAction::Execute => {}
     }
@@ -1419,41 +1407,13 @@ where
         .await?;
     }
 
-    // Build executor succeeded; persist the materialization record.
     if let Some(observation) = state.build_observation.as_ref() {
-        let toolchain_fp = bm::toolchain_fingerprint_for_plan(&state.decision.plan);
-        let mut file = match bm::load_state(&workspace_root) {
-            bm::LoadOutcome::Loaded(f) => f,
-            bm::LoadOutcome::Missing | bm::LoadOutcome::Invalid(_) => {
-                bm::MaterializationFile::default()
-            }
-        };
-        bm::upsert_record(&mut file, bm::record_for(observation, &toolchain_fp));
-
-        // Heuristic recommendation: emit once per (digest, heuristic).
-        let heuristic_label = observation.source.heuristic_label();
-        if heuristic_label.is_some() && !request.reporter.is_json() {
-            let emitted = bm::maybe_record_recommendation(
-                &mut file,
-                &observation.input_digest,
-                heuristic_label.as_deref(),
-            );
-            if emitted {
-                eprintln!(
-                    "ATO-RECOMMEND build inputs were inferred for \"{}\" framework. \
-                     Declare [build] inputs/outputs in capsule.toml for stable \
-                     materialization. See: docs/rfcs/draft/BUILD_MATERIALIZATION.md",
-                    heuristic_label.as_deref().unwrap_or("(unknown)")
-                );
-            }
-        }
-
-        if let Err(err) = bm::save_state(&workspace_root, &file) {
-            eprintln!(
-                "ATO-WARN failed to persist build materialization state: {}",
-                err
-            );
-        }
+        bm::persist_after_execute(
+            &state.decision.plan,
+            &workspace_root,
+            observation,
+            request.reporter.is_json(),
+        );
     }
 
     state.build_decision_kind = Some(bm::BuildResultKind::Executed);
