@@ -1544,6 +1544,44 @@ http_get = "/health"
         }
     }
 
+    /// Phase 13a §13a.3 contract lockdown: the IpcReady wire format must
+    /// expose exactly `event`, `service`, `endpoint`, and (optionally) `port`
+    /// — no extra fields, no renames. ato-cli and downstream consumers parse
+    /// this shape; any drift is a breaking change.
+    #[test]
+    fn test_nacelle_event_ipc_ready_wire_contract() {
+        use serde_json::Value;
+
+        // Case 1: port omitted (Unix socket endpoint).
+        let event = NacelleEvent::IpcReady {
+            service: "llm-service".to_string(),
+            endpoint: "unix:///tmp/capsule-ipc/llm.sock".to_string(),
+            port: None,
+        };
+        let value: Value = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        let obj = value.as_object().expect("ipc_ready event must be a JSON object");
+        assert_eq!(obj.len(), 3, "Unix-socket IpcReady must have exactly 3 fields, got: {obj:?}");
+        assert_eq!(obj["event"], Value::String("ipc_ready".to_string()));
+        assert_eq!(obj["service"], Value::String("llm-service".to_string()));
+        assert_eq!(
+            obj["endpoint"],
+            Value::String("unix:///tmp/capsule-ipc/llm.sock".to_string())
+        );
+        assert!(!obj.contains_key("port"), "port must be omitted when None");
+        assert!(!obj.contains_key("type"), "field is `event`, not `type`");
+
+        // Case 2: port present (TCP endpoint).
+        let event = NacelleEvent::IpcReady {
+            service: "db-service".to_string(),
+            endpoint: "tcp://127.0.0.1:54321".to_string(),
+            port: Some(54321),
+        };
+        let value: Value = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        let obj = value.as_object().expect("ipc_ready event must be a JSON object");
+        assert_eq!(obj.len(), 4, "TCP IpcReady must have exactly 4 fields, got: {obj:?}");
+        assert_eq!(obj["port"], Value::Number(54321.into()));
+    }
+
     #[test]
     fn test_shell_workload_with_cmd() {
         let json = r#"{
