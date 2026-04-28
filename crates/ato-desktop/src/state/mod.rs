@@ -1178,6 +1178,55 @@ impl AppState {
         self.route_metadata_popover_open = !self.route_metadata_popover_open;
     }
 
+    /// Aggregate boot progress across the active workspace, in [0.0, 1.0].
+    ///
+    /// Returns `None` when no pane is in a transient session state
+    /// (Resolving/Materializing/Launching) — i.e. there is nothing
+    /// worth showing a progress strip for. Each transient state maps
+    /// to a coarse fraction (0.20 / 0.55 / 0.85) so the strip moves
+    /// forward as guests advance through resolve → materialize →
+    /// launch instead of hovering at a single value the whole time.
+    /// Mounted/Closed/Detached/LaunchFailed/non-web panes count as
+    /// fully done; the average across all panes feels honest when
+    /// some tabs are already up while others are still booting.
+    pub fn workspace_loading_progress(&self) -> Option<f32> {
+        let workspace = self.active_workspace()?;
+        let mut total = 0.0_f32;
+        let mut count = 0_u32;
+        let mut transient = false;
+        for task in &workspace.tasks {
+            for pane in &task.panes {
+                count += 1;
+                let fraction = match &pane.surface {
+                    PaneSurface::Web(web) => match web.session {
+                        WebSessionState::Resolving => {
+                            transient = true;
+                            0.20
+                        }
+                        WebSessionState::Materializing => {
+                            transient = true;
+                            0.55
+                        }
+                        WebSessionState::Launching => {
+                            transient = true;
+                            0.85
+                        }
+                        WebSessionState::Mounted
+                        | WebSessionState::Closed
+                        | WebSessionState::Detached
+                        | WebSessionState::LaunchFailed => 1.0,
+                    },
+                    _ => 1.0,
+                };
+                total += fraction;
+            }
+        }
+        if !transient || count == 0 {
+            return None;
+        }
+        Some((total / count as f32).clamp(0.0, 1.0))
+    }
+
     pub fn create_new_tab(&mut self) {
         let next_task_id = self.next_task_id;
         let next_pane_id = self.next_pane_id;
