@@ -1364,6 +1364,9 @@ impl Render for DesktopShell {
                     })
                     .when(self.state.route_metadata_popover_open, |this| {
                         this.child(render_route_metadata_popover(&self.state, &theme))
+                    })
+                    .when(self.state.settings_panel_open, |this| {
+                        this.child(render_settings_overlay(&self.state, &theme))
                     }),
             );
 
