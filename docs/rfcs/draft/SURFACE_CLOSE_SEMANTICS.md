@@ -311,6 +311,16 @@ stops") is invisible by default — without a discoverability hook,
 users with hidden-process anxiety cannot tell that retention is
 working as designed.
 
+> **Status (PR 4B.1, 2026-04-29)**: the activity-panel approach
+> attempted in PR 4B.1 was a no-op for end users — `state.activity`
+> only renders error-toned entries (used by the launch-failed
+> overlay), so an Info push there is invisible. PR 4B.1 ships with a
+> `tracing::info!` surface (developer-only). The user-visible
+> discoverability surface is owed by **PR 4B.2 (Stop UI)**: the
+> command palette items `Stop capsule session` and `Stop all
+> retained sessions (N)` will satisfy §6.4 once they land. v0 hard
+> requirement is met when PR 4B.2 ships.
+
 ## 7. Resource safety
 
 ### 7.1 Bounded retention size
