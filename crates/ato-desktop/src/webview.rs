@@ -1906,9 +1906,25 @@ fn read_capsule_icon_source(manifest_path: &Path, app_root: &Path) -> Option<Str
     {
         return Some(icon);
     }
-    let candidate = app_root.join(&icon);
-    let absolute = candidate.canonicalize().unwrap_or(candidate);
-    Some(absolute.to_string_lossy().to_string())
+    // Two layouts in the wild for relative icon paths:
+    //   1. Local dev: capsule.toml + assets/ siblings under the same dir
+    //      (`ato app session start` against samples/byok-ai-chat/).
+    //   2. Published: capsule.toml at the sandbox root with source files
+    //      under a `source/` subdirectory (cli/commands/run extracts to
+    //      `manifest_dir/source/` — see runtime/provisioning/shadow.rs).
+    // Try the source-prefixed path first so the published path wins for
+    // registry installs, then fall back to the bare path for local dev.
+    let with_source = app_root.join("source").join(&icon);
+    if with_source.exists() {
+        let absolute = with_source.canonicalize().unwrap_or(with_source);
+        return Some(absolute.to_string_lossy().to_string());
+    }
+    let bare = app_root.join(&icon);
+    if bare.exists() {
+        let absolute = bare.canonicalize().unwrap_or(bare);
+        return Some(absolute.to_string_lossy().to_string());
+    }
+    None
 }
 
 fn should_install_ato_auth_cookies(url: &str) -> bool {
