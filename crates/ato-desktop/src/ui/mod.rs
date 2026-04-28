@@ -29,14 +29,12 @@ use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
     CancelAuthHandoff, CancelConfigForm, CancelQuit, CheckForUpdates, CloseTask, ConfirmQuitClear,
     ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
-    FocusCommandBar, MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll,
-    NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    InstallCapsuleUpdate, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
-    OpenUrlBridge, PreviousTask,
-    PreviousWorkspace, Quit,
-    ResumeAfterAuth, SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun,
-    SignOut, SplitPane, ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover,
-    ToggleTheme,
+    FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
+    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
+    OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
+    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
+    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, ToggleAutoDevtools,
+    ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -287,9 +285,8 @@ impl DesktopShell {
                 .placeholder("")
                 .default_value(state.command_bar_text.clone())
         });
-        let launcher_search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search, command, or ask AI…")
-        });
+        let launcher_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search, command, or ask AI…"));
         match cleanup_stale_capsule_sessions() {
             Ok(notes) => {
                 for note in notes {
@@ -934,10 +931,7 @@ impl DesktopShell {
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.cli_login_rx = Some(rx);
                 std::thread::spawn(move || {
-                    let ok = child
-                        .wait()
-                        .map(|status| status.success())
-                        .unwrap_or(false);
+                    let ok = child.wait().map(|status| status.success()).unwrap_or(false);
                     let _ = tx.send(ok);
                 });
             }
@@ -1511,10 +1505,9 @@ impl Render for DesktopShell {
                 command_bar,
                 &theme,
             ))
-            .when_some(
-                self.state.workspace_loading_progress(),
-                |this, progress| this.child(render_boot_progress_strip(progress, &theme)),
-            )
+            .when_some(self.state.workspace_loading_progress(), |this, progress| {
+                this.child(render_boot_progress_strip(progress, &theme))
+            })
             .child(body)
             .when(self.state.pending_quit_confirmation, |this| {
                 this.child(render_quit_dialog(&theme))
@@ -1565,14 +1558,9 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
                         .text_color(text_primary)
                         .child("Quit Ato Desktop"),
                 )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(text_secondary)
-                        .child(
-                            "Keep your current tabs for the next launch, or clear them and start fresh?",
-                        ),
-                )
+                .child(div().text_size(px(13.0)).text_color(text_secondary).child(
+                    "Keep your current tabs for the next launch, or clear them and start fresh?",
+                ))
                 .child(
                     div()
                         .flex()
@@ -1621,12 +1609,16 @@ fn quit_dialog_button(
 ) -> impl IntoElement {
     let (bg, fg, border) = match kind {
         QuitDialogButtonKind::Primary => (theme.accent, gpui::white(), theme.accent),
-        QuitDialogButtonKind::Neutral => {
-            (theme.surface_hover, theme.text_primary, theme.border_default)
-        }
-        QuitDialogButtonKind::Danger => {
-            (theme.surface_hover, hsla(0.0, 0.7, 0.5, 1.0), theme.border_default)
-        }
+        QuitDialogButtonKind::Neutral => (
+            theme.surface_hover,
+            theme.text_primary,
+            theme.border_default,
+        ),
+        QuitDialogButtonKind::Danger => (
+            theme.surface_hover,
+            hsla(0.0, 0.7, 0.5, 1.0),
+            theme.border_default,
+        ),
     };
     div()
         .id(label)
@@ -1707,10 +1699,13 @@ fn decode_data_url_image(url: &str) -> Option<Arc<Image>> {
     let body = url.strip_prefix("data:")?;
     let (meta, payload) = body.split_once(',')?;
     let mime = meta.split(';').next().unwrap_or("");
-    let format = image_format_from_content_type(mime).or_else(|| sniff_image_format(payload.as_bytes()))?;
+    let format =
+        image_format_from_content_type(mime).or_else(|| sniff_image_format(payload.as_bytes()))?;
     let bytes = if meta.contains(";base64") {
         use base64::Engine;
-        base64::engine::general_purpose::STANDARD.decode(payload).ok()?
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .ok()?
     } else {
         payload.as_bytes().to_vec()
     };
@@ -1810,22 +1805,17 @@ fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBound
     }
 }
 
-
 fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement {
     // 2px strip flush against the chrome's bottom border. Filled
     // section uses theme.accent; track uses surface_hover so the
     // strip is visible against either light or dark panel_bg.
     let progress = progress.clamp(0.0, 1.0);
-    div()
-        .h(px(2.0))
-        .w_full()
-        .bg(theme.surface_hover)
-        .child(
-            div()
-                .h(px(2.0))
-                .w(gpui::relative(progress))
-                .bg(theme.accent),
-        )
+    div().h(px(2.0)).w_full().bg(theme.surface_hover).child(
+        div()
+            .h(px(2.0))
+            .w(gpui::relative(progress))
+            .bg(theme.accent),
+    )
 }
 
 /// Render the capsule-update slot inside the route-info popover.

@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::pipeline::phases::run::DerivedBridgeManifest;
 use crate::application::pipeline::phases::run::PreparedRunContext;
-use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::launch_context::RuntimeLaunchContext;
+use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
     preflight_required_environment_variables, prepare_target_execution, resolve_launch_context,
     TargetLaunchOptions,
@@ -278,7 +278,10 @@ fn start_guest_session(
     command.env("PYTHONUNBUFFERED", "1");
     command.env("ATO_DESKTOP_SESSION_PORT", port.to_string());
     command.env("ATO_DESKTOP_SESSION_HOST", "127.0.0.1");
-    command.env("ATO_DESKTOP_SESSION_ID", format!("ato-desktop-session-{port}"));
+    command.env(
+        "ATO_DESKTOP_SESSION_ID",
+        format!("ato-desktop-session-{port}"),
+    );
     command.env("ATO_DESKTOP_SESSION_ADAPTER", &guest.adapter);
     command.env("ATO_DESKTOP_SESSION_RPC_PATH", &guest.rpc_path);
     command.env("ATO_DESKTOP_SESSION_HEALTH_PATH", &guest.health_path);
