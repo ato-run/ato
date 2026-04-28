@@ -79,6 +79,10 @@ pub enum ShellEvent {
     SessionReady {
         pane_id: usize,
     },
+    HostPanelRouteChanged {
+        pane_id: usize,
+        path: String,
+    },
     PermissionDenied {
         pane_id: usize,
         capability: String,
@@ -111,6 +115,10 @@ pub enum ShellEvent {
         request_id: String,
         status: u16,
         duration_ms: u64,
+    },
+    ProcessLog {
+        pane_id: usize,
+        message: String,
     },
     /// Forward keyboard input from xterm.js to nacelle PTY stdin
     TerminalInput {
