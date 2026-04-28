@@ -1655,9 +1655,42 @@ impl WebViewManager {
             let window_handle = self.window_handle;
             builder = builder.with_on_page_load_handler(move |event, url| match event {
                 PageLoadEvent::Started => {
+                    // Phase 0 (RFC: SURFACE_MATERIALIZATION §5.1):
+                    // navigation_start fires when Wry begins fetching
+                    // the initial document. Wry calls this on its
+                    // worker thread; emit_stage is thread-safe (just
+                    // an eprintln behind an env check).
+                    crate::surface_timing::emit_stage(
+                        "navigation_start",
+                        "ok",
+                        0,
+                        None,
+                        &crate::surface_timing::SurfaceExtras::default(),
+                    );
                     automation.mark_page_unloaded(pane_id);
                 }
                 PageLoadEvent::Finished => {
+                    // navigation_finished. Note: PageLoadEvent::Finished
+                    // is "DOM-loaded plus initial subresources," not
+                    // first_paint. v0 uses this as a best-effort proxy
+                    // for first_visible_signal as well — emitting both
+                    // names so the log can be filtered either way.
+                    // Phase 3a's native overlay will produce a more
+                    // precise first_visible_signal once it lands.
+                    crate::surface_timing::emit_stage(
+                        "navigation_finished",
+                        "ok",
+                        0,
+                        None,
+                        &crate::surface_timing::SurfaceExtras::default(),
+                    );
+                    crate::surface_timing::emit_stage(
+                        "first_visible_signal",
+                        "ok",
+                        0,
+                        None,
+                        &crate::surface_timing::SurfaceExtras::default(),
+                    );
                     automation.mark_page_loaded(pane_id);
                     match page_load_behavior {
                         PageLoadBehavior::UpdateExternalUrl => {
@@ -1736,9 +1769,24 @@ impl WebViewManager {
             builder.with_url(&url)
         };
 
+        // Phase 0 (RFC: SURFACE_MATERIALIZATION §3.1) — measure the
+        // Wry / WKWebView creation cost. The pair `webview_create_start`
+        // / `webview_create_end` brackets the actual `build_as_child`
+        // call so callers can subtract preload-script setup, scheme
+        // handler registration, etc., from the cost they're trying to
+        // optimize in Phase 2B.
+        crate::surface_timing::emit_stage(
+            "webview_create_start",
+            "ok",
+            0,
+            None,
+            &crate::surface_timing::SurfaceExtras::default(),
+        );
+        let create_timer = crate::surface_timing::SurfaceStageTimer::start("webview_create_end");
         let webview = builder
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
+        create_timer.finish_ok();
 
         if let Some(handoff) = &desktop_auth_handoff {
             install_ato_auth_cookies(&webview, handoff)
@@ -1866,10 +1914,24 @@ impl WebViewManager {
         });
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
+        // Phase 0 (RFC: SURFACE_MATERIALIZATION §3.1) — host panel
+        // WebView creation cost. Same bracketing as the capsule path
+        // above; emitted with the same stage names so a SURFACE-TIMING
+        // log can be filtered with one rule regardless of which
+        // call site fired.
+        crate::surface_timing::emit_stage(
+            "webview_create_start",
+            "ok",
+            0,
+            None,
+            &crate::surface_timing::SurfaceExtras::default(),
+        );
+        let create_timer = crate::surface_timing::SurfaceStageTimer::start("webview_create_end");
         let webview = builder
             .with_url(&url)
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child host panel webview for {url}"))?;
+        create_timer.finish_ok();
 
         #[cfg(target_os = "macos")]
         let frame_host = Some(install_macos_frame_host(&webview)?);
