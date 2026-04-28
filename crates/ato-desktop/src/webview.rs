@@ -433,6 +433,12 @@ impl WebViewManager {
 
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
         state.extend_activity(self.bridge.drain_activity());
+
+        // RFC: SURFACE_CLOSE_SEMANTICS §6.4 — mirror retention size
+        // into AppState so omnibar suggestions / chrome can render
+        // "Stop all retained sessions (N)" without holding a back-
+        // reference to WebViewManager.
+        state.retention_count = self.retention.len();
         let shell_events = self.bridge.drain_shell_events();
         self.apply_shell_events(&shell_events, state);
         state.apply_shell_events(shell_events);
@@ -2152,6 +2158,111 @@ impl WebViewManager {
             );
             crate::retention::spawn_graceful_stop(entry, reason);
         }
+    }
+
+    /// Number of capsule sessions currently sitting in the retention
+    /// table. Surfaced by the chrome indicator + command palette
+    /// (RFC: SURFACE_CLOSE_SEMANTICS §6.4) so users can tell when
+    /// hidden processes are still running.
+    pub fn retention_count(&self) -> usize {
+        self.retention.len()
+    }
+
+    /// Explicit Stop for the active pane's underlying session
+    /// (RFC: SURFACE_CLOSE_SEMANTICS §6.1 / §6.2). Stops the process,
+    /// removes the session record, and drops any retention entry —
+    /// reopen will go through the cold path.
+    ///
+    /// This is the user-initiated path, so the stop is **synchronous**
+    /// and any error is surfaced as an activity entry (the user
+    /// actively asked for this; failure should not be silent). For
+    /// machine-driven stops (TTL / quit / LRU / pane-close demote)
+    /// see `retention::spawn_graceful_stop`.
+    pub fn stop_active_session(&mut self, state: &mut AppState) -> bool {
+        let Some(active_pane_id) = self.active_pane_id else {
+            return false;
+        };
+        let Some(view) = self.views.get(&active_pane_id) else {
+            return false;
+        };
+        let Some(session) = view.launched_session.as_ref() else {
+            return false;
+        };
+        let session_id = session.session_id.clone();
+        let handle = session.handle.clone();
+
+        // Drop from retention without stop — we're about to do an
+        // immediate stop ourselves below, no need for the background
+        // graceful-stop path.
+        let _ = self.retention.take_by_session_id(&session_id);
+        self.stop_log_follower(&session_id);
+
+        match stop_guest_session(&session_id) {
+            Ok(true) => {
+                tracing::info!(
+                    session_id = %session_id,
+                    handle = %handle,
+                    "stop_active_session: process terminated"
+                );
+                state.push_activity(
+                    crate::state::ActivityTone::Info,
+                    format!("Stopped session for {}", handle),
+                );
+                true
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    handle = %handle,
+                    "stop_active_session: session was already inactive"
+                );
+                state.push_activity(
+                    crate::state::ActivityTone::Warning,
+                    format!("Session for {} was already inactive", handle),
+                );
+                false
+            }
+            Err(err) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    handle = %handle,
+                    error = %err,
+                    "stop_active_session: graceful stop failed"
+                );
+                state.push_activity(
+                    crate::state::ActivityTone::Error,
+                    format!("Failed to stop session for {}: {err}", handle),
+                );
+                false
+            }
+        }
+    }
+
+    /// Drain every retained session and graceful-stop each in a
+    /// background thread. Active panes (`self.views`) are
+    /// **untouched** — the user has to close those panes first
+    /// before the underlying session can be stopped via this path.
+    /// Returns the number of sessions queued for stop.
+    pub fn stop_all_retained_sessions(&mut self) -> usize {
+        let drained = self.retention.drain();
+        let count = drained.len();
+        for (entry, _reason) in drained {
+            // `_reason` is `AppQuit` because `drain()` reports it
+            // that way; the caller-intent here is "user asked", so
+            // tag the log accordingly. (Not worth a new
+            // `EvictionReason::ExplicitStopAll` — only logs
+            // distinguish.)
+            tracing::info!(
+                session_id = %entry.session_id,
+                handle = %entry.handle,
+                "stop_all_retained_sessions: graceful stop scheduled"
+            );
+            crate::retention::spawn_graceful_stop(
+                entry,
+                crate::retention::EvictionReason::AppQuit,
+            );
+        }
+        count
     }
 
     /// Mark `pane_id`'s update slot as `Checking` and dispatch a worker
