@@ -1643,6 +1643,24 @@ impl WebViewManager {
             );
         }
 
+        // Phase 0 (RFC: SURFACE_MATERIALIZATION §5.1) — base extras
+        // shared by every SURFACE-TIMING line emitted from this build.
+        // `since_click_ms` (added per emission below) is the actual
+        // user-perceived metric — `elapsed_ms` is meaningless for
+        // instant-marker stages like `navigation_start` and
+        // `first_visible_signal`, so we anchor those against the click
+        // origin captured by `resolve_and_start_capsule`.
+        let surface_click_origin = launched_session.as_ref().and_then(|s| s.click_origin);
+        let surface_base_extras = {
+            let mut extras = crate::surface_timing::SurfaceExtras::default()
+                .with_partition_id(pane.partition_id.clone())
+                .with_route_key(pane.route.to_string());
+            if let Some(session) = launched_session.as_ref() {
+                extras = extras.with_session_id(session.session_id.clone());
+            }
+            extras
+        };
+
         // Always install a page-load handler.
         // - PageLoadEvent::Started → mark pane as not-loaded (guard for evaluate_script)
         // - PageLoadEvent::Finished → mark loaded + push bridge shell events
@@ -1653,6 +1671,8 @@ impl WebViewManager {
             let page_load_behavior = build_flags.page_load_behavior;
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
+            let click_origin = surface_click_origin;
+            let base_extras = surface_base_extras.clone();
             builder = builder.with_on_page_load_handler(move |event, url| match event {
                 PageLoadEvent::Started => {
                     // Phase 0 (RFC: SURFACE_MATERIALIZATION §5.1):
@@ -1660,12 +1680,16 @@ impl WebViewManager {
                     // the initial document. Wry calls this on its
                     // worker thread; emit_stage is thread-safe (just
                     // an eprintln behind an env check).
+                    let extras = match click_origin {
+                        Some(origin) => base_extras.clone().with_since_click_ms(origin.elapsed_ms()),
+                        None => base_extras.clone(),
+                    };
                     crate::surface_timing::emit_stage(
                         "navigation_start",
                         "ok",
                         0,
                         None,
-                        &crate::surface_timing::SurfaceExtras::default(),
+                        &extras,
                     );
                     automation.mark_page_unloaded(pane_id);
                 }
@@ -1677,20 +1701,31 @@ impl WebViewManager {
                     // names so the log can be filtered either way.
                     // Phase 3a's native overlay will produce a more
                     // precise first_visible_signal once it lands.
+                    let extras = match click_origin {
+                        Some(origin) => base_extras.clone().with_since_click_ms(origin.elapsed_ms()),
+                        None => base_extras.clone(),
+                    };
                     crate::surface_timing::emit_stage(
                         "navigation_finished",
                         "ok",
                         0,
                         None,
-                        &crate::surface_timing::SurfaceExtras::default(),
+                        &extras,
                     );
                     crate::surface_timing::emit_stage(
                         "first_visible_signal",
                         "ok",
                         0,
                         None,
-                        &crate::surface_timing::SurfaceExtras::default(),
+                        &extras,
                     );
+                    if let Some(origin) = click_origin {
+                        crate::surface_timing::emit_total(
+                            origin.elapsed_ms(),
+                            "first_visible_signal",
+                            &base_extras,
+                        );
+                    }
                     automation.mark_page_loaded(pane_id);
                     match page_load_behavior {
                         PageLoadBehavior::UpdateExternalUrl => {
@@ -1775,18 +1810,42 @@ impl WebViewManager {
         // call so callers can subtract preload-script setup, scheme
         // handler registration, etc., from the cost they're trying to
         // optimize in Phase 2B.
+        //
+        // We compute `since_click_ms` at emission time (not at timer
+        // construction) so the value reflects the real wall-clock
+        // distance from the click handler to that point — using
+        // `SurfaceStageTimer` would freeze the extras at construction.
+        let create_started = std::time::Instant::now();
+        let extras_at_start = match surface_click_origin {
+            Some(origin) => surface_base_extras
+                .clone()
+                .with_since_click_ms(origin.elapsed_ms()),
+            None => surface_base_extras.clone(),
+        };
         crate::surface_timing::emit_stage(
             "webview_create_start",
             "ok",
             0,
             None,
-            &crate::surface_timing::SurfaceExtras::default(),
+            &extras_at_start,
         );
-        let create_timer = crate::surface_timing::SurfaceStageTimer::start("webview_create_end");
         let webview = builder
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
-        create_timer.finish_ok();
+        let create_elapsed_ms = create_started.elapsed().as_millis() as u64;
+        let extras_at_end = match surface_click_origin {
+            Some(origin) => surface_base_extras
+                .clone()
+                .with_since_click_ms(origin.elapsed_ms()),
+            None => surface_base_extras.clone(),
+        };
+        crate::surface_timing::emit_stage(
+            "webview_create_end",
+            "ok",
+            create_elapsed_ms,
+            None,
+            &extras_at_end,
+        );
 
         if let Some(handoff) = &desktop_auth_handoff {
             install_ato_auth_cookies(&webview, handoff)

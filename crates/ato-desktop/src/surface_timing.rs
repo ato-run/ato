@@ -33,11 +33,18 @@ pub(crate) fn enabled() -> bool {
 /// Optional debug extras attached to a `SURFACE-TIMING` line. Used to
 /// answer the §3.3 precondition: is `partition_id` stable across a
 /// `(session_id, partition_id)` pane close → reopen?
+///
+/// `since_click_ms` is the user-perceived time anchor: for
+/// instant-marker stages (`navigation_*`, `first_visible_signal`)
+/// where `elapsed_ms` is meaningless (the stage has no duration),
+/// `since_click_ms` carries the wall-clock distance from the click
+/// handler entry — that's the number Phase 0 wants.
 #[derive(Default, Clone, Debug)]
 pub(crate) struct SurfaceExtras {
     pub session_id: Option<String>,
     pub partition_id: Option<String>,
     pub route_key: Option<String>,
+    pub since_click_ms: Option<u64>,
 }
 
 impl SurfaceExtras {
@@ -56,6 +63,11 @@ impl SurfaceExtras {
         self
     }
 
+    pub fn with_since_click_ms(mut self, value: u64) -> Self {
+        self.since_click_ms = Some(value);
+        self
+    }
+
     fn render(&self) -> String {
         let mut parts = String::new();
         if let Some(value) = &self.session_id {
@@ -66,6 +78,9 @@ impl SurfaceExtras {
         }
         if let Some(value) = &self.route_key {
             parts.push_str(&format!(" route_key={:?}", value));
+        }
+        if let Some(value) = self.since_click_ms {
+            parts.push_str(&format!(" since_click_ms={}", value));
         }
         parts
     }
@@ -222,6 +237,15 @@ mod tests {
         assert!(rendered.contains("session_id=\"ato-desktop-session-12345\""));
         assert!(rendered.contains("partition_id=\"pane-7\""));
         assert!(rendered.contains("route_key=\"local:/foo/bar\""));
+    }
+
+    #[test]
+    fn extras_render_emits_since_click_ms_unquoted() {
+        let extras = SurfaceExtras::default().with_since_click_ms(2473);
+        let rendered = extras.render();
+        // Numeric — bare value so jq / awk can parse without strip.
+        assert!(rendered.contains("since_click_ms=2473"));
+        assert!(!rendered.contains("since_click_ms=\""));
     }
 
     #[test]
