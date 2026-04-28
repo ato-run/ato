@@ -31,7 +31,8 @@ use crate::app::{
     ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
     FocusCommandBar, MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll,
     NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
+    InstallCapsuleUpdate, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
+    OpenUrlBridge, PreviousTask,
     PreviousWorkspace, Quit,
     ResumeAfterAuth, SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun,
     SignOut, SplitPane, ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover,
@@ -541,6 +542,31 @@ impl DesktopShell {
             );
             cx.notify();
         }
+    }
+
+    /// Click handler for the popover's Install-update button. Closes the
+    /// modal and dispatches NavigateToUrl with the precomputed
+    /// `target_handle` (e.g. `capsule://...@latest`). The existing
+    /// `webview::sync_from_state` route-change pipeline tears down the
+    /// running session and `ato app session start` lazily installs the
+    /// new version, so no extra install plumbing is needed here.
+    fn on_install_capsule_update(
+        &mut self,
+        action: &InstallCapsuleUpdate,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Drop the active pane's banner immediately so the modal feels
+        // responsive — the worker thread will repopulate it after the new
+        // session settles. Stale `Available` would otherwise flicker until
+        // the next check completes.
+        if let Some(active) = self.state.active_capsule_pane() {
+            self.state.capsule_updates.remove(&active.pane_id);
+        }
+        self.state.route_metadata_popover_open = false;
+        let url = action.url.clone();
+        window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
+        cx.notify();
     }
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1461,6 +1487,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_open_latest_release_page))
             .on_action(cx.listener(Self::on_open_external_link))
+            .on_action(cx.listener(Self::on_install_capsule_update))
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, _cx| {
                 let path_vec = paths.paths().to_vec();
                 this.state.launch_dropped_paths(path_vec);
@@ -1801,6 +1828,92 @@ fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement 
         )
 }
 
+/// Render the capsule-update slot inside the route-info popover.
+///
+/// `Idle` / `Checking` are silent — the popover was opened to read metadata,
+/// and a fast network round-trip would otherwise flicker. Once the worker
+/// posts a `UpToDate { current }` we surface a calm subtitle, an
+/// `Available` lights up an accent banner with an Install-update button,
+/// and `Failed` collapses to a muted single-line error so the user has
+/// some feedback if the registry was unreachable.
+fn render_capsule_update_section(
+    update: Option<&crate::state::CapsuleUpdate>,
+    theme: &Theme,
+) -> AnyElement {
+    use crate::state::CapsuleUpdate;
+    match update {
+        None | Some(CapsuleUpdate::Idle) | Some(CapsuleUpdate::Checking) => {
+            div().w(px(0.0)).into_any_element()
+        }
+        Some(CapsuleUpdate::UpToDate { current }) => div()
+            .mt_1()
+            .text_size(px(11.0))
+            .text_color(theme.text_tertiary)
+            .child(format!("v{current} (latest)"))
+            .into_any_element(),
+        Some(CapsuleUpdate::Failed { message }) => div()
+            .mt_1()
+            .text_size(px(11.0))
+            .text_color(theme.text_tertiary)
+            .child(format!("Update check failed: {message}"))
+            .into_any_element(),
+        Some(CapsuleUpdate::Available {
+            current,
+            latest,
+            target_handle,
+        }) => {
+            let target_handle = target_handle.clone();
+            div()
+                .mt_2()
+                .rounded(px(10.0))
+                .bg(theme.accent_subtle)
+                .border_1()
+                .border_color(theme.accent_border)
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight(600.0))
+                        .text_color(theme.text_primary)
+                        .child("Update available"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_secondary)
+                        .child(format!("v{current} → v{latest}")),
+                )
+                .child(
+                    div()
+                        .id("capsule-update-install-button")
+                        .mt_1()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(theme.accent)
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight(600.0))
+                        .text_color(gpui::white())
+                        .cursor_pointer()
+                        .child("Install update")
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(InstallCapsuleUpdate {
+                                    url: target_handle.clone(),
+                                }),
+                                cx,
+                            );
+                        }),
+                )
+                .into_any_element()
+        }
+    }
+}
+
 fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement {
     let active = state.active_capsule_pane().or_else(|| {
         state
@@ -2049,6 +2162,10 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
                         )
                         .child(value_view)
                 }))
+                .child(render_capsule_update_section(
+                    state.capsule_updates.get(&pane_id),
+                    theme,
+                ))
                 .when(!log_entries.is_empty(), |this| {
                     this.child(
                         div()
