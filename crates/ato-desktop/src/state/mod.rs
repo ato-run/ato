@@ -1435,6 +1435,7 @@ impl AppState {
 
     pub fn set_route_metadata_tab(&mut self, tab: CapsuleDetailTab) {
         self.route_metadata_active_tab = tab;
+        self.update_active_capsule_detail_host_panel_route();
     }
 
     pub fn active_capsule_detail_host_panel_route(&self) -> Option<HostPanelRoute> {
@@ -2086,6 +2087,63 @@ impl AppState {
             self.next_pane_id += 1;
             self.command_bar_text.clear();
             self.push_activity(ActivityTone::Info, "Opened settings task");
+        }
+    }
+
+    pub fn open_active_capsule_detail_task(&mut self) {
+        let Some(route) = self.active_capsule_detail_host_panel_route() else {
+            self.push_activity(
+                ActivityTone::Warning,
+                "No active capsule pane available for capsule detail",
+            );
+            return;
+        };
+
+        let pane_id = match &route {
+            HostPanelRoute::CapsuleDetail { pane_id, .. } => *pane_id,
+            HostPanelRoute::Launcher | HostPanelRoute::Settings { .. } => return,
+        };
+
+        if let Some(existing_task_id) = self.find_capsule_detail_task_id(pane_id) {
+            self.select_task(existing_task_id);
+            self.update_capsule_detail_task_route(existing_task_id, pane_id, route);
+            self.push_activity(ActivityTone::Info, "Focused capsule detail task");
+            return;
+        }
+
+        let next_task_id = self.next_task_id;
+        let next_pane_id = self.next_pane_id;
+        let title = route.label();
+
+        let mut created = false;
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.tasks.push(TaskSet {
+                id: next_task_id,
+                title: title.clone(),
+                focused_pane: next_pane_id,
+                pane_tree: PaneTree::Leaf(next_pane_id),
+                panes: vec![Pane {
+                    id: next_pane_id,
+                    title: title.clone(),
+                    role: PaneRole::Primary,
+                    visible: true,
+                    bounds: PaneBounds::empty(),
+                    surface: PaneSurface::HostPanel(route),
+                }],
+                split_ratio: 0.5,
+                route_candidates: vec![],
+                route_index: 0,
+                preview: title.clone(),
+            });
+            workspace.active_task = next_task_id;
+            created = true;
+        }
+
+        if created {
+            self.next_task_id += 1;
+            self.next_pane_id += 1;
+            self.command_bar_text.clear();
+            self.push_activity(ActivityTone::Info, "Opened capsule detail task");
         }
     }
 
@@ -3740,6 +3798,23 @@ impl AppState {
         })
     }
 
+    fn find_capsule_detail_task_id(&self, pane_id: PaneId) -> Option<TaskSetId> {
+        self.active_workspace()?.tasks.iter().find_map(|task| {
+            task.panes
+                .iter()
+                .any(|pane| {
+                    matches!(
+                        pane.surface,
+                        PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
+                            pane_id: route_pane_id,
+                            ..
+                        }) if route_pane_id == pane_id
+                    )
+                })
+                .then_some(task.id)
+        })
+    }
+
     fn update_settings_host_panel_routes(&mut self) {
         let route = HostPanelRoute::Settings {
             section: Some(self.settings_active_tab),
@@ -3768,6 +3843,20 @@ impl AppState {
         }
     }
 
+    fn update_active_capsule_detail_host_panel_route(&mut self) {
+        let Some(route) = self.active_capsule_detail_host_panel_route() else {
+            return;
+        };
+        let pane_id = match &route {
+            HostPanelRoute::CapsuleDetail { pane_id, .. } => *pane_id,
+            HostPanelRoute::Launcher | HostPanelRoute::Settings { .. } => return,
+        };
+        let Some(task_id) = self.find_capsule_detail_task_id(pane_id) else {
+            return;
+        };
+        self.update_capsule_detail_task_route(task_id, pane_id, route);
+    }
+
     fn update_task_host_panel_route(&mut self, task_id: TaskSetId, route: HostPanelRoute) {
         let title = route.label();
         let active_task_id = self.active_task().map(|task| task.id);
@@ -3778,6 +3867,39 @@ impl AppState {
                 task.preview = title.clone();
                 for pane in &mut task.panes {
                     if let PaneSurface::HostPanel(HostPanelRoute::Settings { .. }) = &pane.surface {
+                        pane.title = title.clone();
+                        pane.surface = PaneSurface::HostPanel(route.clone());
+                    }
+                }
+            }
+        }
+
+        if active_task_id == Some(task_id) {
+            self.sync_command_bar_with_active_route();
+        }
+    }
+
+    fn update_capsule_detail_task_route(
+        &mut self,
+        task_id: TaskSetId,
+        pane_id: PaneId,
+        route: HostPanelRoute,
+    ) {
+        let title = route.label();
+        let active_task_id = self.active_task().map(|task| task.id);
+
+        if let Some(workspace) = self.active_workspace_mut() {
+            if let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id) {
+                task.title = title.clone();
+                task.preview = title.clone();
+                for pane in &mut task.panes {
+                    if matches!(
+                        pane.surface,
+                        PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
+                            pane_id: route_pane_id,
+                            ..
+                        }) if route_pane_id == pane_id
+                    ) {
                         pane.title = title.clone();
                         pane.surface = PaneSurface::HostPanel(route.clone());
                     }
@@ -4178,6 +4300,53 @@ mod tests {
         state.select_task(3);
 
         assert!(state.active_capsule_detail_host_panel_route().is_none());
+    }
+
+    #[test]
+    fn open_active_capsule_detail_task_creates_single_task_per_capsule_pane() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        let original_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.open_active_capsule_detail_task();
+        state.open_active_capsule_detail_task();
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), original_count + 1);
+        let task = workspace.active_task().expect("task");
+        assert_eq!(task.title, "Capsule detail · pane 2 · Overview");
+        assert!(task.panes.iter().any(|pane| matches!(
+            pane.surface,
+            PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
+                pane_id: 2,
+                tab: CapsuleDetailTab::Overview,
+            })
+        )));
+    }
+
+    #[test]
+    fn set_route_metadata_tab_updates_existing_capsule_detail_task_route() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        state.open_active_capsule_detail_task();
+        state.select_task(2);
+
+        state.set_route_metadata_tab(CapsuleDetailTab::Logs);
+
+        let workspace = state.active_workspace().expect("workspace");
+        let task = workspace
+            .tasks
+            .iter()
+            .find(|task| task.title.contains("Capsule detail"))
+            .expect("capsule detail task");
+        assert_eq!(task.title, "Capsule detail · pane 2 · Logs");
+        assert!(task.panes.iter().any(|pane| matches!(
+            pane.surface,
+            PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
+                pane_id: 2,
+                tab: CapsuleDetailTab::Logs,
+            })
+        )));
     }
 
     #[test]
