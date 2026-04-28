@@ -32,7 +32,7 @@ use crate::app::{
     NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenLocalRegistry,
     OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
     SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
-    ToggleAutoDevtools, ToggleDevConsole, ToggleTheme,
+    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -564,6 +564,16 @@ impl DesktopShell {
     ) {
         self.state.dismiss_transient();
         self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_toggle_route_metadata_popover(
+        &mut self,
+        _: &ToggleRouteMetadataPopover,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.toggle_route_metadata_popover();
         cx.notify();
     }
 
@@ -1125,7 +1135,8 @@ impl Render for DesktopShell {
         let hide_for_overlay = (command_bar && !omnibar_suggestions.is_empty())
             || self.state.pending_config.is_some()
             || self.state.active_permission_prompt().is_some()
-            || self.state.pending_quit_confirmation;
+            || self.state.pending_quit_confirmation
+            || self.state.route_metadata_popover_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
         let theme = Theme::from_mode(self.state.theme_mode);
@@ -1167,6 +1178,9 @@ impl Render for DesktopShell {
                         this.child(modals::config_form::render_config_modal_overlay(
                             modal, &theme,
                         ))
+                    })
+                    .when(self.state.route_metadata_popover_open, |this| {
+                        this.child(render_route_metadata_popover(&self.state, &theme))
                     }),
             );
 
@@ -1196,6 +1210,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_expand_split))
             .on_action(cx.listener(Self::on_shrink_split))
             .on_action(cx.listener(Self::on_dismiss_transient))
+            .on_action(cx.listener(Self::on_toggle_route_metadata_popover))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_cancel_quit))
             .on_action(cx.listener(Self::on_cycle_handle))
@@ -1454,6 +1469,141 @@ fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBound
     }
 }
 
+
+fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoElement {
+    let active = state.active_capsule_pane().or_else(|| {
+        state
+            .active_web_pane()
+            .map(|pane| crate::state::ActiveCapsulePane {
+                pane_id: pane.pane_id,
+                title: pane.title,
+                route: pane.route,
+                session: pane.session,
+                source_label: pane.source_label,
+                trust_state: pane.trust_state,
+                restricted: pane.restricted,
+                snapshot_label: pane.snapshot_label,
+                canonical_handle: pane.canonical_handle,
+                session_id: pane.session_id,
+                adapter: pane.adapter,
+                manifest_path: pane.manifest_path,
+                runtime_label: pane.runtime_label,
+                display_strategy: pane.display_strategy,
+                log_path: pane.log_path,
+                local_url: pane.local_url,
+                healthcheck_url: pane.healthcheck_url,
+                invoke_url: pane.invoke_url,
+                served_by: pane.served_by,
+            })
+    });
+    let Some(active) = active else {
+        return div();
+    };
+
+    let session_label = match active.session {
+        crate::state::WebSessionState::Detached => "detached",
+        crate::state::WebSessionState::Resolving => "resolving",
+        crate::state::WebSessionState::Materializing => "materializing",
+        crate::state::WebSessionState::Launching => "launching",
+        crate::state::WebSessionState::Mounted => "mounted",
+        crate::state::WebSessionState::Closed => "closed",
+        crate::state::WebSessionState::LaunchFailed => "launch failed",
+    };
+
+    let mut rows: Vec<(&'static str, String)> = vec![("session", session_label.to_string())];
+    if let Some(v) = active.source_label {
+        rows.push(("source", v));
+    }
+    if let Some(v) = active.runtime_label {
+        rows.push(("runtime", v));
+    }
+    if let Some(v) = active.display_strategy {
+        rows.push(("display", v));
+    }
+    if let Some(v) = active.adapter {
+        rows.push(("adapter", v));
+    }
+    if let Some(v) = active.trust_state {
+        rows.push(("trust", v));
+    }
+    if active.restricted {
+        rows.push(("restricted", "yes".to_string()));
+    }
+    if let Some(v) = active.snapshot_label {
+        rows.push(("snapshot", v));
+    }
+    if let Some(v) = active.canonical_handle {
+        rows.push(("handle", v));
+    }
+    if let Some(v) = active.session_id {
+        rows.push(("session_id", v));
+    }
+    if let Some(v) = active.served_by {
+        rows.push(("served_by", v));
+    }
+    if let Some(v) = active.local_url {
+        rows.push(("local_url", v));
+    }
+    if let Some(v) = active.invoke_url {
+        rows.push(("invoke_url", v));
+    }
+    if let Some(v) = active.healthcheck_url {
+        rows.push(("healthcheck", v));
+    }
+    if let Some(v) = active.manifest_path {
+        rows.push(("manifest", v));
+    }
+    if let Some(v) = active.log_path {
+        rows.push(("log", v));
+    }
+
+    div()
+        .absolute()
+        .top(px(8.0))
+        .right(px(12.0))
+        .w(px(360.0))
+        .max_h(px(420.0))
+        .rounded(px(12.0))
+        .bg(theme.panel_bg)
+        .border_1()
+        .border_color(theme.border_default)
+        .shadow(vec![BoxShadow {
+            color: hsla(0.0, 0.0, 0.0, 0.22),
+            offset: point(px(0.0), px(8.0)),
+            blur_radius: px(24.0),
+            spread_radius: px(0.0),
+        }])
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight(600.0))
+                .text_color(theme.text_secondary)
+                .child("Route metadata"),
+        )
+        .children(rows.into_iter().map(|(label, value)| {
+            div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .text_color(theme.text_tertiary)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_primary)
+                        .child(value),
+                )
+        }))
+}
 
 fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
     let Some(prompt) = state.active_permission_prompt() else {
