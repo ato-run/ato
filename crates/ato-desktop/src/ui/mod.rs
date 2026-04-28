@@ -1315,11 +1315,14 @@ impl Render for DesktopShell {
         // modal (omnibar suggestions, the missing-env config form,
         // the permission prompt, the quit confirmation, the config
         // modal) is invisible until we toggle the WebView off.
+        // Route-metadata popover deliberately stays out of this list:
+        // we shrink stage_bounds instead (see compute_stage_bounds),
+        // so the WebView keeps painting in its narrowed rect while
+        // the popover renders in the GPUI gap to its right.
         let hide_for_overlay = (command_bar && !omnibar_suggestions.is_empty())
             || self.state.pending_config.is_some()
             || self.state.active_permission_prompt().is_some()
             || self.state.pending_quit_confirmation
-            || self.state.route_metadata_popover_open
             || self.state.settings_panel_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
@@ -1738,11 +1741,23 @@ fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBounds {
+/// Width of the gap reserved on the right of the stage when the
+/// route-metadata popover is open. WKWebView always paints over
+/// GPUI's CALayer tree, so the popover would be invisible if it
+/// overlapped the WebView; carving this strip lets the popover
+/// render in plain GPUI space alongside a still-visible WebView.
+const POPOVER_GAP_WIDTH: f32 = 380.0;
+
+fn compute_stage_bounds(state: &AppState, width: f32, height: f32) -> PaneBounds {
+    let popover_gap = if state.route_metadata_popover_open {
+        POPOVER_GAP_WIDTH
+    } else {
+        0.0
+    };
     PaneBounds {
         x: RAIL_WIDTH + STAGE_PADDING,
         y: CHROME_HEIGHT + STAGE_PADDING,
-        width: (width - RAIL_WIDTH - STAGE_PADDING * 2.0).max(240.0),
+        width: (width - RAIL_WIDTH - STAGE_PADDING * 2.0 - popover_gap).max(240.0),
         height: (height - CHROME_HEIGHT - STAGE_PADDING * 2.0).max(180.0),
     }
 }
