@@ -54,6 +54,7 @@
 **Draft**
 
 - [Draft Index](draft/README.md)
+- [Host Panel Routing](draft/HOST_PANEL_ROUTING.md)
 - [Capsule IPC](draft/DRAFT_CAPSULE_IPC.md)
 - [Lifecycle](draft/DRAFT_LIFECYCLE.md)
 - [Draft ID](draft/DRAFT_ID.md)

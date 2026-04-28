@@ -34,6 +34,152 @@ pub enum ThemeMode {
     Dark,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SettingsTab {
+    General,
+    Account,
+    Runtime,
+    Sandbox,
+    Trust,
+    Registry,
+    Projection,
+    Developer,
+    About,
+}
+
+impl SettingsTab {
+    pub const ALL: [Self; 9] = [
+        Self::General,
+        Self::Account,
+        Self::Runtime,
+        Self::Sandbox,
+        Self::Trust,
+        Self::Registry,
+        Self::Projection,
+        Self::Developer,
+        Self::About,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Account => "Account",
+            Self::Runtime => "Runtime",
+            Self::Sandbox => "Sandbox",
+            Self::Trust => "Trust Store",
+            Self::Registry => "Registry",
+            Self::Projection => "Delivery",
+            Self::Developer => "Developer",
+            Self::About => "About",
+        }
+    }
+
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::General | Self::Account | Self::Runtime | Self::Sandbox => "Basic",
+            Self::Trust => "Security",
+            Self::Registry | Self::Projection | Self::Developer | Self::About => "System",
+        }
+    }
+
+    pub fn badge(self) -> Option<&'static str> {
+        match self {
+            Self::Runtime => Some("Core"),
+            _ => None,
+        }
+    }
+}
+
+impl Default for SettingsTab {
+    fn default() -> Self {
+        Self::General
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapsuleDetailTab {
+    Overview,
+    Permissions,
+    Logs,
+    Update,
+    Api,
+}
+
+impl CapsuleDetailTab {
+    pub const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Permissions,
+        Self::Logs,
+        Self::Update,
+        Self::Api,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Permissions => "Permissions",
+            Self::Logs => "Logs",
+            Self::Update => "Update",
+            Self::Api => "API",
+        }
+    }
+}
+
+impl Default for CapsuleDetailTab {
+    fn default() -> Self {
+        Self::Overview
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum HostPanelRoute {
+    Launcher,
+    Settings {
+        section: Option<SettingsTab>,
+    },
+    CapsuleDetail {
+        pane_id: PaneId,
+        tab: CapsuleDetailTab,
+    },
+}
+
+impl HostPanelRoute {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Launcher => "Launchpad".to_string(),
+            Self::Settings { section: None } => "Settings".to_string(),
+            Self::Settings {
+                section: Some(section),
+            } => format!("Settings · {}", section.label()),
+            Self::CapsuleDetail { pane_id, tab } => {
+                format!("Capsule detail · pane {} · {}", pane_id, tab.label())
+            }
+        }
+    }
+
+    pub fn url(&self) -> Url {
+        let value = match self {
+            Self::Launcher => "capsule-host://panel/launcher".to_string(),
+            Self::Settings { section: None } => "capsule-host://panel/settings".to_string(),
+            Self::Settings {
+                section: Some(section),
+            } => format!(
+                "capsule-host://panel/settings/{}",
+                settings_tab_route_segment(*section)
+            ),
+            Self::CapsuleDetail { pane_id, tab } => format!(
+                "capsule-host://panel/capsule/{}/{}",
+                pane_id,
+                capsule_detail_tab_route_segment(*tab)
+            ),
+        };
+        Url::parse(&value).expect("host panel route should always be a valid URL")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitAxis {
     Horizontal,
@@ -403,6 +549,7 @@ pub struct AuthSession {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneSurface {
     Web(WebPane),
+    HostPanel(HostPanelRoute),
     Native {
         body: String,
     },
@@ -798,10 +945,12 @@ pub struct AppState {
     /// info chip. The popover surfaces source/runtime/trust/snapshot
     /// fields that previously cluttered the chrome as inline tags.
     pub route_metadata_popover_open: bool,
+    pub route_metadata_active_tab: CapsuleDetailTab,
     /// Whether the settings overlay panel is currently visible.
     /// Managed by `show_settings_panel()` (toggle). No sidebar tab
     /// is created — the overlay is rendered on top of the stage.
     pub settings_panel_open: bool,
+    pub settings_active_tab: SettingsTab,
     /// Status of the most recent GitHub-release version check. Drives
     /// the Updates card in the settings panel — the actual fetch is
     /// dispatched by `DesktopShell::on_check_for_updates`, which runs
@@ -915,7 +1064,9 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
+            route_metadata_active_tab: CapsuleDetailTab::Overview,
             settings_panel_open: false,
+            settings_active_tab: SettingsTab::General,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
             capsule_updates: HashMap::new(),
@@ -1095,7 +1246,9 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
+            route_metadata_active_tab: CapsuleDetailTab::Overview,
             settings_panel_open: false,
+            settings_active_tab: SettingsTab::General,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
             capsule_updates: HashMap::new(),
@@ -1272,7 +1425,16 @@ impl AppState {
     }
 
     pub fn toggle_route_metadata_popover(&mut self) {
-        self.route_metadata_popover_open = !self.route_metadata_popover_open;
+        if self.route_metadata_popover_open {
+            self.route_metadata_popover_open = false;
+        } else {
+            self.route_metadata_popover_open = true;
+            self.route_metadata_active_tab = CapsuleDetailTab::Overview;
+        }
+    }
+
+    pub fn set_route_metadata_tab(&mut self, tab: CapsuleDetailTab) {
+        self.route_metadata_active_tab = tab;
     }
 
     /// Aggregate boot progress across the active workspace, in [0.0, 1.0].
@@ -1346,7 +1508,7 @@ impl AppState {
                     role: PaneRole::Primary,
                     visible: true,
                     bounds: PaneBounds::empty(),
-                    surface: PaneSurface::Launcher,
+                    surface: PaneSurface::HostPanel(HostPanelRoute::Launcher),
                 }],
                 split_ratio: 0.5,
                 route_candidates: vec![],
@@ -1866,6 +2028,10 @@ impl AppState {
         self.settings_panel_open = !self.settings_panel_open;
     }
 
+    pub fn set_settings_tab(&mut self, tab: SettingsTab) {
+        self.settings_active_tab = tab;
+    }
+
     pub fn toggle_dev_console(&mut self) {
         let has_dev_console = self
             .active_task()
@@ -2184,6 +2350,14 @@ impl AppState {
                         entry.duration_ms = Some(duration_ms);
                     }
                 }
+                ShellEvent::ProcessLog { pane_id, message } => {
+                    self.push_capsule_log(
+                        pane_id,
+                        CapsuleLogStage::Runtime,
+                        Self::process_log_tone(&message),
+                        message,
+                    );
+                }
                 // TerminalInput and TerminalResize are consumed upstream by the WebViewManager
                 // (which has access to nacelle stdin writers) before apply_shell_events is called.
                 // They should not appear here; silently ignore any that leak through.
@@ -2352,6 +2526,34 @@ impl AppState {
                 invoke_url: web.invoke_url.clone(),
                 served_by: web.served_by.clone(),
                 auth_flow: web.auth_flow,
+                bounds: pane.bounds,
+            }),
+            PaneSurface::HostPanel(route) => Some(ActiveWebPane {
+                workspace_id: workspace.id,
+                task_id: task.id,
+                pane_id: pane.id,
+                title: pane.title.clone(),
+                route: GuestRoute::ExternalUrl(route.url()),
+                partition_id: format!("host-panel-{}", pane.id),
+                profile: "host-panel".to_string(),
+                capabilities: Vec::new(),
+                session: WebSessionState::Launching,
+                source_label: Some("host-panel".to_string()),
+                trust_state: Some("host".to_string()),
+                restricted: false,
+                snapshot_label: None,
+                canonical_handle: None,
+                session_id: None,
+                adapter: None,
+                manifest_path: None,
+                runtime_label: None,
+                display_strategy: None,
+                log_path: None,
+                local_url: None,
+                healthcheck_url: None,
+                invoke_url: None,
+                served_by: None,
+                auth_flow: false,
                 bounds: pane.bounds,
             }),
             PaneSurface::Native { .. }
@@ -2608,9 +2810,20 @@ impl AppState {
             tone,
             message: message.into(),
         });
-        if logs.len() > 40 {
-            let excess = logs.len() - 40;
+        if logs.len() > 400 {
+            let excess = logs.len() - 400;
             logs.drain(0..excess);
+        }
+    }
+
+    fn process_log_tone(message: &str) -> ActivityTone {
+        let lowered = message.to_ascii_lowercase();
+        if lowered.contains("error") || lowered.contains("panic") || lowered.contains("fatal") {
+            ActivityTone::Error
+        } else if lowered.contains("warn") {
+            ActivityTone::Warning
+        } else {
+            ActivityTone::Info
         }
     }
 
@@ -2754,6 +2967,7 @@ impl AppState {
             .find(|pane| pane.id == pane_id)
             .map(|pane| match &pane.surface {
                 PaneSurface::Web(web) => web.route.to_string(),
+                PaneSurface::HostPanel(route) => route.label(),
                 PaneSurface::Native { .. } => pane.title.clone(),
                 PaneSurface::CapsuleStatus(capsule) => capsule.route.to_string(),
                 PaneSurface::DevConsole => "Developer console".to_string(),
@@ -3374,6 +3588,12 @@ fn sidebar_icon_for_task(
                 SidebarTaskIconSpec::Monogram(short_label(&task.title))
             }
         },
+        PaneSurface::HostPanel(route) => match route {
+            HostPanelRoute::Launcher => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Launcher),
+            HostPanelRoute::Settings { .. } | HostPanelRoute::CapsuleDetail { .. } => {
+                SidebarTaskIconSpec::Monogram(short_label(&task.title))
+            }
+        },
         PaneSurface::DevConsole => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Console),
         PaneSurface::Terminal(_) => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal),
         PaneSurface::Launcher => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Launcher),
@@ -3405,6 +3625,7 @@ fn task_route_label(task: &TaskSet) -> String {
 
     match &pane.surface {
         PaneSurface::Web(web) => web.route.to_string(),
+        PaneSurface::HostPanel(route) => route.label(),
         PaneSurface::Native { .. } => "Native settings panel".to_string(),
         PaneSurface::CapsuleStatus(capsule) => capsule.route.to_string(),
         PaneSurface::DevConsole => "Developer console".to_string(),
@@ -3421,6 +3642,30 @@ fn demo_local_capsule(name: &str) -> String {
         .join(name)
         .display()
         .to_string()
+}
+
+fn settings_tab_route_segment(tab: SettingsTab) -> &'static str {
+    match tab {
+        SettingsTab::General => "general",
+        SettingsTab::Account => "account",
+        SettingsTab::Runtime => "runtime",
+        SettingsTab::Sandbox => "sandbox",
+        SettingsTab::Trust => "trust",
+        SettingsTab::Registry => "registry",
+        SettingsTab::Projection => "projection",
+        SettingsTab::Developer => "developer",
+        SettingsTab::About => "about",
+    }
+}
+
+fn capsule_detail_tab_route_segment(tab: CapsuleDetailTab) -> &'static str {
+    match tab {
+        CapsuleDetailTab::Overview => "overview",
+        CapsuleDetailTab::Permissions => "permissions",
+        CapsuleDetailTab::Logs => "logs",
+        CapsuleDetailTab::Update => "update",
+        CapsuleDetailTab::Api => "api",
+    }
 }
 
 fn route_profile(route: &GuestRoute) -> &'static str {
@@ -3677,6 +3922,25 @@ mod tests {
     }
 
     #[test]
+    fn process_log_event_is_recorded_as_runtime_log() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        let pane_id = state.active_web_pane().expect("pane").pane_id;
+
+        state.apply_shell_events(vec![ShellEvent::ProcessLog {
+            pane_id,
+            message: "ERROR failed to connect upstream".to_string(),
+        }]);
+
+        let inspector = state.active_capsule_inspector().expect("inspector");
+        assert!(inspector.logs.iter().any(|entry| {
+            entry.stage == CapsuleLogStage::Runtime
+                && entry.tone == ActivityTone::Error
+                && entry.message.contains("failed to connect upstream")
+        }));
+    }
+
+    #[test]
     fn show_settings_panel_toggles_open_flag() {
         let mut state = AppState::demo();
         let original_task_count = state.active_workspace().expect("workspace").tasks.len();
@@ -3700,6 +3964,32 @@ mod tests {
             state.active_workspace().expect("workspace").tasks.len(),
             original_task_count,
         );
+    }
+
+    #[test]
+    fn settings_tab_defaults_to_general_and_updates() {
+        let mut state = AppState::demo();
+
+        assert_eq!(state.settings_active_tab, SettingsTab::General);
+
+        state.set_settings_tab(SettingsTab::Developer);
+
+        assert_eq!(state.settings_active_tab, SettingsTab::Developer);
+    }
+
+    #[test]
+    fn route_metadata_popover_resets_to_overview_when_opened() {
+        let mut state = AppState::demo();
+
+        state.set_route_metadata_tab(CapsuleDetailTab::Logs);
+        state.toggle_route_metadata_popover();
+
+        assert!(state.route_metadata_popover_open);
+        assert_eq!(state.route_metadata_active_tab, CapsuleDetailTab::Overview);
+
+        state.toggle_route_metadata_popover();
+
+        assert!(!state.route_metadata_popover_open);
     }
 
     #[test]
@@ -3736,6 +4026,25 @@ mod tests {
         assert_eq!(workspace.tasks.len(), task_count + 1);
         assert_eq!(workspace.active_task().expect("task").title, "New Tab 2");
         assert_eq!(state.command_bar_text, "");
+    }
+
+    #[test]
+    fn create_new_tab_projects_launcher_host_panel_to_capsule_host_url() {
+        let mut state = AppState::demo();
+
+        state.create_new_tab();
+
+        let pane = state
+            .active_task()
+            .and_then(|task| task.focused_pane())
+            .expect("pane");
+        assert!(matches!(
+            pane.surface,
+            PaneSurface::HostPanel(HostPanelRoute::Launcher)
+        ));
+        let active = state.active_web_pane().expect("pane");
+        assert_eq!(active.profile, "host-panel");
+        assert_eq!(active.route.to_string(), "capsule-host://panel/launcher");
     }
 
     #[test]

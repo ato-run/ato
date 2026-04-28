@@ -116,7 +116,7 @@ pub(super) fn render_settings_overlay(state: &AppState, theme: &Theme) -> impl I
         .child(
             div()
                 .id("settings-panel-container")
-                .h_full()
+                .size_full()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
@@ -132,6 +132,7 @@ fn render_stage_pane(
 ) -> AnyElement {
     match &pane.surface {
         PaneSurface::Web(web) => render_web_pane(web, state, theme).into_any_element(),
+        PaneSurface::HostPanel(_route) => render_host_panel_pane(theme).into_any_element(),
         PaneSurface::Native { body } => {
             render_settings_panel(body, state, theme).into_any_element()
         }
@@ -224,6 +225,20 @@ fn render_web_pane(web: &WebPane, state: &AppState, theme: &Theme) -> gpui::Div 
                     this.child(render_launch_failed_overlay(web, state, theme))
                 }),
         )
+}
+
+fn render_host_panel_pane(theme: &Theme) -> gpui::Div {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .min_w(px(240.0))
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(theme.pane_bg_top, 0.),
+            linear_color_stop(theme.pane_bg_bottom, 1.),
+        ))
+        .child(div().flex_1().relative().size_full())
 }
 
 fn render_share_loading_overlay(web: &WebPane, theme: &Theme) -> impl IntoElement {

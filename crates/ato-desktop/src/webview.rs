@@ -1,18 +1,20 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::{CONTENT_TYPE, COOKIE};
 use http::{HeaderMap, HeaderValue};
+use include_dir::{include_dir, Dir};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
@@ -52,6 +54,9 @@ use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
+const HOST_PANEL_SCHEME: &str = "capsule-host";
+const HOST_PANEL_PROFILE: &str = "host-panel";
+static HOST_PANEL_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/frontend/dist");
 
 /// Preload injected into `terminal://` WebViews so xterm.js can reach the host.
 ///
@@ -147,6 +152,8 @@ pub struct WebViewManager {
     completed_terminal_sessions: HashSet<String>,
     /// Spawn errors queued until terminal page is loaded, then shown via xterm error banner.
     pending_terminal_errors: HashMap<String, String>,
+    /// Stop-signal senders for background log followers keyed by session_id.
+    log_followers: HashMap<String, Sender<()>>,
     /// Automation host — handles AI-agent socket requests.
     automation: AutomationHost,
     /// Whether `prewarm` has been invoked. WKWebView framework load
@@ -296,6 +303,7 @@ impl WebViewManager {
             terminal_sessions: HashMap::new(),
             completed_terminal_sessions: HashSet::new(),
             pending_terminal_errors: HashMap::new(),
+            log_followers: HashMap::new(),
             automation,
             prewarmed: false,
             web_context,
@@ -1127,6 +1135,7 @@ impl WebViewManager {
                                         ActivityTone::Info,
                                         format!("Terminal stream started for {title}"),
                                     );
+                                    self.start_log_follower(active.pane_id, &session);
                                     self.views.insert(active.pane_id, webview);
                                 }
                                 Err(error) => {
@@ -1183,6 +1192,7 @@ impl WebViewManager {
                                     // thread; the result lands on DesktopShell via the
                                     // mpsc channel installed by install_capsule_update_channel.
                                     self.spawn_capsule_update_check(active.pane_id, session, state);
+                                    self.start_log_follower(active.pane_id, session);
                                 }
                                 self.views.insert(active.pane_id, webview);
                             }
@@ -1349,6 +1359,10 @@ impl WebViewManager {
         local_session: Option<GuestLaunchSession>,
         auth_policy: AuthPolicyRegistry,
     ) -> Result<ManagedWebView> {
+        if pane.profile == HOST_PANEL_PROFILE {
+            return self.build_host_panel_webview(window, pane);
+        }
+
         let scheme = if matches!(pane.route, GuestRoute::Terminal { .. }) {
             "terminal".to_string()
         } else {
@@ -1714,6 +1728,75 @@ impl WebViewManager {
         })
     }
 
+    fn build_host_panel_webview(
+        &mut self,
+        window: &Window,
+        pane: &ActiveWebPane,
+    ) -> Result<ManagedWebView> {
+        let url = pane.route.to_string();
+        let webview_bounds = content_bounds(pane.bounds);
+        let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
+            .with_bounds(bounds_to_rect(webview_bounds));
+
+        builder = builder.with_user_agent(&format!(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/17.0 Safari/605.1.15 AtoDesktop/{}",
+            env!("CARGO_PKG_VERSION")
+        ));
+        builder = builder.with_initialization_script_for_main_only(
+            format!(
+                "window.__ATO_DESKTOP__ = {{ version: \"{}\", platform: \"{}\" }};",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+            ),
+            true,
+        );
+
+        let protocol = self.protocol_router.clone();
+        let bridge = self.bridge.clone();
+        builder = builder.with_asynchronous_custom_protocol(
+            HOST_PANEL_SCHEME.to_string(),
+            move |_webview_id, request, responder| {
+                protocol.handle_async(
+                    HOST_PANEL_SCHEME,
+                    request,
+                    responder,
+                    bridge.clone(),
+                    Vec::new(),
+                    None,
+                    RouteContent::External,
+                )
+            },
+        );
+
+        let dev_base = host_panel_dev_base_url();
+        builder = builder.with_navigation_handler(move |uri: String| {
+            url::Url::parse(&uri)
+                .ok()
+                .is_some_and(|url| allow_host_panel_navigation(&url, dev_base.as_ref()))
+        });
+        builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
+
+        let webview = builder
+            .with_url(&url)
+            .build_as_child(window)
+            .with_context(|| format!("unable to create Wry child host panel webview for {url}"))?;
+
+        #[cfg(target_os = "macos")]
+        let frame_host = Some(install_macos_frame_host(&webview)?);
+
+        Ok(ManagedWebView {
+            pane_id: pane.pane_id,
+            route: pane.route.clone(),
+            route_key: pane.route.to_string(),
+            bounds: webview_bounds,
+            launched_session: None,
+            webview,
+            #[cfg(target_os = "macos")]
+            frame_host,
+        })
+    }
+
     /// Drop cached webviews / terminals / launched sessions for a
     /// list of pane ids. Called by DesktopShell after AppState::close_task
     /// so closing a tab actually tears down the underlying Wry views
@@ -1764,7 +1847,33 @@ impl WebViewManager {
         });
     }
 
-    fn stop_launched_session(&self, webview: &ManagedWebView, state: &mut AppState) {
+    fn start_log_follower(&mut self, pane_id: usize, session: &GuestLaunchSession) {
+        let Some(log_path) = session.log_path.clone() else {
+            return;
+        };
+        if self.log_followers.contains_key(&session.session_id) {
+            return;
+        }
+
+        let (stop_tx, stop_rx) = channel::<()>();
+        let bridge = self.bridge.clone();
+        let session_id = session.session_id.clone();
+
+        thread::spawn(move || {
+            follow_process_log(pane_id, &session_id, log_path, bridge, stop_rx);
+        });
+
+        self.log_followers
+            .insert(session.session_id.clone(), stop_tx);
+    }
+
+    fn stop_log_follower(&mut self, session_id: &str) {
+        if let Some(stop_tx) = self.log_followers.remove(session_id) {
+            let _ = stop_tx.send(());
+        }
+    }
+
+    fn stop_launched_session(&mut self, webview: &ManagedWebView, state: &mut AppState) {
         let Some(session) = &webview.launched_session else {
             return;
         };
@@ -1772,7 +1881,8 @@ impl WebViewManager {
         self.stop_guest_session_record(session, state);
     }
 
-    fn stop_guest_session_record(&self, session: &GuestLaunchSession, state: &mut AppState) {
+    fn stop_guest_session_record(&mut self, session: &GuestLaunchSession, state: &mut AppState) {
+        self.stop_log_follower(&session.session_id);
         match stop_guest_session(&session.session_id) {
             Ok(true) => state.push_activity(
                 ActivityTone::Info,
@@ -1889,6 +1999,10 @@ impl WebViewManager {
 
 impl Drop for WebViewManager {
     fn drop(&mut self) {
+        for (_, stop_tx) in self.log_followers.drain() {
+            let _ = stop_tx.send(());
+        }
+
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
         for existing in self.views.drain().map(|(_, existing)| existing) {
             if let Some(session) = existing.launched_session.as_ref() {
@@ -1996,6 +2110,77 @@ fn run_capsule_update_check(canonical_handle: &str, current: &str) -> crate::sta
                 CapsuleUpdate::UpToDate {
                     current: current_norm,
                 }
+            }
+        }
+    }
+}
+
+fn follow_process_log(
+    pane_id: usize,
+    session_id: &str,
+    log_path: PathBuf,
+    bridge: BridgeProxy,
+    stop_rx: Receiver<()>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !log_path.exists() {
+        if stop_rx.try_recv().is_ok() {
+            return;
+        }
+        if Instant::now() > deadline {
+            bridge.log(
+                ActivityTone::Warning,
+                format!(
+                    "Process log for session {} never appeared at {}",
+                    session_id,
+                    log_path.display()
+                ),
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let file = match std::fs::File::open(&log_path) {
+        Ok(file) => file,
+        Err(error) => {
+            bridge.log(
+                ActivityTone::Warning,
+                format!(
+                    "Failed to open process log for session {}: {}",
+                    session_id, error
+                ),
+            );
+            return;
+        }
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            return;
+        }
+
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => thread::sleep(Duration::from_millis(50)),
+            Ok(_) => {
+                let message = line.trim_end_matches(['\r', '\n']).to_string();
+                if message.is_empty() {
+                    continue;
+                }
+                bridge.push_shell_event(ShellEvent::ProcessLog { pane_id, message });
+            }
+            Err(error) => {
+                bridge.log(
+                    ActivityTone::Warning,
+                    format!(
+                        "Process log follower for session {} stopped after read error: {}",
+                        session_id, error
+                    ),
+                );
+                return;
             }
         }
     }
@@ -2374,6 +2559,7 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
 
         match &pane.surface {
             crate::state::PaneSurface::Web(web) => Some(web.session.clone()),
+            crate::state::PaneSurface::HostPanel(_) => None,
             crate::state::PaneSurface::Native { .. }
             | crate::state::PaneSurface::CapsuleStatus(_)
             | crate::state::PaneSurface::Inspector
@@ -2477,6 +2663,10 @@ impl ProtocolRouter {
         path: &str,
         content: &RouteContent,
     ) -> Result<Response<Cow<'static, [u8]>>> {
+        if scheme == HOST_PANEL_SCHEME {
+            return serve_host_panel_asset(path);
+        }
+
         match content {
             RouteContent::EmbeddedWelcome => handle_embedded_welcome(scheme, host, path),
             RouteContent::GuestAssets(session) => serve_guest_asset(session, host, path),
@@ -2553,6 +2743,138 @@ fn handle_embedded_welcome(
             format!("asset not found for {scheme}: {path}"),
             "text/plain; charset=utf-8",
         ),
+    }
+}
+
+fn serve_host_panel_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
+    if let Some(dev_base) = host_panel_dev_base_url() {
+        return proxy_host_panel_asset(&dev_base, path);
+    }
+
+    let Some(asset_path) = resolve_host_panel_asset_path(path)? else {
+        return build_plain_response(
+            404,
+            format!("host panel asset not found: {path}"),
+            "text/plain; charset=utf-8",
+        );
+    };
+
+    let file = HOST_PANEL_DIST
+        .get_file(&asset_path)
+        .with_context(|| format!("missing embedded host panel asset: {asset_path}"))?;
+
+    Response::builder()
+        .status(200)
+        .header(CONTENT_TYPE, host_panel_content_type(&asset_path))
+        .body(Cow::Borrowed(file.contents()))
+        .context("failed to build host panel asset response")
+}
+
+fn proxy_host_panel_asset(dev_base: &url::Url, path: &str) -> Result<Response<Cow<'static, [u8]>>> {
+    let request_url = host_panel_request_url(dev_base, path)?;
+    let response = match ureq::get(request_url.as_str()).call() {
+        Ok(response) => response,
+        Err(error) => {
+            return build_plain_response(
+                502,
+                format!("failed to proxy host panel asset from dev server: {error}"),
+                "text/plain; charset=utf-8",
+            );
+        }
+    };
+
+    let status = response.status();
+    let content_type = response
+        .header("content-type")
+        .unwrap_or_else(|| host_panel_content_type(request_url.path()))
+        .to_string();
+    let mut reader = response.into_reader();
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .context("failed to read proxied host panel asset body")?;
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, content_type)
+        .body(Cow::Owned(body))
+        .context("failed to build proxied host panel asset response")
+}
+
+fn host_panel_dev_base_url() -> Option<url::Url> {
+    std::env::var("ATO_DESKTOP_FRONTEND_DEV_URL")
+        .ok()
+        .and_then(|value| url::Url::parse(value.trim()).ok())
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn allow_host_panel_navigation(url: &url::Url, dev_base: Option<&url::Url>) -> bool {
+    if url.scheme() == HOST_PANEL_SCHEME {
+        return true;
+    }
+
+    let Some(dev_base) = dev_base else {
+        return false;
+    };
+
+    url.scheme() == dev_base.scheme()
+        && url.host_str() == dev_base.host_str()
+        && url.port_or_known_default() == dev_base.port_or_known_default()
+}
+
+fn host_panel_request_url(dev_base: &url::Url, path: &str) -> Result<url::Url> {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Ok(dev_base.clone());
+    }
+
+    dev_base
+        .join(trimmed)
+        .with_context(|| format!("failed to resolve host panel dev asset path: {path}"))
+}
+
+fn resolve_host_panel_asset_path(path: &str) -> Result<Option<String>> {
+    let trimmed = path.trim_start_matches('/');
+
+    if trimmed
+        .split('/')
+        .any(|segment| segment == ".." || segment.contains('\\'))
+    {
+        anyhow::bail!("parent traversal is not allowed for host panel assets: {path}");
+    }
+
+    let candidate = if trimmed.is_empty() {
+        "index.html".to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    if HOST_PANEL_DIST.get_file(&candidate).is_some() {
+        return Ok(Some(candidate));
+    }
+
+    if Path::new(&candidate).extension().is_some() {
+        return Ok(None);
+    }
+
+    Ok(Some("index.html".to_string()))
+}
+
+fn host_panel_content_type(path: &str) -> &'static str {
+    match Path::new(path).extension().and_then(|value| value.to_str()) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("ico") => "image/x-icon",
+        Some("jpeg") | Some("jpg") => "image/jpeg",
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("map") => "application/json; charset=utf-8",
+        Some("png") => "image/png",
+        Some("svg") => "image/svg+xml",
+        Some("ttf") => "font/ttf",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => "text/plain; charset=utf-8",
     }
 }
 
@@ -3437,5 +3759,92 @@ mod tests {
         // `kind` tag that `GuestBridgeRequest` uses; otherwise serde refuses
         // to deserialize the message.
         assert!(super::TERMINAL_BRIDGE_PRELOAD.contains("kind"));
+    }
+
+    #[test]
+    fn capsule_host_root_serves_frontend_index() {
+        let response = serve_host_panel_asset("/").expect("host panel asset");
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = std::str::from_utf8(response.body().as_ref()).expect("utf8");
+        assert!(body.contains("<div id=\"root\"></div>"));
+    }
+
+    #[test]
+    fn capsule_host_route_like_path_falls_back_to_index() {
+        let root = serve_host_panel_asset("/").expect("host panel asset");
+        let response = serve_host_panel_asset("/launcher").expect("host panel asset");
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body().as_ref(), root.body().as_ref());
+    }
+
+    #[test]
+    fn capsule_host_missing_static_asset_returns_not_found() {
+        let response = serve_host_panel_asset("/assets/missing.js").expect("host panel asset");
+
+        assert_eq!(response.status(), 404);
+    }
+
+    #[test]
+    fn capsule_host_rejects_parent_traversal() {
+        let error = serve_host_panel_asset("/../secret.txt").expect_err("should reject traversal");
+
+        assert!(error.to_string().contains("parent traversal"));
+    }
+
+    #[test]
+    fn host_panel_request_url_uses_base_for_root() {
+        let base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
+
+        let resolved = host_panel_request_url(&base, "/").expect("request url");
+
+        assert_eq!(resolved.as_str(), "http://127.0.0.1:4174/");
+    }
+
+    #[test]
+    fn host_panel_request_url_joins_nested_asset_paths() {
+        let base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
+
+        let resolved = host_panel_request_url(&base, "/assets/main.js").expect("request url");
+
+        assert_eq!(resolved.as_str(), "http://127.0.0.1:4174/assets/main.js");
+    }
+
+    #[test]
+    fn host_panel_navigation_allows_capsule_host_scheme() {
+        let target = url::Url::parse("capsule-host://host/launcher").expect("url");
+
+        assert!(allow_host_panel_navigation(&target, None));
+    }
+
+    #[test]
+    fn host_panel_navigation_rejects_external_origins_without_dev_url() {
+        let target = url::Url::parse("https://example.com/settings").expect("url");
+
+        assert!(!allow_host_panel_navigation(&target, None));
+    }
+
+    #[test]
+    fn host_panel_navigation_allows_configured_dev_origin() {
+        let target = url::Url::parse("http://127.0.0.1:4174/launcher").expect("url");
+        let dev_base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
+
+        assert!(allow_host_panel_navigation(&target, Some(&dev_base)));
+    }
+
+    #[test]
+    fn host_panel_navigation_rejects_other_dev_origins() {
+        let target = url::Url::parse("http://127.0.0.1:4175/launcher").expect("url");
+        let dev_base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
+
+        assert!(!allow_host_panel_navigation(&target, Some(&dev_base)));
     }
 }
