@@ -686,7 +686,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         "app",
         "session",
         "stop",
-        "desky-session-123",
+        "ato-desktop-session-123",
         "--json",
     ])
     .expect("parse app session stop");
@@ -697,7 +697,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                     command: SessionCommands::Stop { session_id, json },
                 },
         } => {
-            assert_eq!(session_id, "desky-session-123");
+            assert_eq!(session_id, "ato-desktop-session-123");
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
