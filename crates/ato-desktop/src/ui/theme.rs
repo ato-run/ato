@@ -2,6 +2,23 @@ use gpui::Hsla;
 
 use crate::state::ThemeMode;
 
+/// Derive a stable hue (0..360) for a task icon from its identity.
+///
+/// The icon color must be a function of the task itself, not the
+/// task's position in the rail or its active/inactive state — the
+/// same task should look the same wherever it is rendered (sidebar
+/// chip, drag preview, future overview cards) and across its
+/// lifecycle. We use the golden-ratio conjugate as a hue increment
+/// so adjacent IDs land far apart on the color wheel without a
+/// precomputed palette table.
+pub fn task_hue(seed: u64) -> f32 {
+    const GOLDEN_CONJUGATE: f32 = 0.618_034;
+    // f32 is enough — we only need stable bucketing into 360°. Cast via u32 to
+    // keep the magnitude small enough for fract() to behave on huge IDs.
+    let truncated = (seed & 0xFFFF_FFFF) as f32;
+    (truncated * GOLDEN_CONJUGATE).fract() * 360.0
+}
+
 pub struct Theme {
     pub mode: ThemeMode,
 
