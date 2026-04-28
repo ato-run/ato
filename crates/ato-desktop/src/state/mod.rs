@@ -2030,6 +2030,55 @@ impl AppState {
 
     pub fn set_settings_tab(&mut self, tab: SettingsTab) {
         self.settings_active_tab = tab;
+        self.update_settings_host_panel_routes();
+    }
+
+    pub fn open_settings_task(&mut self) {
+        let route = HostPanelRoute::Settings {
+            section: Some(self.settings_active_tab),
+        };
+
+        if let Some(existing_task_id) = self.find_settings_task_id() {
+            self.select_task(existing_task_id);
+            self.update_task_host_panel_route(existing_task_id, route);
+            self.push_activity(ActivityTone::Info, "Focused settings task");
+            return;
+        }
+
+        let next_task_id = self.next_task_id;
+        let next_pane_id = self.next_pane_id;
+        let title = "Settings".to_string();
+
+        let mut created = false;
+        if let Some(workspace) = self.active_workspace_mut() {
+            workspace.tasks.push(TaskSet {
+                id: next_task_id,
+                title: title.clone(),
+                focused_pane: next_pane_id,
+                pane_tree: PaneTree::Leaf(next_pane_id),
+                panes: vec![Pane {
+                    id: next_pane_id,
+                    title: title.clone(),
+                    role: PaneRole::Primary,
+                    visible: true,
+                    bounds: PaneBounds::empty(),
+                    surface: PaneSurface::HostPanel(route),
+                }],
+                split_ratio: 0.5,
+                route_candidates: vec![],
+                route_index: 0,
+                preview: "Desktop settings".to_string(),
+            });
+            workspace.active_task = next_task_id;
+            created = true;
+        }
+
+        if created {
+            self.next_task_id += 1;
+            self.next_pane_id += 1;
+            self.command_bar_text.clear();
+            self.push_activity(ActivityTone::Info, "Opened settings task");
+        }
     }
 
     pub fn toggle_dev_console(&mut self) {
@@ -3668,6 +3717,72 @@ fn capsule_detail_tab_route_segment(tab: CapsuleDetailTab) -> &'static str {
     }
 }
 
+impl AppState {
+    fn find_settings_task_id(&self) -> Option<TaskSetId> {
+        self.active_workspace()?.tasks.iter().find_map(|task| {
+            task.panes
+                .iter()
+                .any(|pane| {
+                    matches!(
+                        pane.surface,
+                        PaneSurface::HostPanel(HostPanelRoute::Settings { .. })
+                    )
+                })
+                .then_some(task.id)
+        })
+    }
+
+    fn update_settings_host_panel_routes(&mut self) {
+        let route = HostPanelRoute::Settings {
+            section: Some(self.settings_active_tab),
+        };
+        let task_ids: Vec<TaskSetId> = self
+            .active_workspace()
+            .map(|workspace| {
+                workspace
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        task.panes.iter().any(|pane| {
+                            matches!(
+                                pane.surface,
+                                PaneSurface::HostPanel(HostPanelRoute::Settings { .. })
+                            )
+                        })
+                    })
+                    .map(|task| task.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for task_id in task_ids {
+            self.update_task_host_panel_route(task_id, route.clone());
+        }
+    }
+
+    fn update_task_host_panel_route(&mut self, task_id: TaskSetId, route: HostPanelRoute) {
+        let title = route.label();
+        let active_task_id = self.active_task().map(|task| task.id);
+
+        if let Some(workspace) = self.active_workspace_mut() {
+            if let Some(task) = workspace.tasks.iter_mut().find(|task| task.id == task_id) {
+                task.title = title.clone();
+                task.preview = title.clone();
+                for pane in &mut task.panes {
+                    if let PaneSurface::HostPanel(HostPanelRoute::Settings { .. }) = &pane.surface {
+                        pane.title = title.clone();
+                        pane.surface = PaneSurface::HostPanel(route.clone());
+                    }
+                }
+            }
+        }
+
+        if active_task_id == Some(task_id) {
+            self.sync_command_bar_with_active_route();
+        }
+    }
+}
+
 fn route_profile(route: &GuestRoute) -> &'static str {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } if handle.contains("electron") => "electron",
@@ -3975,6 +4090,44 @@ mod tests {
         state.set_settings_tab(SettingsTab::Developer);
 
         assert_eq!(state.settings_active_tab, SettingsTab::Developer);
+    }
+
+    #[test]
+    fn open_settings_task_creates_singleton_host_panel_task() {
+        let mut state = AppState::demo();
+        let original_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.open_settings_task();
+        state.open_settings_task();
+
+        let workspace = state.active_workspace().expect("workspace");
+        assert_eq!(workspace.tasks.len(), original_count + 1);
+        let task = workspace.active_task().expect("task");
+        assert_eq!(task.title, "Settings · General");
+        assert!(task.panes.iter().any(|pane| matches!(
+            pane.surface,
+            PaneSurface::HostPanel(HostPanelRoute::Settings {
+                section: Some(SettingsTab::General)
+            })
+        )));
+    }
+
+    #[test]
+    fn set_settings_tab_updates_existing_settings_task_route() {
+        let mut state = AppState::demo();
+        state.open_settings_task();
+
+        state.set_settings_tab(SettingsTab::Developer);
+
+        let workspace = state.active_workspace().expect("workspace");
+        let task = workspace.active_task().expect("task");
+        assert_eq!(task.title, "Settings · Developer");
+        assert!(task.panes.iter().any(|pane| matches!(
+            pane.surface,
+            PaneSurface::HostPanel(HostPanelRoute::Settings {
+                section: Some(SettingsTab::Developer)
+            })
+        )));
     }
 
     #[test]
