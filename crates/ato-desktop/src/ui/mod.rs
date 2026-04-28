@@ -1258,6 +1258,10 @@ impl Render for DesktopShell {
                 command_bar,
                 &theme,
             ))
+            .when_some(
+                self.state.workspace_loading_progress(),
+                |this, progress| this.child(render_boot_progress_strip(progress, &theme)),
+            )
             .child(body)
             .when(self.state.pending_quit_confirmation, |this| {
                 this.child(render_quit_dialog(&theme))
@@ -1469,6 +1473,23 @@ fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBound
     }
 }
 
+
+fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement {
+    // 2px strip flush against the chrome's bottom border. Filled
+    // section uses theme.accent; track uses surface_hover so the
+    // strip is visible against either light or dark panel_bg.
+    let progress = progress.clamp(0.0, 1.0);
+    div()
+        .h(px(2.0))
+        .w_full()
+        .bg(theme.surface_hover)
+        .child(
+            div()
+                .h(px(2.0))
+                .w(gpui::relative(progress))
+                .bg(theme.accent),
+        )
+}
 
 fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoElement {
     let active = state.active_capsule_pane().or_else(|| {
