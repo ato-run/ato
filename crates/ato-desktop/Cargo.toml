@@ -28,6 +28,7 @@ gpui-inspector = ["gpui-component/inspector"]
 
 [dependencies]
 anyhow = "1.0"
+ato-session-core = { path = "../ato-session-core" }
 base64 = "0.22"
 capsule-core = { path = "../capsule-core" }
 capsule-wire = { path = "../capsule-wire" }
@@ -58,3 +59,6 @@ objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-quartz-core = "0.3.2"
 objc2-web-kit = "0.3.2"
+
+[dev-dependencies]
+tempfile = "3"
