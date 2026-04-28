@@ -1438,6 +1438,33 @@ impl AppState {
         self.update_active_capsule_detail_host_panel_route();
     }
 
+    fn apply_host_panel_route_path(&mut self, path: &str) {
+        let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+        let Some(first) = segments.first().copied() else {
+            return;
+        };
+
+        match first {
+            "settings" => {
+                if let Some(section) = segments
+                    .get(1)
+                    .and_then(|value| parse_settings_tab_route_segment(value))
+                {
+                    self.set_settings_tab(section);
+                }
+            }
+            "capsule" => {
+                if let Some(tab) = segments
+                    .get(2)
+                    .and_then(|value| parse_capsule_detail_tab_route_segment(value))
+                {
+                    self.set_route_metadata_tab(tab);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn active_capsule_detail_host_panel_route(&self) -> Option<HostPanelRoute> {
         let active = self.active_capsule_pane()?;
         Some(HostPanelRoute::CapsuleDetail {
@@ -2328,6 +2355,9 @@ impl AppState {
                         ActivityTone::Info,
                         "Capsule frontend mounted",
                     );
+                }
+                ShellEvent::HostPanelRouteChanged { pane_id: _, path } => {
+                    self.apply_host_panel_route_path(&path);
                 }
                 ShellEvent::PermissionDenied {
                     pane_id,
@@ -3773,6 +3803,21 @@ fn settings_tab_route_segment(tab: SettingsTab) -> &'static str {
     }
 }
 
+fn parse_settings_tab_route_segment(value: &str) -> Option<SettingsTab> {
+    match value {
+        "general" => Some(SettingsTab::General),
+        "account" => Some(SettingsTab::Account),
+        "runtime" => Some(SettingsTab::Runtime),
+        "sandbox" => Some(SettingsTab::Sandbox),
+        "trust" => Some(SettingsTab::Trust),
+        "registry" => Some(SettingsTab::Registry),
+        "projection" => Some(SettingsTab::Projection),
+        "developer" => Some(SettingsTab::Developer),
+        "about" => Some(SettingsTab::About),
+        _ => None,
+    }
+}
+
 fn capsule_detail_tab_route_segment(tab: CapsuleDetailTab) -> &'static str {
     match tab {
         CapsuleDetailTab::Overview => "overview",
@@ -3780,6 +3825,17 @@ fn capsule_detail_tab_route_segment(tab: CapsuleDetailTab) -> &'static str {
         CapsuleDetailTab::Logs => "logs",
         CapsuleDetailTab::Update => "update",
         CapsuleDetailTab::Api => "api",
+    }
+}
+
+fn parse_capsule_detail_tab_route_segment(value: &str) -> Option<CapsuleDetailTab> {
+    match value {
+        "overview" => Some(CapsuleDetailTab::Overview),
+        "permissions" => Some(CapsuleDetailTab::Permissions),
+        "logs" => Some(CapsuleDetailTab::Logs),
+        "update" => Some(CapsuleDetailTab::Update),
+        "api" => Some(CapsuleDetailTab::Api),
+        _ => None,
     }
 }
 
@@ -4347,6 +4403,30 @@ mod tests {
                 tab: CapsuleDetailTab::Logs,
             })
         )));
+    }
+
+    #[test]
+    fn host_panel_route_change_updates_capsule_detail_tab() {
+        let mut state = AppState::demo();
+
+        state.apply_shell_events(vec![ShellEvent::HostPanelRouteChanged {
+            pane_id: 999,
+            path: "/capsule/2/logs".to_string(),
+        }]);
+
+        assert_eq!(state.route_metadata_active_tab, CapsuleDetailTab::Logs);
+    }
+
+    #[test]
+    fn host_panel_route_change_updates_settings_tab() {
+        let mut state = AppState::demo();
+
+        state.apply_shell_events(vec![ShellEvent::HostPanelRouteChanged {
+            pane_id: 999,
+            path: "/settings/developer".to_string(),
+        }]);
+
+        assert_eq!(state.settings_active_tab, SettingsTab::Developer);
     }
 
     #[test]
