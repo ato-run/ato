@@ -865,6 +865,97 @@ pub(crate) fn maybe_record_recommendation(
     true
 }
 
+// ---------------------------------------------------------------------------
+// Caller-friendly composite helpers (used by both `ato run`'s build phase and
+// `ato app session start`'s session-start phase runner).
+// ---------------------------------------------------------------------------
+
+/// What `prepare_decision` resolved: an observation (if a build spec is
+/// applicable) and the policy decision derived from it. Callers use the
+/// `decision.action` to choose between skipping, executing, or failing the
+/// build executor; the `observation` is what they should pass back to
+/// [`persist_after_execute`] after a successful executor invocation.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedBuildDecision {
+    pub(crate) observation: Option<BuildObservation>,
+    pub(crate) decision: BuildDecision,
+}
+
+/// Observe the plan and consult the policy + state. Idempotent (no side
+/// effects on disk); safe to call before every build invocation.
+pub(crate) fn prepare_decision(
+    plan: &capsule_core::router::ManifestData,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+    policy: BuildPolicy,
+    workspace_root: &Path,
+) -> PreparedBuildDecision {
+    let observation = observe_for_plan(plan, launch_ctx).ok().flatten();
+    let decision = match observation.as_ref() {
+        Some(obs) => decide(policy, obs, workspace_root),
+        None => BuildDecision {
+            action: DecisionAction::Execute,
+            result_kind: BuildResultKind::NotApplicable,
+        },
+    };
+    PreparedBuildDecision {
+        observation,
+        decision,
+    }
+}
+
+/// After a successful build executor invocation, upsert the materialization
+/// record and emit a one-shot heuristic recommendation. Failures to persist
+/// are logged but never surfaced (the build itself succeeded; missing the
+/// record only hurts the next run, which will fall back to `Execute`).
+pub(crate) fn persist_after_execute(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &Path,
+    observation: &BuildObservation,
+    suppress_recommendation: bool,
+) {
+    let toolchain_fp = toolchain_fingerprint_for_plan(plan);
+    let mut file = match load_state(workspace_root) {
+        LoadOutcome::Loaded(f) => f,
+        LoadOutcome::Missing | LoadOutcome::Invalid(_) => MaterializationFile::default(),
+    };
+    upsert_record(&mut file, record_for(observation, &toolchain_fp));
+
+    let heuristic_label = observation.source.heuristic_label();
+    if heuristic_label.is_some() && !suppress_recommendation {
+        let emitted = maybe_record_recommendation(
+            &mut file,
+            &observation.input_digest,
+            heuristic_label.as_deref(),
+        );
+        if emitted {
+            eprintln!(
+                "ATO-RECOMMEND build inputs were inferred for \"{}\" framework. \
+                 Declare [build] inputs/outputs in capsule.toml for stable \
+                 materialization. See: docs/rfcs/draft/BUILD_MATERIALIZATION.md",
+                heuristic_label.as_deref().unwrap_or("(unknown)")
+            );
+        }
+    }
+
+    if let Err(err) = save_state(workspace_root, &file) {
+        eprintln!(
+            "ATO-WARN failed to persist build materialization state: {}",
+            err
+        );
+    }
+}
+
+/// Build the user-facing error returned when policy=NoBuild cannot be
+/// satisfied. The decision's `result_kind` carries the granular reason
+/// (`missing-materialization` / `stale-materialization` / etc.).
+pub(crate) fn no_build_error(decision: &BuildDecision) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: {} (policy=no-build)",
+        crate::utils::error::ATO_ERR_MISSING_MATERIALIZATION,
+        decision.result_kind.as_str()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
