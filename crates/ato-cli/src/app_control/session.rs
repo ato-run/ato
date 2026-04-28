@@ -36,7 +36,7 @@ use super::resolve::{build_resolution, resolve_local_plan};
 
 const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
-const SESSION_RUNTIME: &str = "desky-session";
+const SESSION_RUNTIME: &str = "ato-desktop-session";
 const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize)]
@@ -276,12 +276,12 @@ fn start_guest_session(
         command.env(key, value);
     }
     command.env("PYTHONUNBUFFERED", "1");
-    command.env("DESKY_SESSION_PORT", port.to_string());
-    command.env("DESKY_SESSION_HOST", "127.0.0.1");
-    command.env("DESKY_SESSION_ID", format!("desky-session-{port}"));
-    command.env("DESKY_SESSION_ADAPTER", &guest.adapter);
-    command.env("DESKY_SESSION_RPC_PATH", &guest.rpc_path);
-    command.env("DESKY_SESSION_HEALTH_PATH", &guest.health_path);
+    command.env("ATO_DESKTOP_SESSION_PORT", port.to_string());
+    command.env("ATO_DESKTOP_SESSION_HOST", "127.0.0.1");
+    command.env("ATO_DESKTOP_SESSION_ID", format!("ato-desktop-session-{port}"));
+    command.env("ATO_DESKTOP_SESSION_ADAPTER", &guest.adapter);
+    command.env("ATO_DESKTOP_SESSION_RPC_PATH", &guest.rpc_path);
+    command.env("ATO_DESKTOP_SESSION_HEALTH_PATH", &guest.health_path);
     command.env("ATO_GUEST_MODE", "1");
 
     let mut child = command.spawn().with_context(|| {
@@ -292,11 +292,11 @@ fn start_guest_session(
         )
     })?;
 
-    let session_id = format!("desky-session-{}", child.id());
+    let session_id = format!("ato-desktop-session-{}", child.id());
     let runtime = runtime_descriptor(plan);
     let process_info = ProcessInfo {
         id: session_id.clone(),
-        name: session_name(plan, "desky-guest"),
+        name: session_name(plan, "ato-desktop-guest"),
         pid: child.id() as i32,
         workload_pid: None,
         status: ProcessStatus::Starting,
@@ -406,7 +406,7 @@ fn start_runtime_session(
                 manifest_path.display()
             )
         })?;
-    let session_id = format!("desky-session-{}", runtime_process.child.id());
+    let session_id = format!("ato-desktop-session-{}", runtime_process.child.id());
     let log_path = session_root.join(format!("{}.log", session_id));
     attach_process_logs(&mut runtime_process.child, &log_path)?;
 
@@ -928,7 +928,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
 }
 
 fn session_root() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("DESKY_SESSION_ROOT") {
+    if let Ok(path) = std::env::var("ATO_DESKTOP_SESSION_ROOT") {
         return Ok(PathBuf::from(path));
     }
     let home =
@@ -936,7 +936,7 @@ fn session_root() -> Result<PathBuf> {
     Ok(home
         .join(".ato")
         .join("apps")
-        .join("desky")
+        .join("ato-desktop")
         .join("sessions"))
 }
 
@@ -1129,7 +1129,7 @@ mod tests {
             package_id: "ato.desktop",
             action: SESSION_ACTION_START,
             session: SessionInfo {
-                session_id: "desky-session-1".to_string(),
+                session_id: "ato-desktop-session-1".to_string(),
                 handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
                 normalized_handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
                 canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
@@ -1152,7 +1152,7 @@ mod tests {
                 },
                 display_strategy: CapsuleDisplayStrategy::GuestWebview,
                 pid: 42,
-                log_path: "/tmp/desky-session.log".to_string(),
+                log_path: "/tmp/ato-desktop-session.log".to_string(),
                 manifest_path: "/tmp/capsule.toml".to_string(),
                 target_label: "web".to_string(),
                 notes: vec!["materialized".to_string()],

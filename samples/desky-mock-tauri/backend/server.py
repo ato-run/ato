@@ -2,10 +2,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 
-HOST = os.environ.get("DESKY_SESSION_HOST", "127.0.0.1")
-PORT = int(os.environ.get("DESKY_SESSION_PORT", "43123"))
-ADAPTER = os.environ.get("DESKY_SESSION_ADAPTER", "tauri")
-SESSION_ID = os.environ.get("DESKY_SESSION_ID", "desky-session")
+HOST = os.environ.get("ATO_DESKTOP_SESSION_HOST", "127.0.0.1")
+PORT = int(os.environ.get("ATO_DESKTOP_SESSION_PORT", "43123"))
+ADAPTER = os.environ.get("ATO_DESKTOP_SESSION_ADAPTER", "tauri")
+SESSION_ID = os.environ.get("ATO_DESKTOP_SESSION_ID", "ato-desktop-session")
 GUEST_MODE = os.environ.get("ATO_GUEST_MODE")
 
 

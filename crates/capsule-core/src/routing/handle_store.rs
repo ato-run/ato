@@ -95,7 +95,7 @@ pub fn resolve_trust_state(canonical: &CanonicalHandle, default: TrustState) -> 
 pub fn handle_state_root() -> PathBuf {
     nacelle_home_dir_or_workspace_tmp()
         .join("apps")
-        .join("desky")
+        .join("ato-desktop")
         .join("handles")
 }
 
