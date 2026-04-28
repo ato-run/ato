@@ -208,7 +208,7 @@ metadata cache と local trust decision は同じ責務にしない。
 - handle は resource identity、snapshot は execution-time concrete identity とする。
 - Desktop は handle から直接 runtime を決め打ちしない。`ato app session start` が返す session envelope の `display_strategy` を最終採用する。
 - `display_strategy` は handle spec に従属する表示ヒントであり、少なくとも `guest_webview`, `web_url`, `terminal_stream`, `service_background`, `unsupported` を持つ。
-- `runtime=web` capsule は `web_url` strategy を返してよく、`metadata.desky_guest` を必須にしない。
+- `runtime=web` capsule は `web_url` strategy を返してよく、`metadata.ato_desktop_guest` を必須にしない。
 
 ## 10. Deprecated Aliases
 

@@ -5,7 +5,6 @@
 //! See `docs/specs/CCP_SPEC.md` for the additive-only versioning contract.
 //!
 //! History:
-//!   - `desky-control-plane/v1` (pre-v0.5): legacy name, retired in v0.5.0
 //!   - `ccp/v1` (v0.5.0+): canonical name aligned with PAS §4.1
 
 /// CCP wire version: `"ccp/v1"`. Producers stamp this verbatim into the
