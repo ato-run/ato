@@ -1147,6 +1147,14 @@ impl WebViewManager {
                                         WebSessionState::Launching,
                                     );
                                 }
+                                if let Some(session) = webview.launched_session.as_ref() {
+                                    if let Some(icon) = read_capsule_icon_source(
+                                        &session.manifest_path,
+                                        &session.app_root,
+                                    ) {
+                                        state.pane_icons.insert(active.pane_id, icon);
+                                    }
+                                }
                                 self.views.insert(active.pane_id, webview);
                             }
                             Err(error) => {
@@ -1832,6 +1840,30 @@ impl Drop for WebViewManager {
             drop(pending.receiver);
         }
     }
+}
+
+/// Read `[metadata].icon` from a capsule manifest and resolve it to
+/// a value the sidebar can fetch — an absolute filesystem path for
+/// relative entries, or the raw string for `http(s)://` / `file://`
+/// / `data:` URLs (left for the image fetcher to dispatch on).
+///
+/// Errors are silently swallowed: the icon is purely cosmetic, and a
+/// missing or malformed `icon` should fall back to the monogram tile
+/// rather than break the launch flow.
+fn read_capsule_icon_source(manifest_path: &Path, app_root: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(manifest_path).ok()?;
+    let manifest: capsule_core::types::CapsuleManifest = toml::from_str(&raw).ok()?;
+    let icon = manifest.metadata.icon.filter(|s| !s.is_empty())?;
+    if icon.starts_with("http://")
+        || icon.starts_with("https://")
+        || icon.starts_with("file://")
+        || icon.starts_with("data:")
+    {
+        return Some(icon);
+    }
+    let candidate = app_root.join(&icon);
+    let absolute = candidate.canonicalize().unwrap_or(candidate);
+    Some(absolute.to_string_lossy().to_string())
 }
 
 fn should_install_ato_auth_cookies(url: &str) -> bool {

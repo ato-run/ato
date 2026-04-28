@@ -64,6 +64,13 @@ impl GhostIcon {
                 Some(FaviconState::Ready(image)) => GhostIconKind::Favicon(image.clone()),
                 _ => GhostIconKind::Globe,
             },
+            SidebarTaskIconSpec::Image { source } => match favicon_cache.get(source) {
+                Some(FaviconState::Ready(image)) => GhostIconKind::Favicon(image.clone()),
+                _ => GhostIconKind::Monogram {
+                    label: "●".to_string(),
+                    hue: task_hue(seed),
+                },
+            },
             SidebarTaskIconSpec::SystemIcon(page_type) => {
                 GhostIconKind::SystemIcon(page_type.clone())
             }
@@ -240,7 +247,7 @@ pub(super) fn render_task_rail(
         .child(render_nav_separator(theme))
         .child(render_new_tab_button(theme))
         .child(div().flex_1())
-        .child(render_settings_nav_item(theme))
+        .child(render_settings_nav_item(state.settings_panel_open, theme))
 }
 
 pub(super) fn favicon_request_url(origin: &str) -> Option<String> {
@@ -380,6 +387,19 @@ fn render_app_icon(
             Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
             Some(FaviconState::Loading) | Some(FaviconState::Failed) | None => {
                 render_globe_icon(theme)
+            }
+        },
+        SidebarTaskIconSpec::Image { source } => match favicon_cache.get(&source) {
+            // The favicon cache doubles as the pane-icon cache —
+            // both are keyed by the request URL/path, both produce
+            // an `Arc<Image>`, and both render through
+            // `render_favicon_icon`. Until the bytes are loaded we
+            // fall back to the same monogram tile that capsules
+            // without an icon would show, so the slot never goes
+            // empty.
+            Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
+            Some(FaviconState::Loading) | Some(FaviconState::Failed) | None => {
+                render_monogram_icon("●", task_hue(seed), theme)
             }
         },
         SidebarTaskIconSpec::SystemIcon(page_type) => render_system_icon(page_type, theme),
@@ -559,9 +579,17 @@ fn render_branch_section() -> Div {
         )
 }
 
-fn render_settings_nav_item(theme: &Theme) -> Div {
-    let bg = theme.surface_hover;
-    let icon_color = theme.text_tertiary;
+fn render_settings_nav_item(active: bool, theme: &Theme) -> Div {
+    let bg = if active {
+        theme.accent_subtle
+    } else {
+        theme.surface_hover
+    };
+    let icon_color = if active {
+        theme.text_primary
+    } else {
+        theme.text_tertiary
+    };
 
     div()
         .w(px(NAV_ITEM_SIZE))
