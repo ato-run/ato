@@ -20,9 +20,11 @@ use crate::application::services::{
 use crate::cli::{ModelTierArg, PrivacyModeArg, RepairActionArg};
 
 mod guest_contract;
+mod latest;
 mod resolve;
 mod session;
 
+pub use latest::fetch_latest;
 pub use resolve::resolve_handle;
 pub use session::{start_session, stop_session};
 
