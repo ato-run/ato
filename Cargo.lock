@@ -814,6 +814,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-web-kit",
  "portable-pty",
+ "semver",
  "serde",
  "serde_json",
  "toml 0.8.23",
