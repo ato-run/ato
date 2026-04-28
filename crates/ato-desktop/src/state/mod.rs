@@ -895,16 +895,16 @@ impl AppState {
         // The demo graph intentionally mixes local capsules, a bundled welcome page, and remote URLs
         // so the shell exercises every rendering path on boot.
         let local_tauri = GuestRoute::CapsuleHandle {
-            handle: demo_local_capsule("desky-real-tauri"),
-            label: demo_local_capsule("desky-real-tauri"),
+            handle: demo_local_capsule("ato-desktop-real-tauri"),
+            label: demo_local_capsule("ato-desktop-real-tauri"),
         };
         let local_electron = GuestRoute::CapsuleHandle {
-            handle: demo_local_capsule("desky-real-electron"),
-            label: demo_local_capsule("desky-real-electron"),
+            handle: demo_local_capsule("ato-desktop-real-electron"),
+            label: demo_local_capsule("ato-desktop-real-electron"),
         };
         let local_wails = GuestRoute::CapsuleHandle {
-            handle: demo_local_capsule("desky-real-wails"),
-            label: demo_local_capsule("desky-real-wails"),
+            handle: demo_local_capsule("ato-desktop-real-wails"),
+            label: demo_local_capsule("ato-desktop-real-wails"),
         };
         let welcome = GuestRoute::Capsule {
             session: "welcome".to_string(),
@@ -3588,7 +3588,7 @@ mod tests {
             Some("untrusted".to_string()),
             true,
             Some("version 0.1.0".to_string()),
-            Some("desky-session-1".to_string()),
+            Some("ato-desktop-session-1".to_string()),
             Some("tauri".to_string()),
             Some("/tmp/capsule.toml".to_string()),
             Some("tauri".to_string()),
@@ -3613,7 +3613,7 @@ mod tests {
             Some("capsule://ato.run/koh0920/ato-onboarding")
         );
         assert_eq!(inspector.source_label.as_deref(), Some("registry"));
-        assert_eq!(inspector.session_id.as_deref(), Some("desky-session-1"));
+        assert_eq!(inspector.session_id.as_deref(), Some("ato-desktop-session-1"));
         assert_eq!(inspector.adapter.as_deref(), Some("tauri"));
         assert!(inspector.logs.iter().any(|entry| {
             entry.stage == CapsuleLogStage::Resolve && entry.message.contains("Queued capsule")
