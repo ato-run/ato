@@ -5,6 +5,21 @@
 **Target:** ato-desktop v0.5.x
 **Last Updated:** 2026-04-29
 
+> **v0.4.1 changes from v0.4** (PR 4B.3 hotfix — 2026-04-29):
+> - **Healthcheck is now authoritative in the fast-path reuse gate**.
+>   PR 4B.1 + 4B.2 実機計測で発覚: `byok-ai-chat` のように `npm run
+>   start` で起動するカプセルでは ato-cli が記録する PID (= npm) が
+>   actual web server (next, 別 PID) より先に exit するため、
+>   `pid_is_alive(record.pid)` を hard gate にすると fast path が常に
+>   miss する。修正: `validate_record_only` を `handle / schema_version
+>   / launch_digest / healthcheck` の 4 条件に変更。`pid` /
+>   `process_start_time_unix_ms` フィールドはレコードに残るが reuse
+>   gate には参加しない (RFC v0.4.1 §3.2 / `ato_session_core::validate`
+>   doc コメント参照)。
+> - 影響: §3.2 / §10.2 / §13 で言及している「5 条件」は v0.4.1 から
+>   「4 条件」。本文の旧言及はリファクタが大きいため一括書き換えは
+>   行わず、本パッチノートで上書き宣言する。
+
 > **v0.4 changes from v0.3** (PR 4A 完了後パッチ):
 > - **Phase 1 完了**: PR 4A.0 (`ato-session-core` crate + atomic write) +
 >   PR 4A.1 (Desktop session-record fast path) + PR 4A.2 (RFC 固着 +
