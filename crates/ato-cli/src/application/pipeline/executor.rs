@@ -8,6 +8,35 @@ pub(crate) struct HourglassPipeline {
     selection: HourglassPhaseSelection,
 }
 
+/// Diagnostic annotation a runner may attach to a phase result so the executor
+/// can include it in `PHASE-TIMING` output.
+///
+/// `result_kind` is the canonical category (e.g. `executed`, `materialized`,
+/// `not-applicable`) that maps to `HourglassPhaseResult::result_kind`. `extras`
+/// is a list of additional `key=value` pairs (e.g. `source=heuristic`,
+/// `heuristic=nextjs:v1`) that are emitted verbatim. Keys must be ASCII
+/// identifiers; values are emitted with `{:?}` (Rust debug) so multi-line or
+/// quote-bearing values stay grep-friendly on a single line.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PhaseAnnotation {
+    pub(crate) result_kind: Option<String>,
+    pub(crate) extras: Vec<(String, String)>,
+}
+
+impl PhaseAnnotation {
+    pub(crate) fn with_result_kind(kind: impl Into<String>) -> Self {
+        Self {
+            result_kind: Some(kind.into()),
+            extras: Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)] // wired by PR-B'/PR-C for source/heuristic annotations
+    pub(crate) fn add_extra(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.extras.push((key.into(), value.into()));
+    }
+}
+
 impl HourglassPipeline {
     pub(crate) fn new(selection: HourglassPhaseSelection) -> Self {
         Self { selection }
@@ -20,16 +49,35 @@ impl HourglassPipeline {
         let mut attempt = PipelineAttemptContext::default();
         attempt.activate_sigint_cleanup();
 
+        let timing_enabled = phase_timing_enabled();
+        let pipeline_started = std::time::Instant::now();
+
         for phase in self.selection.flow.phases() {
             if !runner.should_continue() {
                 break;
             }
             attempt.enter_phase(*phase);
-            let result = if self.selection.runs(*phase) {
+            let phase_started = std::time::Instant::now();
+            let selected = self.selection.runs(*phase);
+            let result = if selected {
                 runner.run_phase(*phase, &mut attempt).await
             } else {
                 runner.skip_phase(*phase, &mut attempt).await
             };
+            let elapsed_ms = phase_started.elapsed().as_millis() as u64;
+
+            if timing_enabled {
+                let annotation = runner.phase_annotation(*phase);
+                let state = if result.is_err() {
+                    "fail"
+                } else if selected {
+                    "ok"
+                } else {
+                    "skip"
+                };
+                let error = result.as_ref().err().map(|err| err.to_string());
+                emit_phase_timing(*phase, state, elapsed_ms, error.as_deref(), annotation);
+            }
 
             if let Err(err) = result {
                 let cleanup_report = attempt.unwind_cleanup();
@@ -37,9 +85,53 @@ impl HourglassPipeline {
             }
         }
 
+        if timing_enabled {
+            let total_ms = pipeline_started.elapsed().as_millis() as u64;
+            eprintln!("PHASE-TIMING total elapsed_ms={}", total_ms);
+        }
+
         attempt.mark_committed();
         Ok(())
     }
+}
+
+fn phase_timing_enabled() -> bool {
+    match std::env::var("ATO_PHASE_TIMING") {
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && !matches!(trimmed, "0" | "false" | "off" | "no")
+        }
+        Err(_) => false,
+    }
+}
+
+fn emit_phase_timing(
+    phase: HourglassPhase,
+    state: &str,
+    elapsed_ms: u64,
+    error: Option<&str>,
+    annotation: Option<PhaseAnnotation>,
+) {
+    let mut line = format!(
+        "PHASE-TIMING phase={} state={} elapsed_ms={}",
+        phase.as_str(),
+        state,
+        elapsed_ms
+    );
+    if let Some(annotation) = annotation {
+        if let Some(kind) = annotation.result_kind {
+            line.push_str(&format!(" result_kind={}", kind));
+        }
+        for (key, value) in annotation.extras {
+            line.push_str(&format!(" {}={:?}", key, value));
+        }
+    }
+    if let Some(message) = error {
+        let truncated: String = message.chars().take(200).collect();
+        let one_line = truncated.replace('\n', " ");
+        line.push_str(&format!(" error={:?}", one_line));
+    }
+    eprintln!("{}", line);
 }
 
 #[async_trait(?Send)]
@@ -61,6 +153,14 @@ pub(crate) trait HourglassPhaseRunner {
     ) -> Result<()> {
         Ok(())
     }
+
+    /// Called by the executor after a phase finishes (success, skip, or fail)
+    /// to attach diagnostic metadata to the `PHASE-TIMING` line. Default
+    /// implementation returns no annotation, preserving prior behavior for
+    /// runners that don't opt in.
+    fn phase_annotation(&self, _phase: HourglassPhase) -> Option<PhaseAnnotation> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -71,7 +171,7 @@ mod tests {
     use async_trait::async_trait;
     use capsule_core::execution_plan::error::{CleanupActionRecord, CleanupActionStatus};
 
-    use super::{HourglassPhaseRunner, HourglassPipeline};
+    use super::{HourglassPhaseRunner, HourglassPipeline, PhaseAnnotation};
     use crate::application::pipeline::cleanup::{PipelineAttemptContext, PipelineAttemptError};
     use crate::application::pipeline::hourglass::{
         HourglassFlow, HourglassPhase, HourglassPhaseSelection,
@@ -200,5 +300,16 @@ mod tests {
         assert_eq!(attempt_err.phase(), HourglassPhase::Prepare);
         assert_eq!(events.lock().unwrap().as_slice(), ["cleanup".to_string()]);
         assert_eq!(attempt_err.cleanup_report().actions.len(), 1);
+    }
+
+    #[test]
+    fn phase_annotation_builder_collects_extras() {
+        let mut annotation = PhaseAnnotation::with_result_kind("materialized");
+        annotation.add_extra("source", "heuristic");
+        annotation.add_extra("heuristic", "nextjs:v1");
+        assert_eq!(annotation.result_kind.as_deref(), Some("materialized"));
+        assert_eq!(annotation.extras.len(), 2);
+        assert_eq!(annotation.extras[0].0, "source");
+        assert_eq!(annotation.extras[1].1, "nextjs:v1");
     }
 }
