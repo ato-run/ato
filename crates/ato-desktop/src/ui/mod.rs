@@ -21,7 +21,7 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 
 use self::chrome::render_command_chrome;
-use self::panels::render_stage;
+use self::panels::{render_settings_overlay, render_stage};
 use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
 
 use crate::app::{
@@ -30,7 +30,8 @@ use crate::app::{
     ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
     FocusCommandBar, MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll,
     NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit,
+    OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
+    PreviousWorkspace, Quit,
     ResumeAfterAuth, SaveConfigForm, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun,
     SignOut, SplitPane, ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover,
     ToggleTheme,
@@ -498,6 +499,21 @@ impl DesktopShell {
                 );
                 cx.notify();
             }
+        }
+    }
+
+    fn on_open_external_link(
+        &mut self,
+        action: &OpenExternalLink,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = open_external_url(&action.url) {
+            self.state.push_activity(
+                crate::state::ActivityTone::Error,
+                format!("Failed to open {}: {error}", action.url),
+            );
+            cx.notify();
         }
     }
 
@@ -1404,6 +1420,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_cancel_config_form))
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_open_latest_release_page))
+            .on_action(cx.listener(Self::on_open_external_link))
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _window, _cx| {
                 let path_vec = paths.paths().to_vec();
                 this.state.launch_dropped_paths(path_vec);
@@ -1874,7 +1891,12 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
                 .child("Route metadata"),
         )
         .children(rows.into_iter().map(|(label, value)| {
-            div()
+            // Render http(s) values as a clickable accent-colored
+            // link that hands the URL off to the system browser via
+            // OpenExternalLink. Anything else stays as plain text —
+            // the popover is read-only otherwise.
+            let is_link = value.starts_with("http://") || value.starts_with("https://");
+            let mut row = div()
                 .flex()
                 .items_baseline()
                 .justify_between()
@@ -1884,13 +1906,37 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
                         .text_size(px(10.5))
                         .text_color(theme.text_tertiary)
                         .child(label),
+                );
+            row = if is_link {
+                let url = value.clone();
+                // Each label key is unique within the popover, so it
+                // doubles as a stable element id without us having to
+                // hash the URL.
+                row.child(
+                    div()
+                        .id(label)
+                        .text_size(px(11.5))
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .hover(|s| s.underline())
+                        .child(value)
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(OpenExternalLink { url: url.clone() }),
+                                cx,
+                            );
+                        }),
                 )
-                .child(
+            } else {
+                row.child(
                     div()
                         .text_size(px(11.5))
                         .text_color(theme.text_primary)
                         .child(value),
                 )
+            };
+            row
         }))
         .when(!log_entries.is_empty(), |this| {
             this.child(
