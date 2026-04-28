@@ -170,7 +170,7 @@ mod tests {
             "ccp/v",
             "ccp/v0", // never released
             "ccp/vabc",
-            "desky-control-plane/v1", // legacy name retired in v0.5
+            "desky-control-plane/v1", // old brand name
             "v1",
             "ccp/1",
         ] {
