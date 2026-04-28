@@ -1,5 +1,6 @@
 pub(crate) mod agent;
 pub(crate) mod auth;
+pub(crate) mod build_materialization;
 pub(crate) mod compat_import;
 pub(crate) mod credential;
 pub(crate) mod engine;
@@ -13,5 +14,6 @@ pub(crate) mod services;
 #[allow(dead_code)]
 pub(crate) mod share;
 pub(crate) mod source_inference;
+pub(crate) mod source_inventory;
 pub(crate) mod types;
 pub(crate) mod workspace;

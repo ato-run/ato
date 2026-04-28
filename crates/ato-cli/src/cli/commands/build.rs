@@ -10,12 +10,14 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::debug;
-use walkdir::WalkDir;
 
 use crate::application::producer_input::resolve_producer_authoritative_input;
+use crate::application::source_inventory::{
+    collect_source_files, native_lockfiles, normalize_outputs, OutputSpec,
+};
 use crate::build::native_delivery;
 use crate::project::init;
 use crate::reporters;
@@ -23,14 +25,6 @@ use crate::runtime::manager as runtime_manager;
 use crate::runtime::overrides as runtime_overrides;
 
 const BUILD_CACHE_LAYOUT_VERSION: &str = "chml-build-cache-v1";
-const BUILD_CACHE_IGNORED_DIRS: &[&str] = &[
-    ".git",
-    ".tmp",
-    "node_modules",
-    ".venv",
-    "target",
-    "__pycache__",
-];
 
 #[derive(Debug, Serialize)]
 pub struct BuildResult {
@@ -1026,15 +1020,10 @@ fn plan_v03_build_provision_command(
 }
 
 #[derive(Debug, Clone)]
-struct BuildCacheOutputSpec {
-    relative_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
 struct V03BuildCache {
     working_dir: PathBuf,
     cache_dir: PathBuf,
-    outputs: Vec<BuildCacheOutputSpec>,
+    outputs: Vec<OutputSpec>,
 }
 
 impl V03BuildCache {
@@ -1104,7 +1093,7 @@ fn prepare_v03_build_cache(
         return Ok(None);
     }
 
-    let output_specs = match normalize_build_cache_outputs(&outputs) {
+    let output_specs = match normalize_outputs(&outputs) {
         Ok(specs) => specs,
         Err(reason) => {
             futures::executor::block_on(reporter.warn(format!(
@@ -1129,56 +1118,9 @@ fn prepare_v03_build_cache(
     }))
 }
 
-fn normalize_build_cache_outputs(raw_outputs: &[String]) -> Result<Vec<BuildCacheOutputSpec>> {
-    let mut outputs = Vec::new();
-
-    for raw_output in raw_outputs {
-        let mut normalized = raw_output.trim();
-        if normalized.is_empty() {
-            continue;
-        }
-
-        if normalized.ends_with("/**") {
-            normalized = normalized.trim_end_matches("/**");
-        }
-        normalized = normalized.trim_start_matches("./");
-        normalized = normalized.trim_end_matches('/');
-
-        if normalized.is_empty() {
-            anyhow::bail!(
-                "outputs entries must resolve to a relative path inside the package root"
-            );
-        }
-        if normalized.contains('*') || normalized.contains('?') || normalized.contains('[') {
-            anyhow::bail!(
-                "unsupported outputs pattern '{}'; only exact relative paths and '<dir>/**' are supported",
-                raw_output
-            );
-        }
-
-        let path = Path::new(normalized);
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-        {
-            anyhow::bail!(
-                "outputs entry '{}' must stay inside the package root",
-                raw_output
-            );
-        }
-
-        outputs.push(BuildCacheOutputSpec {
-            relative_path: path.to_path_buf(),
-        });
-    }
-
-    Ok(outputs)
-}
-
 fn compute_v03_build_cache_key(
     plan: &capsule_core::router::ManifestData,
-    outputs: &[BuildCacheOutputSpec],
+    outputs: &[OutputSpec],
     build_command: &str,
 ) -> Result<String> {
     let working_dir = plan.execution_working_directory();
@@ -1210,109 +1152,17 @@ fn compute_v03_build_cache_key(
         }
     }
 
-    for lockfile in native_lockfiles_for_build_cache(&working_dir) {
+    for lockfile in native_lockfiles(&working_dir) {
         update_hash_text(&mut hasher, &lockfile.display().to_string());
         hash_file_contents(&mut hasher, &lockfile)?;
     }
 
-    for relative_path in collect_build_cache_source_files(&working_dir, outputs)? {
+    for relative_path in collect_source_files(&working_dir, outputs)? {
         update_hash_text(&mut hasher, &relative_path.display().to_string());
         hash_file_contents(&mut hasher, &working_dir.join(&relative_path))?;
     }
 
     Ok(hex::encode(hasher.finalize()))
-}
-
-fn native_lockfiles_for_build_cache(working_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = [
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "bun.lock",
-        "bun.lockb",
-        "uv.lock",
-        "Cargo.lock",
-        "deno.lock",
-        "poetry.lock",
-    ]
-    .into_iter()
-    .map(|name| working_dir.join(name))
-    .filter(|path| path.exists())
-    .collect::<Vec<_>>();
-    paths.sort();
-    paths
-}
-
-fn collect_build_cache_source_files(
-    working_dir: &Path,
-    outputs: &[BuildCacheOutputSpec],
-) -> Result<Vec<PathBuf>> {
-    let ignored_dynamic_roots = dynamic_build_cache_ignored_roots(working_dir);
-    let mut files = Vec::new();
-    let walker = WalkDir::new(working_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            let Ok(relative_path) = entry.path().strip_prefix(working_dir) else {
-                return true;
-            };
-            if relative_path.as_os_str().is_empty() {
-                return true;
-            }
-            if path_is_within_any_root(relative_path, &ignored_dynamic_roots) {
-                return false;
-            }
-            if entry.file_type().is_dir() {
-                if let Some(name) = relative_path.file_name().and_then(|value| value.to_str()) {
-                    if BUILD_CACHE_IGNORED_DIRS.contains(&name) {
-                        return false;
-                    }
-                }
-            }
-            !path_is_within_cached_outputs(relative_path, outputs)
-        });
-
-    for entry in walker {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let relative_path = entry
-            .path()
-            .strip_prefix(working_dir)
-            .with_context(|| format!("Failed to relativize {}", entry.path().display()))?;
-        if path_is_within_any_root(relative_path, &ignored_dynamic_roots) {
-            continue;
-        }
-        if path_is_within_cached_outputs(relative_path, outputs) {
-            continue;
-        }
-        files.push(relative_path.to_path_buf());
-    }
-
-    files.sort();
-    Ok(files)
-}
-
-fn path_is_within_cached_outputs(path: &Path, outputs: &[BuildCacheOutputSpec]) -> bool {
-    outputs
-        .iter()
-        .any(|output| path.starts_with(&output.relative_path))
-}
-
-fn dynamic_build_cache_ignored_roots(working_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir() {
-        if let Ok(relative) = ato_home.strip_prefix(working_dir) {
-            if !relative.as_os_str().is_empty() {
-                roots.push(relative.to_path_buf());
-            }
-        }
-    }
-    roots
-}
-
-fn path_is_within_any_root(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
 }
 
 fn update_hash_text(hasher: &mut Sha256, value: &str) {
