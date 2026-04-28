@@ -104,6 +104,18 @@ pub struct SelectTask {
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
+pub struct SelectSettingsTab {
+    pub tab: crate::state::SettingsTab,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct SelectRouteMetadataTab {
+    pub tab: crate::state::CapsuleDetailTab,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
 pub struct CloseTask {
     pub task_id: usize,
 }
