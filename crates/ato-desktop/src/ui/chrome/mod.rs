@@ -6,9 +6,11 @@ use gpui_component::input::{Input, InputState};
 
 use crate::app::{
     BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
-    ShowSettings,
+    ShowSettings, ToggleRouteMetadataPopover,
 };
-use crate::state::{AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction};
+use crate::state::{
+    AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction, WebSessionState,
+};
 
 use self::window_controls::{default_window_control_buttons, render_window_controls};
 use super::theme::Theme;
@@ -331,102 +333,91 @@ fn render_omnibar_suggestion(
 }
 
 
-fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoElement {
-    let Some(active) = state.active_capsule_pane().or_else(|| {
-        state
-            .active_web_pane()
-            .map(|pane| crate::state::ActiveCapsulePane {
-                pane_id: pane.pane_id,
-                title: pane.title,
-                route: pane.route,
-                session: pane.session,
-                source_label: pane.source_label,
-                trust_state: pane.trust_state,
-                restricted: pane.restricted,
-                snapshot_label: pane.snapshot_label,
-                canonical_handle: pane.canonical_handle,
-                session_id: pane.session_id,
-                adapter: pane.adapter,
-                manifest_path: pane.manifest_path,
-                runtime_label: pane.runtime_label,
-                display_strategy: pane.display_strategy,
-                log_path: pane.log_path,
-                local_url: pane.local_url,
-                healthcheck_url: pane.healthcheck_url,
-                invoke_url: pane.invoke_url,
-                served_by: pane.served_by,
-            })
-    }) else {
-        return div().w(px(0.0));
-    };
-
-    let mut tags = Vec::new();
-
-    match active.session {
-        crate::state::WebSessionState::Resolving => tags.push(("Resolving".to_string(), true)),
-        crate::state::WebSessionState::Materializing => {
-            tags.push(("Materializing".to_string(), true))
-        }
-        crate::state::WebSessionState::Launching => tags.push(("Launching".to_string(), true)),
-        _ => {}
-    }
-
-    if let Some(source) = active.source_label {
-        tags.push((source, false));
-    }
-    if let Some(runtime) = active.runtime_label {
-        tags.push((runtime, false));
-    }
-    if let Some(display_strategy) = active.display_strategy {
-        tags.push((display_strategy, false));
-    }
-    if let Some(trust) = active.trust_state {
-        tags.push((trust, false));
-    }
-    if active.restricted {
-        tags.push(("restricted".to_string(), true));
-    }
-    if let Some(snapshot) = active.snapshot_label {
-        tags.push((snapshot, false));
-    }
-
-    if tags.is_empty() {
-        return div().w(px(0.0));
-    }
-
-    div().flex().items_center().gap(px(6.0)).children(
-        tags.into_iter()
-            .take(4)
-            .map(|(label, emphasized)| render_status_chip(&label, emphasized, theme)),
-    )
+/// Visual variant of the route-status chip in the chrome bar.
+///
+/// Previously the chrome rendered up to four inline pills covering
+/// source/runtime/trust/snapshot/transient state — that read as
+/// noise on the right edge for users who only care about the
+/// metadata when something looks wrong. The chip is now a single
+/// click target whose icon depends on the route's lifecycle: a calm
+/// info glyph when the session is healthy, a half-circle while the
+/// guest is materializing, and a dedicated warning glyph when the
+/// launch has failed. Click → `ToggleRouteMetadataPopover` reveals
+/// the full metadata in an anchored popover.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum RouteChipVariant {
+    Info,
+    Loading,
+    Error,
 }
 
-fn render_status_chip(label: &str, emphasized: bool, theme: &Theme) -> impl IntoElement {
-    let bg = if emphasized {
-        theme.accent_subtle
-    } else {
-        theme.omnibar_rest_bg
-    };
-    let border = if emphasized {
-        theme.accent_border
-    } else {
-        theme.omnibar_rest_border
-    };
-    let text = if emphasized {
-        theme.text_primary
-    } else {
-        theme.omnibar_placeholder
+fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoElement {
+    let session = state
+        .active_capsule_pane()
+        .map(|pane| pane.session)
+        .or_else(|| state.active_web_pane().map(|pane| pane.session));
+
+    let Some(session) = session else {
+        return div().w(px(0.0)).into_any_element();
     };
 
+    let variant = match session {
+        WebSessionState::LaunchFailed => RouteChipVariant::Error,
+        WebSessionState::Resolving | WebSessionState::Materializing | WebSessionState::Launching => {
+            RouteChipVariant::Loading
+        }
+        _ => RouteChipVariant::Info,
+    };
+    let pressed = state.route_metadata_popover_open;
+
+    render_route_chip(variant, pressed, theme).into_any_element()
+}
+
+fn render_route_chip(variant: RouteChipVariant, pressed: bool, theme: &Theme) -> impl IntoElement {
+    // Error tones are inlined here rather than added to the global
+    // Theme — the chrome's chip is currently the only error-coded
+    // surface, so threading new fields through both light and dark
+    // themes would be premature.
+    let error_bg = hsla(0.0 / 360.0, 0.65, 0.55, 0.10);
+    let error_border = hsla(0.0 / 360.0, 0.55, 0.55, 0.45);
+    let error_fg = hsla(0.0 / 360.0, 0.65, 0.50, 1.0);
+
+    let (icon, tone_bg, tone_border, tone_fg) = match variant {
+        RouteChipVariant::Info => (
+            "ⓘ",
+            theme.omnibar_rest_bg,
+            theme.omnibar_rest_border,
+            theme.text_secondary,
+        ),
+        RouteChipVariant::Loading => (
+            "◐",
+            theme.accent_subtle,
+            theme.accent_border,
+            theme.accent,
+        ),
+        RouteChipVariant::Error => ("⚠", error_bg, error_border, error_fg),
+    };
+
+    let bg = if pressed { theme.surface_pressed } else { tone_bg };
+
     div()
+        .id("route-metadata-chip")
         .rounded(px(999.0))
-        .px(px(8.0))
-        .py(px(3.0))
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
         .border_1()
-        .border_color(border)
+        .border_color(tone_border)
         .bg(bg)
-        .text_size(px(10.5))
-        .text_color(text)
-        .child(label.to_string())
+        .text_size(px(12.0))
+        .text_color(tone_fg)
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
+        })
+        .child(icon)
 }
 
