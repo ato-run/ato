@@ -30,7 +30,7 @@ pub(super) fn parse_guest_contract(
 ) -> Option<GuestContract> {
     let table = manifest
         .get("metadata")
-        .and_then(|value| value.get("desky_guest"))?
+        .and_then(|value| value.get("ato_desktop_guest"))?
         .as_table()?;
 
     let adapter = table.get("adapter")?.as_str()?.trim().to_string();
@@ -124,7 +124,7 @@ mod tests {
     fn parses_guest_contract_metadata() {
         let manifest: toml::Value = toml::from_str(
             r#"
-[metadata.desky_guest]
+[metadata.ato_desktop_guest]
 adapter = "tauri"
 frontend_entry = "frontend/index.html"
 transport = "http"
