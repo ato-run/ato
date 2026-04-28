@@ -252,7 +252,7 @@ CLI の front-door は `run`, `decap`, `encap` の 3 つに固定する。物語
   - `terminal_stream`
   - `service_background`
   - `unsupported`
-- `runtime=web` は `[metadata.desky_guest]` を要求しない。CLI は web runtime を起動し、Desktop が attach できる `local_url` を session payload に入れる。
+- `runtime=web` は `[metadata.ato_desktop_guest]` を要求しない。CLI は web runtime を起動し、Desktop が attach できる `local_url` を session payload に入れる。
 - loopback registry handle でも session contract は同一で、trust は `untrusted`、isolation は fail-closed を維持する。
 
 ## 4. 設定 / ディスパッチ

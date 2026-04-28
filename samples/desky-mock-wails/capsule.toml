@@ -7,7 +7,7 @@ driver = "wails"
 run = "python3 backend/server.py"
 working_dir = "."
 
-[metadata.desky_guest]
+[metadata.ato_desktop_guest]
 adapter = "wails"
 frontend_entry = "frontend/index.html"
 transport = "http"
