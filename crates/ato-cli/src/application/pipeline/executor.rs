@@ -105,6 +105,74 @@ fn phase_timing_enabled() -> bool {
     }
 }
 
+/// Emit a fine-grained sub-stage timing line during a phase.
+///
+/// Format: `PHASE-TIMING phase=<phase> stage=<stage> state=<ok|fail> elapsed_ms=<n> [error=...]`.
+/// The `stage=` field is optional — its absence on a `PHASE-TIMING` line
+/// means the line is the phase-level summary (existing contract preserved).
+/// No-op when `ATO_PHASE_TIMING` is not enabled, so production stderr stays
+/// clean.
+///
+/// Stages live below phases. They are intended for callers (phase impls)
+/// that want to attribute their elapsed_ms to internal sub-stages — e.g.
+/// `prepare_session_execution`, `spawn_runtime_process`, `wait_http_ready`
+/// inside `Execute`.
+pub(crate) fn emit_phase_stage_timing(
+    phase: HourglassPhase,
+    stage: &str,
+    state: &str,
+    elapsed_ms: u64,
+    error: Option<&str>,
+) {
+    if !phase_timing_enabled() {
+        return;
+    }
+    let mut line = format!(
+        "PHASE-TIMING phase={} stage={} state={} elapsed_ms={}",
+        phase.as_str(),
+        stage,
+        state,
+        elapsed_ms
+    );
+    if let Some(message) = error {
+        let truncated: String = message.chars().take(200).collect();
+        let one_line = truncated.replace('\n', " ");
+        line.push_str(&format!(" error={:?}", one_line));
+    }
+    eprintln!("{}", line);
+}
+
+/// Convenience timer paired with [`emit_phase_stage_timing`]. Records its
+/// start instant and emits an `ok` (or `fail`) line on demand. Use it when
+/// you have a fixed sub-stage boundary; for ad-hoc cases call
+/// `emit_phase_stage_timing` directly with your own `Instant::now()`.
+pub(crate) struct PhaseStageTimer {
+    phase: HourglassPhase,
+    stage: &'static str,
+    started: std::time::Instant,
+}
+
+impl PhaseStageTimer {
+    pub(crate) fn start(phase: HourglassPhase, stage: &'static str) -> Self {
+        Self {
+            phase,
+            stage,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn finish_ok(self) {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        emit_phase_stage_timing(self.phase, self.stage, "ok", elapsed_ms, None);
+    }
+
+    #[allow(dead_code)] // Reserved for fail-emitting call sites; not yet used in v0.
+    pub(crate) fn finish_fail(self, error: &str) {
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        emit_phase_stage_timing(self.phase, self.stage, "fail", elapsed_ms, Some(error));
+    }
+}
+
 fn emit_phase_timing(
     phase: HourglassPhase,
     state: &str,
