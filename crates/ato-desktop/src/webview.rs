@@ -153,6 +153,12 @@ pub struct WebViewManager {
     /// only needs to happen once per process; subsequent real tabs
     /// reuse the warm XPC services.
     prewarmed: bool,
+    /// Sender for the per-pane "is there a newer registry version?" check.
+    /// Set once at startup by `DesktopShell::install_capsule_update_channel`;
+    /// cloned per spawned worker so result delivery survives manager lifecycle.
+    /// `None` until the channel is installed (e.g. in unit tests where the
+    /// background check is irrelevant).
+    capsule_update_tx: Option<std::sync::mpsc::Sender<(usize, crate::state::CapsuleUpdate)>>,
     /// Shared `WebContext` so every pane uses the same on-disk
     /// `WKWebsiteDataStore`. This makes cookies and localStorage
     /// persist across tab open/close and across restarts (data
@@ -293,7 +299,20 @@ impl WebViewManager {
             automation,
             prewarmed: false,
             web_context,
+            capsule_update_tx: None,
         }
+    }
+
+    /// Hand the manager a Sender it should clone whenever a capsule pane
+    /// launches, so the worker thread can post its `CapsuleUpdate` result
+    /// back to `DesktopShell::poll_capsule_updates`. Calling this with
+    /// `None` (or never calling it) disables the background check — handy
+    /// in unit tests that don't need the registry round-trip.
+    pub fn install_capsule_update_channel(
+        &mut self,
+        tx: std::sync::mpsc::Sender<(usize, crate::state::CapsuleUpdate)>,
+    ) {
+        self.capsule_update_tx = Some(tx);
     }
 
     /// Build a 1×1 throwaway WebView pointed at about:blank so the
@@ -1160,6 +1179,10 @@ impl WebViewManager {
                                     // Without this the launched_session lives only on
                                     // ManagedWebView and the popover renders mostly empty.
                                     apply_launch_session_metadata(state, active.pane_id, session);
+                                    // Kick off the registry update check on a worker
+                                    // thread; the result lands on DesktopShell via the
+                                    // mpsc channel installed by install_capsule_update_channel.
+                                    self.spawn_capsule_update_check(active.pane_id, session, state);
                                 }
                                 self.views.insert(active.pane_id, webview);
                             }
@@ -1710,6 +1733,37 @@ impl WebViewManager {
         }
     }
 
+    /// Mark `pane_id`'s update slot as `Checking` and dispatch a worker
+    /// thread that calls `ato app latest <handle>` and posts the comparison
+    /// result back via the installed channel. Skips silently when the
+    /// session has no canonical handle / snapshot label (nothing to compare),
+    /// or when no channel has been installed (tests).
+    fn spawn_capsule_update_check(
+        &self,
+        pane_id: usize,
+        session: &GuestLaunchSession,
+        state: &mut AppState,
+    ) {
+        let Some(tx) = self.capsule_update_tx.clone() else {
+            return;
+        };
+        let Some(canonical) = session.canonical_handle.clone() else {
+            return;
+        };
+        let Some(current) = session.snapshot_label.clone() else {
+            return;
+        };
+
+        state
+            .capsule_updates
+            .insert(pane_id, crate::state::CapsuleUpdate::Checking);
+
+        std::thread::spawn(move || {
+            let result = run_capsule_update_check(&canonical, &current);
+            let _ = tx.send((pane_id, result));
+        });
+    }
+
     fn stop_launched_session(&self, webview: &ManagedWebView, state: &mut AppState) {
         let Some(session) = &webview.launched_session else {
             return;
@@ -1885,6 +1939,92 @@ fn apply_launch_session_metadata(
         session.invoke_url.clone(),
         session.served_by.clone(),
     );
+}
+
+/// Worker-thread body for the per-pane capsule update check.
+///
+/// Calls `orchestrator::fetch_latest_capsule_version` (which subprocess-runs
+/// `ato app latest <handle> --json`) and compares the registry's reply to
+/// the running snapshot label using semver. The result is funnelled back
+/// to `DesktopShell::poll_capsule_updates` through the channel installed
+/// by `install_capsule_update_channel`.
+fn run_capsule_update_check(
+    canonical_handle: &str,
+    current: &str,
+) -> crate::state::CapsuleUpdate {
+    use crate::state::CapsuleUpdate;
+
+    let latest = match crate::orchestrator::fetch_latest_capsule_version(canonical_handle) {
+        Ok(Some(value)) => value,
+        // Registry knows the capsule but has no published release yet —
+        // nothing to upgrade to, so call it up-to-date rather than failed.
+        Ok(None) => {
+            return CapsuleUpdate::UpToDate {
+                current: current.to_string(),
+            };
+        }
+        Err(error) => {
+            return CapsuleUpdate::Failed {
+                message: format!("registry lookup failed: {error}"),
+            };
+        }
+    };
+
+    // Trim a leading 'v' on either side so capsule manifests using `v0.3.4`
+    // and registries using `0.3.4` interoperate.
+    let normalize = |s: &str| s.trim().trim_start_matches('v').to_string();
+    let current_norm = normalize(current);
+    let latest_norm = normalize(&latest);
+
+    let parsed_current = semver::Version::parse(&current_norm);
+    let parsed_latest = semver::Version::parse(&latest_norm);
+
+    match (parsed_current, parsed_latest) {
+        (Ok(current_v), Ok(latest_v)) if latest_v > current_v => CapsuleUpdate::Available {
+            current: current_norm,
+            latest: latest_norm.clone(),
+            target_handle: target_handle_for_version(canonical_handle, &latest_norm),
+        },
+        (Ok(_), Ok(_)) => CapsuleUpdate::UpToDate {
+            current: current_norm,
+        },
+        // Either side failed semver parsing — fall back to a plain string
+        // inequality so non-standard version strings still surface a banner
+        // when they differ. Better than silently swallowing the signal.
+        _ => {
+            if current_norm != latest_norm {
+                CapsuleUpdate::Available {
+                    current: current_norm,
+                    latest: latest_norm.clone(),
+                    target_handle: target_handle_for_version(canonical_handle, &latest_norm),
+                }
+            } else {
+                CapsuleUpdate::UpToDate {
+                    current: current_norm,
+                }
+            }
+        }
+    }
+}
+
+/// Build the canonical handle pinned to a specific version. Strips an
+/// existing `@<old>` suffix if present so the result is idempotent for the
+/// "click Install update twice in a row" case.
+///
+/// Examples:
+///   - `capsule://ato.run/koh0920/byok-ai-chat@0.3.3`, `0.3.4`
+///       → `capsule://ato.run/koh0920/byok-ai-chat@0.3.4`
+///   - `capsule://ato.run/koh0920/byok-ai-chat`,       `0.3.4`
+///       → `capsule://ato.run/koh0920/byok-ai-chat@0.3.4`
+fn target_handle_for_version(canonical_handle: &str, latest: &str) -> String {
+    // Only strip the LAST `@` so publisher names containing `@` (unlikely but
+    // possible) don't get truncated. The version suffix is whatever follows
+    // the final `@` in the canonical handle.
+    let base = match canonical_handle.rsplit_once('@') {
+        Some((prefix, _existing_version)) => prefix,
+        None => canonical_handle,
+    };
+    format!("{}@{}", base, latest)
 }
 
 /// Read `[metadata].icon` from a capsule manifest and resolve it to
@@ -3028,6 +3168,41 @@ fn dispatch_automation_command(
 mod tests {
     use super::*;
     use crate::state::{CapabilityGrant, WebSessionState};
+
+    #[test]
+    fn target_handle_replaces_existing_version_suffix() {
+        assert_eq!(
+            target_handle_for_version(
+                "capsule://ato.run/koh0920/byok-ai-chat@0.3.3",
+                "0.3.4",
+            ),
+            "capsule://ato.run/koh0920/byok-ai-chat@0.3.4",
+        );
+    }
+
+    #[test]
+    fn target_handle_appends_when_no_existing_version() {
+        assert_eq!(
+            target_handle_for_version(
+                "capsule://ato.run/koh0920/byok-ai-chat",
+                "0.3.4",
+            ),
+            "capsule://ato.run/koh0920/byok-ai-chat@0.3.4",
+        );
+    }
+
+    #[test]
+    fn target_handle_strips_only_last_at_suffix() {
+        // Pathological case: an `@` somewhere earlier in the handle should
+        // not get truncated. Only the trailing `@<version>` is replaced.
+        assert_eq!(
+            target_handle_for_version(
+                "capsule://ato.run/some@user/pkg@1.0.0",
+                "1.1.0",
+            ),
+            "capsule://ato.run/some@user/pkg@1.1.0",
+        );
+    }
 
     fn active_web_pane(route: GuestRoute, pane_id: usize) -> ActiveWebPane {
         ActiveWebPane {
