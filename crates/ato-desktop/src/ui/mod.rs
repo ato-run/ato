@@ -1180,41 +1180,58 @@ impl DesktopShell {
     }
 
     fn sync_favicons(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let origins = self
+        // Two icon families share the cache: external-URL favicons
+        // (key = origin, request URL = "{origin}/favicon.ico") and
+        // capsule-manifest icons (key = absolute path or full URL,
+        // request = the key itself). Same `Arc<Image>` cache, two
+        // dispatches in `spawn_favicon_fetch`.
+        let sources = self
             .state
             .sidebar_task_items()
             .into_iter()
             .filter_map(|task| match task.icon {
-                SidebarTaskIconSpec::ExternalUrl { origin } => Some(origin),
+                SidebarTaskIconSpec::ExternalUrl { origin } => Some((origin, IconKind::Favicon)),
+                SidebarTaskIconSpec::Image { source } => Some((source, IconKind::Direct)),
                 SidebarTaskIconSpec::Monogram(_) | SidebarTaskIconSpec::SystemIcon(_) => None,
             })
             .collect::<Vec<_>>();
 
-        for origin in origins {
-            if self.favicon_cache.contains_key(&origin) {
+        for (key, kind) in sources {
+            if self.favicon_cache.contains_key(&key) {
                 continue;
             }
 
             self.favicon_cache
-                .insert(origin.clone(), FaviconState::Loading);
-            self.spawn_favicon_fetch(origin, window, cx);
+                .insert(key.clone(), FaviconState::Loading);
+            self.spawn_favicon_fetch(key, kind, window, cx);
         }
     }
 
-    fn spawn_favicon_fetch(&mut self, origin: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn spawn_favicon_fetch(
+        &mut self,
+        key: String,
+        kind: IconKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn_in(
             window,
             move |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
                 let mut async_cx = cx.clone();
                 async move {
-                    let origin_for_fetch = origin.clone();
+                    let key_for_fetch = key.clone();
                     let image = async_cx
-                        .background_spawn(async move { fetch_favicon_image(&origin_for_fetch) })
+                        .background_spawn(async move {
+                            match kind {
+                                IconKind::Favicon => fetch_favicon_image(&key_for_fetch),
+                                IconKind::Direct => fetch_direct_image(&key_for_fetch),
+                            }
+                        })
                         .await;
 
                     let _ = this.update_in(&mut async_cx, move |this, _window, cx| {
                         this.favicon_cache.insert(
-                            origin,
+                            key,
                             match image {
                                 Some(image) => FaviconState::Ready(image),
                                 None => FaviconState::Failed,
@@ -1552,6 +1569,81 @@ impl Focusable for DesktopShell {
     }
 }
 
+#[derive(Copy, Clone)]
+enum IconKind {
+    /// Origin → `{origin}/favicon.ico` (legacy ExternalUrl tabs).
+    Favicon,
+    /// `source` is a fully-resolved location: absolute filesystem
+    /// path, `file://` / `http(s)://` URL, or a `data:` URL. Set by
+    /// the capsule-manifest icon plumbing.
+    Direct,
+}
+
+fn fetch_direct_image(source: &str) -> Option<Arc<Image>> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return fetch_image_from_url(source);
+    }
+    if let Some(rest) = source.strip_prefix("file://") {
+        return fetch_image_from_path(std::path::Path::new(rest));
+    }
+    if source.starts_with("data:") {
+        return decode_data_url_image(source);
+    }
+    fetch_image_from_path(std::path::Path::new(source))
+}
+
+fn fetch_image_from_path(path: &std::path::Path) -> Option<Arc<Image>> {
+    let bytes = std::fs::read(path).ok()?;
+    let format = format_for_extension(path).or_else(|| sniff_image_format(&bytes))?;
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+fn fetch_image_from_url(url: &str) -> Option<Arc<Image>> {
+    let response = ureq::get(url).call().ok()?;
+    let content_type = response
+        .header("content-type")
+        .or_else(|| response.header("Content-Type"))
+        .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+    let mut bytes = Vec::new();
+    response.into_reader().read_to_end(&mut bytes).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let format = content_type
+        .as_deref()
+        .and_then(image_format_from_content_type)
+        .or_else(|| sniff_image_format(&bytes))?;
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+fn decode_data_url_image(url: &str) -> Option<Arc<Image>> {
+    // Minimal `data:image/<fmt>;base64,...` decoder. We only need to
+    // handle the base64 form because the icon plumbing is the only
+    // producer and we control its output.
+    let body = url.strip_prefix("data:")?;
+    let (meta, payload) = body.split_once(',')?;
+    let mime = meta.split(';').next().unwrap_or("");
+    let format = image_format_from_content_type(mime).or_else(|| sniff_image_format(payload.as_bytes()))?;
+    let bytes = if meta.contains(";base64") {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(payload).ok()?
+    } else {
+        payload.as_bytes().to_vec()
+    };
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+fn format_for_extension(path: &std::path::Path) -> Option<ImageFormat> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "svg" => Some(ImageFormat::Svg),
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        "gif" => Some(ImageFormat::Gif),
+        "ico" => Some(ImageFormat::Ico),
+        _ => None,
+    }
+}
+
 fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
     let request_url = favicon_request_url(origin)?;
     let response = ureq::get(&request_url).call().ok()?;
@@ -1578,6 +1670,7 @@ fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
 fn image_format_from_content_type(content_type: &str) -> Option<ImageFormat> {
     match content_type {
         "image/x-icon" | "image/vnd.microsoft.icon" => Some(ImageFormat::Ico),
+        "image/svg+xml" => Some(ImageFormat::Svg),
         other => ImageFormat::from_mime_type(other),
     }
 }
@@ -1591,6 +1684,14 @@ fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
     }
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         return Some(ImageFormat::Gif);
+    }
+    // SVG sniff — tolerate XML prologue and stray whitespace before
+    // the root element, which renderers like Inkscape emit by
+    // default.
+    let prefix = std::str::from_utf8(&bytes[..bytes.len().min(256)]).unwrap_or("");
+    let trimmed = prefix.trim_start_matches('\u{feff}').trim_start();
+    if trimmed.starts_with("<?xml") || trimmed.starts_with("<svg") {
+        return Some(ImageFormat::Svg);
     }
     if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         return Some(ImageFormat::Webp);
