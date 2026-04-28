@@ -1,0 +1,38 @@
+[package]
+name = "ato-session-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Session record schema and validation helpers shared by ato-cli (writer) and ato-desktop (reader)."
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# This crate intentionally has minimal dependencies: it sits between
+# `capsule-wire` (pure DTO root) and the runtime crates that need both
+# the on-disk session record schema and the small set of OS helpers
+# (PID alive, process start time, HTTP healthcheck) used to validate a
+# stored session before reuse. Keep this crate free of CLI / GUI /
+# tokio / async-runtime / clap / reqwest dependencies — those belong in
+# `ato-cli` or `ato-desktop`.
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "ato_session_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+capsule-wire = { path = "../capsule-wire" }
+dirs = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

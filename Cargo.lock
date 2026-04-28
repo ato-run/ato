@@ -720,6 +720,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "ato-session-core",
  "axoupdater",
  "axum 0.7.9",
  "axum-server",
@@ -797,6 +798,7 @@ name = "ato-desktop"
 version = "0.4.99"
 dependencies = [
  "anyhow",
+ "ato-session-core",
  "base64 0.22.1",
  "block2",
  "capsule-core",
@@ -818,6 +820,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tempfile",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
@@ -832,6 +835,20 @@ name = "ato-desktop-xtask"
 version = "0.4.99"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "ato-session-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capsule-wire",
+ "dirs 5.0.1",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
