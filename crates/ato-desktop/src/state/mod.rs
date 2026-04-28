@@ -527,12 +527,16 @@ pub enum SystemPageIcon {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarTaskIconSpec {
     Monogram(String),
-    ExternalUrl { origin: String },
+    ExternalUrl {
+        origin: String,
+    },
     /// Pre-resolved image source — either an absolute file path (set
     /// from `[metadata].icon` in the capsule manifest) or a direct
     /// URL. Used by the favicon-cache fetcher to stream the bytes
     /// into a `gpui::Image` and render it as the tab icon.
-    Image { source: String },
+    Image {
+        source: String,
+    },
     SystemIcon(SystemPageIcon),
 }
 
@@ -3277,8 +3281,9 @@ struct DesktopAuthHandoff {
 }
 
 fn verify_cli_ato_session() -> Result<VerifiedAtoSession, String> {
-    let ato_bin = crate::orchestrator::resolve_ato_binary()
-        .map_err(|error| format!("Could not locate ato binary for sign-in verification: {error}"))?;
+    let ato_bin = crate::orchestrator::resolve_ato_binary().map_err(|error| {
+        format!("Could not locate ato binary for sign-in verification: {error}")
+    })?;
     let output = Command::new(&ato_bin)
         .arg("desktop-auth-handoff")
         .output()
@@ -3658,7 +3663,10 @@ mod tests {
             Some("capsule://ato.run/koh0920/ato-onboarding")
         );
         assert_eq!(inspector.source_label.as_deref(), Some("registry"));
-        assert_eq!(inspector.session_id.as_deref(), Some("ato-desktop-session-1"));
+        assert_eq!(
+            inspector.session_id.as_deref(),
+            Some("ato-desktop-session-1")
+        );
         assert_eq!(inspector.adapter.as_deref(), Some("tauri"));
         assert!(inspector.logs.iter().any(|entry| {
             entry.stage == CapsuleLogStage::Resolve && entry.message.contains("Queued capsule")

@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 use url::Url;
 
 use super::{
-    AppState, CapabilityGrant, GuestRoute, Pane, PaneBounds, PaneRole, PaneTree, PaneSurface,
+    AppState, CapabilityGrant, GuestRoute, Pane, PaneBounds, PaneRole, PaneSurface, PaneTree,
     TaskSet, WebPane, WebSessionState, Workspace,
 };
 
@@ -54,9 +54,18 @@ struct PersistedTask {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum PersistedRoute {
-    ExternalUrl { url: String },
-    CapsuleHandle { handle: String, label: String },
-    CapsuleUrl { handle: String, label: String, url: String },
+    ExternalUrl {
+        url: String,
+    },
+    CapsuleHandle {
+        handle: String,
+        label: String,
+    },
+    CapsuleUrl {
+        handle: String,
+        label: String,
+        url: String,
+    },
 }
 
 impl PersistedRoute {
@@ -86,13 +95,9 @@ impl PersistedRoute {
             Self::CapsuleHandle { handle, label } => {
                 Some(GuestRoute::CapsuleHandle { handle, label })
             }
-            Self::CapsuleUrl { handle, label, url } => Url::parse(&url).ok().map(|url| {
-                GuestRoute::CapsuleUrl {
-                    handle,
-                    label,
-                    url,
-                }
-            }),
+            Self::CapsuleUrl { handle, label, url } => Url::parse(&url)
+                .ok()
+                .map(|url| GuestRoute::CapsuleUrl { handle, label, url }),
         }
     }
 }
@@ -248,7 +253,7 @@ fn rebuild_state(shell: PersistedShell) -> AppState {
                                 healthcheck_url: None,
                                 invoke_url: None,
                                 served_by: None,
-                    auth_flow: false,
+                                auth_flow: false,
                             }),
                         }],
                         split_ratio: 0.68,
