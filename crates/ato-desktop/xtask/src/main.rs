@@ -11,6 +11,19 @@ const DEFAULT_TARGET: &str = "darwin-arm64";
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
+        Some("frontend") => {
+            let subcommand = args.next();
+            let forwarded = normalize_passthrough_args(args.collect());
+            match subcommand.as_deref() {
+                Some("build") => frontend_build(&forwarded),
+                Some("dev") => frontend_dev(&forwarded),
+                Some("help") | Some("--help") | Some("-h") | None => {
+                    print_frontend_help();
+                    Ok(())
+                }
+                Some(other) => bail!("unsupported frontend command: {}", other),
+            }
+        }
         Some("bundle") => {
             let mut target = DEFAULT_TARGET.to_string();
             let mut sign = false;
@@ -134,6 +147,8 @@ fn print_help() {
     println!(
         "ato-desktop xtask\n\n\
          Commands:\n  \
+                     frontend build [-- <vite-args...>]\n  \
+                     frontend dev   [-- <vite-args...>]\n  \
            bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
            notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
            zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
@@ -146,6 +161,67 @@ fn print_help() {
            - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
          Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n"
     );
+}
+
+fn print_frontend_help() {
+    println!(
+        "ato-desktop xtask frontend\n\n\
+         Subcommands:\n  \
+           build [-- <vite-args...>]  Install dependencies with pnpm and build frontend/dist\n  \
+           dev   [-- <vite-args...>]  Install dependencies with pnpm and start the Vite dev server\n\n\
+         Examples:\n  \
+           cargo run --manifest-path xtask/Cargo.toml -- frontend build\n  \
+           cargo run --manifest-path xtask/Cargo.toml -- frontend dev -- --host 127.0.0.1 --port 4174\n"
+    );
+}
+
+fn frontend_build(forwarded_args: &[String]) -> Result<()> {
+    let paths = WorkspacePaths::discover()?;
+    install_frontend_dependencies(&paths)?;
+    run_frontend_pnpm(&paths, &["run", "build"], forwarded_args)
+}
+
+fn frontend_dev(forwarded_args: &[String]) -> Result<()> {
+    let paths = WorkspacePaths::discover()?;
+    install_frontend_dependencies(&paths)?;
+    run_frontend_pnpm(&paths, &["run", "dev"], forwarded_args)
+}
+
+fn install_frontend_dependencies(paths: &WorkspacePaths) -> Result<()> {
+    run_frontend_pnpm(paths, &["install", "--frozen-lockfile"], &[])
+}
+
+fn run_frontend_pnpm(
+    paths: &WorkspacePaths,
+    args: &[&str],
+    forwarded_args: &[String],
+) -> Result<()> {
+    let mut command = Command::new("pnpm");
+    command.current_dir(&paths.frontend_root);
+    for arg in args {
+        command.arg(arg);
+    }
+    for arg in forwarded_args {
+        command.arg(arg);
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("failed to invoke pnpm in {}", paths.frontend_root.display()))?;
+    if !status.success() {
+        bail!(
+            "pnpm command failed in {} with status {}",
+            paths.frontend_root.display(),
+            status
+        );
+    }
+    Ok(())
+}
+
+fn normalize_passthrough_args(mut args: Vec<String>) -> Vec<String> {
+    if matches!(args.first().map(String::as_str), Some("--")) {
+        args.remove(0);
+    }
+    args
 }
 
 /// Build the `ato-desktop` and `ato` binaries for a given Rust target.
@@ -954,6 +1030,7 @@ fn render_info_plist(version: &str) -> String {
 struct WorkspacePaths {
     desktop_root: PathBuf,
     desktop_manifest: PathBuf,
+    frontend_root: PathBuf,
     ato_manifest: PathBuf,
     nacelle_manifest: PathBuf,
     target_root: PathBuf,
@@ -995,6 +1072,7 @@ impl WorkspacePaths {
             }
         };
         let desktop_manifest = desktop_root.join("Cargo.toml");
+        let frontend_root = desktop_root.join("frontend");
         let ato_manifest = ato_root.join("Cargo.toml");
         // nacelle lives at <repo>/crates/nacelle in the monorepo.
         let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
@@ -1003,6 +1081,7 @@ impl WorkspacePaths {
         Ok(Self {
             desktop_root,
             desktop_manifest,
+            frontend_root,
             ato_manifest,
             nacelle_manifest,
             target_root,
@@ -1035,7 +1114,7 @@ impl MacTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_info_plist, MacTarget};
+    use super::{normalize_passthrough_args, render_info_plist, MacTarget};
 
     #[test]
     fn parses_supported_targets() {
@@ -1049,5 +1128,17 @@ mod tests {
         let plist = render_info_plist("1.2.3");
         assert!(plist.contains("run.ato.desktop"));
         assert!(plist.contains("1.2.3"));
+    }
+
+    #[test]
+    fn normalize_passthrough_args_strips_delimiter() {
+        assert_eq!(
+            normalize_passthrough_args(vec![
+                "--".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+            ]),
+            vec!["--host".to_string(), "127.0.0.1".to_string()]
+        );
     }
 }
