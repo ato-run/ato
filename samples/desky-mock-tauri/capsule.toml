@@ -7,7 +7,7 @@ driver = "tauri"
 run = "python3 backend/server.py"
 working_dir = "."
 
-[metadata.desky_guest]
+[metadata.ato_desktop_guest]
 adapter = "tauri"
 frontend_entry = "frontend/index.html"
 transport = "http"
