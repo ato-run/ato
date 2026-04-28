@@ -1345,7 +1345,7 @@ fn url_port(url: &str) -> Option<u16> {
 }
 
 /// Returns a stable temporary directory path derived from the share URL.
-/// Stored under ~/.ato/apps/desky/shared-runs/<hash> so the same share URL
+/// Stored under ~/.ato/apps/ato-desktop/shared-runs/<hash> so the same share URL
 /// always materializes to the same location, enabling session resume.
 fn share_tmp_dir(share_url: &str) -> Result<PathBuf> {
     use std::collections::hash_map::DefaultHasher;
