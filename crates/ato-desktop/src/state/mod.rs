@@ -727,6 +727,10 @@ pub struct AppState {
     /// Set when the user requests Quit so the shell can render a
     /// confirm dialog asking whether to keep or clear persisted tabs.
     pub pending_quit_confirmation: bool,
+    /// Toggle for the route-metadata popover anchored to the chrome's
+    /// info chip. The popover surfaces source/runtime/trust/snapshot
+    /// fields that previously cluttered the chrome as inline tags.
+    pub route_metadata_popover_open: bool,
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
@@ -821,6 +825,7 @@ impl AppState {
                 last_login_origin: None,
             },
             pending_quit_confirmation: false,
+            route_metadata_popover_open: false,
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -996,6 +1001,7 @@ impl AppState {
                 last_login_origin: None,
             },
             pending_quit_confirmation: false,
+            route_metadata_popover_open: false,
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -1162,9 +1168,14 @@ impl AppState {
 
     pub fn dismiss_transient(&mut self) {
         self.pending_permission_prompt = None;
+        self.route_metadata_popover_open = false;
         if matches!(self.shell_mode, ShellMode::CommandBar) {
             self.shell_mode = ShellMode::Focus;
         }
+    }
+
+    pub fn toggle_route_metadata_popover(&mut self) {
+        self.route_metadata_popover_open = !self.route_metadata_popover_open;
     }
 
     pub fn create_new_tab(&mut self) {
