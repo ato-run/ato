@@ -97,54 +97,83 @@ pub struct SessionInfo {
     service: Option<ServiceBackgroundDisplay>,
 }
 
+impl SessionInfo {
+    /// PID of the spawned process. Used by the App Session Materialization
+    /// layer to enrich the freshly-written record with its process_start_time.
+    pub(crate) fn pid(&self) -> i32 {
+        self.pid
+    }
+}
+
+/// On-disk session record. Schema is forward-compatible: older record files
+/// (lacking `schema_version` / `launch_digest` / `process_start_time_unix_ms`)
+/// deserialize cleanly via `#[serde(default)]` and are treated as schema=1
+/// (reuse-incompatible) by the App Session Materialization layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredSessionInfo {
-    session_id: String,
-    handle: String,
-    normalized_handle: String,
-    canonical_handle: Option<String>,
-    trust_state: TrustState,
-    source: Option<String>,
-    restricted: bool,
-    snapshot: Option<ResolvedSnapshot>,
-    runtime: CapsuleRuntimeDescriptor,
-    display_strategy: CapsuleDisplayStrategy,
-    pid: i32,
-    log_path: String,
-    manifest_path: String,
-    target_label: String,
-    notes: Vec<String>,
-    guest: Option<GuestSessionDisplay>,
-    web: Option<WebSessionDisplay>,
-    terminal: Option<TerminalSessionDisplay>,
-    service: Option<ServiceBackgroundDisplay>,
+pub(crate) struct StoredSessionInfo {
+    pub(crate) session_id: String,
+    pub(crate) handle: String,
+    pub(crate) normalized_handle: String,
+    pub(crate) canonical_handle: Option<String>,
+    pub(crate) trust_state: TrustState,
+    pub(crate) source: Option<String>,
+    pub(crate) restricted: bool,
+    pub(crate) snapshot: Option<ResolvedSnapshot>,
+    pub(crate) runtime: CapsuleRuntimeDescriptor,
+    pub(crate) display_strategy: CapsuleDisplayStrategy,
+    pub(crate) pid: i32,
+    pub(crate) log_path: String,
+    pub(crate) manifest_path: String,
+    pub(crate) target_label: String,
+    pub(crate) notes: Vec<String>,
+    pub(crate) guest: Option<GuestSessionDisplay>,
+    pub(crate) web: Option<WebSessionDisplay>,
+    pub(crate) terminal: Option<TerminalSessionDisplay>,
+    pub(crate) service: Option<ServiceBackgroundDisplay>,
+
+    // App Session Materialization v0 (RFC: APP_SESSION_MATERIALIZATION).
+    // All three are `Option` for forward compatibility with schema=1 records.
+    /// Schema version. Records written by v0 set this to `Some(2)`. Older
+    /// records (or hand-written ones) leave it as `None` and are treated as
+    /// schema=1 — they MAY be displayed but MUST NOT be reused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schema_version: Option<u32>,
+    /// blake3 launch digest of the LaunchSpec used to start this session.
+    /// Reuse requires this to match the current LaunchSpec digest exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) launch_digest: Option<String>,
+    /// Process creation time (unix ms). Used in conjunction with PID alive
+    /// to defeat OS PID reuse. macOS / Linux only at v0; unknown on Windows
+    /// and serializes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) process_start_time_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GuestSessionDisplay {
-    adapter: String,
-    frontend_entry: String,
-    transport: String,
-    healthcheck_url: String,
-    invoke_url: String,
-    capabilities: Vec<String>,
+pub(crate) struct GuestSessionDisplay {
+    pub(crate) adapter: String,
+    pub(crate) frontend_entry: String,
+    pub(crate) transport: String,
+    pub(crate) healthcheck_url: String,
+    pub(crate) invoke_url: String,
+    pub(crate) capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct WebSessionDisplay {
-    local_url: String,
-    healthcheck_url: String,
-    served_by: String,
+pub(crate) struct WebSessionDisplay {
+    pub(crate) local_url: String,
+    pub(crate) healthcheck_url: String,
+    pub(crate) served_by: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TerminalSessionDisplay {
-    log_path: String,
+pub(crate) struct TerminalSessionDisplay {
+    pub(crate) log_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ServiceBackgroundDisplay {
-    log_path: String,
+pub(crate) struct ServiceBackgroundDisplay {
+    pub(crate) log_path: String,
 }
 
 pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
@@ -339,10 +368,19 @@ pub(super) fn start_guest_session(
         web: None,
         terminal: None,
         service: None,
+        // App Session Materialization: filled in by run_execute after spawn
+        // succeeds (start_time helper takes the freshly-spawned PID + the
+        // launch_digest computed before the lock was acquired). Leaving them
+        // None here keeps the inner spawn logic decoupled from the
+        // materialization layer and matches the legacy schema=1 record shape
+        // that older versions of ato-cli expect to read.
+        schema_version: None,
+        launch_digest: None,
+        process_start_time_unix_ms: None,
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
-    Ok(session_info_from_record(session))
+    Ok(session_info_from_stored(session))
 }
 
 pub(super) fn start_runtime_session(
@@ -493,13 +531,17 @@ pub(super) fn start_runtime_session(
                 log_path: log_path.display().to_string(),
             }
         }),
+        // App Session Materialization: see note on the guest variant above.
+        schema_version: None,
+        launch_digest: None,
+        process_start_time_unix_ms: None,
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
-    Ok(session_info_from_record(session))
+    Ok(session_info_from_stored(session))
 }
 
-fn session_info_from_record(session: StoredSessionInfo) -> SessionInfo {
+pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInfo {
     let guest_compat = session.guest.as_ref().map(|guest| {
         (
             guest.adapter.clone(),
@@ -914,7 +956,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn session_root() -> Result<PathBuf> {
+pub(crate) fn session_root() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ATO_DESKTOP_SESSION_ROOT") {
         return Ok(PathBuf::from(path));
     }
@@ -970,7 +1012,7 @@ fn wait_for_http_ready(
     }
 }
 
-fn http_get_ok(port: u16, path: &str) -> bool {
+pub(crate) fn http_get_ok(port: u16, path: &str) -> bool {
     // Treat any I/O hiccup (EAGAIN/ECONNRESET/timeout) as "not ready
     // yet" so the caller keeps polling. The previous version
     // propagated `?` errors out of the probe, which surfaced the
