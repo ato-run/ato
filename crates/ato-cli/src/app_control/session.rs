@@ -18,11 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::pipeline::phases::run::DerivedBridgeManifest;
 use crate::application::pipeline::phases::run::PreparedRunContext;
-use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
-    preflight_required_environment_variables, prepare_target_execution, resolve_launch_context,
-    TargetLaunchOptions,
+    prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
 };
 use crate::install::support::resolve_run_target_or_install;
 use crate::reporters;
@@ -31,8 +29,7 @@ use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
 use crate::runtime::tree as runtime_tree;
 use crate::ProviderToolchain;
 
-use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, resolve_local_plan};
+use super::resolve::resolve_local_plan;
 
 const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
@@ -143,80 +140,26 @@ struct ServiceBackgroundDisplay {
 }
 
 pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
-    let resolution = build_resolution(handle, target_label, None)?;
-    let (manifest_path, plan, launch, mut notes) =
-        resolve_session_launch_plan(handle, target_label)?;
-    notes.extend(resolution.notes.clone());
-    let raw_manifest = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let manifest_value: toml::Value = toml::from_str(&raw_manifest)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    // Env preflight before any subprocess spawn — the same check
-    // `ato run` relies on. Without this, missing required env (e.g.
-    // OPENAI_API_KEY) only surfaces as a process-failure stderr,
-    // which the Desktop orchestrator cannot route to its
-    // PendingConfig modal (it expects an E103 envelope on stderr).
-    // RuntimeLaunchContext::empty() matches what an interactive
-    // session start sees: no IPC bindings, no extra injected env,
-    // so the check falls back to OS env / manifest env entries —
-    // which is what the spawned child will actually receive.
-    let launch_ctx = RuntimeLaunchContext::empty();
-    preflight_required_environment_variables(&plan, &launch_ctx)?;
-
-    // Run the v0.3 provision/build lifecycle (same path `ato run`
-    // takes via `application/pipeline/phases/run.rs`). The Desktop
-    // launches capsules through `ato app session start`, which used
-    // to skip this — so capsules with `[targets.<label>].
-    // build_command` (e.g. a Next.js app declaring `npm install &&
-    // npm run build`) saw their `.next` build never get materialized
-    // and the run_command then failed with `next: command not found`
-    // / `Could not find a production build`. Running the lifecycle
-    // here makes the desktop launch path a strict superset of the
-    // CLI launch path — both materialize node_modules and the
-    // production build before invoking run_command.
+    // Drive the same Hourglass pipeline `ato run` uses, with a
+    // `SessionStartPhaseRunner` that swaps Execute for session-specific
+    // spawn + ProcessManager registration. Install resolves the handle,
+    // Build invokes the materialization layer (so warm starts skip
+    // `next build`), and Execute populates a `SessionInfo` we emit as
+    // the Desktop's session envelope below.
     //
-    // In `--json` mode the caller (Desktop orchestrator) parses the
-    // session envelope from stdout, so anything the lifecycle prints
-    // — both the `reporter.notify` headers ("⚙️  Provision …") and
-    // the inherited subprocess stdout (`pnpm install` progress, the
-    // `next build` route table, etc.) — must NOT land on stdout or
-    // serde_json will choke on the leading non-JSON bytes. Use
-    // `CliReporter::new_run` so reporter output goes to stderr, and
-    // dup fd 1→fd 2 around the lifecycle call so the subprocess's
-    // inherited stdout follows.
-    let lifecycle_reporter = Arc::new(reporters::CliReporter::new_run(false));
-    let stdout_guard = if json {
-        Some(redirect_stdout_to_stderr().context("failed to redirect stdout for lifecycle")?)
-    } else {
-        None
-    };
-    let lifecycle_result = futures::executor::block_on(
-        crate::commands::run::run_v03_lifecycle_steps(&plan, &lifecycle_reporter, &launch_ctx),
-    );
-    if let Some(saved_fd) = stdout_guard {
-        // Restore stdout before propagating any error or printing the
-        // session envelope. We swallow restore failures because losing
-        // stdout entirely would mask the original lifecycle error.
-        let _ = restore_stdout(saved_fd);
-    }
-    lifecycle_result?;
-    let guest = parse_guest_contract(
-        &manifest_value,
-        manifest_path.parent().unwrap_or_else(|| Path::new(".")),
-    );
-    let info = if let Some(guest) = guest {
-        start_guest_session(handle, &resolution, &manifest_path, &plan, guest, notes)?
-    } else {
-        start_runtime_session(
-            handle,
-            &resolution,
-            &manifest_path,
-            &plan,
-            &raw_manifest,
-            &launch,
-            notes,
-        )?
-    };
+    // Prepare / Verify / DryRun are no-op for v0; the runner reports
+    // them as `result_kind=not-applicable` in PHASE-TIMING so the
+    // diagnostic stream stays distinguishable from `ato run`.
+    use crate::application::pipeline::consumer::ConsumerRunPipeline;
+
+    let mut runner =
+        super::session_runner::SessionStartPhaseRunner::new(handle, target_label, json);
+    let pipeline = ConsumerRunPipeline::standard();
+    futures::executor::block_on(pipeline.run(&mut runner))?;
+
+    let info = runner
+        .session_info
+        .ok_or_else(|| anyhow::anyhow!("session start pipeline did not populate session info"))?;
 
     if json {
         println!(
@@ -235,7 +178,7 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     Ok(())
 }
 
-fn start_guest_session(
+pub(super) fn start_guest_session(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
@@ -378,7 +321,7 @@ fn start_guest_session(
     Ok(session_info_from_record(session))
 }
 
-fn start_runtime_session(
+pub(super) fn start_runtime_session(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
@@ -579,7 +522,7 @@ fn session_info_from_record(session: StoredSessionInfo) -> SessionInfo {
     }
 }
 
-fn resolve_session_launch_plan(
+pub(super) fn resolve_session_launch_plan(
     handle: &str,
     target_label: Option<&str>,
 ) -> Result<(
@@ -1024,7 +967,7 @@ fn http_get_ok(port: u16, path: &str) -> bool {
     response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
 }
 
-fn print_session_info(info: &SessionInfo) {
+pub(super) fn print_session_info(info: &SessionInfo) {
     println!("Session: {}", info.session_id);
     println!("Handle: {}", info.handle);
     println!("Display: {}", info.display_strategy.as_str());
@@ -1059,7 +1002,7 @@ fn print_session_info(info: &SessionInfo) {
 /// output — lands on stderr instead of corrupting the session
 /// envelope on stdout.
 #[cfg(unix)]
-fn redirect_stdout_to_stderr() -> Result<i32> {
+pub(super) fn redirect_stdout_to_stderr() -> Result<i32> {
     // SAFETY: dup/dup2 on standard FDs; failure paths return an
     // error and we never hold the saved FD past `restore_stdout`.
     unsafe {
@@ -1081,7 +1024,7 @@ fn redirect_stdout_to_stderr() -> Result<i32> {
 }
 
 #[cfg(unix)]
-fn restore_stdout(saved: i32) -> Result<()> {
+pub(super) fn restore_stdout(saved: i32) -> Result<()> {
     // SAFETY: `saved` was returned from a successful `dup` in
     // `redirect_stdout_to_stderr`; it is a valid FD that we own.
     unsafe {
@@ -1099,7 +1042,7 @@ fn restore_stdout(saved: i32) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn redirect_stdout_to_stderr() -> Result<i32> {
+pub(super) fn redirect_stdout_to_stderr() -> Result<i32> {
     // Windows path: skip the FD redirect for now. The desktop is
     // currently macOS/Linux only, so this only matters for `ato app
     // session start --json` invoked manually on Windows. The
@@ -1110,7 +1053,7 @@ fn redirect_stdout_to_stderr() -> Result<i32> {
 }
 
 #[cfg(not(unix))]
-fn restore_stdout(_saved: i32) -> Result<()> {
+pub(super) fn restore_stdout(_saved: i32) -> Result<()> {
     Ok(())
 }
 
