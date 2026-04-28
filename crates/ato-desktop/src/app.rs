@@ -73,6 +73,17 @@ pub struct NavigateToUrl {
     pub url: String,
 }
 
+/// Hand a URL to the OS so it opens in the user's default browser
+/// (or whatever app is registered for the scheme). Used by the
+/// route-metadata popover to make local_url / healthcheck_url /
+/// invoke_url click-through to the same dev server the WebView is
+/// rendering, but in a real browser for inspection / DevTools.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct OpenExternalLink {
+    pub url: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
 pub struct SelectTask {
