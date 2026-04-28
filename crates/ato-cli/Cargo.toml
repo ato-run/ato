@@ -1,6 +1,6 @@
 [package]
 name = "ato-cli"
-version = "0.4.96"
+version = "0.4.97"
 edition = "2021"
 description = "ato CLI (meta-runtime)"
 authors = ["ato-run"]
