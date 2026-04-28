@@ -84,6 +84,18 @@ pub struct OpenExternalLink {
     pub url: String,
 }
 
+/// Trigger the active pane to navigate to a registry handle pinned to a
+/// newer version (e.g. `capsule://ato.run/foo/bar@1.2.3`). Dispatched by
+/// the Install-update button in the route-metadata popover. The desktop
+/// reuses the existing NavigateToUrl flow, so there's no extra install
+/// plumbing — `ato app session start` lazily fetches & installs whatever
+/// version isn't cached yet.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct InstallCapsuleUpdate {
+    pub url: String,
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
 pub struct SelectTask {
