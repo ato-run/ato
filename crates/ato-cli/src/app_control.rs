@@ -29,6 +29,15 @@ pub use latest::fetch_latest;
 pub use resolve::resolve_handle;
 pub use session::{start_session, stop_session};
 
+// App Session Materialization (RFC: APP_SESSION_MATERIALIZATION) consumes a
+// few in-module helpers from session. Re-exported as pub(crate) so the
+// materialization layer can share storage / probe primitives without
+// flipping the entire `session` module to public.
+pub(crate) use session::{
+    http_get_ok, session_root, GuestSessionDisplay, ServiceBackgroundDisplay, StoredSessionInfo,
+    TerminalSessionDisplay, WebSessionDisplay,
+};
+
 /// Canonical package identifier for the ato-desktop control-plane envelope.
 /// Renamed from the legacy `DESKY_PACKAGE_ID` (= "ato/desky") in line with the
 /// brand-wide rename to `ato-desktop`. The wire `package_id` field is

@@ -26,8 +26,11 @@ use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::router::ManifestData;
 
 use crate::application::build_materialization as bm;
+use crate::application::launch_materialization as lm;
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
-use crate::application::pipeline::executor::{HourglassPhaseRunner, PhaseAnnotation};
+use crate::application::pipeline::executor::{
+    HourglassPhaseRunner, PhaseAnnotation, PhaseStageTimer,
+};
 use crate::application::pipeline::hourglass::HourglassPhase;
 use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::executors::target_runner::preflight_required_environment_variables;
@@ -58,6 +61,16 @@ pub(super) struct SessionStartPhaseRunner<'a> {
     build_observation: Option<bm::BuildObservation>,
     build_decision_kind: Option<bm::BuildResultKind>,
 
+    // Set by Execute phase (App Session Materialization).
+    /// `true` when Execute returned an envelope by reusing an existing
+    /// ready session (no spawn). Drives `result_kind=materialized-session`
+    /// in `phase_annotation`.
+    execute_reused: bool,
+    /// Reason the existing record was rejected, if Execute fell through to
+    /// spawn after observing a stale candidate. Surfaced as the
+    /// `prior_kind` extra on PHASE-TIMING.
+    execute_prior_kind: Option<lm::PriorKind>,
+
     // Set by Execute phase. Read by `start_session` after `pipeline.run`.
     pub(super) session_info: Option<SessionInfo>,
 }
@@ -77,6 +90,8 @@ impl<'a> SessionStartPhaseRunner<'a> {
             launch_ctx: RuntimeLaunchContext::empty(),
             build_observation: None,
             build_decision_kind: None,
+            execute_reused: false,
+            execute_prior_kind: None,
             session_info: None,
         }
     }
@@ -175,6 +190,62 @@ impl<'a> SessionStartPhaseRunner<'a> {
             .as_ref()
             .expect("install populates raw_manifest");
 
+        // App Session Materialization (RFC v0.2 §5.1):
+        //
+        //   acquire lock(launch_key)        ──┐
+        //   lookup + 5-condition validate    │  held across the entire body
+        //   ↳ Reuse: return existing envelope│  so a concurrent caller observes
+        //   ↳ Spawn: start fresh, persist v2 │  the freshly-written record on
+        //                                     │  unlock instead of duplicating.
+        //   release lock                    ──┘
+        //
+        // Lock failures are non-fatal for v0: if we cannot acquire the
+        // file lock (permission, exotic FS, etc.) we proceed without it.
+        // The reuse path still functions — it just falls back to "no race
+        // protection," which is no worse than the pre-RFC behavior.
+        let launch_spec = lm::canonicalize_launch_spec(
+            self.handle,
+            self.target_label.unwrap_or_else(|| plan.selected_target_label()),
+            plan,
+            launch,
+            manifest_path,
+        )?;
+        let launch_digest = lm::compute_launch_digest(&launch_spec);
+        let launch_key = lm::compute_launch_key(&launch_spec);
+        let _lock = lm::acquire_launch_lock(&launch_key).ok();
+
+        // 1. Lookup + validate.
+        let lookup_timer = PhaseStageTimer::start(HourglassPhase::Execute, "session_lookup");
+        let decision = lm::prepare_reuse_decision(&launch_spec, &launch_digest);
+        lookup_timer.finish_ok();
+
+        match decision {
+            Ok(lm::ReuseDecision::Reuse { record }) => {
+                let validate_timer =
+                    PhaseStageTimer::start(HourglassPhase::Execute, "session_validate");
+                // The 5-condition check ran inside prepare_reuse_decision;
+                // the timer here just bookmarks the validate boundary so
+                // PHASE-TIMING shows the same shape regardless of hit/miss.
+                validate_timer.finish_ok();
+
+                self.execute_reused = true;
+                self.session_info = Some(super::session::session_info_from_stored(*record));
+                return Ok(());
+            }
+            Ok(lm::ReuseDecision::Spawn { prior_kind }) => {
+                self.execute_prior_kind = prior_kind;
+            }
+            Err(err) => {
+                // Lookup failure (e.g. session_root unreadable) — fall
+                // through to spawn. The reuse miss is itself diagnostic
+                // signal; surface it as `prior_kind=stale-session` is
+                // misleading, so we leave prior_kind unset and let the
+                // user inspect logs.
+                eprintln!("ATO-WARN session reuse lookup failed: {}", err);
+            }
+        }
+
+        // 2. Spawn fresh session.
         let manifest_value: toml::Value = toml::from_str(raw_manifest)
             .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
         let guest = parse_guest_contract(
@@ -204,6 +275,16 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 self.notes.clone(),
             )?
         };
+
+        // 3. Enrich the freshly-written record with schema=2 fields. Best-
+        // effort: failures here only weaken future reuse, not the current
+        // launch.
+        let pid = info.pid() as u32;
+        let process_start_time = lm::process_start_time_unix_ms(pid);
+        if let Err(err) = lm::persist_after_spawn(pid, &launch_digest, process_start_time) {
+            eprintln!("ATO-WARN failed to enrich session record with reuse metadata: {}", err);
+        }
+
         self.session_info = Some(info);
         Ok(())
     }
@@ -249,6 +330,22 @@ impl HourglassPhaseRunner for SessionStartPhaseRunner<'_> {
             // distinguishes them from real executions and matches RFC §6.1.
             HourglassPhase::Prepare | HourglassPhase::Verify | HourglassPhase::DryRun => {
                 Some(PhaseAnnotation::with_result_kind("not-applicable"))
+            }
+            HourglassPhase::Execute => {
+                let mut annotation = PhaseAnnotation::with_result_kind(if self.execute_reused {
+                    "materialized-session"
+                } else {
+                    "executed"
+                });
+                if let Some(prior) = self.execute_prior_kind {
+                    // prior_kind is meaningful only on miss → spawn paths;
+                    // omit it on reuse hits since there is no rejected
+                    // candidate to attribute.
+                    if !self.execute_reused {
+                        annotation.add_extra("prior_kind", prior.as_str());
+                    }
+                }
+                Some(annotation)
             }
             _ => Some(PhaseAnnotation::with_result_kind("executed")),
         }
