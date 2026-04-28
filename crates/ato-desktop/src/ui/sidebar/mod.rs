@@ -264,6 +264,11 @@ fn render_nav_item(
 
     let item = div()
         .id(("task-tab", task_id))
+        // Group lets the close-button child react to the rail item's
+        // hover state (canonical gpui-component pattern, see
+        // notification.rs). The empty group name matches the close
+        // button's group_hover() call below.
+        .group("")
         .w(px(NAV_ITEM_SIZE))
         .h(px(NAV_ITEM_SIZE))
         .rounded(px(6.0))
@@ -332,6 +337,10 @@ fn render_nav_item(
 fn render_close_button(task_id: usize, theme: &Theme) -> Stateful<Div> {
     div()
         .id(("task-close", task_id))
+        // Hidden by default, revealed only while the parent rail
+        // item is hovered. Kept clickable when visible.
+        .invisible()
+        .group_hover("", |this| this.visible())
         .absolute()
         .top(px(-4.0))
         .right(px(-4.0))
