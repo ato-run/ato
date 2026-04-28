@@ -269,6 +269,18 @@ fn render_field_row(
         }
     }
 
+    // The Input widget inherits its text color from `gpui_component`'s
+    // independent theme global, not from our `Theme`. In dark/auto
+    // appearance the inherited foreground can land near-white on our
+    // light panel background — making the value invisible. Pin colors
+    // to our theme so the field is always legible regardless of how
+    // gpui_component's appearance is currently configured.
+    let style_input = |i: Input| {
+        i.h(px(32.0))
+            .text_size(px(13.0))
+            .text_color(theme.text_primary)
+            .bg(theme.settings_body_bg)
+    };
     let input_box = match input {
         Some(entity) => match &field.kind {
             ConfigKind::Enum { choices } => {
@@ -288,10 +300,10 @@ fn render_field_row(
                             .text_color(theme.text_tertiary)
                             .child(hint),
                     )
-                    .child(Input::new(entity).h(px(32.0)))
+                    .child(style_input(Input::new(entity)))
                     .into_any_element()
             }
-            _ => Input::new(entity).h(px(32.0)).into_any_element(),
+            _ => style_input(Input::new(entity)).into_any_element(),
         },
         None => div()
             .h(px(32.0))
