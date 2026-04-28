@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName};
 
-use super::theme::Theme;
+use super::theme::{task_hue, Theme};
 use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
 
 /// Drag-and-drop payload for reordering sidebar task tabs. The drop
@@ -51,14 +51,14 @@ pub(super) struct GhostIconColors {
 impl GhostIcon {
     fn from_spec(
         spec: &SidebarTaskIconSpec,
-        index: usize,
+        seed: u64,
         favicon_cache: &HashMap<String, FaviconState>,
         theme: &Theme,
     ) -> Self {
         let kind = match spec {
             SidebarTaskIconSpec::Monogram(label) => GhostIconKind::Monogram {
                 label: label.clone(),
-                hue: workspace_hue(index),
+                hue: task_hue(seed),
             },
             SidebarTaskIconSpec::ExternalUrl { origin } => match favicon_cache.get(origin) {
                 Some(FaviconState::Ready(image)) => GhostIconKind::Favicon(image.clone()),
@@ -101,11 +101,10 @@ impl gpui::Render for DraggedTaskTab {
 fn render_ghost_icon(ghost: &GhostIcon) -> Div {
     match &ghost.kind {
         GhostIconKind::Monogram { label, hue } => {
-            // Inactive monogram colors — same gradient logic as
-            // render_monogram_icon, just inlined so we do not need to
-            // pass &Theme through the Render impl.
-            let saturation = 0.50;
-            let lightness = 0.42;
+            // Mirror render_monogram_icon's fixed saturation/lightness
+            // so the drag preview matches the rail icon exactly.
+            let saturation = 0.55;
+            let lightness = 0.50;
             div()
                 .w(px(APP_ICON_SIZE))
                 .h(px(APP_ICON_SIZE))
@@ -168,8 +167,8 @@ fn render_ghost_icon(ghost: &GhostIcon) -> Div {
                 SystemPageIcon::Inspector => ("i", 45.0),
                 SystemPageIcon::CapsuleStatus => ("⊙", 0.0),
             };
-            let saturation = 0.40_f32;
-            let lightness = 0.38_f32;
+            let saturation = 0.55_f32;
+            let lightness = 0.50_f32;
             div()
                 .w(px(APP_ICON_SIZE))
                 .h(px(APP_ICON_SIZE))
@@ -280,7 +279,7 @@ fn render_nav_item(
             DraggedTaskTab {
                 task_id: drag_id.0,
                 from_index: drag_id.1,
-                ghost: GhostIcon::from_spec(&task.icon, index, favicon_cache, theme),
+                ghost: GhostIcon::from_spec(&task.icon, task_id as u64, favicon_cache, theme),
             },
             |dragged, _offset, _window, cx| {
                 // Stop propagation so the parent on_mouse_down does
@@ -323,8 +322,7 @@ fn render_nav_item(
 
     item.child(render_app_icon(
         task.icon,
-        index,
-        task.is_active,
+        task_id as u64,
         favicon_cache,
         theme,
     ))
@@ -361,28 +359,31 @@ fn render_close_button(task_id: usize, theme: &Theme) -> Stateful<Div> {
 
 fn render_app_icon(
     icon: SidebarTaskIconSpec,
-    hue_index: usize,
-    active: bool,
+    seed: u64,
     favicon_cache: &HashMap<String, FaviconState>,
     theme: &Theme,
 ) -> Div {
     match icon {
         SidebarTaskIconSpec::Monogram(label) => {
-            render_monogram_icon(&label, workspace_hue(hue_index), active, theme)
+            render_monogram_icon(&label, task_hue(seed), theme)
         }
         SidebarTaskIconSpec::ExternalUrl { origin } => match favicon_cache.get(&origin) {
-            Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), active, theme),
+            Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
             Some(FaviconState::Loading) | Some(FaviconState::Failed) | None => {
-                render_globe_icon(active, theme)
+                render_globe_icon(theme)
             }
         },
-        SidebarTaskIconSpec::SystemIcon(page_type) => render_system_icon(page_type, active, theme),
+        SidebarTaskIconSpec::SystemIcon(page_type) => render_system_icon(page_type, theme),
     }
 }
 
-fn render_monogram_icon(label: &str, hue: f32, active: bool, theme: &Theme) -> Div {
-    let saturation = if active { 0.65 } else { 0.50 };
-    let lightness = if active { 0.55 } else { 0.42 };
+fn render_monogram_icon(label: &str, hue: f32, theme: &Theme) -> Div {
+    // Active/inactive selection is communicated by the surrounding chip
+    // (accent_subtle backdrop + accent rail bar) — the icon itself stays
+    // identical so the same task reads as the same color across the
+    // sidebar, drag preview, and any other surface.
+    let saturation = 0.55_f32;
+    let lightness = 0.50_f32;
     let border_color = theme.border_default;
 
     div()
@@ -419,12 +420,8 @@ fn render_monogram_icon(label: &str, hue: f32, active: bool, theme: &Theme) -> D
         .child(label.to_string())
 }
 
-fn render_favicon_icon(image: Arc<Image>, active: bool, theme: &Theme) -> Div {
-    let bg = if active {
-        theme.accent_subtle
-    } else {
-        theme.surface_hover
-    };
+fn render_favicon_icon(image: Arc<Image>, theme: &Theme) -> Div {
+    let bg = theme.surface_hover;
     let border_color = theme.border_default;
 
     div()
@@ -441,18 +438,10 @@ fn render_favicon_icon(image: Arc<Image>, active: bool, theme: &Theme) -> Div {
         .child(img(image).size_full())
 }
 
-fn render_globe_icon(active: bool, theme: &Theme) -> Div {
-    let bg = if active {
-        theme.accent_subtle
-    } else {
-        theme.surface_hover
-    };
+fn render_globe_icon(theme: &Theme) -> Div {
+    let bg = theme.surface_hover;
     let border_color = theme.border_default;
-    let text_color = if active {
-        theme.accent
-    } else {
-        theme.text_tertiary
-    };
+    let text_color = theme.text_tertiary;
 
     div()
         .w(px(APP_ICON_SIZE))
@@ -470,7 +459,9 @@ fn render_globe_icon(active: bool, theme: &Theme) -> Div {
         .child("◎")
 }
 
-fn render_system_icon(page_type: SystemPageIcon, active: bool, theme: &Theme) -> Div {
+fn render_system_icon(page_type: SystemPageIcon, theme: &Theme) -> Div {
+    // Hue is per-role (Terminal=green, Console=purple, …) rather than
+    // per-identity, so these icons read the same regardless of state.
     let (label, hue) = match page_type {
         SystemPageIcon::Console => (">_", 270.0),    // purple
         SystemPageIcon::Terminal => ("$", 160.0),    // green
@@ -479,14 +470,9 @@ fn render_system_icon(page_type: SystemPageIcon, active: bool, theme: &Theme) ->
         SystemPageIcon::CapsuleStatus => ("⊙", 0.0), // red
     };
 
-    let saturation = if active { 0.55 } else { 0.40 };
-    let lightness = if active { 0.50 } else { 0.38 };
-    let bg = gpui::hsla(
-        hue / 360.0,
-        saturation,
-        lightness,
-        if active { 0.25 } else { 0.15 },
-    );
+    let saturation = 0.55_f32;
+    let lightness = 0.50_f32;
+    let bg = gpui::hsla(hue / 360.0, saturation, lightness, 0.20);
     let text_color = gpui::hsla(hue / 360.0, saturation + 0.1, lightness + 0.2, 1.0);
     let border_color = theme.border_default;
 
@@ -622,11 +608,6 @@ fn render_new_tab_button(theme: &Theme) -> Div {
                 .text_color(icon_color)
                 .child(Icon::new(IconName::Plus).size(px(16.0)).into_any_element()),
         )
-}
-
-fn workspace_hue(index: usize) -> f32 {
-    const HUES: &[f32] = &[217.0, 270.0, 160.0, 45.0, 0.0, 25.0];
-    HUES[index % HUES.len()]
 }
 
 #[cfg(test)]
