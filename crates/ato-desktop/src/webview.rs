@@ -1154,6 +1154,12 @@ impl WebViewManager {
                                     ) {
                                         state.pane_icons.insert(active.pane_id, icon);
                                     }
+                                    // Mirror session metadata onto the WebPane so the
+                                    // route-info popover (and inspector) can show the
+                                    // dev-server URL, log path, runtime label, etc.
+                                    // Without this the launched_session lives only on
+                                    // ManagedWebView and the popover renders mostly empty.
+                                    apply_launch_session_metadata(state, active.pane_id, session);
                                 }
                                 self.views.insert(active.pane_id, webview);
                             }
@@ -1840,6 +1846,45 @@ impl Drop for WebViewManager {
             drop(pending.receiver);
         }
     }
+}
+
+/// Copy the bits of `CapsuleLaunchSession` that the route-info
+/// popover reads (URLs, runtime + display strategy labels, paths)
+/// onto the active WebPane. Keeping the launched_session as the
+/// source of truth and just mirroring it avoids reshaping the
+/// WebViewManager's lifecycle, while still letting the read-only
+/// surfaces (popover, inspector) render the running dev-server URL.
+fn apply_launch_session_metadata(
+    state: &mut AppState,
+    pane_id: usize,
+    session: &GuestLaunchSession,
+) {
+    let runtime_label = if !session.runtime.target_label.is_empty() {
+        Some(session.runtime.target_label.clone())
+    } else {
+        session.runtime.runtime.clone()
+    };
+    state.update_capsule_route_metadata(
+        pane_id,
+        session.canonical_handle.clone(),
+        session.source.clone(),
+        Some(session.trust_state.clone()),
+        session.restricted,
+        session.snapshot_label.clone(),
+        Some(session.session_id.clone()),
+        session.adapter.clone(),
+        Some(session.manifest_path.display().to_string()),
+        runtime_label,
+        Some(session.display_strategy.as_str().to_string()),
+        session
+            .log_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        session.local_url.clone(),
+        session.healthcheck_url.clone(),
+        session.invoke_url.clone(),
+        session.served_by.clone(),
+    );
 }
 
 /// Read `[metadata].icon` from a capsule manifest and resolve it to
