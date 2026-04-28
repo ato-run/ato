@@ -160,7 +160,26 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     // session start sees: no IPC bindings, no extra injected env,
     // so the check falls back to OS env / manifest env entries —
     // which is what the spawned child will actually receive.
-    preflight_required_environment_variables(&plan, &RuntimeLaunchContext::empty())?;
+    let launch_ctx = RuntimeLaunchContext::empty();
+    preflight_required_environment_variables(&plan, &launch_ctx)?;
+
+    // Run the v0.3 provision/build lifecycle (same path `ato run`
+    // takes via `application/pipeline/phases/run.rs`). The Desktop
+    // launches capsules through `ato app session start`, which used
+    // to skip this — so capsules with `[targets.<label>].
+    // build_command` (e.g. a Next.js app declaring `npm install &&
+    // npm run build`) saw their `.next` build never get materialized
+    // and the run_command then failed with `next: command not found`
+    // / `Could not find a production build`. Running the lifecycle
+    // here makes the desktop launch path a strict superset of the
+    // CLI launch path — both materialize node_modules and the
+    // production build before invoking run_command.
+    let lifecycle_reporter = Arc::new(reporters::CliReporter::new(false));
+    futures::executor::block_on(crate::commands::run::run_v03_lifecycle_steps(
+        &plan,
+        &lifecycle_reporter,
+        &launch_ctx,
+    ))?;
     let guest = parse_guest_contract(
         &manifest_value,
         manifest_path.parent().unwrap_or_else(|| Path::new(".")),
