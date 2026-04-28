@@ -7,9 +7,12 @@
 //! pane bounds) are intentionally NOT persisted; the orchestrator
 //! re-launches sessions on demand the way it does for a fresh tab.
 //!
-//! Tabs with no clean restore representation (Launcher, Terminal,
-//! Inspector, AuthHandoff, capsule:// routes, ato://cli) are skipped
-//! so we never resurrect an inconsistent half-state.
+//! Tabs with no clean restore representation (Launcher host panel,
+//! Terminal, Inspector, AuthHandoff, capsule:// routes, ato://cli)
+//! are skipped so we never resurrect an inconsistent half-state.
+//! `HostPanelRoute::Settings` is the one host-owned panel we do
+//! restore because it is process-local, deterministic, and does not
+//! depend on any live session metadata.
 //!
 //! Schema is versioned (`version: u32`); a mismatch falls back to
 //! `AppState::initial()` and the file is overwritten on the next save.
@@ -22,8 +25,8 @@ use tracing::{debug, warn};
 use url::Url;
 
 use super::{
-    AppState, CapabilityGrant, GuestRoute, Pane, PaneBounds, PaneRole, PaneSurface, PaneTree,
-    TaskSet, WebPane, WebSessionState, Workspace,
+    AppState, CapabilityGrant, GuestRoute, HostPanelRoute, Pane, PaneBounds, PaneRole, PaneSurface,
+    PaneTree, SettingsTab, TaskSet, WebPane, WebSessionState, Workspace,
 };
 
 const PERSIST_FILE_NAME: &str = "desktop-tabs.json";
@@ -57,6 +60,9 @@ enum PersistedRoute {
     ExternalUrl {
         url: String,
     },
+    HostPanelSettings {
+        section: Option<SettingsTab>,
+    },
     CapsuleHandle {
         handle: String,
         label: String,
@@ -89,9 +95,19 @@ impl PersistedRoute {
         }
     }
 
+    fn from_host_panel(route: &HostPanelRoute) -> Option<Self> {
+        match route {
+            HostPanelRoute::Settings { section } => {
+                Some(Self::HostPanelSettings { section: *section })
+            }
+            HostPanelRoute::Launcher | HostPanelRoute::CapsuleDetail { .. } => None,
+        }
+    }
+
     fn into_route(self) -> Option<GuestRoute> {
         match self {
             Self::ExternalUrl { url } => Url::parse(&url).ok().map(GuestRoute::ExternalUrl),
+            Self::HostPanelSettings { .. } => None,
             Self::CapsuleHandle { handle, label } => {
                 Some(GuestRoute::CapsuleHandle { handle, label })
             }
@@ -125,6 +141,7 @@ fn snapshot_state(state: &AppState) -> PersistedShell {
                     let primary = task.panes.iter().find(|p| p.role == PaneRole::Primary)?;
                     let route = match &primary.surface {
                         PaneSurface::Web(web) => PersistedRoute::from_route(&web.route)?,
+                        PaneSurface::HostPanel(route) => PersistedRoute::from_host_panel(route)?,
                         PaneSurface::CapsuleStatus(status) => {
                             PersistedRoute::from_route(&status.route)?
                         }
@@ -216,50 +233,29 @@ fn rebuild_state(shell: PersistedShell) -> AppState {
                 .tasks
                 .into_iter()
                 .filter_map(|task| {
-                    let route = task.route.into_route()?;
                     let pane_id = next_pane_id;
                     next_pane_id += 1;
                     let task_id = next_task_id;
                     next_task_id += 1;
+                    let (title, surface, route_candidates, preview) =
+                        build_restored_surface(task.title, task.route, pane_id)?;
                     Some(TaskSet {
                         id: task_id,
-                        title: task.title,
+                        title,
                         focused_pane: pane_id,
                         pane_tree: PaneTree::Leaf(pane_id),
                         panes: vec![Pane {
                             id: pane_id,
-                            title: route.to_string(),
+                            title: restored_pane_title(&surface),
                             role: PaneRole::Primary,
                             visible: true,
                             bounds: PaneBounds::empty(),
-                            surface: PaneSurface::Web(WebPane {
-                                route: route.clone(),
-                                partition_id: derive_partition_id(&route),
-                                session: WebSessionState::Launching,
-                                capabilities: vec![CapabilityGrant::OpenExternal],
-                                profile: "electron".to_string(),
-                                source_label: Some("web".to_string()),
-                                trust_state: None,
-                                restricted: false,
-                                snapshot_label: None,
-                                canonical_handle: None,
-                                session_id: None,
-                                adapter: None,
-                                manifest_path: None,
-                                runtime_label: None,
-                                display_strategy: None,
-                                log_path: None,
-                                local_url: None,
-                                healthcheck_url: None,
-                                invoke_url: None,
-                                served_by: None,
-                                auth_flow: false,
-                            }),
+                            surface,
                         }],
                         split_ratio: 0.68,
-                        route_candidates: vec![route],
+                        route_candidates,
                         route_index: 0,
-                        preview: String::new(),
+                        preview,
                     })
                 })
                 .collect();
@@ -312,5 +308,125 @@ fn derive_partition_id(route: &GuestRoute) -> String {
             handle.replace('/', "_")
         }
         _ => "default".to_string(),
+    }
+}
+
+fn build_restored_surface(
+    title: String,
+    route: PersistedRoute,
+    _pane_id: usize,
+) -> Option<(String, PaneSurface, Vec<GuestRoute>, String)> {
+    match route {
+        PersistedRoute::HostPanelSettings { section } => {
+            let route = HostPanelRoute::Settings { section };
+            let label = route.label();
+            Some((
+                label.clone(),
+                PaneSurface::HostPanel(route),
+                Vec::new(),
+                label,
+            ))
+        }
+        other => {
+            let route = other.into_route()?;
+            Some((
+                title,
+                PaneSurface::Web(WebPane {
+                    route: route.clone(),
+                    partition_id: derive_partition_id(&route),
+                    session: WebSessionState::Launching,
+                    capabilities: vec![CapabilityGrant::OpenExternal],
+                    profile: "electron".to_string(),
+                    source_label: Some("web".to_string()),
+                    trust_state: None,
+                    restricted: false,
+                    snapshot_label: None,
+                    canonical_handle: None,
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
+                    runtime_label: None,
+                    display_strategy: None,
+                    log_path: None,
+                    local_url: None,
+                    healthcheck_url: None,
+                    invoke_url: None,
+                    served_by: None,
+                    auth_flow: false,
+                }),
+                vec![route],
+                String::new(),
+            ))
+        }
+    }
+}
+
+fn restored_pane_title(surface: &PaneSurface) -> String {
+    match surface {
+        PaneSurface::Web(web) => web.route.to_string(),
+        PaneSurface::HostPanel(route) => route.label(),
+        _ => "Pane".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::SettingsTab;
+
+    #[test]
+    fn snapshot_state_persists_settings_host_panel_tasks() {
+        let mut state = AppState::demo();
+        state.set_settings_tab(SettingsTab::Developer);
+        state.open_settings_task();
+
+        let snapshot = snapshot_state(&state);
+
+        let task = snapshot
+            .workspaces
+            .first()
+            .and_then(|workspace| {
+                workspace
+                    .tasks
+                    .iter()
+                    .find(|task| task.title.contains("Settings"))
+            })
+            .expect("settings task");
+        assert!(matches!(
+            task.route,
+            PersistedRoute::HostPanelSettings {
+                section: Some(SettingsTab::Developer)
+            }
+        ));
+    }
+
+    #[test]
+    fn rebuild_state_restores_settings_host_panel_tasks() {
+        let shell = PersistedShell {
+            version: SCHEMA_VERSION,
+            active_workspace: 1,
+            workspaces: vec![PersistedWorkspace {
+                id: 1,
+                title: "Ato".to_string(),
+                active_task: 1,
+                tasks: vec![PersistedTask {
+                    title: "Settings".to_string(),
+                    route: PersistedRoute::HostPanelSettings {
+                        section: Some(SettingsTab::Runtime),
+                    },
+                }],
+            }],
+        };
+
+        let state = rebuild_state(shell);
+        let task = state.active_task().expect("task");
+
+        assert_eq!(task.title, "Settings · Runtime");
+        assert!(task.panes.iter().any(|pane| matches!(
+            pane.surface,
+            PaneSurface::HostPanel(HostPanelRoute::Settings {
+                section: Some(SettingsTab::Runtime)
+            })
+        )));
     }
 }
