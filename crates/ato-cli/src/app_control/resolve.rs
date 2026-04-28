@@ -292,7 +292,7 @@ pub(super) fn resolve_local_plan(
             )
             .with_context(|| {
                 format!(
-                    "failed to build experimental Desky execution descriptor at {}",
+                    "failed to build experimental ato-desktop execution descriptor at {}",
                     manifest_path.display()
                 )
             })?;
@@ -301,7 +301,7 @@ pub(super) fn resolve_local_plan(
                 plan,
                 guest,
                 vec![format!(
-                    "Used experimental Desky guest-driver fallback for driver='{driver}'. Core manifest validation does not admit guest drivers yet."
+                    "Used experimental ato-desktop guest-driver fallback for driver='{driver}'. Core manifest validation does not admit guest drivers yet."
                 )],
             ))
         }
