@@ -15,7 +15,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     div, hsla, linear_color_stop, linear_gradient, point, px, AnyElement, AsyncWindowContext,
-    BoxShadow, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
+    BoxShadow, Context, Div, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
     ImageFormat, IntoElement, MouseButton, Render, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
@@ -33,13 +33,14 @@ use crate::app::{
     NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
     OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
     OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
-    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, ToggleAutoDevtools,
-    ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
+    SelectRouteMetadataTab, SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit,
+    SignInToAtoRun, SignOut, SplitPane, ToggleAutoDevtools, ToggleDevConsole,
+    ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
-    ActivityTone, AppState, AuthSessionStatus, PaneBounds, PaneId, PaneSurface, ShellMode,
-    SidebarTaskIconSpec,
+    ActivityTone, AppState, AuthSessionStatus, CapsuleDetailTab, PaneBounds, PaneId, PaneSurface,
+    ShellMode, SidebarTaskIconSpec,
 };
 use crate::terminal::TerminalSessionManager;
 use crate::webview::WebViewManager;
@@ -626,9 +627,23 @@ impl DesktopShell {
     }
 
     fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.show_settings_panel();
+        self.state.settings_panel_open = false;
+        self.state.open_settings_task();
+        crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, true);
         self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    fn on_select_settings_tab(
+        &mut self,
+        action: &SelectSettingsTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.set_settings_tab(action.tab);
+        crate::state::persistence::save_tabs(&self.state);
+        self.sync_omnibar_with_state(window, cx, false);
         cx.notify();
     }
 
@@ -788,6 +803,16 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         self.state.toggle_route_metadata_popover();
+        cx.notify();
+    }
+
+    fn on_select_route_metadata_tab(
+        &mut self,
+        action: &SelectRouteMetadataTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.set_route_metadata_tab(action.tab);
         cx.notify();
     }
 
@@ -1379,6 +1404,28 @@ impl Render for DesktopShell {
             || self.state.settings_panel_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
+        let route_metadata_overlay_route = if self.state.route_metadata_popover_open {
+            self.state
+                .active_capsule_detail_host_panel_route()
+                .map(|route| route.url())
+        } else {
+            None
+        };
+        let route_metadata_overlay_bounds = route_metadata_overlay_route
+            .as_ref()
+            .map(|_| route_metadata_overlay_webview_bounds(stage_bounds));
+        let route_metadata_overlay_payload = if self.state.route_metadata_popover_open {
+            crate::webview::overlay_host_panel_payload(&self.state)
+        } else {
+            None
+        };
+        self.webviews.sync_overlay_host_panel(
+            window,
+            route_metadata_overlay_route,
+            route_metadata_overlay_bounds,
+            route_metadata_overlay_payload,
+            &mut self.state,
+        );
         let theme = Theme::from_mode(self.state.theme_mode);
 
         let body = div()
@@ -1439,6 +1486,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_toggle_auto_devtools))
             .on_action(cx.listener(Self::on_focus_command_bar))
             .on_action(cx.listener(Self::on_show_settings))
+            .on_action(cx.listener(Self::on_select_settings_tab))
+            .on_action(cx.listener(Self::on_select_route_metadata_tab))
             .on_action(cx.listener(Self::on_toggle_dev_console))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_select_task))
@@ -1805,6 +1854,19 @@ fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBound
     }
 }
 
+fn inset_bounds(bounds: PaneBounds, inset: f32) -> PaneBounds {
+    PaneBounds {
+        x: bounds.x + inset,
+        y: bounds.y + inset,
+        width: (bounds.width - inset * 2.0).max(1.0),
+        height: (bounds.height - inset * 2.0).max(1.0),
+    }
+}
+
+fn route_metadata_overlay_webview_bounds(stage_bounds: PaneBounds) -> PaneBounds {
+    inset_bounds(stage_bounds, 22.0)
+}
+
 fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement {
     // 2px strip flush against the chrome's bottom border. Filled
     // section uses theme.accent; track uses surface_hover so the
@@ -1905,9 +1967,14 @@ fn render_capsule_update_section(
 }
 
 fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement {
+    if let Some(route) = state.active_capsule_detail_host_panel_route() {
+        return render_route_metadata_host_panel_overlay(&route, theme).into_any_element();
+    }
+
+    let active_web = state.active_web_pane();
     let active = state.active_capsule_pane().or_else(|| {
-        state
-            .active_web_pane()
+        active_web
+            .clone()
             .map(|pane| crate::state::ActiveCapsulePane {
                 pane_id: pane.pane_id,
                 title: pane.title,
@@ -1933,73 +2000,38 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
     let Some(active) = active else {
         return div().into_any_element();
     };
+
     let pane_id = active.pane_id;
-
-    let session_label = match active.session {
-        crate::state::WebSessionState::Detached => "detached",
-        crate::state::WebSessionState::Resolving => "resolving",
-        crate::state::WebSessionState::Materializing => "materializing",
-        crate::state::WebSessionState::Launching => "launching",
-        crate::state::WebSessionState::Mounted => "mounted",
-        crate::state::WebSessionState::Closed => "closed",
-        crate::state::WebSessionState::LaunchFailed => "launch failed",
-    };
-
     let route_label = active.route.to_string();
-    let title = active.title.clone();
-
-    let mut rows: Vec<(&'static str, String)> = vec![("session", session_label.to_string())];
-    if let Some(v) = active.source_label {
-        rows.push(("source", v));
-    }
-    if let Some(v) = active.runtime_label {
-        rows.push(("runtime", v));
-    }
-    if let Some(v) = active.display_strategy {
-        rows.push(("display", v));
-    }
-    if let Some(v) = active.adapter {
-        rows.push(("adapter", v));
-    }
-    if let Some(v) = active.trust_state {
-        rows.push(("trust", v));
-    }
-    if active.restricted {
-        rows.push(("restricted", "yes".to_string()));
-    }
-    if let Some(v) = active.snapshot_label {
-        rows.push(("snapshot", v));
-    }
-    if let Some(v) = active.canonical_handle {
-        rows.push(("handle", v));
-    }
-    if let Some(v) = active.session_id {
-        rows.push(("session_id", v));
-    }
-    if let Some(v) = active.served_by {
-        rows.push(("served_by", v));
-    }
-    if let Some(v) = active.local_url {
-        rows.push(("local_url", v));
-    }
-    if let Some(v) = active.invoke_url {
-        rows.push(("invoke_url", v));
-    }
-    if let Some(v) = active.healthcheck_url {
-        rows.push(("healthcheck", v));
-    }
-    if let Some(v) = active.manifest_path {
-        rows.push(("manifest", v));
-    }
-    if let Some(v) = active.log_path {
-        rows.push(("log", v));
-    }
-
+    let canonical_handle = active
+        .canonical_handle
+        .clone()
+        .unwrap_or_else(|| route_label.clone());
+    let publisher = capsule_publisher_label(&canonical_handle);
+    let version_label = active
+        .snapshot_label
+        .clone()
+        .unwrap_or_else(|| "unversioned".to_string());
+    let trust_label = active.trust_state.clone().unwrap_or_else(|| {
+        if active.restricted {
+            "untrusted"
+        } else {
+            "pending"
+        }
+        .to_string()
+    });
+    let trust_accent = capsule_trust_color(&trust_label, theme);
+    let session_label = capsule_session_label(active.session.clone());
+    let quick_open_url = active
+        .local_url
+        .clone()
+        .or_else(|| active.invoke_url.clone())
+        .or_else(|| active.healthcheck_url.clone());
     let log_entries: Vec<crate::state::CapsuleLogEntry> = state
         .capsule_logs
         .get(&pane_id)
         .map(|entries| {
-            let take = entries.len().min(8);
+            let take = entries.len().min(10);
             entries[entries.len() - take..].to_vec()
         })
         .unwrap_or_default();
@@ -2023,35 +2055,195 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
+        .child(render_capsule_detail_header(
+            &active,
+            &publisher,
+            &version_label,
+            &trust_label,
+            trust_accent,
+            quick_open_url.clone(),
+            theme,
+        ))
+        .child(render_capsule_detail_nav(
+            state.route_metadata_active_tab,
+            theme,
+        ))
+        .child(render_capsule_detail_body(
+            state,
+            &active,
+            active_web.as_ref(),
+            &canonical_handle,
+            &route_label,
+            &publisher,
+            &session_label,
+            &version_label,
+            log_entries,
+            quick_open_url,
+            theme,
+        ));
+
+    div()
+        .id("route-metadata-backdrop")
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.20))
+        .p(px(10.0))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
+        })
+        .child(panel)
+        .into_any_element()
+}
+
+fn render_route_metadata_host_panel_overlay(
+    route: &crate::state::HostPanelRoute,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .id("route-metadata-backdrop")
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.20))
+        .p(px(10.0))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
+        })
         .child(
             div()
-                .px_4()
-                .py(px(12.0))
-                .border_b_1()
-                .border_color(theme.border_subtle)
+                .id("route-metadata-panel")
+                .size_full()
+                .rounded(px(14.0))
+                .bg(theme.settings_panel_bg)
+                .border_1()
+                .border_color(theme.border_default)
+                .shadow(vec![BoxShadow {
+                    color: hsla(0.0, 0.0, 0.0, 0.30),
+                    offset: point(px(0.0), px(12.0)),
+                    blur_radius: px(36.0),
+                    spread_radius: px(0.0),
+                }])
+                .p(px(12.0))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .size_full()
+                        .rounded(px(12.0))
+                        .bg(theme.canvas_bg)
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .flex()
+                        .items_start()
+                        .justify_end()
+                        .p(px(14.0))
+                        .child(
+                            div()
+                                .rounded(px(999.0))
+                                .bg(theme.panel_bg)
+                                .border_1()
+                                .border_color(theme.border_subtle)
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .text_size(px(11.0))
+                                .text_color(theme.text_secondary)
+                                .child(route.label()),
+                        ),
+                ),
+        )
+}
+
+fn render_capsule_detail_header(
+    active: &crate::state::ActiveCapsulePane,
+    publisher: &str,
+    version_label: &str,
+    trust_label: &str,
+    trust_accent: gpui::Hsla,
+    quick_open_url: Option<String>,
+    theme: &Theme,
+) -> Div {
+    let restart_enabled = !matches!(
+        active.session,
+        crate::state::WebSessionState::Detached | crate::state::WebSessionState::Closed
+    );
+    let open_enabled = quick_open_url.is_some();
+
+    div()
+        .px(px(20.0))
+        .py(px(16.0))
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(20.0))
+        .child(
+            div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap_3()
+                .gap(px(14.0))
+                .child(
+                    div()
+                        .w(px(42.0))
+                        .h(px(42.0))
+                        .rounded(px(14.0))
+                        .bg(theme.accent_subtle)
+                        .border_1()
+                        .border_color(theme.accent_border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(18.0))
+                        .text_color(theme.accent)
+                        .child("◉"),
+                )
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap(px(3.0))
                         .child(
                             div()
-                                .text_size(px(18.0))
-                                .font_weight(FontWeight(600.0))
-                                .text_color(theme.text_primary)
-                                .child("Route metadata"),
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    div()
+                                        .text_size(px(19.0))
+                                        .font_weight(FontWeight(650.0))
+                                        .text_color(theme.text_primary)
+                                        .child(active.title.clone()),
+                                )
+                                .child(render_capsule_meta_pill(version_label, theme))
+                                .child(render_capsule_trust_pill(trust_label, trust_accent, theme)),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.text_secondary)
-                                .child(route_label.clone()),
+                                .child(format!("{}  •  {}", publisher, active.route)),
                         ),
-                )
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(render_capsule_header_button("Stop", false, None, theme))
+                .child(render_capsule_header_button(
+                    "Restart",
+                    restart_enabled,
+                    Some(Box::new(crate::app::BrowserReload)),
+                    theme,
+                ))
+                .child(render_capsule_header_button(
+                    "Open",
+                    open_enabled,
+                    quick_open_url
+                        .map(|url| Box::new(OpenExternalLink { url }) as Box<dyn gpui::Action>),
+                    theme,
+                ))
                 .child(
                     div()
                         .px(px(12.0))
@@ -2070,152 +2262,1087 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
                         }),
                 ),
         )
+}
+
+fn render_capsule_detail_nav(active_tab: CapsuleDetailTab, theme: &Theme) -> Div {
+    div()
+        .px(px(20.0))
+        .pt(px(8.0))
+        .pb(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .children(CapsuleDetailTab::ALL.into_iter().map(|tab| {
+            render_capsule_detail_nav_item(tab, active_tab == tab, theme).into_any_element()
+        }))
+}
+
+fn render_capsule_detail_nav_item(
+    tab: CapsuleDetailTab,
+    active: bool,
+    theme: &Theme,
+) -> impl IntoElement {
+    div()
+        .id(("capsule-detail-tab", capsule_detail_tab_index(tab)))
+        .px(px(10.0))
+        .py(px(8.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .bg(if active {
+            theme.accent_subtle
+        } else {
+            hsla(0.0, 0.0, 0.0, 0.0)
+        })
+        .text_size(px(12.0))
+        .font_weight(FontWeight(if active { 650.0 } else { 500.0 }))
+        .text_color(if active {
+            theme.accent
+        } else {
+            theme.text_disabled
+        })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(Box::new(SelectRouteMetadataTab { tab }), cx);
+        })
+        .child(tab.label())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_capsule_detail_body(
+    state: &AppState,
+    active: &crate::state::ActiveCapsulePane,
+    active_web: Option<&crate::state::ActiveWebPane>,
+    canonical_handle: &str,
+    route_label: &str,
+    publisher: &str,
+    session_label: &str,
+    version_label: &str,
+    log_entries: Vec<crate::state::CapsuleLogEntry>,
+    quick_open_url: Option<String>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let pane_id = active.pane_id;
+    let network_logs: Vec<&crate::state::NetworkLogEntry> = state
+        .network_logs
+        .iter()
+        .filter(|entry| entry.pane_id == pane_id)
+        .collect();
+
+    div()
+        .flex_1()
+        .overflow_y_scrollbar()
+        .px(px(20.0))
+        .pb(px(20.0))
+        .child(match state.route_metadata_active_tab {
+            CapsuleDetailTab::Overview => render_capsule_overview_page(
+                state,
+                active,
+                route_label,
+                publisher,
+                session_label,
+                &log_entries,
+                &network_logs,
+                quick_open_url,
+                theme,
+            ),
+            CapsuleDetailTab::Permissions => render_capsule_permissions_page(
+                state,
+                active,
+                active_web,
+                canonical_handle,
+                &network_logs,
+                theme,
+            ),
+            CapsuleDetailTab::Logs => {
+                render_capsule_logs_page(active, active_web, &log_entries, theme)
+            }
+            CapsuleDetailTab::Update => {
+                render_capsule_update_page(state, active, version_label, theme)
+            }
+            CapsuleDetailTab::Api => render_capsule_api_page(
+                state,
+                active,
+                active_web,
+                canonical_handle,
+                &network_logs,
+                theme,
+            ),
+        })
+}
+
+fn render_capsule_overview_page(
+    _state: &AppState,
+    active: &crate::state::ActiveCapsulePane,
+    route_label: &str,
+    publisher: &str,
+    session_label: &str,
+    log_entries: &[crate::state::CapsuleLogEntry],
+    network_logs: &[&crate::state::NetworkLogEntry],
+    quick_open_url: Option<String>,
+    theme: &Theme,
+) -> Div {
+    let unique_domains = unique_domain_count(network_logs);
+    let latest_egress = network_logs
+        .last()
+        .map(|entry| entry.url.clone())
+        .unwrap_or_else(|| "No egress observed".to_string());
+    let storage_label = active
+        .manifest_path
+        .as_deref()
+        .map(|_| "Manifest + state paths tracked")
+        .unwrap_or("Storage mounts pending");
+
+    div()
+        .pt(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(
+            div()
+                .flex()
+                .gap(px(12.0))
+                .children(vec![
+                    render_capsule_summary_card(
+                        "Runtime",
+                        active.runtime_label.as_deref().unwrap_or("unknown runtime"),
+                        active.display_strategy.as_deref().unwrap_or("foundation profile pending"),
+                        theme,
+                    )
+                    .into_any_element(),
+                    render_capsule_summary_card(
+                        "Resources",
+                        "CPU / Mem live telemetry",
+                        "Collector not connected yet",
+                        theme,
+                    )
+                    .into_any_element(),
+                    render_capsule_summary_card(
+                        "Network",
+                        &format!("{} domains active", unique_domains),
+                        &latest_egress,
+                        theme,
+                    )
+                    .into_any_element(),
+                    render_capsule_summary_card("Storage", storage_label, canonical_storage_hint(active), theme)
+                        .into_any_element(),
+                ]),
+        )
+        .child(render_capsule_section(
+            "Identity",
+            vec![
+                render_capsule_detail_row("Capsule", &active.title, route_label, theme).into_any_element(),
+                render_capsule_detail_row("Publisher", publisher, active.source_label.as_deref().unwrap_or("registry"), theme).into_any_element(),
+                render_capsule_detail_row("Status", session_label, "Uptime and last launch timestamps surface here when runtime metrics are available.", theme).into_any_element(),
+            ],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Quick actions",
+            vec![
+                render_capsule_detail_row("Start", route_label, "Re-dispatch the capsule route when the session is down.", theme).into_any_element(),
+                render_capsule_detail_row("Restart", "Browser reload", "Uses the active pane reload flow today.", theme).into_any_element(),
+                render_capsule_detail_row(
+                    "Open",
+                    quick_open_url.as_deref().unwrap_or("No external URL available"),
+                    "Opens the served URL in the system browser when available.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Recent activity",
+            if log_entries.is_empty() {
+                vec![render_capsule_empty("No capsule activity recorded yet.", theme).into_any_element()]
+            } else {
+                log_entries
+                    .iter()
+                    .rev()
+                    .map(|entry| render_capsule_activity_row(entry, theme).into_any_element())
+                    .collect()
+            },
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Runtime notes",
+            vec![
+                render_capsule_detail_row(
+                    "Foundation",
+                    active.display_strategy.as_deref().unwrap_or("guest-webview"),
+                    "Execution profile currently surfaced from launch metadata.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Manifest",
+                    active.manifest_path.as_deref().unwrap_or("not resolved"),
+                    "Resolved manifest path for the running capsule.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+}
+
+fn render_capsule_permissions_page(
+    state: &AppState,
+    active: &crate::state::ActiveCapsulePane,
+    active_web: Option<&crate::state::ActiveWebPane>,
+    canonical_handle: &str,
+    network_logs: &[&crate::state::NetworkLogEntry],
+    theme: &Theme,
+) -> Div {
+    let granted_envs = state
+        .secret_store
+        .grants
+        .get(canonical_handle)
+        .cloned()
+        .unwrap_or_default();
+    let allowlist_detail = if state.config.default_egress_allow.is_empty() {
+        None
+    } else {
+        Some(state.config.default_egress_allow.join(", "))
+    };
+    let capabilities = active_web
+        .map(|pane| pane.capabilities.clone())
+        .unwrap_or_default();
+
+    div()
+        .pt(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(render_capsule_section(
+            "Network",
+            vec![
+                render_capsule_detail_row(
+                    "Egress allow",
+                    if state.config.default_egress_allow.is_empty() {
+                        "No explicit allowlist"
+                    } else {
+                        "Configured allow hosts"
+                    },
+                    if state.config.default_egress_allow.is_empty() {
+                        "Block all egress remains the effective default."
+                    } else {
+                        allowlist_detail.as_deref().unwrap_or("")
+                    },
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "CIDR allow",
+                    "None",
+                    "No raw IP ranges are granted for this capsule yet.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Block all egress",
+                    if state.config.default_egress_allow.is_empty() {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    },
+                    "A kill switch lives here; wiring to mutable policy comes next.",
+                    theme,
+                )
+                .into_any_element(),
+            ]
+            .into_iter()
+            .chain(if network_logs.is_empty() {
+                vec![
+                    render_capsule_empty("No live connections captured for this capsule.", theme)
+                        .into_any_element(),
+                ]
+            } else {
+                network_logs
+                    .iter()
+                    .rev()
+                    .take(6)
+                    .map(|entry| {
+                        render_capsule_detail_row(
+                            entry.method.as_str(),
+                            entry.url.as_str(),
+                            &format!(
+                                "status={} • {}{}",
+                                entry
+                                    .status
+                                    .map(|code| code.to_string())
+                                    .unwrap_or_else(|| "pending".to_string()),
+                                entry.duration_ms.unwrap_or_default(),
+                                if entry.url.contains("tail") {
+                                    " ms • tailnet"
+                                } else {
+                                    " ms"
+                                }
+                            ),
+                            theme,
+                        )
+                        .into_any_element()
+                    })
+                    .collect()
+            })
+            .collect(),
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Filesystem",
+            vec![
+                render_capsule_detail_row(
+                    "Manifest",
+                    active.manifest_path.as_deref().unwrap_or("Unavailable"),
+                    "Reveal and wipe flows land here once mount management is wired.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Logs",
+                    active.log_path.as_deref().unwrap_or("Unavailable"),
+                    "Current runtime log target for the capsule.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Additional paths",
+                    "No extra mounts detected",
+                    "Read-only and read-write path grants will appear here.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Environment",
+            if granted_envs.is_empty() {
+                vec![render_capsule_empty(
+                    "No explicit env grants recorded for this capsule.",
+                    theme,
+                )
+                .into_any_element()]
+            } else {
+                granted_envs
+                    .iter()
+                    .map(|key| {
+                        render_capsule_detail_row(
+                            key,
+                            "••••••••",
+                            "Reveal once / Edit / Remove flows can bind to this row later.",
+                            theme,
+                        )
+                        .into_any_element()
+                    })
+                    .collect()
+            },
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Role / Capabilities",
+            if capabilities.is_empty() {
+                vec![render_capsule_empty(
+                    "No capability grants surfaced for the active pane.",
+                    theme,
+                )
+                .into_any_element()]
+            } else {
+                capabilities
+                    .iter()
+                    .map(|capability| {
+                        render_capsule_detail_row(
+                            capability.as_str(),
+                            "granted",
+                            if active.restricted {
+                                "grant source: session • tier: Tier2 / unsafe gated"
+                            } else {
+                                "grant source: manifest • tier: Tier1"
+                            },
+                            theme,
+                        )
+                        .into_any_element()
+                    })
+                    .collect()
+            },
+            theme,
+        ))
+        .child(
+            div()
+                .flex()
+                .justify_end()
+                .child(render_capsule_footer_button(
+                    "Reset to manifest defaults",
+                    false,
+                    theme,
+                )),
+        )
+}
+
+fn render_capsule_logs_page(
+    active: &crate::state::ActiveCapsulePane,
+    active_web: Option<&crate::state::ActiveWebPane>,
+    log_entries: &[crate::state::CapsuleLogEntry],
+    theme: &Theme,
+) -> Div {
+    let service_tabs = capsule_service_tabs(active, active_web);
+    let error_count = log_entries
+        .iter()
+        .filter(|entry| entry.tone == crate::state::ActivityTone::Error)
+        .count();
+
+    div()
+        .pt(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(render_capsule_section(
+            "Filter bar",
+            vec![
+                render_capsule_filter_row(
+                    &[
+                        "All services",
+                        "error/warn/info/debug",
+                        "Search logs",
+                        "Last hour",
+                    ],
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_service_tab_row(&service_tabs, error_count, theme)
+                    .into_any_element(),
+            ],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Log stream",
+            if log_entries.is_empty() {
+                vec![
+                    render_capsule_empty("No log lines captured for this capsule yet.", theme)
+                        .into_any_element(),
+                ]
+            } else {
+                log_entries
+                    .iter()
+                    .rev()
+                    .map(|entry| render_capsule_log_row(entry, active, theme).into_any_element())
+                    .collect()
+            },
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Tail controls",
+            vec![
+                render_capsule_detail_row(
+                    "Follow",
+                    "off",
+                    "tail -f mode can bind to this toggle once streaming logs land.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Actions",
+                    "Copy / Export / Clear",
+                    "Structured field expansion will appear in the detail rail for a selected row.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+}
+
+fn render_capsule_update_page(
+    state: &AppState,
+    active: &crate::state::ActiveCapsulePane,
+    version_label: &str,
+    theme: &Theme,
+) -> Div {
+    div()
+        .pt(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(render_capsule_section(
+            "Current",
+            vec![
+                render_capsule_detail_row(
+                    "Version",
+                    version_label,
+                    active.trust_state.as_deref().unwrap_or("signature status pending"),
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Installed at",
+                    active.manifest_path.as_deref().unwrap_or("unknown"),
+                    "Install timestamp becomes available once history is persisted.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Available",
+            vec![render_capsule_update_section(state.capsule_updates.get(&active.pane_id), theme)],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Policy",
+            vec![
+                render_capsule_detail_row(
+                    "Update channel",
+                    "stable",
+                    "Per-capsule override will sit here: stable / beta / nightly / pinned.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Auto-update",
+                    "off",
+                    "Capsule-specific auto-update is visible here once writable policy lands.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Changelog",
+            vec![render_capsule_empty(
+                "Release notes markdown will render here after the registry exposes per-version changelogs.",
+                theme,
+            )
+            .into_any_element()],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "History",
+            vec![render_capsule_empty(
+                "Install history and rollback actions appear here once version history is persisted locally.",
+                theme,
+            )
+            .into_any_element()],
+            theme,
+        ))
+}
+
+fn render_capsule_api_page(
+    state: &AppState,
+    active: &crate::state::ActiveCapsulePane,
+    active_web: Option<&crate::state::ActiveWebPane>,
+    canonical_handle: &str,
+    network_logs: &[&crate::state::NetworkLogEntry],
+    theme: &Theme,
+) -> Div {
+    let granted_envs = state
+        .secret_store
+        .grants
+        .get(canonical_handle)
+        .cloned()
+        .unwrap_or_default();
+    let inbound_rows: Vec<AnyElement> = [
+        active.local_url.as_deref().map(|value| {
+            render_capsule_detail_row(
+                "Local URL",
+                value,
+                "Served endpoint for browser-based access.",
+                theme,
+            )
+            .into_any_element()
+        }),
+        active.healthcheck_url.as_deref().map(|value| {
+            render_capsule_detail_row(
+                "Health",
+                value,
+                "Readiness probe published by the capsule.",
+                theme,
+            )
+            .into_any_element()
+        }),
+        active.invoke_url.as_deref().map(|value| {
+            render_capsule_detail_row(
+                "Invoke",
+                value,
+                "Programmatic invoke route exposed by the guest.",
+                theme,
+            )
+            .into_any_element()
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    div()
+        .pt(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(16.0))
+        .child(render_capsule_section(
+            "Inbound",
+            if inbound_rows.is_empty() {
+                vec![render_capsule_empty(
+                    "No inbound endpoints are exposed for this capsule.",
+                    theme,
+                )
+                .into_any_element()]
+            } else {
+                inbound_rows
+            },
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Outbound",
+            if granted_envs.is_empty() {
+                vec![render_capsule_empty(
+                    "No outbound credentials are bound to this capsule.",
+                    theme,
+                )
+                .into_any_element()]
+            } else {
+                granted_envs
+                    .iter()
+                    .map(|key| {
+                        render_capsule_detail_row(
+                            key,
+                            "••••••••",
+                            "FD injection / env injection choice can be attached here.",
+                            theme,
+                        )
+                        .into_any_element()
+                    })
+                    .collect()
+            },
+            theme,
+        ))
+        .child(render_capsule_section(
+            "Schema registry",
+            vec![render_capsule_detail_row(
+                "Resolved runtime",
+                active.runtime_label.as_deref().unwrap_or("unknown"),
+                "std.* alias resolution and schema hash materialize in this block.",
+                theme,
+            )
+            .into_any_element()],
+            theme,
+        ))
+        .child(render_capsule_section(
+            "IPC",
+            vec![
+                render_capsule_detail_row(
+                    "Session",
+                    active.session_id.as_deref().unwrap_or("no session id"),
+                    "Disconnect session is attached to the broker row when IPC control lands.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Capabilities",
+                    &active_web
+                        .map(|pane| {
+                            pane.capabilities
+                                .iter()
+                                .map(|capability| capability.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_else(|| "none".to_string()),
+                    "Current broker grants for the active pane.",
+                    theme,
+                )
+                .into_any_element(),
+                render_capsule_detail_row(
+                    "Recent requests",
+                    &network_logs.len().to_string(),
+                    "Recent outbound request activity is unified with the network stream above.",
+                    theme,
+                )
+                .into_any_element(),
+            ],
+            theme,
+        ))
+}
+
+fn render_capsule_section(title: &str, rows: Vec<AnyElement>, theme: &Theme) -> Div {
+    div()
+        .rounded(px(14.0))
+        .bg(theme.settings_card_bg)
+        .border_1()
+        .border_color(theme.border_subtle)
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight(620.0))
+                .text_color(theme.text_primary)
+                .child(title.to_string()),
+        )
+        .children(rows)
+}
+
+fn render_capsule_detail_row(label: &str, value: &str, detail: &str, theme: &Theme) -> Div {
+    div()
+        .py(px(8.0))
+        .border_b_1()
+        .border_color(hsla(0.0, 0.0, 1.0, 0.03))
+        .flex()
+        .items_start()
+        .justify_between()
+        .gap(px(14.0))
         .child(
             div()
                 .flex_1()
-                .overflow_y_scrollbar()
-                .p_4()
                 .flex()
                 .flex_col()
-                .gap_3()
+                .gap(px(2.0))
                 .child(
                     div()
-                        .p_3()
-                        .rounded(px(10.0))
-                        .bg(theme.settings_card_bg)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_tertiary)
-                                .child("active pane"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight(600.0))
-                                .text_color(theme.text_primary)
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme.text_secondary)
-                                .child(route_label),
-                        ),
+                        .text_size(px(11.0))
+                        .text_color(theme.text_tertiary)
+                        .child(label.to_string()),
                 )
-                .children(rows.into_iter().map(|(label, value)| {
-                    let is_link = value.starts_with("http://") || value.starts_with("https://");
-                    let value_view = if is_link {
-                        let url = value.clone();
-                        div()
-                            .id(label)
-                            .text_size(px(12.5))
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
-                            .child(value)
-                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                cx.stop_propagation();
-                                window.dispatch_action(
-                                    Box::new(OpenExternalLink { url: url.clone() }),
-                                    cx,
-                                );
-                            })
-                            .into_any_element()
-                    } else {
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.text_primary)
-                            .child(value)
-                            .into_any_element()
-                    };
-
+                .child(
                     div()
-                        .rounded(px(10.0))
-                        .bg(theme.settings_card_bg)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_tertiary)
-                                .child(label),
-                        )
-                        .child(value_view)
-                }))
-                .child(render_capsule_update_section(
-                    state.capsule_updates.get(&pane_id),
-                    theme,
-                ))
-                .when(!log_entries.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .mt_1()
-                            .pt_1()
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight(600.0))
-                                    .text_color(theme.text_secondary)
-                                    .child("Recent activity"),
-                            )
-                            .children(log_entries.into_iter().map(|entry| {
-                                let tone_color = match entry.tone {
-                                    crate::state::ActivityTone::Error => {
-                                        hsla(0.0 / 360.0, 0.65, 0.50, 1.0)
-                                    }
-                                    crate::state::ActivityTone::Warning => {
-                                        hsla(38.0 / 360.0, 0.85, 0.50, 1.0)
-                                    }
-                                    crate::state::ActivityTone::Info => theme.text_primary,
-                                };
-                                div()
-                                    .mt_2()
-                                    .rounded(px(10.0))
-                                    .bg(theme.settings_card_bg)
-                                    .border_1()
-                                    .border_color(theme.border_subtle)
-                                    .p_3()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(11.0))
-                                            .text_color(theme.text_tertiary)
-                                            .child(entry.stage.as_str()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .text_color(tone_color)
-                                            .child(entry.message),
-                                    )
-                            })),
-                    )
-                }),
-        );
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight(520.0))
+                        .text_color(theme.text_primary)
+                        .child(value.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.5))
+                        .line_height(px(16.0))
+                        .text_color(theme.text_disabled)
+                        .child(detail.to_string()),
+                ),
+        )
+}
+
+fn render_capsule_activity_row(entry: &crate::state::CapsuleLogEntry, theme: &Theme) -> Div {
+    let tone_color = match entry.tone {
+        crate::state::ActivityTone::Error => hsla(0.0 / 360.0, 0.65, 0.50, 1.0),
+        crate::state::ActivityTone::Warning => hsla(38.0 / 360.0, 0.85, 0.50, 1.0),
+        crate::state::ActivityTone::Info => theme.text_primary,
+    };
 
     div()
-        .id("route-metadata-backdrop")
-        .absolute()
-        .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.20))
-        .p(px(10.0))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
+        .rounded(px(10.0))
+        .bg(theme.settings_body_bg)
+        .border_1()
+        .border_color(theme.settings_body_border)
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap(px(3.0))
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(theme.text_tertiary)
+                .child(entry.stage.as_str()),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(tone_color)
+                .child(entry.message.clone()),
+        )
+}
+
+fn render_capsule_summary_card(title: &str, value: &str, detail: &str, theme: &Theme) -> Div {
+    div()
+        .flex_1()
+        .min_w(px(180.0))
+        .rounded(px(12.0))
+        .bg(theme.settings_card_bg)
+        .border_1()
+        .border_color(theme.border_subtle)
+        .p_3()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(theme.text_tertiary)
+                .child(title.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight(620.0))
+                .text_color(theme.text_primary)
+                .child(value.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(10.5))
+                .line_height(px(16.0))
+                .text_color(theme.text_disabled)
+                .child(detail.to_string()),
+        )
+}
+
+fn render_capsule_empty(message: &str, theme: &Theme) -> Div {
+    div()
+        .rounded(px(10.0))
+        .bg(theme.settings_body_bg)
+        .border_1()
+        .border_color(theme.settings_body_border)
+        .p_3()
+        .text_size(px(11.0))
+        .line_height(px(18.0))
+        .text_color(theme.text_disabled)
+        .child(message.to_string())
+}
+
+fn render_capsule_filter_row(labels: &[&str], theme: &Theme) -> Div {
+    div().flex().items_center().gap(px(8.0)).children(
+        labels
+            .iter()
+            .map(|label| render_capsule_meta_pill(label, theme).into_any_element()),
+    )
+}
+
+fn render_capsule_service_tab_row(
+    service_tabs: &[String],
+    error_count: usize,
+    theme: &Theme,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .children(service_tabs.iter().enumerate().map(|(index, label)| {
+            let text = if index == 0 && error_count > 0 {
+                format!("{} ({})", label, error_count)
+            } else {
+                label.clone()
+            };
+            render_capsule_meta_pill(&text, theme).into_any_element()
+        }))
+}
+
+fn render_capsule_log_row(
+    entry: &crate::state::CapsuleLogEntry,
+    active: &crate::state::ActiveCapsulePane,
+    theme: &Theme,
+) -> Div {
+    let level = match entry.tone {
+        crate::state::ActivityTone::Error => "error",
+        crate::state::ActivityTone::Warning => "warn",
+        crate::state::ActivityTone::Info => "info",
+    };
+
+    div()
+        .rounded(px(10.0))
+        .bg(theme.settings_body_bg)
+        .border_1()
+        .border_color(theme.settings_body_border)
+        .p_3()
+        .flex()
+        .items_start()
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(theme.text_tertiary)
+                .child("now"),
+        )
+        .child(
+            div().text_size(px(10.5)).text_color(theme.accent).child(
+                active
+                    .served_by
+                    .clone()
+                    .or_else(|| active.adapter.clone())
+                    .unwrap_or_else(|| "All".to_string()),
+            ),
+        )
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(theme.text_secondary)
+                .child(level),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .text_color(theme.text_primary)
+                .child(entry.message.clone()),
+        )
+}
+
+fn render_capsule_meta_pill(label: &str, theme: &Theme) -> Div {
+    div()
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(999.0))
+        .bg(theme.settings_body_bg)
+        .border_1()
+        .border_color(theme.settings_body_border)
+        .text_size(px(10.5))
+        .text_color(theme.text_secondary)
+        .child(label.to_string())
+}
+
+fn render_capsule_trust_pill(label: &str, accent: gpui::Hsla, theme: &Theme) -> Div {
+    div()
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(999.0))
+        .bg(theme.settings_body_bg)
+        .border_1()
+        .border_color(theme.settings_body_border)
+        .text_size(px(10.5))
+        .font_weight(FontWeight(650.0))
+        .text_color(accent)
+        .child(label.to_string())
+}
+
+fn render_capsule_header_button(
+    label: &str,
+    enabled: bool,
+    action: Option<Box<dyn gpui::Action>>,
+    theme: &Theme,
+) -> Div {
+    let button = div()
+        .px(px(12.0))
+        .py(px(7.0))
+        .rounded(px(8.0))
+        .bg(if enabled {
+            theme.settings_card_bg
+        } else {
+            theme.settings_body_bg
         })
-        .child(panel)
-        .into_any_element()
+        .border_1()
+        .border_color(theme.border_subtle)
+        .text_size(px(12.0))
+        .text_color(if enabled {
+            theme.text_primary
+        } else {
+            theme.text_disabled
+        })
+        .child(label.to_string());
+
+    match action {
+        Some(action) if enabled => {
+            button
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(action.boxed_clone(), cx);
+                })
+        }
+        _ => button,
+    }
+}
+
+fn render_capsule_footer_button(label: &str, enabled: bool, theme: &Theme) -> Div {
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .rounded(px(8.0))
+        .bg(theme.settings_body_bg)
+        .border_1()
+        .border_color(theme.settings_body_border)
+        .text_size(px(12.0))
+        .text_color(if enabled {
+            theme.text_primary
+        } else {
+            theme.text_disabled
+        })
+        .child(label.to_string())
+}
+
+fn capsule_detail_tab_index(tab: CapsuleDetailTab) -> usize {
+    match tab {
+        CapsuleDetailTab::Overview => 1,
+        CapsuleDetailTab::Permissions => 2,
+        CapsuleDetailTab::Logs => 3,
+        CapsuleDetailTab::Update => 4,
+        CapsuleDetailTab::Api => 5,
+    }
+}
+
+fn capsule_publisher_label(handle: &str) -> String {
+    let trimmed = handle.trim_start_matches("capsule://");
+    let mut parts = trimmed.split('/');
+    let host = parts.next().unwrap_or("capsule");
+    let publisher = parts.next().unwrap_or(host);
+    format!("{} / {}", host, publisher)
+}
+
+fn capsule_trust_color(label: &str, theme: &Theme) -> gpui::Hsla {
+    let normalized = label.to_ascii_lowercase();
+    if normalized.contains("verified") || normalized.contains("trusted") {
+        hsla(145.0 / 360.0, 0.68, 0.55, 1.0)
+    } else if normalized.contains("untrusted") || normalized.contains("failed") {
+        hsla(38.0 / 360.0, 0.88, 0.58, 1.0)
+    } else {
+        theme.text_secondary
+    }
+}
+
+fn capsule_session_label(session: crate::state::WebSessionState) -> &'static str {
+    match session {
+        crate::state::WebSessionState::Detached => "stopped",
+        crate::state::WebSessionState::Resolving => "starting",
+        crate::state::WebSessionState::Materializing => "materializing",
+        crate::state::WebSessionState::Launching => "running",
+        crate::state::WebSessionState::Mounted => "running",
+        crate::state::WebSessionState::Closed => "stopped",
+        crate::state::WebSessionState::LaunchFailed => "failed",
+    }
+}
+
+fn capsule_service_tabs(
+    active: &crate::state::ActiveCapsulePane,
+    active_web: Option<&crate::state::ActiveWebPane>,
+) -> Vec<String> {
+    let mut tabs = vec!["All".to_string()];
+    if let Some(service) = active.served_by.as_deref() {
+        tabs.push(service.to_string());
+    }
+    if let Some(adapter) = active.adapter.as_deref() {
+        if !tabs.iter().any(|tab| tab == adapter) {
+            tabs.push(adapter.to_string());
+        }
+    }
+    if let Some(web) = active_web {
+        if !tabs.iter().any(|tab| tab == &web.profile) {
+            tabs.push(web.profile.clone());
+        }
+    }
+    tabs
+}
+
+fn unique_domain_count(network_logs: &[&crate::state::NetworkLogEntry]) -> usize {
+    let mut hosts = Vec::new();
+    for entry in network_logs {
+        if let Ok(url) = url::Url::parse(&entry.url) {
+            if let Some(host) = url.host_str() {
+                let host = host.to_string();
+                if !hosts.iter().any(|existing| existing == &host) {
+                    hosts.push(host);
+                }
+            }
+        }
+    }
+    hosts.len()
+}
+
+fn canonical_storage_hint(active: &crate::state::ActiveCapsulePane) -> &str {
+    if active.log_path.is_some() {
+        "State mount size will surface alongside log + cache mounts."
+    } else {
+        "No persistent state paths have been surfaced yet."
+    }
 }
 
 fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
