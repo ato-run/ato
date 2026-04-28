@@ -63,7 +63,13 @@ actions!(
         Quit,
         ConfirmQuitKeep,
         ConfirmQuitClear,
-        CancelQuit
+        CancelQuit,
+        // RFC: SURFACE_CLOSE_SEMANTICS §6 — explicit Stop UI. The
+        // shortcut on `StopActiveSession` is provisional; if a
+        // platform / keymap conflict surfaces we re-bind without
+        // changing the action name.
+        StopActiveSession,
+        StopAllRetainedSessions
     ]
 );
 
@@ -269,6 +275,11 @@ pub fn run() {
             KeyBinding::new("cmd-left", BrowserBack, Some("AtoDesktopShell")),
             KeyBinding::new("cmd-right", BrowserForward, Some("AtoDesktopShell")),
             KeyBinding::new("cmd-q", Quit, None),
+            // RFC: SURFACE_CLOSE_SEMANTICS §6.3 — provisional Stop
+            // shortcut. Cmd+W remains "close pane" (now retains the
+            // session); Cmd+Shift+W is the explicit "stop session"
+            // action that actively kills the process.
+            KeyBinding::new("cmd-shift-w", StopActiveSession, Some("AtoDesktopShell")),
         ]);
 
         #[cfg(target_os = "macos")]

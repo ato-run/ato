@@ -6,7 +6,7 @@ use gpui_component::input::{Input, InputState};
 
 use crate::app::{
     BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
-    ShowSettings, ToggleRouteMetadataPopover,
+    ShowSettings, StopActiveSession, StopAllRetainedSessions, ToggleRouteMetadataPopover,
 };
 use crate::state::{
     AppState, GuestRoute, OmnibarSuggestion, OmnibarSuggestionAction, WebSessionState,
@@ -43,7 +43,39 @@ pub(super) fn render_command_chrome(
             command_bar,
             theme,
         )))
+        .child(render_retention_indicator(state, theme))
         .child(render_active_route_status(state, theme))
+}
+
+/// RFC: SURFACE_CLOSE_SEMANTICS §6.4 — discoverability hook for
+/// retained sessions. Renders an empty container when nothing is
+/// retained so the chrome stays clean; a small clickable pill
+/// `N kept warm` appears only when at least one session is retained.
+/// Click dispatches `StopAllRetainedSessions`.
+fn render_retention_indicator(state: &AppState, theme: &Theme) -> impl IntoElement {
+    let count = state.retention_count;
+    if count == 0 {
+        return div().into_any_element();
+    }
+    let label = format!("{count} kept warm");
+    div()
+        .id("retention-indicator")
+        .px_2()
+        .py_1()
+        .rounded(px(999.0))
+        .border_1()
+        .border_color(theme.panel_border)
+        .bg(theme.panel_bg)
+        .text_size(px(11.0))
+        .font_weight(FontWeight(500.0))
+        .text_color(theme.text_secondary)
+        .cursor_pointer()
+        .hover(move |style| style.bg(theme.omnibar_suggestion_hover))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(StopAllRetainedSessions), cx);
+        })
+        .child(label)
+        .into_any_element()
 }
 
 fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
@@ -314,6 +346,12 @@ fn render_omnibar_suggestion(
                         }),
                         cx,
                     );
+                }
+                OmnibarSuggestionAction::StopActiveSession => {
+                    window.dispatch_action(Box::new(StopActiveSession), cx);
+                }
+                OmnibarSuggestionAction::StopAllRetainedSessions => {
+                    window.dispatch_action(Box::new(StopAllRetainedSessions), cx);
                 }
             }
         })

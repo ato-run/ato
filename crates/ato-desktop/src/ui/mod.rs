@@ -635,6 +635,41 @@ impl DesktopShell {
         cx.notify();
     }
 
+    /// RFC: SURFACE_CLOSE_SEMANTICS §6.1 / §6.2 / §6.3 — explicit
+    /// "Stop session" for the active pane. Called from omnibar
+    /// suggestion + Cmd+Shift+W shortcut. The stop is synchronous
+    /// because the user actively asked; failure surfaces as an
+    /// activity entry.
+    fn on_stop_active_session(
+        &mut self,
+        _: &crate::app::StopActiveSession,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.webviews.stop_active_session(&mut self.state);
+        cx.notify();
+    }
+
+    /// RFC: SURFACE_CLOSE_SEMANTICS §6.2 — drain the retention table
+    /// and graceful-stop every entry in the background. Active panes
+    /// (visible to the user) are untouched: only sessions that were
+    /// kept warm by recent pane-close events get stopped.
+    fn on_stop_all_retained_sessions(
+        &mut self,
+        _: &crate::app::StopAllRetainedSessions,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stopped = self.webviews.stop_all_retained_sessions();
+        self.state.retention_count = self.webviews.retention_count();
+        self.state.push_activity(
+            crate::state::ActivityTone::Info,
+            format!("Stopping {stopped} retained session(s) in the background"),
+        );
+        tracing::info!(stopped, "stop_all_retained_sessions dispatched");
+        cx.notify();
+    }
+
     fn on_select_settings_tab(
         &mut self,
         action: &SelectSettingsTab,
@@ -1505,6 +1540,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_toggle_route_metadata_popover))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_cancel_quit))
+            .on_action(cx.listener(Self::on_stop_active_session))
+            .on_action(cx.listener(Self::on_stop_all_retained_sessions))
             .on_action(cx.listener(Self::on_cycle_handle))
             .on_action(cx.listener(Self::on_browser_back))
             .on_action(cx.listener(Self::on_browser_forward))
