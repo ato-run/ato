@@ -3963,10 +3963,16 @@ mod fast_path_tests {
 
     #[test]
     #[cfg(unix)]
-    fn dead_pid_falls_back() {
+    fn dead_pid_alone_does_not_force_fallback_when_healthcheck_decides() {
+        // PR 4B.3 fix (PID-drift bug): the fast path no longer gates
+        // on `pid_is_alive`. A record with a dead PID still falls
+        // back here — but ONLY because the healthcheck URL is
+        // unbound (port 1). The negative outcome is "HealthcheckFailed",
+        // not "PidNotAlive". This rebound matters for `npm run start`
+        // capsules where the recorded PID exits while the actual
+        // server keeps serving traffic under a different PID.
         let dir = TempDir::new().expect("tempdir");
         let mut record = base_record(TEST_HANDLE);
-        // Reliable "definitely dead" PID — well above PID_MAX.
         record.pid = 999_999_999;
         write_record(dir.path(), &record);
         assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
@@ -3974,10 +3980,12 @@ mod fast_path_tests {
 
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn start_time_mismatch_falls_back() {
+    fn start_time_mismatch_alone_does_not_force_fallback_when_healthcheck_decides() {
+        // Mirror of the dead-pid test for the start_time field. Same
+        // rationale: the field stays on the record for diagnostics
+        // but no longer gates reuse. Only the healthcheck does.
         let dir = TempDir::new().expect("tempdir");
         let mut record = base_record(TEST_HANDLE);
-        // pid is alive (self) but start time is fabricated.
         record.process_start_time_unix_ms = Some(1);
         write_record(dir.path(), &record);
         assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
