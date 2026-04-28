@@ -1372,7 +1372,7 @@ impl Render for DesktopShell {
             );
 
         div()
-            .key_context("DeskyShell")
+            .key_context("AtoDesktopShell")
             .track_focus(&self.focus_handle)
             .size_full()
             .flex()
