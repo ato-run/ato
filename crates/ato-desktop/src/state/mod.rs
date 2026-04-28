@@ -701,6 +701,14 @@ pub enum OmnibarSuggestionAction {
     SelectTask { task_id: TaskSetId },
     ShowSettings,
     LaunchCapsule { handle: String },
+    /// RFC: SURFACE_CLOSE_SEMANTICS §6.2 — explicit Stop UI for the
+    /// active pane's underlying capsule session.
+    StopActiveSession,
+    /// RFC: SURFACE_CLOSE_SEMANTICS §6.2 — drain the retention table
+    /// and graceful-stop everything in it. The label visible to the
+    /// user includes the count (`Stop all retained sessions (N)`)
+    /// which doubles as the §6.4 discoverability hook.
+    StopAllRetainedSessions,
 }
 
 /// A search result from the local capsule registry.
@@ -929,6 +937,12 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub command_bar_text: String,
     pub activity: Vec<ActivityEntry>,
+    /// Mirror of `WebViewManager.retention_count()` updated each
+    /// `sync_from_state` so the omnibar / chrome can render
+    /// "Stop all retained sessions (N)" without owning a back-
+    /// reference to the manager (RFC: SURFACE_CLOSE_SEMANTICS §6.2 /
+    /// §6.4).
+    pub retention_count: usize,
     pub capsule_logs: HashMap<PaneId, Vec<CapsuleLogEntry>>,
     pub browser_commands: VecDeque<BrowserCommand>,
     pub pending_permission_prompt: Option<PermissionPrompt>,
@@ -1052,6 +1066,7 @@ impl AppState {
             }],
             command_bar_text: "https://ato.run/".to_string(),
             activity: Vec::new(),
+            retention_count: 0,
             capsule_logs: HashMap::new(),
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
@@ -1234,6 +1249,7 @@ impl AppState {
                 tone: ActivityTone::Info,
                 message: "Phase 3 shell bootstrapped with ato-cli guest orchestration".to_string(),
             }],
+            retention_count: 0,
             capsule_logs: HashMap::new(),
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
@@ -1368,6 +1384,31 @@ impl AppState {
                 detail: "Open desktop settings".to_string(),
                 action: OmnibarSuggestionAction::ShowSettings,
             });
+        }
+
+        // RFC: SURFACE_CLOSE_SEMANTICS §6.2 — explicit Stop UI in the
+        // omnibar / command palette. Both items appear when the user
+        // types "stop" (or any prefix); the "all retained" item is
+        // suppressed when the table is empty so the count never
+        // shows `(0)`.
+        let matches_stop = query.is_empty() || "stop".contains(&query) || "stop session".contains(&query);
+        if matches_stop {
+            suggestions.push(OmnibarSuggestion {
+                title: "Stop capsule session".to_string(),
+                detail: "Stop the active pane's session and remove its record".to_string(),
+                action: OmnibarSuggestionAction::StopActiveSession,
+            });
+            if self.retention_count > 0 {
+                suggestions.push(OmnibarSuggestion {
+                    title: format!(
+                        "Stop all retained sessions ({})",
+                        self.retention_count
+                    ),
+                    detail: "Drain the retention table — sessions kept warm by recent pane closes"
+                        .to_string(),
+                    action: OmnibarSuggestionAction::StopAllRetainedSessions,
+                });
+            }
         }
 
         if let Some(workspace) = self.active_workspace() {
