@@ -2098,6 +2098,26 @@ impl WebViewManager {
             std::time::Instant::now(),
         );
 
+        // RFC: SURFACE_CLOSE_SEMANTICS §6.4 — discoverability hook.
+        // tracing surfaces this in the developer log (`stderr`); the
+        // user-facing surface is owed by the next PR (PR 4B.2: pane
+        // context menu, command palette `Stop all retained sessions
+        // (N)`). state.activity renders only error-toned entries
+        // today, so a `push_activity(Info, …)` here would be a no-op
+        // for end users — left out intentionally.
+        let retained_count = self.retention.len();
+        tracing::info!(
+            session_id = %session.session_id,
+            handle = %session.handle,
+            retained_count,
+            ttl_minutes = crate::retention::DEFAULT_TTL.as_secs() / 60,
+            "session retained on pane close — reopen within TTL hits the fast path"
+        );
+
+        // Keep state.activity push in for tests + future error-overlay
+        // diagnostics; if a launch fails right after retention the
+        // overlay can include this trail. Do NOT rely on it for
+        // user-visible discoverability.
         state.push_activity(
             crate::state::ActivityTone::Info,
             format!(
