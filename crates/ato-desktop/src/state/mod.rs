@@ -1437,6 +1437,14 @@ impl AppState {
         self.route_metadata_active_tab = tab;
     }
 
+    pub fn active_capsule_detail_host_panel_route(&self) -> Option<HostPanelRoute> {
+        let active = self.active_capsule_pane()?;
+        Some(HostPanelRoute::CapsuleDetail {
+            pane_id: active.pane_id,
+            tab: self.route_metadata_active_tab,
+        })
+    }
+
     /// Aggregate boot progress across the active workspace, in [0.0, 1.0].
     ///
     /// Returns `None` when no pane is in a transient session state
@@ -4143,6 +4151,33 @@ mod tests {
         state.toggle_route_metadata_popover();
 
         assert!(!state.route_metadata_popover_open);
+    }
+
+    #[test]
+    fn active_capsule_detail_host_panel_route_tracks_selected_tab() {
+        let mut state = AppState::demo();
+        state.select_task(2);
+        state.set_route_metadata_tab(CapsuleDetailTab::Permissions);
+
+        let route = state
+            .active_capsule_detail_host_panel_route()
+            .expect("capsule detail route");
+
+        assert_eq!(
+            route,
+            HostPanelRoute::CapsuleDetail {
+                pane_id: 2,
+                tab: CapsuleDetailTab::Permissions,
+            }
+        );
+    }
+
+    #[test]
+    fn active_capsule_detail_host_panel_route_is_absent_for_non_capsule_tabs() {
+        let mut state = AppState::demo();
+        state.select_task(3);
+
+        assert!(state.active_capsule_detail_host_panel_route().is_none());
     }
 
     #[test]
