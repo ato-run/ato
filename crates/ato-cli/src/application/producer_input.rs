@@ -5,8 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use capsule_core::ato_lock::{compute_closure_digest, compute_lock_id};
 use capsule_core::input_resolver::{
-    resolve_authoritative_input, ResolveInputOptions, ResolvedCanonicalLock, ResolvedInput,
-    ATO_LOCK_FILE_NAME,
+    resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
 };
 use capsule_core::lock_runtime::resolve_lock_runtime_model;
 use capsule_core::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
@@ -14,7 +13,7 @@ use serde_json::Value;
 
 use crate::application::ports::publish::{PublishArtifactIdentityClass, PublishArtifactMetadata};
 use crate::application::source_inference::{
-    self, materialize_run_from_canonical_lock, materialize_run_from_compatibility,
+    materialize_run_from_canonical_lock, materialize_run_from_compatibility,
     materialize_run_from_source_only, RunMaterialization,
 };
 use crate::application::workspace::state;
@@ -75,49 +74,39 @@ fn producer_authoritative_input_from_resolved(
     resolved: ResolvedInput,
     reporter: Arc<CliReporter>,
     assume_yes: bool,
-    already_regenerated: bool,
+    _already_regenerated: bool,
 ) -> Result<ProducerAuthoritativeInput> {
+    let _ = project_root; // reserved for future canonical-lock-only paths that need it
     match resolved {
         ResolvedInput::CanonicalLock {
             canonical,
-            provenance,
+            provenance: _,
             advisories,
         } => {
-            let manifest_path = provenance.discovered.compatibility_manifest_path.clone();
-            let identity_check = ensure_canonical_lock_matches_manifest_identity(
-                &canonical,
-                manifest_path.as_deref(),
-            );
-            if let Err(stale_err) = identity_check {
-                // Auto-regen path: when the user passed -y / --yes (or
-                // is on a TTY and approves the prompt), regenerate
-                // ato.lock.json to match the manifest, then re-resolve
-                // and retry once. We refuse to recurse twice so a
-                // genuinely broken regen surfaces the original error
-                // instead of looping.
-                if already_regenerated {
-                    return Err(stale_err);
-                }
-                let manifest_path = manifest_path
-                    .as_deref()
-                    .ok_or(stale_err)
-                    .map_err(|err| anyhow::anyhow!("{err}"))?;
-                if !assume_yes && !prompt_regenerate_lock(manifest_path)? {
-                    anyhow::bail!(
-                        "ato.lock.json regeneration declined. Re-run with -y / --yes to regenerate automatically, or run `ato lock --refresh`."
-                    );
-                }
-                regenerate_lockfile_blocking(manifest_path, reporter.clone())?;
-                let resolved =
-                    resolve_authoritative_input(project_root, ResolveInputOptions::default())?;
-                return producer_authoritative_input_from_resolved(
-                    project_root,
-                    resolved,
-                    reporter,
-                    assume_yes,
-                    true,
-                );
-            }
+            // Canonical-lock-first contract (see PAS §4.5 + the e2e
+            // `e2e_local_registry_private_publish_prefers_canonical_lock_metadata`
+            // and unit `test_build_prefers_existing_canonical_lock_input`):
+            // when `ato.lock.json` is the resolved authoritative input,
+            // it is the source of truth — `capsule.toml` is treated as
+            // a discovery hint at most. We deliberately do NOT diff the
+            // lock's `contract.metadata.{name,version}` against the
+            // manifest here, because:
+            //
+            //   1. Test fixtures (and real registry pins) routinely
+            //      ship a placeholder manifest alongside a canonical
+            //      lock that supersedes it.
+            //   2. The previous staleness gate prompted "Regenerate
+            //      now? [y/N]" in non-interactive contexts (CI, JSON
+            //      mode, test runs), failing the publish with E999
+            //      even though the canonical lock was perfectly
+            //      consumable.
+            //
+            // Users who genuinely want to rebuild the canonical lock
+            // from a freshly edited manifest should invoke
+            // `ato lock --refresh` (or delete `ato.lock.json`) — that
+            // path falls back through CompatibilityProject /
+            // SourceOnly below and is the right place for any
+            // "rebuild the lock from source" semantics.
             let materialized =
                 materialize_run_from_canonical_lock(&canonical, None, reporter, assume_yes)?;
             ProducerAuthoritativeInput::from_materialized(
@@ -143,156 +132,6 @@ fn producer_authoritative_input_from_resolved(
             ProducerAuthoritativeInput::from_materialized(materialized, Vec::new())
         }
     }
-}
-
-fn prompt_regenerate_lock(manifest_path: &Path) -> Result<bool> {
-    use std::io::{self, BufRead, Write};
-    eprintln!(
-        "ato.lock.json is stale relative to {}. Regenerate now? [y/N]",
-        manifest_path.display()
-    );
-    io::stderr().flush().ok();
-    let stdin = io::stdin();
-    let mut line = String::new();
-    if stdin.lock().read_line(&mut line).is_err() {
-        return Ok(false);
-    }
-    let answer = line.trim().to_lowercase();
-    Ok(matches!(answer.as_str(), "y" | "yes"))
-}
-
-fn regenerate_lockfile_blocking(manifest_path: &Path, reporter: Arc<CliReporter>) -> Result<()> {
-    // The legacy implementation called `capsule_core::lockfile::
-    // ensure_lockfile`, which only refreshes the **legacy**
-    // `capsule.lock.json` (the `CapsuleLock` format kept under
-    // `<derived>/capsule.lock.json`). It never touches the canonical
-    // `ato.lock.json` — that file holds the `AtoLock`
-    // `contract.entries.metadata.{name,version}` that
-    // `ensure_canonical_lock_matches_manifest_identity` checks against
-    // the manifest. So `regenerate` would print "regenerated" while
-    // the canonical lock stayed stale; the next downstream call site
-    // (`ato publish` resolves authoritative input from at least three
-    // separate sites — see `cli/dispatch/publish.rs`) would re-detect
-    // staleness and re-prompt. The user saw two "Regenerate now? [y/N]"
-    // prompts in a row before the publish bailed with E999.
-    //
-    // Fix: rebuild `ato.lock.json` itself by removing the stale file
-    // and re-running source inference through the compatibility-input
-    // pipeline (`source_inference::execute_init_from_compatibility`),
-    // which is the same pipeline `ato init` uses to write the durable
-    // canonical lock. After this, the next `resolve_authoritative_input`
-    // sees a fresh `metadata.name`/`metadata.version` matching
-    // `capsule.toml` and the identity check passes — so the second call
-    // site no longer needs to prompt.
-    let project_root = manifest_path.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "manifest path {} has no parent directory",
-            manifest_path.display()
-        )
-    })?;
-
-    let lock_path = project_root.join(ATO_LOCK_FILE_NAME);
-    if lock_path.exists() {
-        fs::remove_file(&lock_path).with_context(|| {
-            format!(
-                "Failed to remove stale {} at {}",
-                ATO_LOCK_FILE_NAME,
-                lock_path.display()
-            )
-        })?;
-    }
-
-    let resolved = resolve_authoritative_input(project_root, ResolveInputOptions::default())
-        .with_context(|| {
-            format!(
-                "Failed to re-resolve project at {} after removing stale lock",
-                project_root.display()
-            )
-        })?;
-
-    match resolved {
-        ResolvedInput::CompatibilityProject { project, .. } => {
-            source_inference::execute_init_from_compatibility(&project, reporter, true)
-                .with_context(|| {
-                    format!(
-                        "Failed to regenerate {} from {}",
-                        ATO_LOCK_FILE_NAME,
-                        manifest_path.display()
-                    )
-                })?;
-        }
-        ResolvedInput::SourceOnly { source, .. } => {
-            source_inference::execute_init_from_resolved_source_only(&source, reporter, true)
-                .with_context(|| {
-                    format!(
-                        "Failed to regenerate {} from source-only project at {}",
-                        ATO_LOCK_FILE_NAME,
-                        project_root.display()
-                    )
-                })?;
-        }
-        ResolvedInput::CanonicalLock { canonical, .. } => {
-            anyhow::bail!(
-                "internal: canonical lock at {} reappeared after removal",
-                canonical.path.display()
-            );
-        }
-    }
-    eprintln!("ato.lock.json regenerated.");
-    Ok(())
-}
-
-fn ensure_canonical_lock_matches_manifest_identity(
-    canonical: &ResolvedCanonicalLock,
-    manifest_path: Option<&Path>,
-) -> Result<()> {
-    let Some(manifest_path) = manifest_path else {
-        return Ok(());
-    };
-
-    let manifest_raw = fs::read_to_string(manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest = capsule_core::types::CapsuleManifest::from_toml(&manifest_raw)
-        .map_err(|err| anyhow::anyhow!("Failed to parse {}: {}", manifest_path.display(), err))?;
-    let lock_metadata = canonical.lock.contract.entries.get("metadata");
-    let lock_name = lock_metadata
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let lock_version = lock_metadata
-        .and_then(|value| value.get("version"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    let manifest_name = manifest.name.trim();
-    let manifest_version = manifest.version.trim();
-    let mut mismatches = Vec::new();
-    if lock_name != Some(manifest_name) {
-        mismatches.push(format!(
-            "name: ato.lock.json={}, capsule.toml={}",
-            lock_name.unwrap_or("<missing>"),
-            manifest_name
-        ));
-    }
-    if lock_version != Some(manifest_version) {
-        mismatches.push(format!(
-            "version: ato.lock.json={}, capsule.toml={}",
-            lock_version.unwrap_or("<missing>"),
-            manifest_version
-        ));
-    }
-
-    if mismatches.is_empty() {
-        return Ok(());
-    }
-
-    anyhow::bail!(
-        "ato.lock.json is stale for {} ({}). Refresh or regenerate ato.lock.json before build/publish so the lock matches the regenerated capsule.toml.",
-        manifest_path.display(),
-        mismatches.join(", ")
-    );
 }
 
 impl ProducerAuthoritativeInput {
@@ -757,25 +596,29 @@ mod tests {
     }
 
     #[test]
-    fn regenerated_capsule_toml_version_auto_regenerates_canonical_lock() {
-        // When `assume_yes` is set, a stale canonical lock should be
-        // transparently rebuilt from the current `capsule.toml` rather
-        // than aborting. The previous behavior delegated to
-        // `capsule_core::lockfile::ensure_lockfile`, which only writes
-        // the legacy `capsule.lock.json` and left the canonical
-        // `ato.lock.json` untouched — so callers downstream of
-        // `resolve_producer_authoritative_input` would re-detect
-        // staleness and re-prompt (the user-visible "two prompts in a
-        // row" bug). Now the regenerator removes the stale canonical
-        // lock and re-runs source inference through the
-        // compatibility-input pipeline, so the resolved metadata
-        // matches `capsule.toml` after one pass.
+    fn canonical_lock_is_authoritative_over_diverging_manifest() {
+        // Canonical-lock-first contract: when `ato.lock.json` is present
+        // the build/publish pipeline must consume its
+        // `contract.metadata.{name,version}` verbatim — no manifest
+        // diff, no "Regenerate now? [y/N]" prompt, no auto-regen even
+        // with `assume_yes=true`.
+        //
+        // The previous incarnation of this test (see git blame) asserted
+        // the opposite: that a stale canonical lock be rebuilt from the
+        // capsule.toml. That broke
+        // `e2e_local_registry_private_publish_prefers_canonical_lock_metadata`
+        // and `test_build_prefers_existing_canonical_lock_input` which
+        // intentionally ship a placeholder manifest beside an
+        // authoritative lock. The new direction (registry pins +
+        // immutable canonical inputs) makes the lock the source of
+        // truth; manifest divergence is a separate concern handled by
+        // `ato lock --refresh`.
         let dir = tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join("capsule.toml"),
             r#"schema_version = "0.3"
-name = "demo"
-version = "0.2.0"
+name = "ignored-manifest"
+version = "9.9.9"
 type = "app"
 
 runtime = "source/deno"
@@ -787,7 +630,7 @@ run = "main.ts"
         let mut lock = AtoLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
-            json!({"name": "demo", "version": "0.1.0", "default_target": "default"}),
+            json!({"name": "canonical-name", "version": "0.1.0", "default_target": "default"}),
         );
         lock.contract.entries.insert(
             "process".to_string(),
@@ -807,36 +650,44 @@ run = "main.ts"
         capsule_core::ato_lock::write_pretty_to_path(&lock, &dir.path().join("ato.lock.json"))
             .expect("write canonical lock");
 
+        // assume_yes=false to prove that no prompt fires either
         let input = resolve_producer_authoritative_input(
             dir.path(),
             Arc::new(crate::reporters::CliReporter::new(false)),
-            true,
+            false,
         )
-        .expect("auto-regen must succeed under assume_yes=true");
+        .expect("canonical lock should be consumed without prompting");
 
         assert_eq!(
             input.semantic_package_version(),
-            "0.2.0",
-            "regenerated canonical lock must match capsule.toml version"
+            "0.1.0",
+            "canonical lock metadata.version must be returned verbatim",
         );
         assert_eq!(
             input.semantic_package_name().expect("name"),
-            "demo",
-            "regenerated canonical lock must match capsule.toml name"
+            "canonical-name",
+            "canonical lock metadata.name must be returned verbatim",
         );
 
-        let regenerated_lock =
+        // The lock file on disk must be untouched: no regen, no rewrite
+        // of metadata.version to track the manifest.
+        let post_resolve_lock =
             capsule_core::ato_lock::load_unvalidated_from_path(&dir.path().join("ato.lock.json"))
-                .expect("regenerated lock must be readable");
-        let metadata = regenerated_lock
+                .expect("canonical lock must remain readable");
+        let metadata = post_resolve_lock
             .contract
             .entries
             .get("metadata")
-            .expect("regenerated lock must include contract.metadata");
+            .expect("canonical lock must keep contract.metadata");
         assert_eq!(
             metadata.get("version").and_then(|v| v.as_str()),
-            Some("0.2.0"),
-            "metadata.version should be refreshed from capsule.toml"
+            Some("0.1.0"),
+            "canonical lock must not be silently regenerated from the manifest",
+        );
+        assert_eq!(
+            metadata.get("name").and_then(|v| v.as_str()),
+            Some("canonical-name"),
+            "canonical lock must not be silently regenerated from the manifest",
         );
     }
 
