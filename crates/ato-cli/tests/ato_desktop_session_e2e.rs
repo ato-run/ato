@@ -67,7 +67,10 @@ mod tests {
     fn session_test_env(home: &Path, session_root: &Path) -> Vec<(&'static str, String)> {
         vec![
             ("HOME", home.display().to_string()),
-            ("ATO_DESKTOP_SESSION_ROOT", session_root.display().to_string()),
+            (
+                "ATO_DESKTOP_SESSION_ROOT",
+                session_root.display().to_string(),
+            ),
         ]
     }
 
