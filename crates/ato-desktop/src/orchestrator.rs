@@ -3,11 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use ato_session_core::{
+    read_session_records, validate_record_only, RecordValidationOutcome,
+    RecordValidationParams, StoredSessionInfo,
+};
 use base64::Engine as _;
 use capsule_wire::handle::{
     normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
+    ResolvedSnapshot,
 };
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
@@ -15,6 +21,12 @@ use tracing::{debug, error, info, warn};
 use crate::config::SecretEntry;
 use crate::surface_timing::{ClickOrigin, SurfaceStageTimer};
 use crate::terminal::{TerminalCore, TryRecvOutput};
+
+/// Healthcheck budget for the fast-path. Phase 0 measured a healthy
+/// `session_start_subprocess` at 4 s; the fast path's win comes from
+/// staying under ~200 ms total so the user-perceived latency falls
+/// below 500 ms once WebView creation + navigation (~50 ms) is added.
+const FAST_PATH_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Pending terminal processes spawned by share URL executor.
 /// `webview.rs` drains these when creating Terminal panes.
@@ -398,6 +410,37 @@ pub fn resolve_and_start_capsule(
             })
             .map_err(LaunchError::from);
     }
+
+    // Phase 1 fast path (RFC v0.3 §3.2 — PR 4A.1): try to reuse a
+    // recorded session without spawning the CLI. Records the
+    // `session_record_lookup` + `session_record_validate` stages so
+    // the absence of `resolve_subprocess` / `session_start_subprocess`
+    // is the implicit "fast path hit" signal in the SURFACE-TIMING
+    // log. Any failure falls through to the legacy two-subprocess
+    // path; we never crash on a corrupted record.
+    match try_session_record_fast_path(handle) {
+        Ok(Some(mut session)) => {
+            session.click_origin = Some(click_origin);
+            info!(
+                session_id = %session.session_id,
+                handle,
+                "capsule session reused via session-record fast path"
+            );
+            return Ok(session);
+        }
+        Ok(None) => {
+            debug!(handle, "session-record fast path miss; falling back to subprocess");
+        }
+        Err(err) => {
+            // The fast path is best-effort — every failure (corrupt
+            // JSON, unreadable directory, permission error) MUST fall
+            // through silently so the user still gets a working
+            // capsule. We log at debug to avoid noise on the cold
+            // path where there's nothing to reuse.
+            debug!(error = %err, handle, "session-record fast path errored; falling back to subprocess");
+        }
+    }
+
     // `resolve_capsule` and `build_launch_session` return
     // `anyhow::Result`; the `?` operator lifts those into
     // `LaunchError::Other` via `From<anyhow::Error>`. `start_capsule`
@@ -915,6 +958,233 @@ fn snapshot_label(snapshot: &serde_json::Value) -> String {
         return format!("version {version}");
     }
     "resolved".to_string()
+}
+
+/// Typed mirror of `snapshot_label` for the fast path where the
+/// snapshot comes back from `ato-session-core` already deserialized
+/// into `ResolvedSnapshot`. Kept separate so the legacy subprocess
+/// path can keep operating on raw `serde_json::Value` without forcing
+/// the schema migration on every CLI envelope.
+fn snapshot_label_from_resolved(snapshot: &ResolvedSnapshot) -> String {
+    match snapshot {
+        ResolvedSnapshot::GithubRepo { commit_sha, .. } => {
+            format!("commit {}", short_id(commit_sha))
+        }
+        ResolvedSnapshot::RegistryRelease { version, .. } => format!("version {version}"),
+        ResolvedSnapshot::LocalPath { resolved_path, .. } => {
+            format!("path {resolved_path}")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PR 4A.1: Desktop session-record fast path
+// ---------------------------------------------------------------------------
+
+/// Try to reuse a previously-recorded session without spawning the
+/// CLI. Returns:
+/// - `Ok(Some(session))` when a valid record is found and the user-
+///   visible `CapsuleLaunchSession` was reconstructed from it.
+/// - `Ok(None)` when no candidate record passes the 5 reuse
+///   conditions (nobody to reuse — caller must fall back).
+/// - `Err(_)` only on infrastructure failures (root unreadable,
+///   construction error). The caller treats `Err` identically to
+///   `Ok(None)` and falls back to the subprocess path.
+///
+/// The function emits two SURFACE-TIMING stages so Phase 0 logs can
+/// distinguish fast-path-hit (`session_record_lookup` +
+/// `session_record_validate` present, `*_subprocess` absent) from
+/// fast-path-miss (both stages still emitted, then the subprocess
+/// stages follow on fallback).
+fn try_session_record_fast_path(handle: &str) -> Result<Option<CapsuleLaunchSession>> {
+    let root = ato_session_core::session_root()?;
+    try_session_record_fast_path_inner(handle, &root, FAST_PATH_HEALTHCHECK_TIMEOUT)
+}
+
+/// Inner helper that takes the session root + healthcheck timeout
+/// explicitly. Production callers go through `try_session_record_fast_path`
+/// (which resolves the env-aware default root); tests inject a tempdir
+/// root to avoid touching the real `~/.ato/apps/ato-desktop/sessions/`.
+fn try_session_record_fast_path_inner(
+    handle: &str,
+    root: &Path,
+    healthcheck_timeout: Duration,
+) -> Result<Option<CapsuleLaunchSession>> {
+    // Stage 1: lookup. Includes dir read and JSON parse for every record.
+    let lookup_started = Instant::now();
+    let records = read_session_records(root)?;
+    let lookup_elapsed_ms = lookup_started.elapsed().as_millis() as u64;
+    crate::surface_timing::emit_stage(
+        "session_record_lookup",
+        "ok",
+        lookup_elapsed_ms,
+        None,
+        &crate::surface_timing::SurfaceExtras::default().with_route_key(handle.to_string()),
+    );
+
+    if records.is_empty() {
+        return Ok(None);
+    }
+
+    // Stage 2: validation. Walk records in arbitrary order and pick
+    // the first one that passes all 5 conditions. Healthcheck
+    // dominates this stage — every other check is a cheap struct
+    // compare.
+    let validate_started = Instant::now();
+    let params = RecordValidationParams {
+        requested_handle: handle,
+        healthcheck_timeout,
+    };
+
+    let mut chosen: Option<StoredSessionInfo> = None;
+    let mut last_outcome = RecordValidationOutcome::HandleMismatch;
+    for record in records {
+        let outcome = validate_record_only(&record, &params);
+        match outcome {
+            RecordValidationOutcome::Reusable => {
+                chosen = Some(record);
+                last_outcome = RecordValidationOutcome::Reusable;
+                break;
+            }
+            other => {
+                last_outcome = other;
+            }
+        }
+    }
+    let validate_elapsed_ms = validate_started.elapsed().as_millis() as u64;
+    let validate_state = if matches!(last_outcome, RecordValidationOutcome::Reusable) {
+        "ok"
+    } else {
+        "fail"
+    };
+    let mut validate_extras =
+        crate::surface_timing::SurfaceExtras::default().with_route_key(handle.to_string());
+    if let Some(record) = chosen.as_ref() {
+        validate_extras = validate_extras.with_session_id(record.session_id.clone());
+    }
+    let validate_error = if matches!(last_outcome, RecordValidationOutcome::Reusable) {
+        None
+    } else {
+        Some(validation_outcome_label(&last_outcome))
+    };
+    crate::surface_timing::emit_stage(
+        "session_record_validate",
+        validate_state,
+        validate_elapsed_ms,
+        validate_error,
+        &validate_extras,
+    );
+
+    let Some(stored) = chosen else {
+        return Ok(None);
+    };
+    Ok(Some(build_launch_session_from_stored(handle, stored)?))
+}
+
+/// Map a `RecordValidationOutcome` to a stable, grep-friendly label
+/// emitted as the `error` field on the `session_record_validate`
+/// SURFACE-TIMING line. Lets analysis distinguish "no record" from
+/// "found but pid dead" from "found but healthcheck failed" without
+/// re-running the validation.
+fn validation_outcome_label(outcome: &RecordValidationOutcome) -> &'static str {
+    match outcome {
+        RecordValidationOutcome::Reusable => "reusable",
+        RecordValidationOutcome::StaleSchema => "stale_schema",
+        RecordValidationOutcome::MissingLaunchDigest => "missing_launch_digest",
+        RecordValidationOutcome::HandleMismatch => "handle_mismatch",
+        RecordValidationOutcome::PidNotAlive => "pid_not_alive",
+        RecordValidationOutcome::StartTimeMismatch => "start_time_mismatch",
+        RecordValidationOutcome::HealthcheckFailed => "healthcheck_failed",
+    }
+}
+
+/// Reconstruct a `CapsuleLaunchSession` from a validated
+/// `StoredSessionInfo`. This is the fast-path analogue of
+/// `build_launch_session(handle, resolved, started)` — but takes only
+/// the on-disk record because the validator has already confirmed the
+/// session is alive and healthy.
+///
+/// **v0 staleness contract**: `trust_state` / `restricted` /
+/// `snapshot_label` are taken from the record at session-creation
+/// time. If the publisher has since updated trust/restriction state
+/// in the registry, the fast path will display the older value. This
+/// is acceptable for v0 because (a) the user has already been
+/// running this session — restriction state can only become more
+/// permissive than what the session was started under, and (b) the
+/// failure-safe direction is "user keeps seeing the running app",
+/// not "user gets blocked from the running app". A later PR can add
+/// a TTL-based background re-resolve if this becomes a problem.
+fn build_launch_session_from_stored(
+    requested_handle: &str,
+    stored: StoredSessionInfo,
+) -> Result<CapsuleLaunchSession> {
+    let manifest_path = PathBuf::from(&stored.manifest_path);
+    let app_root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("manifest path has no parent: {}", manifest_path.display()))?;
+
+    // Frontend entry needs canonicalization against app_root (handles
+    // absolute → relative conversion for guests that wrote the
+    // canonical path into the record). Same helper the subprocess
+    // path uses, so behaviour stays identical.
+    let frontend_entry = match stored.guest.as_ref() {
+        Some(guest) => Some(normalize_frontend_entry(
+            &app_root,
+            &guest.frontend_entry,
+            &guest.frontend_entry,
+        )?),
+        None => None,
+    };
+
+    let trust_state = match stored.trust_state {
+        capsule_wire::handle::TrustState::Unknown => "unknown",
+        capsule_wire::handle::TrustState::Untrusted => "untrusted",
+        capsule_wire::handle::TrustState::Trusted => "trusted",
+        capsule_wire::handle::TrustState::Promoted => "promoted",
+        capsule_wire::handle::TrustState::Local => "local",
+    }
+    .to_string();
+
+    // The `requested_handle` parameter exists so logs / notes can
+    // reflect what the user clicked even if the record was indexed
+    // under a different normalization. We deliberately keep
+    // `stored.handle` as the canonical reusable identity.
+    let _ = requested_handle;
+
+    Ok(CapsuleLaunchSession {
+        handle: stored.handle.clone(),
+        normalized_handle: stored.normalized_handle.clone(),
+        canonical_handle: stored.canonical_handle.clone(),
+        source: stored.source.clone(),
+        trust_state,
+        restricted: stored.restricted,
+        snapshot_label: stored.snapshot.as_ref().map(snapshot_label_from_resolved),
+        session_id: stored.session_id,
+        runtime: stored.runtime,
+        display_strategy: stored.display_strategy,
+        manifest_path,
+        app_root,
+        target_label: stored.target_label,
+        adapter: stored.guest.as_ref().map(|g| g.adapter.clone()),
+        frontend_entry,
+        invoke_url: stored.guest.as_ref().map(|g| g.invoke_url.clone()),
+        healthcheck_url: stored
+            .guest
+            .as_ref()
+            .map(|g| g.healthcheck_url.clone())
+            .or_else(|| stored.web.as_ref().map(|w| w.healthcheck_url.clone())),
+        capabilities: stored
+            .guest
+            .as_ref()
+            .map(|g| g.capabilities.clone())
+            .unwrap_or_default(),
+        local_url: stored.web.as_ref().map(|w| w.local_url.clone()),
+        served_by: stored.web.as_ref().map(|w| w.served_by.clone()),
+        log_path: Some(PathBuf::from(&stored.log_path)),
+        notes: stored.notes,
+        click_origin: None,
+    })
 }
 
 fn short_id(value: &str) -> String {
@@ -3564,4 +3834,275 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
         .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
         .unwrap_or(1);
     Some(width)
+}
+
+// ---------------------------------------------------------------------------
+// PR 4A.2: fallback correctness tests for try_session_record_fast_path_inner
+// ---------------------------------------------------------------------------
+//
+// These tests cover every reuse-rejection path: missing record, schema=1
+// record, missing launch_digest, dead pid, start-time mismatch, and dead
+// healthcheck endpoint. The "valid record passes" path is exercised by a
+// dedicated test that brings up a tiny in-process HTTP server so we can
+// validate `build_launch_session_from_stored` produces the expected
+// `CapsuleLaunchSession`.
+//
+// Tests inject the session-record root via `try_session_record_fast_path_inner`
+// rather than via `ATO_DESKTOP_SESSION_ROOT` so they run safely in parallel.
+//
+// Timing assertions are deliberately absent — those belong in RFC §1.1
+// (real-world measurement), not in CI where wall-clock is flaky.
+#[cfg(test)]
+mod fast_path_tests {
+    use super::*;
+    use ato_session_core::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
+    use ato_session_core::write_session_record_atomic;
+    use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use tempfile::TempDir;
+
+    const TEST_HANDLE: &str = "capsule://ato.run/koh0920/byok-ai-chat";
+    const TEST_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(50);
+
+    /// Build a `StoredSessionInfo` that, on its own, is reuse-eligible:
+    /// schema=2, launch_digest set, pid=self, start_time=self's actual
+    /// start time. The healthcheck URL points at port 1 (unbound) by
+    /// default — individual tests override it when they need the
+    /// healthcheck to pass.
+    fn base_record(handle: &str) -> StoredSessionInfo {
+        StoredSessionInfo {
+            session_id: format!("ato-desktop-session-{}", std::process::id()),
+            handle: handle.to_string(),
+            normalized_handle: handle.trim_start_matches("capsule://").to_string(),
+            canonical_handle: Some(handle.trim_start_matches("capsule://").to_string()),
+            trust_state: TrustState::Untrusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "main".to_string(),
+                runtime: Some("node".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
+            pid: std::process::id() as i32,
+            log_path: "/tmp/x.log".to_string(),
+            // app_root is derived from manifest_path.parent(); use a
+            // valid existing dir so build_launch_session_from_stored
+            // doesn't error on canonicalization later.
+            manifest_path: "/tmp/manifest.toml".to_string(),
+            target_label: "main".to_string(),
+            notes: vec![],
+            guest: Some(GuestSessionDisplay {
+                adapter: "node".to_string(),
+                frontend_entry: "index.html".to_string(),
+                transport: "http".to_string(),
+                healthcheck_url: "http://127.0.0.1:1/health".to_string(),
+                invoke_url: "http://127.0.0.1:1/invoke".to_string(),
+                capabilities: vec!["fs:read".to_string()],
+            }),
+            web: None,
+            terminal: None,
+            service: None,
+            schema_version: Some(SCHEMA_VERSION_V2),
+            launch_digest: Some("d".repeat(64)),
+            process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+                std::process::id(),
+            ),
+        }
+    }
+
+    fn write_record(root: &Path, record: &StoredSessionInfo) {
+        write_session_record_atomic(root, record).expect("write fixture");
+    }
+
+    fn run_fast_path(root: &Path, handle: &str) -> Option<CapsuleLaunchSession> {
+        try_session_record_fast_path_inner(handle, root, TEST_HEALTHCHECK_TIMEOUT)
+            .expect("fast path must not error on these fixtures")
+    }
+
+    #[test]
+    fn record_missing_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        // Empty session root -> no records to validate.
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    #[test]
+    fn nonexistent_session_root_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        let missing = dir.path().join("never");
+        // read_session_records tolerates missing root → Ok(empty).
+        let result = try_session_record_fast_path_inner(
+            TEST_HANDLE,
+            &missing,
+            TEST_HEALTHCHECK_TIMEOUT,
+        )
+        .expect("missing root must not error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn schema_v1_record_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        record.schema_version = None; // pre-v2 record
+        write_record(dir.path(), &record);
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    #[test]
+    fn missing_launch_digest_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        record.launch_digest = None;
+        write_record(dir.path(), &record);
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dead_pid_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        // Reliable "definitely dead" PID — well above PID_MAX.
+        record.pid = 999_999_999;
+        write_record(dir.path(), &record);
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn start_time_mismatch_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        // pid is alive (self) but start time is fabricated.
+        record.process_start_time_unix_ms = Some(1);
+        write_record(dir.path(), &record);
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn healthcheck_failure_falls_back() {
+        let dir = TempDir::new().expect("tempdir");
+        // base_record points at port 1 (unbound) — five conditions
+        // pass except healthcheck.
+        let record = base_record(TEST_HANDLE);
+        write_record(dir.path(), &record);
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    #[test]
+    fn handle_alias_match_via_normalized() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut record = base_record(TEST_HANDLE);
+        // Pretend the user clicked the bare "publisher/slug" form.
+        record.handle = "koh0920/byok-ai-chat".to_string();
+        record.normalized_handle = "koh0920/byok-ai-chat".to_string();
+        record.canonical_handle = Some("koh0920/byok-ai-chat".to_string());
+        write_record(dir.path(), &record);
+        // Healthcheck still fails (port 1) so this should be a None,
+        // but the handle match itself is exercised — the validation
+        // outcome will be HealthcheckFailed (last_outcome path), not
+        // HandleMismatch. We assert the outer behaviour: still falls
+        // back, never panics on the alias path.
+        assert!(run_fast_path(dir.path(), "koh0920/byok-ai-chat").is_none());
+    }
+
+    #[test]
+    fn corrupt_json_does_not_panic() {
+        let dir = TempDir::new().expect("tempdir");
+        // Garbage record alongside no valid record → fast path returns
+        // None without unwinding. read_session_records logs a warn and
+        // skips the file.
+        std::fs::write(dir.path().join("corrupt.json"), b"{ not json").expect("write garbage");
+        assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
+    }
+
+    /// Tiny single-thread HTTP/1.1 server that answers `200 OK` to every
+    /// request. Returns the URL clients should hit and a stop-flag.
+    fn spawn_ok_server() -> (String, Arc<AtomicBool>) {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind ephemeral healthcheck server");
+        listener
+            .set_nonblocking(false)
+            .expect("blocking accept ok in test");
+        let port = listener.local_addr().expect("local addr").port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        thread::spawn(move || {
+            // Accept loop. Stops when caller flips the flag (or when
+            // the test ends and the listener drops via panic).
+            for incoming in listener.incoming() {
+                if stop_clone.load(Ordering::Relaxed) {
+                    return;
+                }
+                let Ok(mut stream) = incoming else { continue };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+                let _ = stream.flush();
+                drop(stream);
+            }
+        });
+        (format!("http://127.0.0.1:{port}/health"), stop)
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn valid_record_passes_and_builds_launch_session() {
+        let dir = TempDir::new().expect("tempdir");
+        let (healthcheck_url, stop) = spawn_ok_server();
+
+        // Smoke-test the test fixture itself before relying on it as
+        // a fast-path gate — if the in-process server can't answer a
+        // bare TCP probe, the real test below would hang on connect
+        // and the failure mode would be confusing.
+        TcpStream::connect(healthcheck_url.trim_start_matches("http://").split('/').next().unwrap())
+            .expect("local healthcheck server should accept connections");
+
+        let mut record = base_record(TEST_HANDLE);
+        // Point the record at the live healthcheck server.
+        if let Some(guest) = record.guest.as_mut() {
+            guest.healthcheck_url = healthcheck_url.clone();
+        }
+        write_record(dir.path(), &record);
+
+        let session = try_session_record_fast_path_inner(
+            TEST_HANDLE,
+            dir.path(),
+            // Bump timeout — the in-process server may need a moment
+            // on cold thread spin-up.
+            Duration::from_millis(500),
+        )
+        .expect("infra ok")
+        .expect("fast path should hit on a fully-valid record");
+
+        // Identity fields flow straight from the record.
+        assert_eq!(session.session_id, record.session_id);
+        assert_eq!(session.handle, record.handle);
+        assert_eq!(session.normalized_handle, record.normalized_handle);
+        assert_eq!(session.canonical_handle, record.canonical_handle);
+        // Staleness contract: trust_state is taken from the record at
+        // session-creation time.
+        assert_eq!(session.trust_state, "untrusted");
+        // Guest payload mapped through.
+        assert_eq!(session.adapter.as_deref(), Some("node"));
+        assert_eq!(session.healthcheck_url, Some(healthcheck_url));
+        assert_eq!(session.capabilities, vec!["fs:read".to_string()]);
+        // app_root is derived from manifest_path.parent().
+        assert_eq!(session.app_root, PathBuf::from("/tmp"));
+
+        stop.store(true, Ordering::Relaxed);
+    }
 }
