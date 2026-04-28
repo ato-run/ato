@@ -164,7 +164,7 @@ same standard applies to the rest of the workspace.
 
 **残タスク（主要）:**
 
-- [ ] **13a.1〜13a.4**: nacelle — IPC ソケットパスの Sandbox 許可、`ipc_env` 透過、readiness 報告
+- [x] **13a.1〜13a.4**: nacelle — IPC ソケットパスの Sandbox 許可、`ipc_env` 透過、readiness 報告 (完了 2026-04-29、ADR-007)
 - [ ] **13b.9**: Guest プロトコル JSON-RPC 2.0 移行 (`GuestAction` → `capsule/invoke`)
 - [ ] **Phase 8.4**: Desktop での Profile 表示・キャッシュ
 - [ ] **Phase 9.2〜9.4**: license.sync — entitlements 注入、Desktop 統合
@@ -572,40 +572,61 @@ pnpm -C apps/ato-store-web exec astro check
 
 ## Phase 13: Capsule IPC 🚧
 
-### 13a: nacelle — Sandbox Enforcer 対応 (見積 1週間)
+### 13a: nacelle — Sandbox Enforcer 対応 ✅ (完了 2026-04-29)
 
 > nacelle は IPC の「内容」には関与せず、ato-cli が注入する IPC Transport パスの
 > Sandbox 許可と環境変数の透過のみを担当する (Smart Build, Dumb Runtime)。
+>
+> **設計決定**: `claudedocs/research_phase13a_sandbox_best_practices_20260429.md`
+> および `docs/rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md` を参照。
+> macOS は `sandbox_init(flags=0)` 経由の動的 SBPL を採用 (nono 参照実装)。
 
 #### 13a.1 IPC Transport の Sandbox 許可
 
-- [ ] `system/sandbox.rs`: ato-cli からの IPC ソケットパスを受け取るインターフェース追加
-  - JSON stdin の `ipc_socket_paths: Vec<String>` フィールド追加
-- [ ] `system/seatbelt.rs` (macOS): Seatbelt プロファイルに IPC ソケットパスを動的追加
-  - `(allow file-read* file-write* (subpath "/tmp/capsule-ipc/"))` 相当
-- [ ] `system/landlock.rs` (Linux): Landlock ルールセットに IPC ソケットパスを動的追加
-  - `AccessFs::ReadFile | AccessFs::WriteFile` で `/tmp/capsule-ipc/` を許可
-- [ ] テスト: IPC パスが許可され、それ以外のパスが拒否されること
+- [x] `system/sandbox/mod.rs`: ato-cli からの IPC ソケットパスを受け取るインターフェース追加
+  - `SandboxPolicy.ipc_socket_paths: Vec<PathBuf>` + `with_ipc_socket_paths()` builder
+  - JSON stdin の `ipc_socket_paths: Vec<String>` フィールド対応
+- [x] `system/sandbox/macos.rs` (macOS): Seatbelt プロファイルに IPC ソケットパスを動的追加
+  - `generate_sbpl_profile()` を `#[allow(dead_code)]` 解除して活性化
+  - `apply_seatbelt_sandbox()` を `sandbox_init(flags=0)` の動的 SBPL 経路に切替
+  - file-read*/file-write* + network* (remote/local unix-socket) の両ルールを emit
+  - Mach IPC keychain deny (`com.apple.secd` 等) を追加 (nono パターン)
+- [x] `system/sandbox/linux.rs` (Linux): Landlock ルールセットに IPC ソケットパスを動的追加
+  - `path_beneath_rules(path, AccessFs::from_all)` で IPC パス + 親ディレクトリ fallback
+- [x] テスト: IPC パスが SBPL に含まれること、Mach IPC keychain deny、symlink 解決
+  (`crates/nacelle/src/system/sandbox/macos.rs::tests` 9 件)
 
 #### 13a.2 環境変数の透過
 
-- [ ] `nacelle internal exec` の JSON 入力に `ipc_env: HashMap<String, String>` を追加
-- [ ] 子プロセス spawn 時に `CAPSULE_IPC_*` 環境変数を透過させる
-- [ ] nacelle 自身は値を解釈しないことを確認（Dumb Runtime）
-- [ ] テスト: 子プロセスが `CAPSULE_IPC_*` を受け取れること
+- [x] `nacelle internal exec` の JSON 入力に `ipc_env: Vec<(String, String)>` を追加
+  (`crates/nacelle/src/cli/commands/internal.rs:180` `ExecEnvelope`)
+- [x] 子プロセス spawn 時に `CAPSULE_IPC_*` 環境変数を透過 (`merge_workload_env()`)
+- [x] nacelle 自身は値を解釈しない (Dumb Runtime — broker は ato-cli 側で完結)
+- [x] テスト: ato-cli `ipc_socket_e2e` が `CAPSULE_IPC_*` を子プロセスで受け取って Unix socket
+  に書き込む経路を確認
 
 #### 13a.3 Readiness Probe の ato-cli への報告
 
-- [ ] Supervisor Mode の readiness_probe 結果を JSON stdout で報告するフォーマット定義
-  - `{ "type": "ipc_ready", "service": "llm-service", "endpoint": "...", "port": 54321 }`
-- [ ] `run_supervisor_mode()` に報告ロジック追加
-- [ ] テスト: readiness 報告の JSON フォーマット検証
+- [x] Supervisor Mode の readiness_probe 結果を JSON stdout で報告 (`NacelleEvent::IpcReady`)
+  - 実装フォーマットは `{"event":"ipc_ready", "service":"...", "endpoint":"...", "port":N}`
+    (TODO 草案の `"type"` ではなく `"event"` を採用 — `#[serde(tag = "event")]` で統一)
+- [x] `run_supervisor_mode()` に報告ロジック (`crates/nacelle/src/manager/r3_supervisor.rs:188`)
+- [x] テスト: 3 件 (`test_nacelle_event_ipc_ready_serialization` /
+  `test_nacelle_event_ipc_ready_with_port` / `test_nacelle_event_ipc_ready_wire_contract`)
 
 #### 13a.4 Engine Interface 拡張
 
-- [ ] `nacelle internal exec` の入力 JSON スキーマに IPC フィールド追加 (schema 更新)
-- [ ] `nacelle internal features` の応答に `"ipc_sandbox": true` 追加
-- [ ] ENGINE_INTERFACE_CONTRACT.md 更新
+- [x] `nacelle internal exec` の入力 JSON スキーマに IPC フィールド追加
+  (`spec_version` v1.0/v2.0 両方で `ipc_env` / `ipc_socket_paths` 受理)
+- [x] `nacelle internal features` の応答に `"ipc_sandbox": true` 追加
+  (`Capabilities` struct + fail-closed: backend が無ければ false)
+- [x] ENGINE_INTERFACE_CONTRACT.md 更新 (§5「Sandbox semantics」節を追加)
+
+#### 13a の今後の宿題（Phase 13a スコープ外）
+
+- [ ] Landlock ABI probe (V6→V1, nono パターン) — 中期 RFC
+- [ ] Landlock IPC scoping (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`) — V5+ 利用時
+- [ ] macOS `sandbox_init` 後継 API 監視 (ADR-007 §4 — 6 ヶ月毎レビュー)
 
 ---
 
