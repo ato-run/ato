@@ -13,6 +13,18 @@ pub(crate) enum AppCommands {
         json: bool,
     },
 
+    #[command(
+        about = "Fetch the latest published version of a capsule from the registry, \
+                 ignoring the local cache. Used by ato-desktop to surface update prompts."
+    )]
+    Latest {
+        handle: String,
+        #[arg(long)]
+        registry: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
     #[command(about = "Manage an ato-desktop guest session")]
     Session {
         #[command(subcommand)]
