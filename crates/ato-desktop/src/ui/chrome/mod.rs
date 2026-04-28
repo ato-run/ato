@@ -332,7 +332,6 @@ fn render_omnibar_suggestion(
         )
 }
 
-
 /// Visual variant of the route-status chip in the chrome bar.
 ///
 /// Previously the chrome rendered up to four inline pills covering
@@ -363,9 +362,9 @@ fn render_active_route_status(state: &AppState, theme: &Theme) -> impl IntoEleme
 
     let variant = match session {
         WebSessionState::LaunchFailed => RouteChipVariant::Error,
-        WebSessionState::Resolving | WebSessionState::Materializing | WebSessionState::Launching => {
-            RouteChipVariant::Loading
-        }
+        WebSessionState::Resolving
+        | WebSessionState::Materializing
+        | WebSessionState::Launching => RouteChipVariant::Loading,
         _ => RouteChipVariant::Info,
     };
     let pressed = state.route_metadata_popover_open;
@@ -389,16 +388,15 @@ fn render_route_chip(variant: RouteChipVariant, pressed: bool, theme: &Theme) ->
             theme.omnibar_rest_border,
             theme.text_secondary,
         ),
-        RouteChipVariant::Loading => (
-            "◐",
-            theme.accent_subtle,
-            theme.accent_border,
-            theme.accent,
-        ),
+        RouteChipVariant::Loading => ("◐", theme.accent_subtle, theme.accent_border, theme.accent),
         RouteChipVariant::Error => ("⚠", error_bg, error_border, error_fg),
     };
 
-    let bg = if pressed { theme.surface_pressed } else { tone_bg };
+    let bg = if pressed {
+        theme.surface_pressed
+    } else {
+        tone_bg
+    };
 
     div()
         .id("route-metadata-chip")
@@ -420,4 +418,3 @@ fn render_route_chip(variant: RouteChipVariant, pressed: bool, theme: &Theme) ->
         })
         .child(icon)
 }
-

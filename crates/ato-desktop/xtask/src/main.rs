@@ -93,9 +93,7 @@ fn main() -> Result<()> {
                 .unwrap_or(DEFAULT_TARGET)
                 .to_string();
             match target.as_str() {
-                "darwin-arm64" | "darwin-x86_64" => {
-                    package_macos_zip(Path::new(&path), &target)
-                }
+                "darwin-arm64" | "darwin-x86_64" => package_macos_zip(Path::new(&path), &target),
                 "windows-x86_64" => package_windows_zip(Path::new(&path), &target),
                 other => bail!("unsupported zip target: {}", other),
             }

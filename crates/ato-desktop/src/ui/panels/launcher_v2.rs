@@ -149,16 +149,12 @@ fn render_search_bar(launcher_search: &Entity<InputState>) -> impl IntoElement {
             ),
         )
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(hsla(217.0 / 360.0, 0.75, 0.45, 0.70))
-                        .child("✦"),
-                ),
+            div().flex().items_center().gap(px(8.0)).child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(hsla(217.0 / 360.0, 0.75, 0.45, 0.70))
+                    .child("✦"),
+            ),
         )
 }
 

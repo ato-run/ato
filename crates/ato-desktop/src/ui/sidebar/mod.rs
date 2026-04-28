@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
@@ -121,10 +122,7 @@ fn render_ghost_icon(ghost: &GhostIcon) -> Div {
                 .justify_center()
                 .bg(linear_gradient(
                     135.,
-                    linear_color_stop(
-                        gpui::hsla(hue / 360.0, saturation, lightness, 1.0),
-                        0.,
-                    ),
+                    linear_color_stop(gpui::hsla(hue / 360.0, saturation, lightness, 1.0), 0.),
                     linear_color_stop(
                         gpui::hsla(
                             ((hue + 30.0) % 360.0) / 360.0,
@@ -214,7 +212,16 @@ const APP_ICON_SIZE: f32 = 22.0;
 pub(super) enum FaviconState {
     Loading,
     Ready(Arc<Image>),
-    Failed,
+    Failed { failed_at: Instant },
+}
+
+impl FaviconState {
+    pub(super) fn should_fetch(&self, now: Instant, retry_delay: Duration) -> bool {
+        match self {
+            Self::Loading | Self::Ready(_) => false,
+            Self::Failed { failed_at } => now.duration_since(*failed_at) >= retry_delay,
+        }
+    }
 }
 
 pub(super) fn render_task_rail(
@@ -372,7 +379,6 @@ fn render_close_button(task_id: usize, theme: &Theme) -> Stateful<Div> {
         })
 }
 
-
 fn render_app_icon(
     icon: SidebarTaskIconSpec,
     seed: u64,
@@ -380,12 +386,10 @@ fn render_app_icon(
     theme: &Theme,
 ) -> Div {
     match icon {
-        SidebarTaskIconSpec::Monogram(label) => {
-            render_monogram_icon(&label, task_hue(seed), theme)
-        }
+        SidebarTaskIconSpec::Monogram(label) => render_monogram_icon(&label, task_hue(seed), theme),
         SidebarTaskIconSpec::ExternalUrl { origin } => match favicon_cache.get(&origin) {
             Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
-            Some(FaviconState::Loading) | Some(FaviconState::Failed) | None => {
+            Some(FaviconState::Loading) | Some(FaviconState::Failed { .. }) | None => {
                 render_globe_icon(theme)
             }
         },
@@ -398,7 +402,7 @@ fn render_app_icon(
             // without an icon would show, so the slot never goes
             // empty.
             Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
-            Some(FaviconState::Loading) | Some(FaviconState::Failed) | None => {
+            Some(FaviconState::Loading) | Some(FaviconState::Failed { .. }) | None => {
                 render_monogram_icon("●", task_hue(seed), theme)
             }
         },
@@ -649,7 +653,8 @@ fn render_new_tab_button(theme: &Theme) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::favicon_request_url;
+    use super::{favicon_request_url, FaviconState};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn favicon_request_is_built_from_origin() {
@@ -662,5 +667,24 @@ mod tests {
             Some("http://localhost:3000/favicon.ico".to_string())
         );
         assert_eq!(favicon_request_url("file:///tmp/app"), None);
+    }
+
+    #[test]
+    fn favicon_state_failed_entries_retry_after_backoff() {
+        let retry_delay = Duration::from_secs(10);
+        let now = Instant::now();
+
+        let loading = FaviconState::Loading;
+        assert!(!loading.should_fetch(now, retry_delay));
+
+        let failed_recently = FaviconState::Failed {
+            failed_at: now - Duration::from_secs(3),
+        };
+        assert!(!failed_recently.should_fetch(now, retry_delay));
+
+        let failed_long_ago = FaviconState::Failed {
+            failed_at: now - Duration::from_secs(12),
+        };
+        assert!(failed_long_ago.should_fetch(now, retry_delay));
     }
 }

@@ -259,7 +259,9 @@ pub fn bootstrap(
 ) -> Result<()> {
     ensure_ato_desktop_package(package_id)?;
     if !finalize {
-        anyhow::bail!("MVP only supports `ato app bootstrap ato/ato-desktop --finalize` right now.");
+        anyhow::bail!(
+            "MVP only supports `ato app bootstrap ato/ato-desktop --finalize` right now."
+        );
     }
 
     let service_root = ensure_ato_desktop_managed_environment_materialized()?;
@@ -1652,7 +1654,12 @@ mod tests {
         state.health.last_error = Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR.to_string());
         write_state_to_path(&state_path, &state).expect("write broken state");
 
-        repair(ATO_DESKTOP_PACKAGE_ID, RepairActionArg::RestartServices, true).expect("repair");
+        repair(
+            ATO_DESKTOP_PACKAGE_ID,
+            RepairActionArg::RestartServices,
+            true,
+        )
+        .expect("repair");
 
         let service_root = managed_service_root(ATO_DESKTOP_PACKAGE_ID).expect("service root");
         assert!(service_root.join("ollama").join("service.json").exists());

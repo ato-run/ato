@@ -17,11 +17,7 @@ pub(super) fn execute_app_command(command: crate::AppCommands, json_mode: bool) 
             handle,
             registry,
             json,
-        } => crate::app_control::fetch_latest(
-            &handle,
-            registry.as_deref(),
-            json_mode || json,
-        ),
+        } => crate::app_control::fetch_latest(&handle, registry.as_deref(), json_mode || json),
         crate::AppCommands::Session { command } => match command {
             crate::SessionCommands::Start {
                 handle,

@@ -108,14 +108,11 @@ fn render_updates_card(state: &AppState, theme: &Theme) -> Div {
         };
 
     let action_button: gpui::Stateful<Div> = match &state.update_check {
-        UpdateCheck::Available { .. } => updates_action_button(
-            "Open release",
-            theme,
-            true,
-            move |window, cx| {
+        UpdateCheck::Available { .. } => {
+            updates_action_button("Open release", theme, true, move |window, cx| {
                 window.dispatch_action(Box::new(OpenLatestReleasePage), cx);
-            },
-        ),
+            })
+        }
         UpdateCheck::Checking => updates_action_button(
             "Checking…",
             theme,
@@ -125,14 +122,9 @@ fn render_updates_card(state: &AppState, theme: &Theme) -> Div {
             // but disabling the button is the clearer signal.
             move |_, _| {},
         ),
-        _ => updates_action_button(
-            "Check now",
-            theme,
-            false,
-            move |window, cx| {
-                window.dispatch_action(Box::new(CheckForUpdates), cx);
-            },
-        ),
+        _ => updates_action_button("Check now", theme, false, move |window, cx| {
+            window.dispatch_action(Box::new(CheckForUpdates), cx);
+        }),
     };
 
     settings_card("Updates", theme)
@@ -153,7 +145,11 @@ fn updates_action_button(
     let (bg, fg, border) = if accent {
         (theme.accent, gpui::white(), theme.accent)
     } else {
-        (theme.surface_hover, theme.text_primary, theme.border_default)
+        (
+            theme.surface_hover,
+            theme.text_primary,
+            theme.border_default,
+        )
     };
     div()
         .id(label)
@@ -178,9 +174,7 @@ fn render_account_card(state: &AppState, theme: &Theme) -> Div {
     let auth = &state.desktop_auth;
     let (status_label, status_color) = match auth.status {
         DesktopAuthStatus::SignedOut => ("Signed out", theme.text_secondary),
-        DesktopAuthStatus::AwaitingBrowser => {
-            ("Waiting for browser…", theme.text_secondary)
-        }
+        DesktopAuthStatus::AwaitingBrowser => ("Waiting for browser…", theme.text_secondary),
         DesktopAuthStatus::SignedIn => ("Signed in", theme.accent),
         DesktopAuthStatus::Failed => ("Sign-in failed", hsla(0.0, 0.7, 0.5, 1.0)),
     };
@@ -193,32 +187,23 @@ fn render_account_card(state: &AppState, theme: &Theme) -> Div {
     let origin = auth.last_login_origin.as_deref().unwrap_or("—");
 
     let action_button: gpui::Stateful<Div> = match auth.status {
-        DesktopAuthStatus::SignedIn => account_action_button(
-            "Sign out",
-            theme,
-            true,
-            move |window, cx| {
+        DesktopAuthStatus::SignedIn => {
+            account_action_button("Sign out", theme, true, move |window, cx| {
                 window.dispatch_action(Box::new(SignOut), cx);
-            },
-        ),
-        DesktopAuthStatus::AwaitingBrowser => account_action_button(
-            "Cancel",
-            theme,
-            false,
-            move |window, cx| {
+            })
+        }
+        DesktopAuthStatus::AwaitingBrowser => {
+            account_action_button("Cancel", theme, false, move |window, cx| {
                 // Re-using SignOut as the cancel path keeps the
                 // logic single-source.
                 window.dispatch_action(Box::new(SignOut), cx);
-            },
-        ),
-        DesktopAuthStatus::Failed | DesktopAuthStatus::SignedOut => account_action_button(
-            "Sign in",
-            theme,
-            false,
-            move |window, cx| {
+            })
+        }
+        DesktopAuthStatus::Failed | DesktopAuthStatus::SignedOut => {
+            account_action_button("Sign in", theme, false, move |window, cx| {
                 window.dispatch_action(Box::new(SignInToAtoRun), cx);
-            },
-        ),
+            })
+        }
     };
 
     settings_card("Account", theme)
@@ -235,7 +220,11 @@ fn account_action_button(
     on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<Div> {
     let (bg, fg, border) = if danger {
-        (theme.surface_hover, hsla(0.0, 0.7, 0.5, 1.0), theme.border_default)
+        (
+            theme.surface_hover,
+            hsla(0.0, 0.7, 0.5, 1.0),
+            theme.border_default,
+        )
     } else {
         (theme.accent, gpui::white(), theme.accent)
     };

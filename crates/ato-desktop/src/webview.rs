@@ -273,8 +273,8 @@ impl WebViewManager {
             .detach();
         }
 
-        let web_context_dir = dirs::home_dir()
-            .map(|home| home.join(".ato").join("desktop").join("webcontext"));
+        let web_context_dir =
+            dirs::home_dir().map(|home| home.join(".ato").join("desktop").join("webcontext"));
         if let Some(dir) = &web_context_dir {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -1930,10 +1930,7 @@ fn apply_launch_session_metadata(
         Some(session.manifest_path.display().to_string()),
         runtime_label,
         Some(session.display_strategy.as_str().to_string()),
-        session
-            .log_path
-            .as_ref()
-            .map(|p| p.display().to_string()),
+        session.log_path.as_ref().map(|p| p.display().to_string()),
         session.local_url.clone(),
         session.healthcheck_url.clone(),
         session.invoke_url.clone(),
@@ -1948,10 +1945,7 @@ fn apply_launch_session_metadata(
 /// the running snapshot label using semver. The result is funnelled back
 /// to `DesktopShell::poll_capsule_updates` through the channel installed
 /// by `install_capsule_update_channel`.
-fn run_capsule_update_check(
-    canonical_handle: &str,
-    current: &str,
-) -> crate::state::CapsuleUpdate {
+fn run_capsule_update_check(canonical_handle: &str, current: &str) -> crate::state::CapsuleUpdate {
     use crate::state::CapsuleUpdate;
 
     let latest = match crate::orchestrator::fetch_latest_capsule_version(canonical_handle) {
@@ -3172,10 +3166,7 @@ mod tests {
     #[test]
     fn target_handle_replaces_existing_version_suffix() {
         assert_eq!(
-            target_handle_for_version(
-                "capsule://ato.run/koh0920/byok-ai-chat@0.3.3",
-                "0.3.4",
-            ),
+            target_handle_for_version("capsule://ato.run/koh0920/byok-ai-chat@0.3.3", "0.3.4",),
             "capsule://ato.run/koh0920/byok-ai-chat@0.3.4",
         );
     }
@@ -3183,10 +3174,7 @@ mod tests {
     #[test]
     fn target_handle_appends_when_no_existing_version() {
         assert_eq!(
-            target_handle_for_version(
-                "capsule://ato.run/koh0920/byok-ai-chat",
-                "0.3.4",
-            ),
+            target_handle_for_version("capsule://ato.run/koh0920/byok-ai-chat", "0.3.4",),
             "capsule://ato.run/koh0920/byok-ai-chat@0.3.4",
         );
     }
@@ -3196,10 +3184,7 @@ mod tests {
         // Pathological case: an `@` somewhere earlier in the handle should
         // not get truncated. Only the trailing `@<version>` is replaced.
         assert_eq!(
-            target_handle_for_version(
-                "capsule://ato.run/some@user/pkg@1.0.0",
-                "1.1.0",
-            ),
+            target_handle_for_version("capsule://ato.run/some@user/pkg@1.0.0", "1.1.0",),
             "capsule://ato.run/some@user/pkg@1.1.0",
         );
     }
@@ -3230,7 +3215,7 @@ mod tests {
             healthcheck_url: None,
             invoke_url: None,
             served_by: None,
-                    auth_flow: false,
+            auth_flow: false,
             bounds: PaneBounds::empty(),
         }
     }
@@ -3238,7 +3223,9 @@ mod tests {
     #[test]
     fn dock_urls_install_ato_auth_cookies_only_for_ato_run_dock() {
         assert!(should_install_ato_auth_cookies("https://ato.run/dock"));
-        assert!(should_install_ato_auth_cookies("https://ato.run/dock/koh0920"));
+        assert!(should_install_ato_auth_cookies(
+            "https://ato.run/dock/koh0920"
+        ));
         assert!(!should_install_ato_auth_cookies("https://ato.run/auth"));
         assert!(!should_install_ato_auth_cookies("https://example.com/dock"));
     }
