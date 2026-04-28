@@ -124,7 +124,7 @@ pub fn resolve_handle(
             "{}",
             serde_json::to_string_pretty(&ResolveEnvelope {
                 schema_version: super::SCHEMA_VERSION,
-                package_id: super::DESKY_PACKAGE_ID,
+                package_id: super::ATO_DESKTOP_PACKAGE_ID,
                 action: ACTION,
                 resolution,
             })?
@@ -771,8 +771,13 @@ fn normalize_curated_store_alias(input: &str) -> String {
         _ => (trimmed, None),
     };
 
-    let canonical = if candidate.eq_ignore_ascii_case("desky") {
-        Some(super::DESKY_PACKAGE_ID)
+    // Both the new `ato-desktop` alias and the legacy `desky` alias resolve
+    // to the canonical control-plane package id so existing scripts /
+    // bookmarks keep working post-rename.
+    let canonical = if candidate.eq_ignore_ascii_case("ato-desktop")
+        || candidate.eq_ignore_ascii_case("desky")
+    {
+        Some(super::ATO_DESKTOP_PACKAGE_ID)
     } else {
         None
     };
@@ -894,8 +899,18 @@ mod tests {
 
     #[test]
     fn normalize_curated_alias_preserves_version_suffix() {
-        let normalized = normalize_handle("desky@1.2.3").expect("normalize alias");
-        assert_eq!(normalized.normalized_handle, "ato/desky@1.2.3");
+        let normalized = normalize_handle("ato-desktop@1.2.3").expect("normalize alias");
+        assert_eq!(normalized.normalized_handle, "ato/ato-desktop@1.2.3");
+        assert!(matches!(
+            normalized.kind,
+            NormalizedHandleKind::StoreCapsule
+        ));
+    }
+
+    #[test]
+    fn normalize_legacy_desky_alias_resolves_to_new_id() {
+        let normalized = normalize_handle("desky@1.2.3").expect("normalize legacy alias");
+        assert_eq!(normalized.normalized_handle, "ato/ato-desktop@1.2.3");
         assert!(matches!(
             normalized.kind,
             NormalizedHandleKind::StoreCapsule
