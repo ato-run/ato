@@ -1520,6 +1520,7 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
     let Some(active) = active else {
         return div();
     };
+    let pane_id = active.pane_id;
 
     let session_label = match active.session {
         crate::state::WebSessionState::Detached => "detached",
@@ -1578,12 +1579,26 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
         rows.push(("log", v));
     }
 
+    // Trail the metadata with the pane's recent capsule logs so users
+    // can read why a launch is taking long / what failed without
+    // having to dig into the inspector. We keep it terse: last 8
+    // entries, color-coded by tone, in chronological order so the
+    // most recent line is at the bottom (matches a console feel).
+    let log_entries: Vec<crate::state::CapsuleLogEntry> = state
+        .capsule_logs
+        .get(&pane_id)
+        .map(|entries| {
+            let take = entries.len().min(8);
+            entries[entries.len() - take..].to_vec()
+        })
+        .unwrap_or_default();
+
     div()
         .absolute()
         .top(px(8.0))
         .right(px(12.0))
-        .w(px(360.0))
-        .max_h(px(420.0))
+        .w(px(420.0))
+        .max_h(px(520.0))
         .rounded(px(12.0))
         .bg(theme.panel_bg)
         .border_1()
@@ -1624,6 +1639,44 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
                         .child(value),
                 )
         }))
+        .when(!log_entries.is_empty(), |this| {
+            this.child(
+                div()
+                    .mt_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border_subtle)
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight(600.0))
+                    .text_color(theme.text_secondary)
+                    .child("Recent activity"),
+            )
+            .children(log_entries.into_iter().map(|entry| {
+                let tone_color = match entry.tone {
+                    crate::state::ActivityTone::Error => hsla(0.0 / 360.0, 0.65, 0.50, 1.0),
+                    crate::state::ActivityTone::Warning => hsla(38.0 / 360.0, 0.85, 0.50, 1.0),
+                    crate::state::ActivityTone::Info => theme.text_primary,
+                };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(
+                        div()
+                            .min_w(px(72.0))
+                            .text_size(px(10.5))
+                            .text_color(theme.text_tertiary)
+                            .child(entry.stage.as_str()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.0))
+                            .text_color(tone_color)
+                            .child(entry.message),
+                    )
+            }))
+        })
 }
 
 fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
