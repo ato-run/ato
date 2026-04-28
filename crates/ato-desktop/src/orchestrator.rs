@@ -417,7 +417,7 @@ pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if !name.starts_with("desky-session-")
+        if !name.starts_with("ato-desktop-session-")
             || path.extension().and_then(|ext| ext.to_str()) != Some("json")
         {
             continue;
@@ -875,7 +875,7 @@ fn normalize_frontend_entry(app_root: &Path, primary: &str, fallback: &str) -> R
 }
 
 fn session_root() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("DESKY_SESSION_ROOT") {
+    if let Ok(path) = std::env::var("ATO_DESKTOP_SESSION_ROOT") {
         return Ok(PathBuf::from(path));
     }
     let home = std::env::var("HOME")
@@ -884,7 +884,7 @@ fn session_root() -> Result<PathBuf> {
     Ok(home
         .join(".ato")
         .join("apps")
-        .join("desky")
+        .join("ato-desktop")
         .join("sessions"))
 }
 
@@ -1359,7 +1359,7 @@ fn share_tmp_dir(share_url: &str) -> Result<PathBuf> {
     Ok(home
         .join(".ato")
         .join("apps")
-        .join("desky")
+        .join("ato-desktop")
         .join("shared-runs")
         .join(format!("{hash:016x}")))
 }
@@ -1510,7 +1510,7 @@ mod tests {
 
     fn session_start() -> SessionStartInfo {
         SessionStartInfo {
-            session_id: "desky-session-1".to_string(),
+            session_id: "ato-desktop-session-1".to_string(),
             handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
             normalized_handle: "capsule://ato.run/koh0920/ato-onboarding".to_string(),
             canonical_handle: Some("capsule://ato.run/koh0920/ato-onboarding".to_string()),
