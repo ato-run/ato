@@ -56,6 +56,7 @@ use tracing::{debug, error, info, warn};
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
 const HOST_PANEL_SCHEME: &str = "capsule-host";
 const HOST_PANEL_PROFILE: &str = "host-panel";
+const HOST_PANEL_OVERLAY_PANE_ID: usize = usize::MAX;
 static HOST_PANEL_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/frontend/dist");
 
 /// Preload injected into `terminal://` WebViews so xterm.js can reach the host.
@@ -130,6 +131,7 @@ struct AuthHandoffSignal {
 
 pub struct WebViewManager {
     views: HashMap<usize, ManagedWebView>,
+    overlay_host_panel: Option<ManagedWebView>,
     pending_launches: HashMap<String, PendingLaunch>,
     active_pane_id: Option<usize>,
     responder_target: Option<ResponderTarget>,
@@ -180,6 +182,7 @@ struct ManagedWebView {
     route: GuestRoute,
     route_key: String,
     bounds: PaneBounds,
+    host_panel_payload_json: Option<String>,
     launched_session: Option<GuestLaunchSession>,
     webview: WebView,
     #[cfg(target_os = "macos")]
@@ -194,6 +197,20 @@ struct DesktopAuthHandoff {
     session_token: String,
     site_base_url: String,
     api_base_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostPanelIpcEnvelope {
+    #[serde(rename = "__ato_host_panel__")]
+    message: HostPanelIpcMessage,
+    #[serde(rename = "paneId")]
+    pane_id: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HostPanelIpcMessage {
+    kind: String,
+    path: Option<String>,
 }
 
 impl ManagedWebView {
@@ -289,6 +306,7 @@ impl WebViewManager {
 
         Self {
             views: HashMap::new(),
+            overlay_host_panel: None,
             pending_launches: HashMap::new(),
             active_pane_id: None,
             responder_target: None,
@@ -915,6 +933,20 @@ impl WebViewManager {
     fn apply_shell_events(&mut self, events: &[ShellEvent], state: &AppState) {
         for event in events {
             match event {
+                ShellEvent::HostPanelRouteChanged { pane_id, path } => {
+                    let full_url = format!("{HOST_PANEL_SCHEME}://panel{path}");
+                    if let Ok(parsed) = full_url.parse() {
+                        if *pane_id == HOST_PANEL_OVERLAY_PANE_ID {
+                            if let Some(view) = self.overlay_host_panel.as_mut() {
+                                view.route = GuestRoute::ExternalUrl(parsed);
+                                view.route_key = full_url;
+                            }
+                        } else if let Some(view) = self.views.get_mut(pane_id) {
+                            view.route = GuestRoute::ExternalUrl(parsed);
+                            view.route_key = full_url;
+                        }
+                    }
+                }
                 ShellEvent::UrlChanged { pane_id, url } => {
                     if let Some(view) = self.views.get_mut(pane_id) {
                         if let Ok(parsed) = url.parse() {
@@ -1721,6 +1753,7 @@ impl WebViewManager {
             route: pane.route.clone(),
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
+            host_panel_payload_json: None,
             launched_session,
             webview,
             #[cfg(target_os = "macos")]
@@ -1733,8 +1766,43 @@ impl WebViewManager {
         window: &Window,
         pane: &ActiveWebPane,
     ) -> Result<ManagedWebView> {
-        let url = pane.route.to_string();
-        let webview_bounds = content_bounds(pane.bounds);
+        self.build_host_panel_child_webview(
+            window,
+            pane.pane_id,
+            pane.route.clone(),
+            pane.bounds,
+            None,
+        )
+    }
+
+    fn build_host_panel_overlay_webview(
+        &mut self,
+        window: &Window,
+        route: url::Url,
+        bounds: PaneBounds,
+        payload: Option<Value>,
+    ) -> Result<ManagedWebView> {
+        self.build_host_panel_child_webview(
+            window,
+            HOST_PANEL_OVERLAY_PANE_ID,
+            GuestRoute::ExternalUrl(route),
+            bounds,
+            payload,
+        )
+    }
+
+    fn build_host_panel_child_webview(
+        &mut self,
+        window: &Window,
+        pane_id: usize,
+        route: GuestRoute,
+        bounds: PaneBounds,
+        payload: Option<Value>,
+    ) -> Result<ManagedWebView> {
+        let url = route.to_string();
+        let webview_bounds = content_bounds(bounds);
+        let payload_json = serde_json::to_string(&payload.unwrap_or(Value::Null))
+            .unwrap_or_else(|_| "null".to_string());
         let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
             .with_bounds(bounds_to_rect(webview_bounds));
 
@@ -1749,6 +1817,10 @@ impl WebViewManager {
                 env!("CARGO_PKG_VERSION"),
                 std::env::consts::OS,
             ),
+            true,
+        );
+        builder = builder.with_initialization_script_for_main_only(
+            host_panel_bootstrap_script(pane_id, &payload_json),
             true,
         );
 
@@ -1775,6 +1847,23 @@ impl WebViewManager {
                 .ok()
                 .is_some_and(|url| allow_host_panel_navigation(&url, dev_base.as_ref()))
         });
+        let bridge = self.bridge.clone();
+        let async_app = self.async_app.clone();
+        let window_handle = self.window_handle;
+        builder = builder.with_ipc_handler(move |request| {
+            let Ok(envelope) = serde_json::from_str::<HostPanelIpcEnvelope>(request.body()) else {
+                return;
+            };
+            if envelope.message.kind == "route-change" {
+                if let Some(path) = envelope.message.path {
+                    bridge.push_shell_event(ShellEvent::HostPanelRouteChanged {
+                        pane_id: envelope.pane_id.unwrap_or(pane_id),
+                        path,
+                    });
+                    notify_window(async_app.clone(), window_handle);
+                }
+            }
+        });
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
         let webview = builder
@@ -1786,10 +1875,11 @@ impl WebViewManager {
         let frame_host = Some(install_macos_frame_host(&webview)?);
 
         Ok(ManagedWebView {
-            pane_id: pane.pane_id,
-            route: pane.route.clone(),
-            route_key: pane.route.to_string(),
+            pane_id,
+            route,
+            route_key: url,
             bounds: webview_bounds,
+            host_panel_payload_json: Some(payload_json),
             launched_session: None,
             webview,
             #[cfg(target_os = "macos")]
@@ -1916,6 +2006,56 @@ impl WebViewManager {
             return;
         };
         self.set_cached_visibility(active_pane_id, !hide, state);
+    }
+
+    pub fn sync_overlay_host_panel(
+        &mut self,
+        window: &Window,
+        route: Option<url::Url>,
+        bounds: Option<PaneBounds>,
+        payload: Option<Value>,
+        state: &mut AppState,
+    ) {
+        let Some(route) = route else {
+            self.overlay_host_panel = None;
+            return;
+        };
+        let Some(bounds) = bounds else {
+            self.overlay_host_panel = None;
+            return;
+        };
+
+        let route_key = route.to_string();
+        let webview_bounds = content_bounds(bounds);
+        let payload_json = serde_json::to_string(&payload.clone().unwrap_or(Value::Null))
+            .unwrap_or_else(|_| "null".to_string());
+
+        if let Some(existing) = self.overlay_host_panel.as_mut() {
+            if existing.route_key == route_key {
+                if bounds_changed(existing.bounds, webview_bounds) {
+                    if let Err(error) = existing.apply_bounds(webview_bounds) {
+                        state.push_activity(
+                            ActivityTone::Error,
+                            format!("Failed to resize overlay host panel: {error}"),
+                        );
+                    }
+                }
+                sync_host_panel_payload(existing, &payload_json, state);
+                return;
+            }
+        }
+
+        self.overlay_host_panel = None;
+
+        match self.build_host_panel_overlay_webview(window, route, bounds, payload) {
+            Ok(view) => {
+                self.overlay_host_panel = Some(view);
+            }
+            Err(error) => state.push_activity(
+                ActivityTone::Error,
+                format!("Failed to create overlay host panel: {error}"),
+            ),
+        }
     }
 
     fn set_cached_visibility(&mut self, pane_id: usize, visible: bool, state: &mut AppState) {
@@ -2995,6 +3135,160 @@ fn rect_to_bounds(rect: Rect) -> PaneBounds {
         y: y as f32,
         width: width as f32,
         height: height as f32,
+    }
+}
+
+fn host_panel_bootstrap_script(pane_id: usize, payload_json: &str) -> String {
+    format!(
+        "(function(){{\n  const initialPayload = {payload_json};\n  const paneId = {pane_id};\n  window.__ATO_HOST_PANEL_PAYLOAD__ = initialPayload;\n  window.__ATO_HOST_PANEL_HYDRATE__ = function(payload) {{\n    window.__ATO_HOST_PANEL_PAYLOAD__ = payload;\n    window.dispatchEvent(new CustomEvent('ato-host-panel-payload', {{ detail: payload }}));\n  }};\n  window.__ATO_HOST_PANEL_NOTIFY__ = function(message) {{\n    try {{\n      if (window.ipc && typeof window.ipc.postMessage === 'function') {{\n        window.ipc.postMessage(JSON.stringify({{ __ato_host_panel__: message, paneId }}));\n      }}\n    }} catch (_error) {{}}\n  }};\n}})();"
+    )
+}
+
+fn sync_host_panel_payload(view: &mut ManagedWebView, payload_json: &str, state: &mut AppState) {
+    if view.host_panel_payload_json.as_deref() == Some(payload_json) {
+        return;
+    }
+
+    let script = format!(
+        "(function(payload){{ if (window.__ATO_HOST_PANEL_HYDRATE__) {{ window.__ATO_HOST_PANEL_HYDRATE__(payload); }} else {{ window.__ATO_HOST_PANEL_PAYLOAD__ = payload; window.dispatchEvent(new CustomEvent('ato-host-panel-payload', {{ detail: payload }})); }} }} )({payload_json});"
+    );
+
+    if let Err(error) = view.webview.evaluate_script(&script) {
+        state.push_activity(
+            ActivityTone::Error,
+            format!("Failed to update host panel payload: {error}"),
+        );
+        return;
+    }
+
+    view.host_panel_payload_json = Some(payload_json.to_string());
+}
+
+pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
+    let inspector = state.active_capsule_inspector()?;
+    let capabilities = state
+        .active_web_pane()
+        .filter(|pane| pane.pane_id == inspector.pane_id)
+        .map(|pane| {
+            pane.capabilities
+                .iter()
+                .map(|capability| capability.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let logs = inspector
+        .logs
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "stage": entry.stage.as_str(),
+                "tone": activity_tone_label(entry.tone.clone()),
+                "message": entry.message,
+            })
+        })
+        .collect::<Vec<_>>();
+    let network = state
+        .network_logs
+        .iter()
+        .filter(|entry| entry.pane_id == inspector.pane_id)
+        .rev()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|entry| {
+            serde_json::json!({
+                "method": entry.method,
+                "url": entry.url,
+                "status": entry.status,
+                "durationMs": entry.duration_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    let update = state.capsule_updates.get(&inspector.pane_id).map(|update| match update {
+        crate::state::CapsuleUpdate::Idle => serde_json::json!({ "kind": "idle" }),
+        crate::state::CapsuleUpdate::Checking => serde_json::json!({ "kind": "checking" }),
+        crate::state::CapsuleUpdate::UpToDate { current } => serde_json::json!({
+            "kind": "up-to-date",
+            "current": current,
+        }),
+        crate::state::CapsuleUpdate::Available {
+            current,
+            latest,
+            target_handle,
+        } => serde_json::json!({
+            "kind": "available",
+            "current": current,
+            "latest": latest,
+            "targetHandle": target_handle,
+        }),
+        crate::state::CapsuleUpdate::Failed { message } => serde_json::json!({
+            "kind": "failed",
+            "message": message,
+        }),
+    });
+    let trust_label = inspector.trust_state.clone().unwrap_or_else(|| {
+        if inspector.restricted {
+            "untrusted".to_string()
+        } else {
+            "pending".to_string()
+        }
+    });
+    let quick_open_url = inspector
+        .local_url
+        .clone()
+        .or_else(|| inspector.invoke_url.clone())
+        .or_else(|| inspector.healthcheck_url.clone());
+
+    Some(serde_json::json!({
+        "capsuleDetail": {
+            "paneId": inspector.pane_id,
+            "title": inspector.title,
+            "handle": inspector.handle,
+            "canonicalHandle": inspector.canonical_handle,
+            "sourceLabel": inspector.source_label,
+            "trustLabel": trust_label,
+            "restricted": inspector.restricted,
+            "versionLabel": inspector.snapshot_label.unwrap_or_else(|| "unversioned".to_string()),
+            "sessionLabel": web_session_state_label(inspector.session_state),
+            "sessionId": inspector.session_id,
+            "adapter": inspector.adapter,
+            "runtimeLabel": inspector.runtime_label,
+            "displayStrategy": inspector.display_strategy,
+            "servedBy": inspector.served_by,
+            "routeLabel": inspector.handle,
+            "manifestPath": inspector.manifest_path,
+            "logPath": inspector.log_path,
+            "localUrl": inspector.local_url,
+            "healthcheckUrl": inspector.healthcheck_url,
+            "invokeUrl": inspector.invoke_url,
+            "quickOpenUrl": quick_open_url,
+            "capabilities": capabilities,
+            "logs": logs,
+            "network": network,
+            "update": update,
+        }
+    }))
+}
+
+fn web_session_state_label(state: crate::state::WebSessionState) -> &'static str {
+    match state {
+        crate::state::WebSessionState::Detached => "detached",
+        crate::state::WebSessionState::Resolving => "resolving",
+        crate::state::WebSessionState::Materializing => "materializing",
+        crate::state::WebSessionState::Launching => "launching",
+        crate::state::WebSessionState::Mounted => "mounted",
+        crate::state::WebSessionState::Closed => "closed",
+        crate::state::WebSessionState::LaunchFailed => "launch-failed",
+    }
+}
+
+fn activity_tone_label(tone: crate::state::ActivityTone) -> &'static str {
+    match tone {
+        crate::state::ActivityTone::Info => "info",
+        crate::state::ActivityTone::Warning => "warning",
+        crate::state::ActivityTone::Error => "error",
     }
 }
 
