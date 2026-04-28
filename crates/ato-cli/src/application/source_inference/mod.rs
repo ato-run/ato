@@ -846,13 +846,67 @@ pub(crate) fn materialize_run_from_compatibility_manifest(
     toml::from_str::<toml::Value>(&raw).ok()
 }
 
+/// Test whether a sibling `capsule.toml` agrees with the canonical
+/// lock's identity (`metadata.{name, version, default_target}`).
+/// Only when all three agree is the manifest safe to surface as the
+/// producer bridge — otherwise the bridge would diverge from the
+/// authoritative lock and `validate_legacy_producer_bridge` would
+/// reject the build/publish at packaging time.
+///
+/// This is what enforces the canonical-lock-first contract: a
+/// placeholder / out-of-sync manifest beside a deliberate canonical
+/// lock should be ignored, not merged in. See the e2e
+/// `e2e_local_registry_private_publish_prefers_canonical_lock_metadata`
+/// and the unit `test_build_prefers_existing_canonical_lock_input`
+/// that exercise this exact split.
+fn manifest_identity_matches_canonical_lock(
+    manifest: &toml::Value,
+    lock: &capsule_core::ato_lock::AtoLock,
+) -> bool {
+    use serde_json::Value as Json;
+    let table = match manifest.as_table() {
+        Some(table) => table,
+        None => return false,
+    };
+    let manifest_name = table.get("name").and_then(toml::Value::as_str);
+    let manifest_version = table.get("version").and_then(toml::Value::as_str);
+    let manifest_default_target = table.get("default_target").and_then(toml::Value::as_str);
+
+    let lock_metadata = match lock.contract.entries.get("metadata") {
+        Some(Json::Object(map)) => map,
+        _ => return false,
+    };
+    let lock_name = lock_metadata.get("name").and_then(Json::as_str);
+    let lock_version = lock_metadata.get("version").and_then(Json::as_str);
+    let lock_default_target = lock_metadata.get("default_target").and_then(Json::as_str);
+
+    // `default_target` is optional in capsule.toml — when omitted the
+    // schema defaults it to the manifest's `type` (so the parsed
+    // value will be e.g. "app"). The lock, on the other hand, only
+    // ships an explicit metadata.default_target when one was selected
+    // during inference. To avoid a false-positive bridge merge that
+    // then fails `validate_legacy_producer_bridge` we require that
+    // the lock's explicit target be present and matching on the
+    // manifest side. If the lock has no opinion we let it pass.
+    let target_compatible = match lock_default_target {
+        Some(lock_target) => manifest_default_target == Some(lock_target),
+        None => true,
+    };
+
+    manifest_name == lock_name && manifest_version == lock_version && target_compatible
+}
+
 pub(crate) fn materialize_run_from_canonical_lock(
     canonical: &ResolvedCanonicalLock,
     scope: Option<&mut CleanupScope>,
     reporter: Arc<CliReporter>,
     assume_yes: bool,
 ) -> Result<RunMaterialization> {
-    let original_manifest = materialize_run_from_compatibility_manifest(&canonical.project_root);
+    // Only fold the sibling capsule.toml into the bridge when it
+    // genuinely matches the lock's identity — otherwise the lock is
+    // authoritative and a divergent manifest gets dropped.
+    let original_manifest = materialize_run_from_compatibility_manifest(&canonical.project_root)
+        .filter(|manifest| manifest_identity_matches_canonical_lock(manifest, &canonical.lock));
     let adapter = MaterializationAdapter {
         workspace_root: canonical.project_root.clone(),
         project_root: canonical.project_root.clone(),
