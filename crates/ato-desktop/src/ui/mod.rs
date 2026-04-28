@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, point, px, AsyncWindowContext, BoxShadow,
-    Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image, ImageFormat,
-    IntoElement, MouseButton, Render, WeakEntity, Window,
+    div, hsla, linear_color_stop, linear_gradient, point, px, AnyElement, AsyncWindowContext,
+    BoxShadow, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Image,
+    ImageFormat, IntoElement, MouseButton, Render, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
 
@@ -1315,14 +1315,11 @@ impl Render for DesktopShell {
         // modal (omnibar suggestions, the missing-env config form,
         // the permission prompt, the quit confirmation, the config
         // modal) is invisible until we toggle the WebView off.
-        // Route-metadata popover deliberately stays out of this list:
-        // we shrink stage_bounds instead (see compute_stage_bounds),
-        // so the WebView keeps painting in its narrowed rect while
-        // the popover renders in the GPUI gap to its right.
         let hide_for_overlay = (command_bar && !omnibar_suggestions.is_empty())
             || self.state.pending_config.is_some()
             || self.state.active_permission_prompt().is_some()
             || self.state.pending_quit_confirmation
+            || self.state.route_metadata_popover_open
             || self.state.settings_panel_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
@@ -1741,23 +1738,11 @@ fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-/// Width of the gap reserved on the right of the stage when the
-/// route-metadata popover is open. WKWebView always paints over
-/// GPUI's CALayer tree, so the popover would be invisible if it
-/// overlapped the WebView; carving this strip lets the popover
-/// render in plain GPUI space alongside a still-visible WebView.
-const POPOVER_GAP_WIDTH: f32 = 380.0;
-
-fn compute_stage_bounds(state: &AppState, width: f32, height: f32) -> PaneBounds {
-    let popover_gap = if state.route_metadata_popover_open {
-        POPOVER_GAP_WIDTH
-    } else {
-        0.0
-    };
+fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBounds {
     PaneBounds {
         x: RAIL_WIDTH + STAGE_PADDING,
         y: CHROME_HEIGHT + STAGE_PADDING,
-        width: (width - RAIL_WIDTH - STAGE_PADDING * 2.0 - popover_gap).max(240.0),
+        width: (width - RAIL_WIDTH - STAGE_PADDING * 2.0).max(240.0),
         height: (height - CHROME_HEIGHT - STAGE_PADDING * 2.0).max(180.0),
     }
 }
@@ -1780,7 +1765,7 @@ fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement 
         )
 }
 
-fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoElement {
+fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement {
     let active = state.active_capsule_pane().or_else(|| {
         state
             .active_web_pane()
@@ -1807,7 +1792,7 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
             })
     });
     let Some(active) = active else {
-        return div();
+        return div().into_any_element();
     };
     let pane_id = active.pane_id;
 
@@ -1882,10 +1867,12 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
         })
         .unwrap_or_default();
 
-    div()
-        .absolute()
-        .top(px(8.0))
-        .right(px(12.0))
+    // Modal layout: a darkened full-stage backdrop with the panel
+    // anchored to the top-right corner. The backdrop intercepts
+    // clicks to dismiss; the panel itself stops propagation so
+    // clicks on rows / links don't immediately close.
+    let panel = div()
+        .id("route-metadata-panel")
         .w(px(420.0))
         .max_h(px(520.0))
         .rounded(px(12.0))
@@ -1893,15 +1880,18 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
         .border_1()
         .border_color(theme.border_default)
         .shadow(vec![BoxShadow {
-            color: hsla(0.0, 0.0, 0.0, 0.22),
-            offset: point(px(0.0), px(8.0)),
-            blur_radius: px(24.0),
+            color: hsla(0.0, 0.0, 0.0, 0.30),
+            offset: point(px(0.0), px(12.0)),
+            blur_radius: px(36.0),
             spread_radius: px(0.0),
         }])
         .p_3()
         .flex()
         .flex_col()
         .gap_2()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        })
         .child(
             div()
                 .text_size(px(11.0))
@@ -1994,7 +1984,23 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> impl IntoEl
                             .child(entry.message),
                     )
             }))
+        });
+
+    div()
+        .id("route-metadata-backdrop")
+        .absolute()
+        .inset_0()
+        .bg(hsla(0.0, 0.0, 0.0, 0.32))
+        .flex()
+        .items_start()
+        .justify_end()
+        .pt(px(8.0))
+        .pr(px(12.0))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
         })
+        .child(panel)
+        .into_any_element()
 }
 
 fn render_permission_prompt_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
