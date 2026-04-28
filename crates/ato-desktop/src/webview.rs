@@ -175,6 +175,14 @@ pub struct WebViewManager {
     /// `WebContext::new(None)` was ephemeral and ato.run sign-in
     /// state was lost the moment the pane was rebuilt.
     web_context: WebContext,
+    /// Retained-session table — RFC: SURFACE_CLOSE_SEMANTICS. Pane
+    /// close demotes the session to this table instead of stopping
+    /// it; reopen within TTL hits the Phase 1 fast path naturally
+    /// (the on-disk session record stays alive). TTL expiry / app
+    /// quit / LRU eviction stop sessions in fire-and-forget
+    /// background threads so the UI never blocks on
+    /// `ato app session stop`.
+    retention: crate::retention::RetentionTable,
 }
 
 struct ManagedWebView {
@@ -326,6 +334,7 @@ impl WebViewManager {
             prewarmed: false,
             web_context,
             capsule_update_tx: None,
+            retention: crate::retention::RetentionTable::with_defaults(),
         }
     }
 
@@ -378,6 +387,13 @@ impl WebViewManager {
         // first real tab is built. After the first sync_from_state
         // call this is a no-op.
         self.prewarm(window);
+
+        // RFC: SURFACE_CLOSE_SEMANTICS — opportunistic TTL sweep on
+        // every render. Cheap (≤ cap entries to walk); fires only
+        // graceful background stops so the UI thread is untouched.
+        // Idle apps may keep a session past its TTL until the next
+        // render — `Drop` covers any leftover at process exit.
+        self.sweep_expired_retention(state);
 
         // Drain ato:// / capsule:// deep links seen by the WebView
         // navigation handler so OAuth callbacks delivered through
@@ -1458,6 +1474,25 @@ impl WebViewManager {
                         session.session_id, session.normalized_handle
                     ),
                 );
+                // RFC: SURFACE_CLOSE_SEMANTICS — if this session_id
+                // was sitting in the retention table (i.e. the user
+                // closed and reopened the same capsule within TTL),
+                // remove it without stopping. The fast path on the
+                // orchestrator side has already verified PID + start
+                // time + healthcheck; the session is now "active"
+                // again, not "retained", so eviction triggers must
+                // not fire on it.
+                if self
+                    .retention
+                    .take_by_session_id(&session.session_id)
+                    .is_some()
+                {
+                    tracing::debug!(
+                        session_id = %session.session_id,
+                        handle = %session.handle,
+                        "session reopened from retention table"
+                    );
+                }
                 launched_session = Some(session.clone());
 
                 // Web dev-server sessions navigate directly to the local URL without the
@@ -2008,11 +2043,18 @@ impl WebViewManager {
         })
     }
 
-    /// Drop cached webviews / terminals / launched sessions for a
-    /// list of pane ids. Called by DesktopShell after AppState::close_task
-    /// so closing a tab actually tears down the underlying Wry views
-    /// instead of leaking them on the heap and leaving guest sessions
-    /// running under ~/.ato/apps/.../sessions/.
+    /// Drop cached webviews / terminals for a list of pane ids.
+    /// Called by DesktopShell after AppState::close_task so closing
+    /// a tab actually tears down the underlying Wry views instead of
+    /// leaking them on the heap.
+    ///
+    /// **RFC: SURFACE_CLOSE_SEMANTICS** — pane close no longer stops
+    /// the underlying capsule session. The launched session is
+    /// demoted to the retention table so a reopen within TTL hits
+    /// the Phase 1 fast path. Other code paths that legitimately
+    /// need an immediate stop (route-changed-to-different-capsule,
+    /// orphaned session, explicit Stop UI in a follow-up PR) keep
+    /// using `stop_launched_session` directly.
     pub fn prune_panes(&mut self, pane_ids: &[usize], state: &mut AppState) {
         for &pane_id in pane_ids {
             if Some(pane_id) == self.active_pane_id {
@@ -2021,9 +2063,74 @@ impl WebViewManager {
             self.automation.fail_requests_for_pane(pane_id);
             self.automation.mark_page_unloaded(pane_id);
             if let Some(view) = self.views.remove(&pane_id) {
-                self.stop_launched_session(&view, state);
+                self.retain_launched_session(&view, state);
             }
             self.visibility_cache.remove(&pane_id);
+        }
+        // Opportunistic TTL sweep: any pane close is a natural place
+        // to spot expired retentions (cheap O(n) over ≤ cap entries).
+        self.sweep_expired_retention(state);
+    }
+
+    /// Demote `view`'s launched session into the retention table
+    /// instead of stopping it immediately. The session record stays
+    /// on disk and the process keeps running, so the next click on
+    /// the same handle hits the Phase 1 fast path. LRU overflow
+    /// returned by the table is graceful-stopped via fire-and-forget
+    /// thread.
+    ///
+    /// Called by `prune_panes` only. Other call sites (route changed
+    /// to a different capsule, orphaned session cleanup) still go
+    /// through `stop_launched_session` for an immediate stop because
+    /// retention semantics don't apply there (RFC §3 force-destroy
+    /// cases).
+    fn retain_launched_session(&mut self, view: &ManagedWebView, state: &mut AppState) {
+        let Some(session) = view.launched_session.as_ref() else {
+            return;
+        };
+        // Stop the log follower regardless — pane is gone, so there
+        // is no UI consumer for the log stream.
+        self.stop_log_follower(&session.session_id);
+
+        let evicted = self.retention.retain(
+            session.session_id.clone(),
+            session.handle.clone(),
+            std::time::Instant::now(),
+        );
+
+        state.push_activity(
+            crate::state::ActivityTone::Info,
+            format!(
+                "Session kept warm for {} minutes (capsule: {})",
+                crate::retention::DEFAULT_TTL.as_secs() / 60,
+                session.handle
+            ),
+        );
+
+        for (entry, reason) in evicted {
+            tracing::info!(
+                session_id = %entry.session_id,
+                handle = %entry.handle,
+                reason = reason.as_str(),
+                "retention table at capacity; evicting oldest"
+            );
+            crate::retention::spawn_graceful_stop(entry, reason);
+        }
+    }
+
+    /// Sweep expired retention entries and graceful-stop them.
+    /// Called from `sync_from_state` (every render) and from
+    /// `prune_panes` so idle time alone keeps retention bounded.
+    fn sweep_expired_retention(&mut self, _state: &mut AppState) {
+        let evicted = self.retention.evict_expired(std::time::Instant::now());
+        for (entry, reason) in evicted {
+            tracing::info!(
+                session_id = %entry.session_id,
+                handle = %entry.handle,
+                reason = reason.as_str(),
+                "retention TTL expired; graceful stop"
+            );
+            crate::retention::spawn_graceful_stop(entry, reason);
         }
     }
 
@@ -2262,6 +2369,20 @@ impl Drop for WebViewManager {
     fn drop(&mut self) {
         for (_, stop_tx) in self.log_followers.drain() {
             let _ = stop_tx.send(());
+        }
+
+        // RFC: SURFACE_CLOSE_SEMANTICS §7.2 — app quit stops every
+        // retained session in v0. Process exit is already
+        // synchronous from the user's perspective, so blocking on
+        // stop here is acceptable; no retention persists across
+        // Desktop restarts in v0.
+        for (entry, _reason) in self.retention.drain() {
+            tracing::debug!(
+                session_id = %entry.session_id,
+                handle = %entry.handle,
+                "stopping retained session on Desktop quit"
+            );
+            let _ = stop_guest_session(&entry.session_id);
         }
 
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
