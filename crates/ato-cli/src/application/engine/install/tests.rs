@@ -851,7 +851,7 @@ async fn native_install_materializes_ato_managed_environment_bootstrap_state() {
     .to_string();
     let artifact = build_capsule_artifact(None, Some(&lock_json), payload).expect("artifact");
 
-    let managed = materialize_ato_managed_environment("ato/desky", &artifact, true, true)
+    let managed = materialize_ato_managed_environment("ato/ato-desktop", &artifact, true, true)
         .expect("materialize managed environment")
         .expect("managed environment");
 

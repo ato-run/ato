@@ -1483,7 +1483,10 @@ fn materialize_ato_managed_environment(
     shell_installed: bool,
     projection_performed: bool,
 ) -> Result<Option<ManagedEnvironmentInfo>> {
-    if scoped_id != "ato/desky" {
+    // Accept both the new (`ato/ato-desktop`) and legacy (`ato/desky`)
+    // package identifiers so already-published capsules under the old name
+    // still trigger managed-environment materialization.
+    if scoped_id != "ato/ato-desktop" && scoped_id != "ato/desky" {
         return Ok(None);
     }
 

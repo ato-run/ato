@@ -7,7 +7,14 @@ use crate::install;
 use crate::install::support::can_prompt_interactively;
 use crate::GitHubAutoFixMode;
 
-const CURATED_INSTALL_ALIASES: &[(&str, &str)] = &[("desky", "ato/desky")];
+/// Short curated names users can type instead of the fully scoped capsule id
+/// (e.g. `ato install ato-desktop` ≈ `ato install ato/ato-desktop`). The
+/// legacy `desky` alias is kept so existing muscle memory still works, but
+/// resolves to the new canonical id.
+const CURATED_INSTALL_ALIASES: &[(&str, &str)] = &[
+    ("ato-desktop", "ato/ato-desktop"),
+    ("desky", "ato/ato-desktop"),
+];
 
 pub(crate) struct InstallCommandArgs {
     pub(crate) slug: Option<String>,
@@ -192,18 +199,36 @@ mod tests {
     use super::resolve_curated_install_alias;
 
     #[test]
-    fn resolves_curated_desky_alias() {
+    fn resolves_curated_ato_desktop_alias() {
         assert_eq!(
-            resolve_curated_install_alias("desky").as_deref(),
-            Some("ato/desky")
+            resolve_curated_install_alias("ato-desktop").as_deref(),
+            Some("ato/ato-desktop")
         );
     }
 
     #[test]
-    fn resolves_curated_desky_alias_with_version_suffix() {
+    fn legacy_desky_alias_resolves_to_new_id() {
+        // Pre-rename muscle memory: `ato install desky` should keep working
+        // and route to the renamed canonical id.
+        assert_eq!(
+            resolve_curated_install_alias("desky").as_deref(),
+            Some("ato/ato-desktop")
+        );
+    }
+
+    #[test]
+    fn resolves_curated_ato_desktop_alias_with_version_suffix() {
+        assert_eq!(
+            resolve_curated_install_alias("ato-desktop@1.2.3").as_deref(),
+            Some("ato/ato-desktop@1.2.3")
+        );
+    }
+
+    #[test]
+    fn legacy_desky_alias_with_version_resolves_to_new_id() {
         assert_eq!(
             resolve_curated_install_alias("desky@1.2.3").as_deref(),
-            Some("ato/desky@1.2.3")
+            Some("ato/ato-desktop@1.2.3")
         );
     }
 

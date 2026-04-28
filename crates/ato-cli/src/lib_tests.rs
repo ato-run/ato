@@ -627,7 +627,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         "ato",
         "app",
         "resolve",
-        "capsule://store/ato/desky",
+        "capsule://store/ato/ato-desktop",
         "--target",
         "desktop",
         "--json",
@@ -643,7 +643,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                     json,
                 },
         } => {
-            assert_eq!(handle, "capsule://store/ato/desky");
+            assert_eq!(handle, "capsule://store/ato/ato-desktop");
             assert_eq!(target.as_deref(), Some("desktop"));
             assert!(registry.is_none());
             assert!(json);
@@ -703,13 +703,13 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let status = Cli::try_parse_from(["ato", "app", "status", "ato/desky", "--json"])
+    let status = Cli::try_parse_from(["ato", "app", "status", "ato/ato-desktop", "--json"])
         .expect("parse app status");
     match status.command {
         Commands::App {
             command: AppCommands::Status { package_id, json },
         } => {
-            assert_eq!(package_id, "ato/desky");
+            assert_eq!(package_id, "ato/ato-desktop");
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
@@ -719,7 +719,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         "ato",
         "app",
         "bootstrap",
-        "ato/desky",
+        "ato/ato-desktop",
         "--finalize",
         "--workspace",
         "~/Workspace",
@@ -741,7 +741,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                     json,
                 },
         } => {
-            assert_eq!(package_id, "ato/desky");
+            assert_eq!(package_id, "ato/ato-desktop");
             assert!(finalize);
             assert_eq!(workspace.as_deref(), Some("~/Workspace"));
             assert_eq!(
@@ -765,7 +765,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         "ato",
         "app",
         "repair",
-        "ato/desky",
+        "ato/ato-desktop",
         "--action",
         "restart-services",
     ])
@@ -779,7 +779,7 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                     json,
                 },
         } => {
-            assert_eq!(package_id, "ato/desky");
+            assert_eq!(package_id, "ato/ato-desktop");
             assert_eq!(action.as_str(), "restart-services");
             assert!(!json);
         }

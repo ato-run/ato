@@ -223,7 +223,7 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
             "{}",
             serde_json::to_string_pretty(&SessionStartEnvelope {
                 schema_version: super::SCHEMA_VERSION,
-                package_id: super::DESKY_PACKAGE_ID,
+                package_id: super::ATO_DESKTOP_PACKAGE_ID,
                 action: SESSION_ACTION_START,
                 session: info,
             })?
@@ -910,7 +910,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&SessionStopEnvelope {
                 schema_version: super::SCHEMA_VERSION,
-                package_id: super::DESKY_PACKAGE_ID,
+                package_id: super::ATO_DESKTOP_PACKAGE_ID,
                 action: SESSION_ACTION_STOP,
                 session_id: session_id.to_string(),
                 stopped,

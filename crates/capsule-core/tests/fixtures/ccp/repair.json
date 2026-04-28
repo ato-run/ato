@@ -1,6 +1,6 @@
 {
   "schema_version": "ccp/v1",
-  "package_id": "ato/desky",
+  "package_id": "ato/ato-desktop",
   "action": "restart-services",
   "state_path": "/Users/test/.ato/apps/desky/bootstrap-state.json",
   "state": {
@@ -30,7 +30,7 @@
       {
         "action": "restart-services",
         "status": "applied",
-        "detail": "Re-ran stub service health checks for Desky control-plane state.",
+        "detail": "Re-ran stub service health checks for ato-desktop control-plane state.",
         "recorded_at": "2026-04-02T00:00:02+00:00"
       }
     ]
