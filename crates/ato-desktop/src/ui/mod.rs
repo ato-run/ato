@@ -19,6 +19,7 @@ use gpui::{
     ImageFormat, IntoElement, MouseButton, Render, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::scroll::ScrollableElement;
 
 use self::chrome::render_command_chrome;
 use self::panels::{render_settings_overlay, render_stage};
@@ -51,6 +52,7 @@ pub(super) const STAGE_PADDING: f32 = 0.0;
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
 const DEVTOOLS_RESYNC_DELAYS_MS: &[u64] = &[32, 96, 192];
+const FAVICON_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 fn devtools_debug_enabled() -> bool {
     std::env::var_os(DEVTOOLS_DEBUG_ENV)
@@ -256,6 +258,13 @@ pub struct DesktopShell {
     /// In-flight GitHub releases/latest fetch. The render loop polls
     /// this and writes the resulting UpdateCheck onto AppState.
     update_check_rx: Option<std::sync::mpsc::Receiver<crate::state::UpdateCheck>>,
+    /// Per-capsule registry update results. The corresponding Sender lives
+    /// inside `WebViewManager` (installed at startup) and a fresh worker
+    /// thread is spawned every time a capsule pane successfully launches —
+    /// see `WebViewManager::spawn_capsule_update_check`. The render loop
+    /// drains this Receiver and writes the (PaneId, CapsuleUpdate) pairs
+    /// into `AppState::capsule_updates`.
+    capsule_update_rx: std::sync::mpsc::Receiver<(usize, crate::state::CapsuleUpdate)>,
     /// Lazy-allocated by `render` whenever `state.pending_config`
     /// flips from `None → Some` (or to a different request). Owns
     /// the per-field `InputState` entities so keystroke/cursor state
@@ -295,6 +304,12 @@ impl DesktopShell {
         }
 
         let mut webviews = WebViewManager::new(window.window_handle(), cx.to_async());
+        // Channel for the per-pane capsule update check. The Sender goes
+        // into the webview manager (cloned per worker thread); the
+        // Receiver lives on this shell and is drained by
+        // poll_capsule_updates on every render.
+        let (capsule_update_tx, capsule_update_rx) = std::sync::mpsc::channel();
+        webviews.install_capsule_update_channel(capsule_update_tx);
         let size = window.bounds().size;
         let stage = compute_stage_bounds(&state, f32::from(size.width), f32::from(size.height));
         state.set_active_bounds(stage);
@@ -380,6 +395,7 @@ impl DesktopShell {
             capsule_search_rx: None,
             cli_login_rx: None,
             update_check_rx: None,
+            capsule_update_rx,
             config_modal: None,
         }
     }
@@ -460,6 +476,16 @@ impl DesktopShell {
         };
         self.update_check_rx = None;
         self.state.update_check = result;
+    }
+
+    /// Drain pending per-pane capsule update results posted by the worker
+    /// threads spawned in `WebViewManager::spawn_capsule_update_check`.
+    /// Multiple results can land in a single render frame (one per pane that
+    /// just settled), so we loop until the channel is empty.
+    fn poll_capsule_updates(&mut self) {
+        while let Ok((pane_id, update)) = self.capsule_update_rx.try_recv() {
+            self.state.capsule_updates.insert(pane_id, update);
+        }
     }
 
     fn on_check_for_updates(
@@ -1200,7 +1226,9 @@ impl DesktopShell {
         // (key = origin, request URL = "{origin}/favicon.ico") and
         // capsule-manifest icons (key = absolute path or full URL,
         // request = the key itself). Same `Arc<Image>` cache, two
-        // dispatches in `spawn_favicon_fetch`.
+        // dispatches in `spawn_favicon_fetch`. Failed fetches are
+        // retried after a short backoff so transient network / file
+        // timing issues do not permanently strand the rail icon.
         let sources = self
             .state
             .sidebar_task_items()
@@ -1211,9 +1239,14 @@ impl DesktopShell {
                 SidebarTaskIconSpec::Monogram(_) | SidebarTaskIconSpec::SystemIcon(_) => None,
             })
             .collect::<Vec<_>>();
+        let now = std::time::Instant::now();
 
         for (key, kind) in sources {
-            if self.favicon_cache.contains_key(&key) {
+            let should_fetch = match self.favicon_cache.get(&key) {
+                Some(state) => state.should_fetch(now, FAVICON_RETRY_DELAY),
+                None => true,
+            };
+            if !should_fetch {
                 continue;
             }
 
@@ -1250,7 +1283,9 @@ impl DesktopShell {
                             key,
                             match image {
                                 Some(image) => FaviconState::Ready(image),
-                                None => FaviconState::Failed,
+                                None => FaviconState::Failed {
+                                    failed_at: std::time::Instant::now(),
+                                },
                             },
                         );
                         cx.notify();
@@ -1303,6 +1338,7 @@ impl Render for DesktopShell {
         self.poll_capsule_search();
         self.poll_cli_login();
         self.poll_update_check();
+        self.poll_capsule_updates();
         self.sync_config_modal(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
@@ -1806,6 +1842,9 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
         crate::state::WebSessionState::LaunchFailed => "launch failed",
     };
 
+    let route_label = active.route.to_string();
+    let title = active.title.clone();
+
     let mut rows: Vec<(&'static str, String)> = vec![("session", session_label.to_string())];
     if let Some(v) = active.source_label {
         rows.push(("source", v));
@@ -1853,11 +1892,6 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
         rows.push(("log", v));
     }
 
-    // Trail the metadata with the pane's recent capsule logs so users
-    // can read why a launch is taking long / what failed without
-    // having to dig into the inspector. We keep it terse: last 8
-    // entries, color-coded by tone, in chronological order so the
-    // most recent line is at the bottom (matches a console feel).
     let log_entries: Vec<crate::state::CapsuleLogEntry> = state
         .capsule_logs
         .get(&pane_id)
@@ -1867,16 +1901,11 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
         })
         .unwrap_or_default();
 
-    // Modal layout: a darkened full-stage backdrop with the panel
-    // anchored to the top-right corner. The backdrop intercepts
-    // clicks to dismiss; the panel itself stops propagation so
-    // clicks on rows / links don't immediately close.
     let panel = div()
         .id("route-metadata-panel")
-        .w(px(420.0))
-        .max_h(px(520.0))
-        .rounded(px(12.0))
-        .bg(theme.panel_bg)
+        .size_full()
+        .rounded(px(14.0))
+        .bg(theme.settings_panel_bg)
         .border_1()
         .border_color(theme.border_default)
         .shadow(vec![BoxShadow {
@@ -1885,117 +1914,196 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
             blur_radius: px(36.0),
             spread_radius: px(0.0),
         }])
-        .p_3()
         .flex()
         .flex_col()
-        .gap_2()
+        .overflow_hidden()
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
             cx.stop_propagation();
         })
         .child(
             div()
-                .text_size(px(11.0))
-                .font_weight(FontWeight(600.0))
-                .text_color(theme.text_secondary)
-                .child("Route metadata"),
-        )
-        .children(rows.into_iter().map(|(label, value)| {
-            // Render http(s) values as a clickable accent-colored
-            // link that hands the URL off to the system browser via
-            // OpenExternalLink. Anything else stays as plain text —
-            // the popover is read-only otherwise.
-            let is_link = value.starts_with("http://") || value.starts_with("https://");
-            let mut row = div()
+                .px_4()
+                .py(px(12.0))
+                .border_b_1()
+                .border_color(theme.border_subtle)
                 .flex()
-                .items_baseline()
+                .items_center()
                 .justify_between()
-                .gap_2()
+                .gap_3()
                 .child(
                     div()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_tertiary)
-                        .child(label),
-                );
-            row = if is_link {
-                let url = value.clone();
-                // Each label key is unique within the popover, so it
-                // doubles as a stable element id without us having to
-                // hash the URL.
-                row.child(
-                    div()
-                        .id(label)
-                        .text_size(px(11.5))
-                        .text_color(theme.accent)
-                        .cursor_pointer()
-                        .hover(|s| s.underline())
-                        .child(value)
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            cx.stop_propagation();
-                            window.dispatch_action(
-                                Box::new(OpenExternalLink { url: url.clone() }),
-                                cx,
-                            );
-                        }),
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(18.0))
+                                .font_weight(FontWeight(600.0))
+                                .text_color(theme.text_primary)
+                                .child("Route metadata"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_secondary)
+                                .child(route_label.clone()),
+                        ),
                 )
-            } else {
-                row.child(
+                .child(
                     div()
-                        .text_size(px(11.5))
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .rounded(px(8.0))
+                        .bg(theme.settings_card_bg)
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .text_size(px(12.0))
                         .text_color(theme.text_primary)
-                        .child(value),
+                        .cursor_pointer()
+                        .child("Close")
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .overflow_y_scrollbar()
+                .p_4()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(
+                    div()
+                        .p_3()
+                        .rounded(px(10.0))
+                        .bg(theme.settings_card_bg)
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_tertiary)
+                                .child("active pane"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight(600.0))
+                                .text_color(theme.text_primary)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.text_secondary)
+                                .child(route_label),
+                        ),
                 )
-            };
-            row
-        }))
-        .when(!log_entries.is_empty(), |this| {
-            this.child(
-                div()
-                    .mt_2()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(theme.border_subtle)
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight(600.0))
-                    .text_color(theme.text_secondary)
-                    .child("Recent activity"),
-            )
-            .children(log_entries.into_iter().map(|entry| {
-                let tone_color = match entry.tone {
-                    crate::state::ActivityTone::Error => hsla(0.0 / 360.0, 0.65, 0.50, 1.0),
-                    crate::state::ActivityTone::Warning => hsla(38.0 / 360.0, 0.85, 0.50, 1.0),
-                    crate::state::ActivityTone::Info => theme.text_primary,
-                };
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_2()
-                    .child(
+                .children(rows.into_iter().map(|(label, value)| {
+                    let is_link = value.starts_with("http://") || value.starts_with("https://");
+                    let value_view = if is_link {
+                        let url = value.clone();
                         div()
-                            .min_w(px(72.0))
-                            .text_size(px(10.5))
-                            .text_color(theme.text_tertiary)
-                            .child(entry.stage.as_str()),
-                    )
-                    .child(
+                            .id(label)
+                            .text_size(px(12.5))
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child(value)
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                cx.stop_propagation();
+                                window.dispatch_action(
+                                    Box::new(OpenExternalLink { url: url.clone() }),
+                                    cx,
+                                );
+                            })
+                            .into_any_element()
+                    } else {
                         div()
-                            .flex_1()
-                            .text_size(px(11.0))
-                            .text_color(tone_color)
-                            .child(entry.message),
+                            .text_size(px(12.5))
+                            .text_color(theme.text_primary)
+                            .child(value)
+                            .into_any_element()
+                    };
+
+                    div()
+                        .rounded(px(10.0))
+                        .bg(theme.settings_card_bg)
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_tertiary)
+                                .child(label),
+                        )
+                        .child(value_view)
+                }))
+                .when(!log_entries.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .mt_1()
+                            .pt_1()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight(600.0))
+                                    .text_color(theme.text_secondary)
+                                    .child("Recent activity"),
+                            )
+                            .children(log_entries.into_iter().map(|entry| {
+                                let tone_color = match entry.tone {
+                                    crate::state::ActivityTone::Error => {
+                                        hsla(0.0 / 360.0, 0.65, 0.50, 1.0)
+                                    }
+                                    crate::state::ActivityTone::Warning => {
+                                        hsla(38.0 / 360.0, 0.85, 0.50, 1.0)
+                                    }
+                                    crate::state::ActivityTone::Info => theme.text_primary,
+                                };
+                                div()
+                                    .mt_2()
+                                    .rounded(px(10.0))
+                                    .bg(theme.settings_card_bg)
+                                    .border_1()
+                                    .border_color(theme.border_subtle)
+                                    .p_3()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .text_color(theme.text_tertiary)
+                                            .child(entry.stage.as_str()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(tone_color)
+                                            .child(entry.message),
+                                    )
+                            })),
                     )
-            }))
-        });
+                }),
+        );
 
     div()
         .id("route-metadata-backdrop")
         .absolute()
         .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.32))
-        .flex()
-        .items_start()
-        .justify_end()
-        .pt(px(8.0))
-        .pr(px(12.0))
+        .bg(hsla(0.0, 0.0, 0.0, 0.20))
+        .p(px(10.0))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
         })
