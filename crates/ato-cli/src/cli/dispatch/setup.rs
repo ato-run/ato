@@ -642,7 +642,7 @@ mod tests {
         fs::write(
             temp.path().join("capsule.toml"),
             r#"schema_version = "0.3"
-name = "desky"
+name = "ato-desktop"
 version = "0.1.0"
 type = "app"
 default_target = "desktop"
@@ -650,13 +650,13 @@ default_target = "desktop"
 [targets.desktop]
 runtime = "source"
 driver = "native"
-run = "open Desky.app"
+run = "open ato-desktop.app"
 
 [workspace]
-default_app = "desky"
+default_app = "ato-desktop"
 
-[workspace.apps.desky]
-source = "ato/desky"
+[workspace.apps.ato-desktop]
+source = "ato/ato-desktop"
 
 [workspace.tools.opencode]
 source = "capsule://store/ato/opencode-engine"
@@ -674,14 +674,14 @@ mode = "reuse-if-present"
             .expect("workspace setup present");
         let deps = setup.capsule_dependencies;
         assert_eq!(deps.len(), 3);
-        assert_eq!(deps[0].name, "app:desky");
-        assert_eq!(deps[0].capsule_ref, "ato/desky");
+        assert_eq!(deps[0].name, "app:ato-desktop");
+        assert_eq!(deps[0].capsule_ref, "ato/ato-desktop");
         assert_eq!(deps[1].name, "tool:opencode");
         assert_eq!(deps[1].capsule_ref, "ato/opencode-engine");
         assert_eq!(deps[1].version.as_deref(), Some("0.4.0"));
         assert_eq!(deps[2].name, "service:ollama");
         assert_eq!(deps[2].capsule_ref, "ato/ollama-runtime");
-        assert_eq!(setup.default_app.as_deref(), Some("desky"));
+        assert_eq!(setup.default_app.as_deref(), Some("ato-desktop"));
         assert_eq!(
             setup.service_preferences[0].mode.as_deref(),
             Some("reuse-if-present")
@@ -694,7 +694,7 @@ mode = "reuse-if-present"
         fs::write(
             temp.path().join("capsule.toml"),
             r#"schema_version = "0.3"
-name = "desky"
+name = "ato-desktop"
 version = "0.1.0"
 type = "app"
 default_target = "desktop"
@@ -702,10 +702,10 @@ default_target = "desktop"
 [targets.desktop]
 runtime = "source"
 driver = "native"
-run = "open Desky.app"
+run = "open ato-desktop.app"
 
-[workspace.apps.desky]
-source = "ato/desky"
+[workspace.apps.ato-desktop]
+source = "ato/ato-desktop"
 "#,
         )
         .expect("write manifest");
@@ -742,7 +742,7 @@ source = "ato/desky"
         let plan = detect_setup_plan(temp.path()).expect("detect plan");
         let deps = plan.capsule_dependencies;
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0].capsule_ref, "ato/desky");
+        assert_eq!(deps[0].capsule_ref, "ato/ato-desktop");
     }
 
     #[test]
@@ -751,7 +751,7 @@ source = "ato/desky"
         fs::write(
             temp.path().join("capsule.toml"),
             r#"schema_version = "0.3"
-name = "desky"
+name = "ato-desktop"
 version = "0.1.0"
 type = "app"
 default_target = "desktop"
@@ -759,12 +759,12 @@ default_target = "desktop"
 [targets.desktop]
 runtime = "source"
 driver = "native"
-run = "open Desky.app"
+run = "open ato-desktop.app"
 
-[workspace.apps.desky]
-source = "ato/desky"
+[workspace.apps.ato-desktop]
+source = "ato/ato-desktop"
 
-[workspace.apps.desky.personalization]
+[workspace.apps.ato-desktop.personalization]
 model_tier = "balanced"
 privacy_mode = "strict"
 "#,
@@ -773,7 +773,7 @@ privacy_mode = "strict"
 
         let plan = detect_setup_plan(temp.path()).expect("detect plan");
         assert_eq!(plan.app_personalization.len(), 1);
-        assert_eq!(plan.app_personalization[0].name, "desky");
+        assert_eq!(plan.app_personalization[0].name, "ato-desktop");
         assert_eq!(
             plan.app_personalization[0].model_tier.as_deref(),
             Some("balanced")

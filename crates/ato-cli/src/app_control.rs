@@ -26,7 +26,19 @@ mod session;
 pub use resolve::resolve_handle;
 pub use session::{start_session, stop_session};
 
-const DESKY_PACKAGE_ID: &str = "ato/desky";
+/// Canonical package identifier for the ato-desktop control-plane envelope.
+/// Renamed from the legacy `DESKY_PACKAGE_ID` (= "ato/desky") in line with the
+/// brand-wide rename to `ato-desktop`. The wire `package_id` field is
+/// informational only — `tolerance.rs` validates `schema_version`, not
+/// `package_id` — so changing the value here is safe for existing desktop
+/// builds.
+const ATO_DESKTOP_PACKAGE_ID: &str = "ato/ato-desktop";
+/// Legacy wire identifier preserved for documentation. The actual back-compat
+/// checks live in `application/engine/install/mod.rs::materialize_ato_managed_environment`
+/// (which accepts both this and [`ATO_DESKTOP_PACKAGE_ID`]) and in the curated
+/// install alias map (`cli/dispatch/install.rs::CURATED_INSTALL_ALIASES`).
+#[allow(dead_code)]
+const LEGACY_DESKY_PACKAGE_ID: &str = "ato/desky";
 // CCP wire version is owned by `capsule_core::ccp::SCHEMA_VERSION` so the
 // Desktop consumer and the CLI producer share one source of truth. See
 // `docs/monorepo-consolidation-plan.md` §M4.
@@ -192,7 +204,7 @@ pub fn write_install_bootstrap_state(
     shell_installed: bool,
     projection_performed: bool,
 ) -> Result<InstallBootstrapStateWriteResult> {
-    ensure_desky_package(package_id)?;
+    ensure_ato_desktop_package(package_id)?;
     let path = bootstrap_state_path();
     let mut materialized = materialize_managed_services(package_id, environment)?;
     materialized.services = load_materialized_service_records(&materialized.service_root)?;
@@ -211,7 +223,7 @@ pub fn write_install_bootstrap_state(
 }
 
 pub fn status(package_id: &str, json: bool) -> Result<()> {
-    ensure_desky_package(package_id)?;
+    ensure_ato_desktop_package(package_id)?;
     let path = bootstrap_state_path();
     let state = load_state_from_path(&path)?;
 
@@ -243,12 +255,12 @@ pub fn bootstrap(
     privacy_mode: Option<PrivacyModeArg>,
     json: bool,
 ) -> Result<()> {
-    ensure_desky_package(package_id)?;
+    ensure_ato_desktop_package(package_id)?;
     if !finalize {
-        anyhow::bail!("MVP only supports `ato app bootstrap ato/desky --finalize` right now.");
+        anyhow::bail!("MVP only supports `ato app bootstrap ato/ato-desktop --finalize` right now.");
     }
 
-    let service_root = ensure_desky_managed_environment_materialized()?;
+    let service_root = ensure_ato_desktop_managed_environment_materialized()?;
 
     let workspace = workspace
         .map(str::trim)
@@ -289,18 +301,18 @@ pub fn bootstrap(
 }
 
 pub fn repair(package_id: &str, action: RepairActionArg, json: bool) -> Result<()> {
-    ensure_desky_package(package_id)?;
+    ensure_ato_desktop_package(package_id)?;
     let path = bootstrap_state_path();
     let mut state = load_state_from_path(&path)?;
 
     let detail = match action {
         RepairActionArg::RestartServices => {
-            let service_root = ensure_desky_managed_environment_materialized()?;
+            let service_root = ensure_ato_desktop_managed_environment_materialized()?;
             let _ = stop_managed_services(&service_root);
             let _ = orchestrate_managed_services(&service_root);
             refresh_materialized_service_health(&mut state);
             state.health.last_error = None;
-            "Stopped materialized services, then re-ran start and readiness checks for Desky control-plane state.".to_string()
+            "Stopped materialized services, then re-ran start and readiness checks for ato-desktop control-plane state.".to_string()
         }
         RepairActionArg::RewriteConfig => {
             state.health.last_error = None;
@@ -308,12 +320,12 @@ pub fn repair(package_id: &str, action: RepairActionArg, json: bool) -> Result<(
                 state.materialization.bootstrap_phase =
                     phase_after_personalization(&state).to_string();
             }
-            "Rewrote Desky bootstrap configuration state.".to_string()
+            "Rewrote ato-desktop bootstrap configuration state.".to_string()
         }
         RepairActionArg::SwitchModelTier => {
             state.personalization.model_tier = Some("fallback".to_string());
             state.health.last_error = None;
-            "Switched Desky model tier to fallback.".to_string()
+            "Switched ato-desktop model tier to fallback.".to_string()
         }
     };
 
@@ -469,7 +481,7 @@ fn phase_after_personalization(state: &StoredBootstrapState) -> &'static str {
     }
 }
 
-fn desky_delivery_environment() -> DeliveryEnvironment {
+fn ato_desktop_delivery_environment() -> DeliveryEnvironment {
     DeliveryEnvironment {
         strategy: "ato-managed".to_string(),
         target: Some("desktop".to_string()),
@@ -509,19 +521,19 @@ fn managed_service_layout_is_materialized(
         })
 }
 
-fn ensure_desky_managed_environment_materialized() -> Result<PathBuf> {
-    let environment = desky_delivery_environment();
-    let service_root = managed_service_root(DESKY_PACKAGE_ID)?;
+fn ensure_ato_desktop_managed_environment_materialized() -> Result<PathBuf> {
+    let environment = ato_desktop_delivery_environment();
+    let service_root = managed_service_root(ATO_DESKTOP_PACKAGE_ID)?;
     if managed_service_layout_is_materialized(&service_root, &environment) {
         return Ok(service_root);
     }
 
-    let _ = materialize_managed_services(DESKY_PACKAGE_ID, &environment)?;
+    let _ = materialize_managed_services(ATO_DESKTOP_PACKAGE_ID, &environment)?;
     Ok(service_root)
 }
 
 fn mark_managed_environment_unmaterialized(state: &mut StoredBootstrapState) {
-    for service in desky_delivery_environment().services {
+    for service in ato_desktop_delivery_environment().services {
         state
             .health
             .services
@@ -660,8 +672,8 @@ fn materialize_managed_services(
 }
 
 fn refresh_materialized_service_health(state: &mut StoredBootstrapState) {
-    let environment = desky_delivery_environment();
-    let root = managed_service_root(DESKY_PACKAGE_ID).ok();
+    let environment = ato_desktop_delivery_environment();
+    let root = managed_service_root(ATO_DESKTOP_PACKAGE_ID).ok();
     let Some(root) = root else {
         mark_managed_environment_unmaterialized(state);
         return;
@@ -1061,7 +1073,7 @@ fn write_service_helper(path: &Path, command: &str) -> Result<()> {
 }
 
 fn managed_service_root(package_id: &str) -> Result<PathBuf> {
-    ensure_desky_package(package_id)?;
+    ensure_ato_desktop_package(package_id)?;
     let bootstrap_root = bootstrap_state_path()
         .parent()
         .map(Path::to_path_buf)
@@ -1083,18 +1095,29 @@ fn service_dir_name(name: &str) -> String {
     normalized.trim_matches('-').to_string()
 }
 
-fn ensure_desky_package(package_id: &str) -> Result<()> {
-    if package_id.trim() != DESKY_PACKAGE_ID {
+fn ensure_ato_desktop_package(package_id: &str) -> Result<()> {
+    if package_id.trim() != ATO_DESKTOP_PACKAGE_ID {
         anyhow::bail!(
             "MVP app control plane currently supports only `{}` (got `{}`).",
-            DESKY_PACKAGE_ID,
+            ATO_DESKTOP_PACKAGE_ID,
             package_id
         );
     }
     Ok(())
 }
 
+/// Canonical (writable) bootstrap-state location, post-rename.
+///
+/// `ATO_DESKTOP_BOOTSTRAP_STATE_PATH` is the new override env var;
+/// `DESKY_BOOTSTRAP_STATE_PATH` is honoured as a legacy fallback so existing
+/// CI / dev scripts keep working until they're updated. Likewise, the on-disk
+/// path moved from `~/.ato/apps/desky/bootstrap-state.json` to
+/// `~/.ato/apps/ato-desktop/bootstrap-state.json`. See `legacy_bootstrap_state_path`
+/// for the read-fallback.
 fn bootstrap_state_path() -> PathBuf {
+    if let Ok(path) = std::env::var("ATO_DESKTOP_BOOTSTRAP_STATE_PATH") {
+        return PathBuf::from(path);
+    }
     if let Ok(path) = std::env::var("DESKY_BOOTSTRAP_STATE_PATH") {
         return PathBuf::from(path);
     }
@@ -1103,20 +1126,45 @@ fn bootstrap_state_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ato")
         .join("apps")
-        .join("desky")
+        .join("ato-desktop")
         .join("bootstrap-state.json")
+}
+
+/// Pre-rename bootstrap-state location. Returned only when the canonical
+/// `bootstrap_state_path()` does not yet exist, so existing users keep their
+/// state across the upgrade. Writes always go to the canonical path.
+fn legacy_bootstrap_state_path() -> Option<PathBuf> {
+    Some(
+        home_dir()?
+            .join(".ato")
+            .join("apps")
+            .join("desky")
+            .join("bootstrap-state.json"),
+    )
 }
 
 fn load_state_from_path(path: &Path) -> Result<StoredBootstrapState> {
     match fs::read_to_string(path) {
         Ok(raw) => {
             let mut state = deserialize_state(&raw).with_context(|| {
-                format!("failed to parse Desky bootstrap state: {}", path.display())
+                format!(
+                    "failed to parse ato-desktop bootstrap state: {}",
+                    path.display()
+                )
             })?;
             refresh_materialized_service_health(&mut state);
             Ok(state)
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(default_state()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // Try the pre-rename path so users who upgraded mid-session keep
+            // their personalization / health snapshot.
+            if let Some(legacy) = legacy_bootstrap_state_path() {
+                if legacy != path && legacy.exists() {
+                    return load_state_from_path(&legacy);
+                }
+            }
+            Ok(default_state())
+        }
         Err(err) => Err(err).with_context(|| format!("failed to read {}", path.display())),
     }
 }
@@ -1339,7 +1387,7 @@ mod tests {
             repair_history: vec![RepairRecord {
                 action: "restart-services".to_string(),
                 status: "applied".to_string(),
-                detail: "Re-ran stub service health checks for Desky control-plane state."
+                detail: "Re-ran stub service health checks for ato-desktop control-plane state."
                     .to_string(),
                 recorded_at: "2026-04-02T00:00:02+00:00".to_string(),
             }],
@@ -1389,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_desky_shape() {
+    fn migrates_legacy_ato_desktop_shape() {
         let raw = r#"{
           "desired_personalization": {
             "workspacePath": "~/Workspace",
@@ -1427,7 +1475,7 @@ mod tests {
     #[test]
     fn status_json_matches_snapshot() {
         let actual = serde_json::to_string_pretty(&build_status_envelope(
-            DESKY_PACKAGE_ID,
+            ATO_DESKTOP_PACKAGE_ID,
             &sample_path(),
             sample_state(),
         ))
@@ -1439,7 +1487,7 @@ mod tests {
     #[test]
     fn bootstrap_json_matches_snapshot() {
         let actual = serde_json::to_string_pretty(&build_bootstrap_envelope(
-            DESKY_PACKAGE_ID,
+            ATO_DESKTOP_PACKAGE_ID,
             &sample_path(),
             sample_state(),
         ))
@@ -1451,7 +1499,7 @@ mod tests {
     #[test]
     fn repair_json_matches_snapshot() {
         let actual = serde_json::to_string_pretty(&build_repair_envelope(
-            DESKY_PACKAGE_ID,
+            ATO_DESKTOP_PACKAGE_ID,
             &sample_path(),
             RepairActionArg::RestartServices,
             sample_state(),
@@ -1463,7 +1511,7 @@ mod tests {
 
     #[test]
     fn build_install_bootstrap_state_marks_materialized_services_ready() {
-        let environment = desky_delivery_environment();
+        let environment = ato_desktop_delivery_environment();
 
         let materialized = MaterializedServiceOutcome {
             service_root: PathBuf::from("/tmp/desky-services"),
@@ -1557,7 +1605,7 @@ mod tests {
         let _path_guard = EnvVarGuard::set("PATH", Some(bin_dir.to_string_lossy().as_ref()));
 
         bootstrap(
-            DESKY_PACKAGE_ID,
+            ATO_DESKTOP_PACKAGE_ID,
             true,
             Some("/Users/test/Workspace"),
             Some(ModelTierArg::Balanced),
@@ -1566,7 +1614,7 @@ mod tests {
         )
         .expect("bootstrap finalize");
 
-        let service_root = managed_service_root(DESKY_PACKAGE_ID).expect("service root");
+        let service_root = managed_service_root(ATO_DESKTOP_PACKAGE_ID).expect("service root");
         assert!(service_root.join("ollama").join("service.json").exists());
         assert!(service_root.join("opencode").join("run.sh").exists());
 
@@ -1602,9 +1650,9 @@ mod tests {
         state.health.last_error = Some(MANAGED_ENVIRONMENT_NOT_MATERIALIZED_ERROR.to_string());
         write_state_to_path(&state_path, &state).expect("write broken state");
 
-        repair(DESKY_PACKAGE_ID, RepairActionArg::RestartServices, true).expect("repair");
+        repair(ATO_DESKTOP_PACKAGE_ID, RepairActionArg::RestartServices, true).expect("repair");
 
-        let service_root = managed_service_root(DESKY_PACKAGE_ID).expect("service root");
+        let service_root = managed_service_root(ATO_DESKTOP_PACKAGE_ID).expect("service root");
         assert!(service_root.join("ollama").join("service.json").exists());
         assert!(service_root.join("opencode").join("run.sh").exists());
 
