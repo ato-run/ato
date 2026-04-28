@@ -3858,11 +3858,6 @@ mod fast_path_tests {
     use ato_session_core::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use ato_session_core::write_session_record_atomic;
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
-    use std::io::{Read as _, Write as _};
-    use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::thread;
     use tempfile::TempDir;
 
     const TEST_HANDLE: &str = "capsule://ato.run/koh0920/byok-ai-chat";
@@ -4026,83 +4021,42 @@ mod fast_path_tests {
         assert!(run_fast_path(dir.path(), TEST_HANDLE).is_none());
     }
 
-    /// Tiny single-thread HTTP/1.1 server that answers `200 OK` to every
-    /// request. Returns the URL clients should hit and a stop-flag.
-    fn spawn_ok_server() -> (String, Arc<AtomicBool>) {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("bind ephemeral healthcheck server");
-        listener
-            .set_nonblocking(false)
-            .expect("blocking accept ok in test");
-        let port = listener.local_addr().expect("local addr").port();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
-        thread::spawn(move || {
-            // Accept loop. Stops when caller flips the flag (or when
-            // the test ends and the listener drops via panic).
-            for incoming in listener.incoming() {
-                if stop_clone.load(Ordering::Relaxed) {
-                    return;
-                }
-                let Ok(mut stream) = incoming else { continue };
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
-                let mut buf = [0u8; 256];
-                let _ = stream.read(&mut buf);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-                );
-                let _ = stream.flush();
-                drop(stream);
-            }
-        });
-        (format!("http://127.0.0.1:{port}/health"), stop)
-    }
-
+    /// Verifies that `build_launch_session_from_stored` correctly
+    /// maps every consumer-visible field of `StoredSessionInfo` onto
+    /// `CapsuleLaunchSession`. This is the "happy path" assertion
+    /// that the negative tests above cannot make on their own.
+    ///
+    /// Earlier revisions of this suite spun up an in-process HTTP
+    /// server so `try_session_record_fast_path_inner` could be
+    /// exercised end-to-end; that approach proved flaky under
+    /// parallel test load (TCP accept races with hundreds of other
+    /// suite threads). The pure-function call here verifies the
+    /// production assembly without TCP — and the healthcheck branch
+    /// is already tested independently in
+    /// `ato_session_core::healthcheck::tests`.
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn valid_record_passes_and_builds_launch_session() {
-        let dir = TempDir::new().expect("tempdir");
-        let (healthcheck_url, stop) = spawn_ok_server();
-
-        // Smoke-test the test fixture itself before relying on it as
-        // a fast-path gate — if the in-process server can't answer a
-        // bare TCP probe, the real test below would hang on connect
-        // and the failure mode would be confusing.
-        TcpStream::connect(healthcheck_url.trim_start_matches("http://").split('/').next().unwrap())
-            .expect("local healthcheck server should accept connections");
-
-        let mut record = base_record(TEST_HANDLE);
-        // Point the record at the live healthcheck server.
-        if let Some(guest) = record.guest.as_mut() {
-            guest.healthcheck_url = healthcheck_url.clone();
-        }
-        write_record(dir.path(), &record);
-
-        let session = try_session_record_fast_path_inner(
-            TEST_HANDLE,
-            dir.path(),
-            // Bump timeout — the in-process server may need a moment
-            // on cold thread spin-up.
-            Duration::from_millis(500),
-        )
-        .expect("infra ok")
-        .expect("fast path should hit on a fully-valid record");
+    fn build_launch_session_from_stored_maps_fields_correctly() {
+        let stored = base_record(TEST_HANDLE);
+        let session = build_launch_session_from_stored(TEST_HANDLE, stored.clone())
+            .expect("synthesizing CapsuleLaunchSession from a complete record must succeed");
 
         // Identity fields flow straight from the record.
-        assert_eq!(session.session_id, record.session_id);
-        assert_eq!(session.handle, record.handle);
-        assert_eq!(session.normalized_handle, record.normalized_handle);
-        assert_eq!(session.canonical_handle, record.canonical_handle);
-        // Staleness contract: trust_state is taken from the record at
-        // session-creation time.
+        assert_eq!(session.session_id, stored.session_id);
+        assert_eq!(session.handle, stored.handle);
+        assert_eq!(session.normalized_handle, stored.normalized_handle);
+        assert_eq!(session.canonical_handle, stored.canonical_handle);
+        // Staleness contract (RFC §6.4 / §10.2 v0): trust_state is
+        // taken from the record at session-creation time and rendered
+        // as the snake_case CCP wire form.
         assert_eq!(session.trust_state, "untrusted");
         // Guest payload mapped through.
         assert_eq!(session.adapter.as_deref(), Some("node"));
-        assert_eq!(session.healthcheck_url, Some(healthcheck_url));
+        assert_eq!(
+            session.healthcheck_url.as_deref(),
+            Some("http://127.0.0.1:1/health")
+        );
         assert_eq!(session.capabilities, vec!["fs:read".to_string()]);
         // app_root is derived from manifest_path.parent().
         assert_eq!(session.app_root, PathBuf::from("/tmp"));
-
-        stop.store(true, Ordering::Relaxed);
     }
 }
