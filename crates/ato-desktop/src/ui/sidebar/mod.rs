@@ -11,6 +11,7 @@ use gpui_component::{Icon, IconName};
 
 use super::theme::{task_hue, Theme};
 use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
+use crate::state::{HostPanelRoute, PaneSurface};
 
 /// Drag-and-drop payload for reordering sidebar task tabs. The drop
 /// handler reads `task_id` to dispatch `MoveTask { task_id, to_index }`
@@ -254,7 +255,7 @@ pub(super) fn render_task_rail(
         .child(render_nav_separator(theme))
         .child(render_new_tab_button(theme))
         .child(div().flex_1())
-        .child(render_settings_nav_item(state.settings_panel_open, theme))
+        .child(render_settings_nav_item(settings_nav_active(state), theme))
 }
 
 pub(super) fn favicon_request_url(origin: &str) -> Option<String> {
@@ -619,6 +620,23 @@ fn render_settings_nav_item(active: bool, theme: &Theme) -> Div {
                 .text_color(icon_color)
                 .child("⚙"),
         )
+}
+
+fn settings_nav_active(state: &crate::state::AppState) -> bool {
+    if state.settings_panel_open {
+        return true;
+    }
+
+    state.active_task()
+        .map(|task| {
+            task.panes.iter().any(|pane| {
+                matches!(
+                    pane.surface,
+                    PaneSurface::HostPanel(HostPanelRoute::Settings { .. })
+                )
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn render_new_tab_button(theme: &Theme) -> Div {
