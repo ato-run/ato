@@ -21,7 +21,7 @@ use tracing::debug;
 
 use crate::application::pipeline::cleanup::{run_sigint_cleanup, PipelineAttemptContext};
 use crate::application::pipeline::consumer::ConsumerRunPipeline;
-use crate::application::pipeline::executor::HourglassPhaseRunner;
+use crate::application::pipeline::executor::{HourglassPhaseRunner, PhaseAnnotation};
 use crate::application::pipeline::hourglass;
 use crate::application::pipeline::hourglass::{HourglassPhase, HourglassPhaseState};
 use crate::application::pipeline::phases::run as run_phase;
@@ -89,6 +89,7 @@ pub struct RunArgs {
     pub export_request: Option<ResolvedCliExportRequest>,
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
+    pub build_policy: crate::application::build_materialization::BuildPolicy,
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
 }
@@ -411,6 +412,7 @@ fn build_consumer_run_request(
         export_request,
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
+        build_policy: args.build_policy,
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
     }
@@ -670,6 +672,7 @@ struct ConsumerRunPhaseRunner<'a> {
     transient_workspace_root: Option<PathBuf>,
     provider_backed_target: bool,
     should_stop_after_install: bool,
+    phase_annotations: std::collections::HashMap<HourglassPhase, PhaseAnnotation>,
 }
 
 impl ConsumerRunPhaseRunner<'_> {
@@ -685,12 +688,20 @@ impl ConsumerRunPhaseRunner<'_> {
     fn resolved_target(&self) -> &Path {
         self.target.as_deref().unwrap_or(self.args.target.as_path())
     }
+
+    fn record_phase_annotation(&mut self, phase: HourglassPhase, annotation: PhaseAnnotation) {
+        self.phase_annotations.insert(phase, annotation);
+    }
 }
 
 #[async_trait(?Send)]
 impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
     fn should_continue(&self) -> bool {
         !self.should_stop_after_install
+    }
+
+    fn phase_annotation(&self, phase: HourglassPhase) -> Option<PhaseAnnotation> {
+        self.phase_annotations.get(&phase).cloned()
     }
 
     async fn run_phase(
@@ -726,6 +737,10 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     install.manifest_outcome,
                     crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
                 );
+                self.record_phase_annotation(
+                    HourglassPhase::Install,
+                    PhaseAnnotation::with_result_kind("executed"),
+                );
                 Ok(())
             }
             HourglassPhase::Prepare => {
@@ -743,11 +758,33 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     emit_run_phase_failure(self.args, HourglassPhase::Prepare, err);
                 })?;
                 self.state = Some(state);
+                self.record_phase_annotation(
+                    HourglassPhase::Prepare,
+                    PhaseAnnotation::with_result_kind("executed"),
+                );
                 Ok(())
             }
             HourglassPhase::Build => {
+                // Pre-compute the observation+decision so diagnostic
+                // annotations remain accurate even if `run_build_phase`
+                // bails (e.g. `--no-build` without an existing record).
+                let preview = self.state.as_ref().and_then(|state| {
+                    let obs = crate::application::build_materialization::observe_for_plan(
+                        &state.decision.plan,
+                        &state.launch_ctx,
+                    )
+                    .ok()
+                    .flatten()?;
+                    let decision = crate::application::build_materialization::decide(
+                        self.args.build_policy,
+                        &obs,
+                        &state.prepared.workspace_root,
+                    );
+                    Some((obs, decision.result_kind))
+                });
+
                 let input = self.take_state(HourglassPhase::Build)?;
-                let state = run_build_phase(
+                let result = run_build_phase(
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
@@ -756,8 +793,42 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     self.export_request.clone(),
                     input,
                 )
-                .await
-                .inspect_err(|err| {
+                .await;
+
+                // Prefer the post-build state's recorded kind (it accounts
+                // for executor success / failure), but fall back to the
+                // pre-computed decision so `--no-build` failures still emit
+                // the right `result_kind=missing-materialization` etc.
+                let observation_for_annotation = match &result {
+                    Ok(state) => state
+                        .build_observation
+                        .clone()
+                        .or_else(|| preview.as_ref().map(|(obs, _)| obs.clone())),
+                    Err(_) => preview.as_ref().map(|(obs, _)| obs.clone()),
+                };
+                let decision_for_annotation = match &result {
+                    Ok(state) => state
+                        .build_decision_kind
+                        .or_else(|| preview.as_ref().map(|(_, kind)| *kind)),
+                    Err(_) => preview.as_ref().map(|(_, kind)| *kind),
+                };
+
+                let mut annotation = PhaseAnnotation::with_result_kind(
+                    decision_for_annotation
+                        .map(|kind| kind.as_str())
+                        .unwrap_or("executed"),
+                );
+                if let Some(observation) = observation_for_annotation {
+                    annotation.add_extra("source", observation.source.timing_label());
+                    if let Some(label) = observation.source.heuristic_label() {
+                        annotation.add_extra("heuristic", label);
+                    }
+                    annotation.add_extra("target", observation.target);
+                    annotation.add_extra("digest", observation.input_digest);
+                }
+                self.record_phase_annotation(HourglassPhase::Build, annotation);
+
+                let state = result.inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Build, err);
                 })?;
                 self.state = Some(state);
@@ -779,6 +850,10 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     emit_run_phase_failure(self.args, HourglassPhase::Verify, err);
                 })?;
                 self.state = Some(state);
+                self.record_phase_annotation(
+                    HourglassPhase::Verify,
+                    PhaseAnnotation::with_result_kind("executed"),
+                );
                 Ok(())
             }
             HourglassPhase::DryRun => {
@@ -797,11 +872,15 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     emit_run_phase_failure(self.args, HourglassPhase::DryRun, err);
                 })?;
                 self.state = Some(state);
+                self.record_phase_annotation(
+                    HourglassPhase::DryRun,
+                    PhaseAnnotation::with_result_kind("executed"),
+                );
                 Ok(())
             }
             HourglassPhase::Execute => {
                 let input = self.take_state(HourglassPhase::Execute)?;
-                run_execute_phase(
+                let result = run_execute_phase(
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
@@ -814,7 +893,14 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 .await
                 .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Execute, err);
-                })
+                });
+                if result.is_ok() {
+                    self.record_phase_annotation(
+                        HourglassPhase::Execute,
+                        PhaseAnnotation::with_result_kind("executed"),
+                    );
+                }
+                result
             }
             HourglassPhase::Finalize | HourglassPhase::Publish => anyhow::bail!(
                 "unsupported run pipeline phase {} in run command",
@@ -843,6 +929,7 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         transient_workspace_root: None,
         provider_backed_target: false,
         should_stop_after_install: false,
+        phase_annotations: std::collections::HashMap::new(),
     };
 
     let result = pipeline.run(&mut runner).await;
@@ -1760,6 +1847,7 @@ run = "node server.js""#,
             export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
         };
@@ -1860,6 +1948,7 @@ run = "main.py""#,
             export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
         };
@@ -1957,6 +2046,7 @@ run = "main.py""#,
             export_request: None,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
         };

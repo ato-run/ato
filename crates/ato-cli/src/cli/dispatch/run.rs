@@ -46,6 +46,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) keep_failed_artifacts: bool,
     pub(crate) auto_fix_mode: Option<GitHubAutoFixMode>,
     pub(crate) allow_unverified: bool,
+    pub(crate) build_policy: crate::application::build_materialization::BuildPolicy,
     pub(crate) read: Vec<String>,
     pub(crate) write: Vec<String>,
     pub(crate) read_write: Vec<String>,
@@ -143,6 +144,7 @@ fn execute_standard_run_with_env_assistance(
             args.cwd.clone(),
             args.state.clone(),
             args.inject.clone(),
+            args.build_policy,
             args.reporter.clone(),
         )
     };
@@ -547,6 +549,7 @@ mod tests {
             keep_failed_artifacts: false,
             auto_fix_mode: None,
             allow_unverified: false,
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
             read: Vec::new(),
             write: Vec::new(),
             read_write: Vec::new(),

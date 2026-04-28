@@ -83,6 +83,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             auto_fix_src,
             auto_fix_all,
             allow_unverified,
+            rebuild,
+            no_build,
             read,
             write,
             read_write,
@@ -118,6 +120,9 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 auto_fix_all,
             ),
             allow_unverified,
+            build_policy: crate::application::build_materialization::BuildPolicy::from_flags(
+                rebuild, no_build,
+            ),
             read,
             write,
             read_write,
