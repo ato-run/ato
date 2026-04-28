@@ -493,6 +493,11 @@ pub enum SystemPageIcon {
 pub enum SidebarTaskIconSpec {
     Monogram(String),
     ExternalUrl { origin: String },
+    /// Pre-resolved image source — either an absolute file path (set
+    /// from `[metadata].icon` in the capsule manifest) or a direct
+    /// URL. Used by the favicon-cache fetcher to stream the bytes
+    /// into a `gpui::Image` and render it as the tab icon.
+    Image { source: String },
     SystemIcon(SystemPageIcon),
 }
 
@@ -754,11 +759,22 @@ pub struct AppState {
     /// info chip. The popover surfaces source/runtime/trust/snapshot
     /// fields that previously cluttered the chrome as inline tags.
     pub route_metadata_popover_open: bool,
+    /// Whether the settings overlay panel is currently visible.
+    /// Managed by `show_settings_panel()` (toggle). No sidebar tab
+    /// is created — the overlay is rendered on top of the stage.
+    pub settings_panel_open: bool,
     /// Status of the most recent GitHub-release version check. Drives
     /// the Updates card in the settings panel — the actual fetch is
     /// dispatched by `DesktopShell::on_check_for_updates`, which runs
     /// the request on a worker thread and writes the result back here.
     pub update_check: UpdateCheck,
+    /// Per-pane icon source — resolved file path or URL pointing to
+    /// the image declared by `[metadata].icon` in the capsule's
+    /// manifest. Populated by `WebViewManager::sync_from_state` once
+    /// a guest session has resolved (so we know `app_root`); read by
+    /// the sidebar to render the tab icon. Cleared when the pane
+    /// closes via `prune_panes`.
+    pub pane_icons: HashMap<PaneId, String>,
     pub pending_post_login_target: Option<PendingPostLoginTarget>,
     pub auth_sessions: Vec<AuthSession>,
     pub auth_policy_registry: AuthPolicyRegistry,
@@ -854,7 +870,9 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
+            settings_panel_open: false,
             update_check: UpdateCheck::Idle,
+            pane_icons: HashMap::new(),
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -1031,7 +1049,9 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
+            settings_panel_open: false,
             update_check: UpdateCheck::Idle,
+            pane_icons: HashMap::new(),
             pending_post_login_target: None,
             auth_sessions: Vec::new(),
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
@@ -1334,6 +1354,9 @@ impl AppState {
         }
         if workspace_now_empty {
             self.command_bar_text.clear();
+        }
+        for pane_id in &pane_ids {
+            self.pane_icons.remove(pane_id);
         }
         pane_ids
     }
@@ -1791,64 +1814,7 @@ impl AppState {
     }
 
     pub fn show_settings_panel(&mut self) {
-        let next_task_id = self.next_task_id;
-        let next_pane_id = self.next_pane_id;
-        let settings_index = self
-            .active_workspace()
-            .map(|workspace| {
-                workspace
-                    .tasks
-                    .iter()
-                    .filter(|task| task.title.starts_with("Settings"))
-                    .count()
-                    + 1
-            })
-            .unwrap_or(1);
-        let title = if settings_index == 1 {
-            "Settings".to_string()
-        } else {
-            format!("Settings {settings_index}")
-        };
-
-        let mut created = false;
-        if let Some(workspace) = self.active_workspace_mut() {
-            workspace.tasks.push(TaskSet {
-                id: next_task_id,
-                title: title.clone(),
-                focused_pane: next_pane_id,
-                pane_tree: PaneTree::Leaf(next_pane_id),
-                panes: vec![Pane {
-                    id: next_pane_id,
-                    title: title.clone(),
-                    role: PaneRole::Primary,
-                    visible: true,
-                    bounds: PaneBounds::empty(),
-                    surface: PaneSurface::Native {
-                        body: "Desktop settings and diagnostics will appear here.".to_string(),
-                    },
-                }],
-                split_ratio: 0.5,
-                route_candidates: vec![],
-                route_index: 0,
-                preview: "Desktop settings".to_string(),
-            });
-            workspace.active_task = next_task_id;
-            created = true;
-        }
-
-        if !created {
-            self.push_activity(
-                ActivityTone::Error,
-                "No focused pane available for settings",
-            );
-            return;
-        }
-
-        self.next_task_id += 1;
-        self.next_pane_id += 1;
-        self.sync_command_bar_with_active_route();
-        self.shell_mode = ShellMode::Focus;
-        self.push_activity(ActivityTone::Info, format!("Opened {title}"));
+        self.settings_panel_open = !self.settings_panel_open;
     }
 
     pub fn toggle_dev_console(&mut self) {
@@ -2491,7 +2457,7 @@ impl AppState {
                 id: task.id,
                 title: task.title.clone(),
                 is_active: task.id == workspace.active_task,
-                icon: sidebar_icon_for_task(task),
+                icon: sidebar_icon_for_task(task, &self.pane_icons),
             })
             .collect()
     }
@@ -3327,10 +3293,22 @@ fn sanitize(value: &str) -> String {
         .collect()
 }
 
-fn sidebar_icon_for_task(task: &TaskSet) -> SidebarTaskIconSpec {
+fn sidebar_icon_for_task(
+    task: &TaskSet,
+    pane_icons: &HashMap<PaneId, String>,
+) -> SidebarTaskIconSpec {
     let Some(pane) = task.focused_pane() else {
         return SidebarTaskIconSpec::Monogram(short_label(&task.title));
     };
+
+    // Capsule panes can advertise a custom icon via their manifest
+    // metadata; if WebViewManager has resolved one for this pane,
+    // prefer it over the deterministic monogram fallback.
+    if let Some(source) = pane_icons.get(&pane.id) {
+        return SidebarTaskIconSpec::Image {
+            source: source.clone(),
+        };
+    }
 
     match &pane.surface {
         PaneSurface::Web(web) => match &web.route {
@@ -3646,33 +3624,29 @@ mod tests {
     }
 
     #[test]
-    fn show_settings_panel_adds_new_settings_task() {
+    fn show_settings_panel_toggles_open_flag() {
         let mut state = AppState::demo();
         let original_task_count = state.active_workspace().expect("workspace").tasks.len();
-        let original_task_id = state.active_task().expect("task").id;
+
+        assert!(!state.settings_panel_open);
 
         state.show_settings_panel();
 
-        let workspace = state.active_workspace().expect("workspace");
-        assert_eq!(workspace.tasks.len(), original_task_count + 1);
-        assert_eq!(workspace.active_task().expect("task").title, "Settings");
+        // Flag toggled on; no new tab was created
+        assert!(state.settings_panel_open);
+        assert_eq!(
+            state.active_workspace().expect("workspace").tasks.len(),
+            original_task_count,
+        );
 
-        let pane = workspace
-            .active_task()
-            .and_then(|task| task.focused_pane())
-            .expect("pane");
-        assert!(matches!(pane.surface, PaneSurface::Native { .. }));
-        assert_eq!(state.command_bar_text, "");
+        state.show_settings_panel();
 
-        let previous_task = workspace
-            .tasks
-            .iter()
-            .find(|task| task.id == original_task_id)
-            .expect("original task should remain");
-        assert!(matches!(
-            previous_task.focused_pane().expect("pane").surface,
-            PaneSurface::Web(_) | PaneSurface::Launcher
-        ));
+        // Toggled off again
+        assert!(!state.settings_panel_open);
+        assert_eq!(
+            state.active_workspace().expect("workspace").tasks.len(),
+            original_task_count,
+        );
     }
 
     #[test]

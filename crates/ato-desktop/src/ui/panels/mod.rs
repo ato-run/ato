@@ -8,8 +8,8 @@ mod settings;
 
 use gpui::prelude::*;
 use gpui::{
-    div, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, Entity, FontWeight,
-    IntoElement,
+    div, hsla, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, Entity,
+    FontWeight, IntoElement, MouseButton,
 };
 use gpui_component::input::InputState;
 use gpui_component::resizable::h_resizable;
@@ -93,6 +93,35 @@ pub(super) fn render_stage(
         ])
         .overflow_hidden()
         .child(content)
+}
+
+/// Renders the settings panel as a full-height overlay anchored to the left
+/// edge of the stage (just right of the sidebar). Clicking the backdrop
+/// dismisses the panel by dispatching `ShowSettings` again (toggle off).
+pub(super) fn render_settings_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
+    use crate::app::ShowSettings;
+
+    let backdrop = hsla(0.0, 0.0, 0.0, 0.0);
+
+    div()
+        .id("settings-overlay")
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_row()
+        .bg(backdrop)
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(ShowSettings), cx);
+        })
+        .child(
+            div()
+                .id("settings-panel-container")
+                .h_full()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .child(render_settings_panel("", state, theme)),
+        )
 }
 
 fn render_stage_pane(
