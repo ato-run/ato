@@ -11,7 +11,6 @@
 use std::time::Duration;
 
 use crate::healthcheck::http_get_ok;
-use crate::process::{pid_is_alive, process_start_time_unix_ms};
 use crate::record::{StoredSessionInfo, SCHEMA_VERSION_V2};
 
 /// Inputs to `validate_record_only`. Lets the caller distinguish
@@ -67,19 +66,51 @@ pub fn handle_matches_record(requested: &str, record: &StoredSessionInfo) -> boo
 
 /// Validate one record against the requested handle. Pure helper —
 /// caller is responsible for picking the right candidate from
-/// `read_session_records`. The five conditions mirror App Session
-/// Materialization v0's reuse gate (RFC §3.2):
+/// `read_session_records`.
 ///
-/// 1. `schema_version >= SCHEMA_VERSION_V2`
-/// 2. `launch_digest.is_some()`
-/// 3. `pid_is_alive(record.pid)`
-/// 4. `process_start_time_unix_ms(pid) == record.process_start_time_unix_ms`
-/// 5. healthcheck URL responds 200 within `healthcheck_timeout`
+/// The reuse gate uses **healthcheck as the authoritative signal**:
+/// if a process is listening on the recorded healthcheck URL and
+/// answers 200, the session is reusable, full stop. PID and
+/// start-time checks are advisory pre-gates only — they short-circuit
+/// the expensive healthcheck when we *know* the session is dead, but
+/// they cannot reject reuse when the healthcheck would have passed.
 ///
-/// Note: condition 4 only gates if the record stored a start time AND
-/// the platform reports one. macOS / Linux always do; non-Unix v0
-/// platforms degrade to "treat as stale" because `process_start_time`
-/// is unsupported there.
+/// ### Why healthcheck wins over PID
+///
+/// Real-world capsules (`byok-ai-chat` measured 2026-04-29) often use
+/// shells that fork and exit:
+///
+/// ```text
+/// ato-cli → spawn npm → npm forks `next start` → npm exits
+/// ```
+///
+/// `ato-cli` records `npm`'s PID, but `npm` is no longer alive once
+/// the actual web server (`next`, a different PID, child of npm) is
+/// up and serving. A strict `pid_is_alive(record.pid)` gate misses
+/// this case and forces the user back through the cold path even
+/// though the session is fully working.
+///
+/// The healthcheck is what the user actually cares about: "does the
+/// app respond?" If yes, attaching a new pane to it is safe. If no,
+/// reuse is unsafe regardless of what `pid_is_alive` says.
+///
+/// ### Validation order (each step short-circuits on failure)
+///
+/// 1. `handle` matches one of `handle` / `normalized_handle` /
+///    `canonical_handle` on the record (cheap — string compare).
+/// 2. `schema_version >= SCHEMA_VERSION_V2` (cheap — int compare).
+///    Pre-v0.4 records are display-only; reuse gate is opt-in via
+///    schema bump.
+/// 3. `launch_digest.is_some()` (cheap — option check). Records
+///    written by older v0 paths or hand-edited may lack this; reuse
+///    is unsafe without it.
+/// 4. **Healthcheck** (the authoritative check, ~5–50 ms over loop-
+///    back). Returns `HealthcheckFailed` on any failure mode (no URL,
+///    timeout, non-200, parse error).
+///
+/// PID + start_time are NOT consulted as gates. The fields stay on the
+/// record for diagnostics and future use (e.g. a future `force-stop`
+/// path that needs to signal something specific).
 pub fn validate_record_only(
     record: &StoredSessionInfo,
     params: &RecordValidationParams<'_>,
@@ -92,28 +123,6 @@ pub fn validate_record_only(
     }
     if record.launch_digest.is_none() {
         return RecordValidationOutcome::MissingLaunchDigest;
-    }
-
-    let pid = record.pid;
-    if pid <= 0 {
-        return RecordValidationOutcome::PidNotAlive;
-    }
-    let pid_u32 = pid as u32;
-    if !pid_is_alive(pid_u32) {
-        return RecordValidationOutcome::PidNotAlive;
-    }
-
-    if let Some(expected_start) = record.process_start_time_unix_ms {
-        match process_start_time_unix_ms(pid_u32) {
-            Some(actual) if actual == expected_start => {}
-            Some(_) => return RecordValidationOutcome::StartTimeMismatch,
-            None => return RecordValidationOutcome::StartTimeMismatch,
-        }
-    } else {
-        // No start time on record — defeats PID-reuse defence; do not
-        // reuse. (Phase 0 records will all have one; this path only
-        // fires for hand-edited or partially-migrated records.)
-        return RecordValidationOutcome::StartTimeMismatch;
     }
 
     let healthcheck_url = healthcheck_url_for(record);
@@ -189,7 +198,9 @@ mod tests {
             launch_digest: Some("d".repeat(64)),
             // Match the running process so the start-time check passes
             // and the test reaches the healthcheck step deterministically.
-            process_start_time_unix_ms: process_start_time_unix_ms(std::process::id()),
+            process_start_time_unix_ms: crate::process::process_start_time_unix_ms(
+                std::process::id(),
+            ),
         }
     }
 
@@ -241,32 +252,46 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn rejects_dead_pid() {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn dead_pid_does_not_block_when_healthcheck_would_be_reachable() {
+        // Real-world capsules (`npm run start`) record a wrapper PID
+        // that exits as soon as the actual server is up. The fast
+        // path must not reject reuse just because the recorded PID
+        // is dead — only the healthcheck does. Here the healthcheck
+        // URL is unbound (port 1) so the validator returns
+        // HealthcheckFailed (not PidNotAlive) — the gate is the
+        // healthcheck, not the PID.
         let mut record = base_record();
         record.pid = 0;
         assert_eq!(
             validate_record_only(&record, &params()),
-            RecordValidationOutcome::PidNotAlive
+            RecordValidationOutcome::HealthcheckFailed,
+            "PID is no longer a gate; absent of an alive healthcheck, \
+             rejection must come from HealthcheckFailed, not PidNotAlive"
         );
     }
 
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn rejects_start_time_mismatch() {
+    fn start_time_mismatch_does_not_block_validation_either() {
+        // Same rationale as `dead_pid_does_not_block_…`: the
+        // process_start_time field stays on the record for
+        // diagnostics but does not gate reuse. The unbound
+        // healthcheck URL is what fails here.
         let mut record = base_record();
         record.process_start_time_unix_ms = Some(1);
         assert_eq!(
             validate_record_only(&record, &params()),
-            RecordValidationOutcome::StartTimeMismatch
+            RecordValidationOutcome::HealthcheckFailed
         );
     }
 
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn healthcheck_failure_returned_when_endpoint_dead() {
-        // base_record() points at an unbound port — passes the first
-        // four conditions, fails healthcheck.
+        // Sanity check the authoritative path: with everything
+        // except the healthcheck OK, the validator returns
+        // HealthcheckFailed.
         let record = base_record();
         assert_eq!(
             validate_record_only(&record, &params()),
