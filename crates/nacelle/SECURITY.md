@@ -158,14 +158,37 @@ The **sole security enforcement** is the OS-native process sandbox:
 | macOS    | Seatbelt (SBPL)    | —             |
 | Linux    | Bubblewrap (bwrap) | Landlock LSM  |
 
-#### macOS (Seatbelt / sandbox-exec)
+#### macOS (Seatbelt — dynamic SBPL via `sandbox_init`)
 
-**Strategy: "Allow Default, Deny Sensitive"**
+Phase 13a (2026-04-29, ADR-007) switched from predefined-profile fallbacks
+to **dynamic SBPL profiles applied via `sandbox_init(flags=0)`**. The
+profile is generated per call from `SandboxPolicy` and ingested as raw
+SBPL source by the kernel — the deprecated-but-supported entry point used
+by `sandbox-exec(1)` itself. The CLI tool `sandbox-exec` is **not** invoked.
 
-- `(allow default)` — permits general file/process/IPC operations.
-- `(deny file-read* file-write* (subpath "~/.ssh") ...)` — blocks
-  access to sensitive user directories.
-- `(deny network*)` — applied when `isolation.network.enabled = false`.
+**Strategy: "Deny Default, Allow Specific" (production)**
+
+- `(deny default)` — everything is denied unless explicitly allowed below.
+- `(allow process-exec / process-fork / signal (target self) / sysctl-read)` —
+  baseline operations every Unix workload needs.
+- `(allow mach-lookup / ipc-posix-shm)` — essential IPC primitives, but
+  Mach services for Keychain (`com.apple.secd`, `SecurityServer`,
+  `security.agent`, `authorizationd`) are explicitly **denied** so the
+  capsule cannot reach the Keychain even though `mach-lookup` is on.
+- `(allow file-read*  (subpath "..."))` for each entry in `read_only_paths`.
+- `(allow file-read* file-write* (subpath "..."))` for each `read_write_paths`.
+- `(allow network*)` only when `isolation.network.enabled = true`.
+- IPC sockets: emitted as both `file-read*/file-write*` (for stat/unlink on
+  the inode) **and** `network* (remote/local unix-socket (subpath ...))`
+  (for connect/bind on the AF_UNIX socket itself — Apple's Seatbelt
+  models AF_UNIX under network rules even though Linux Landlock gates
+  them via filesystem rules).
+
+**Strategy: "Allow Default, Deny Sensitive" (development mode only)**
+
+When `policy.development_mode = true`, the production profile is bypassed
+in favour of `(allow default)` + `(deny file-write* (subpath "/System") ...)`
+to keep iteration fast while still protecting critical system locations.
 
 #### Linux (Bubblewrap + Landlock)
 

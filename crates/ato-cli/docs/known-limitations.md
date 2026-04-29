@@ -17,7 +17,7 @@ forwarded to the ato-tsnetd sidecar (SOCKS5 proxy), but the sidecar is not yet
 auto-connected to source workloads.
 
 `network.enabled = false` (deny-all) IS fully enforced via the OS sandbox
-(`sandbox-exec` on macOS, `bwrap` on Linux).
+(Seatbelt via `sandbox_init` on macOS, `bwrap` + Landlock on Linux).
 
 **Workaround:** Use `network.enabled = false` when complete network isolation is
 required. Do not rely on `egress_allow` alone to restrict a source capsule to a
