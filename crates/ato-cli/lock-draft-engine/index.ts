@@ -88,8 +88,34 @@ export interface LockDraft {
 export type LockDraftRepoFileEntry = RepoFileEntry;
 export type LockDraftSelectedTarget = SelectedTarget;
 
-// Wrapper function for Cloudflare Workers (synchronous WASM execution)
-import { evaluateLockDraftJson } from "./pkg/lock_draft_engine.js";
+// Wrapper function for Cloudflare Workers (synchronous WASM execution).
+// wasm-pack's generated wrapper calls __wbindgen_start() unconditionally, but
+// Cloudflare's module validator may expose the wasm exports under `default`.
+// Initialize the generated bg helpers directly so both Node/Vitest and Workers
+// see the same initialized wasm object.
+import * as wasmModule from "./pkg/lock_draft_engine_bg.wasm";
+import {
+  __wbg_set_wasm,
+  __wbindgen_init_externref_table,
+  evaluateLockDraftJson,
+} from "./pkg/lock_draft_engine_bg.js";
+
+type LockDraftWasmExports = {
+  __wbindgen_start?: () => void;
+};
+
+const wasmExports =
+  "default" in wasmModule
+    ? ((wasmModule as { default: LockDraftWasmExports }).default ??
+      (wasmModule as LockDraftWasmExports))
+    : (wasmModule as LockDraftWasmExports);
+
+__wbg_set_wasm(wasmExports);
+if (typeof wasmExports.__wbindgen_start === "function") {
+  wasmExports.__wbindgen_start();
+} else {
+  __wbindgen_init_externref_table();
+}
 
 export function evaluateLockDraft(input: LockDraftInput): LockDraft {
   return JSON.parse(evaluateLockDraftJson(JSON.stringify(input))) as LockDraft;
