@@ -470,13 +470,32 @@ fn build_runtime_command(
         }
 
         let mut allow_write = execution_plan.runtime.policy.filesystem.read_write.clone();
-        if execution_plan.target.runtime == ExecutionRuntime::Web
-            && !allow_write.iter().any(|path| path == &runtime_dir_allow)
+        // Auto-grant write to the capsule's own runtime_dir for both Web
+        // (build outputs) and Source (capsule's source/ tree where the
+        // start.js may scribble state — e.g. tiddlywiki creates
+        // `workspace/mywiki`). Mirrors the read auto-grant a few lines up
+        // so the capsule has symmetric access to its own files. Without
+        // this, source/node capsules that write any relative path get
+        // `NotCapable: Requires write access` from Deno even though the
+        // path is inside their own unpacked directory.
+        if matches!(
+            execution_plan.target.runtime,
+            ExecutionRuntime::Web | ExecutionRuntime::Source
+        ) && !allow_write.iter().any(|path| path == &runtime_dir_allow)
         {
             allow_write.push(runtime_dir_allow.clone());
         }
         if !allow_write.is_empty() {
             cmd.arg(format!("--allow-write={}", allow_write.join(",")));
+        }
+
+        // Tier1 source/node capsules legitimately spawn child processes
+        // via Node's child_process API (e.g. tiddlywiki shells out to
+        // `node` for --init and --listen). Without --allow-run Deno
+        // refuses every spawn() with NotCapable. Scope to source/node
+        // only — the Web executor doesn't need this and doesn't get it.
+        if execution_plan.target.runtime == ExecutionRuntime::Source {
+            cmd.arg("--allow-run");
         }
     }
 
