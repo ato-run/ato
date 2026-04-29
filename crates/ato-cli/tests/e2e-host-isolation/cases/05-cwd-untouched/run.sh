@@ -7,7 +7,7 @@
 #
 # Case A: provider-backed scheme (npm:semver) — never wrote to cwd
 # Case B: directory project (ato run .) — previously wrote attempt-<nanos> dirs
-#         under .ato/tmp/source-inference/; fixed by USE_HOME_RUN_STATE = true
+#         under .ato/tmp/source-inference/; now routes through ~/.ato/runs/.
 set -euo pipefail
 source "$(dirname "$0")/../../harness/assert.sh"
 

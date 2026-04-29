@@ -2493,8 +2493,10 @@ fn test_source_rebuild_accepts_reference_alias() {
 /// Regression test: `ato run .` on a directory project must NOT create
 /// `<cwd>/.ato/tmp/source-inference/` run-attempt directories.
 ///
-/// Before the fix (USE_HOME_RUN_STATE), `use_global_run_state` was `false` for
-/// directory projects, causing attempt-<nanos>/ dirs to accumulate in cwd.
+/// Historical bug: directory-project run attempts were materialized under cwd
+/// instead of `~/.ato/runs/`, leaving `attempt-<nanos>/` dirs in the user's
+/// project tree. Run-attempt state must always live under `~/.ato/runs/` so
+/// the cwd-untouched invariant (e2e-host-isolation/05-cwd-untouched) holds.
 ///
 /// This test validates the display path emitted by `inspect preview` always
 /// points to `~/.ato/runs/source-inference/` regardless of whether the input
