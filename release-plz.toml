@@ -16,7 +16,27 @@ name = "capsule-core"
 release = false
 
 [[package]]
+name = "capsule-wire"
+release = false
+
+[[package]]
+name = "ato-session-core"
+release = false
+
+[[package]]
 name = "lock-draft-engine"
+release = false
+
+[[package]]
+name = "ato-desktop"
+release = false
+
+[[package]]
+name = "ato-desktop-xtask"
+release = false
+
+[[package]]
+name = "nacelle"
 release = false
 
 [changelog]
