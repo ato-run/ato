@@ -31,7 +31,7 @@ anyhow = "1.0"
 ato-session-core = { path = "../ato-session-core" }
 base64 = "0.22"
 capsule-core = { path = "../capsule-core" }
-capsule-wire = { path = "../capsule-wire" }
+capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
 cookie = "0.18"
 dirs = "5.0"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "15d86607" }
