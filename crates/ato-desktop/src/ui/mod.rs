@@ -23,7 +23,7 @@ use gpui_component::scroll::ScrollableElement;
 
 use self::chrome::render_command_chrome;
 use self::panels::{render_settings_overlay, render_stage};
-use self::sidebar::{favicon_request_url, render_task_rail, FaviconState};
+use self::sidebar::{favicon_candidate_urls, render_task_rail, FaviconState};
 
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
@@ -1322,6 +1322,15 @@ impl DesktopShell {
         let now = std::time::Instant::now();
 
         for (key, kind) in sources {
+            // Carry the prior failure count forward through Loading so
+            // the post-fetch resolver can bump it on another miss; that
+            // is what `MAX_FAVICON_ATTEMPTS` clamps against. Without
+            // this, we'd retry a permanently broken origin every
+            // `FAVICON_RETRY_DELAY` for the lifetime of the app.
+            let prior_attempts = match self.favicon_cache.get(&key) {
+                Some(FaviconState::Failed { attempts, .. }) => *attempts,
+                _ => 0,
+            };
             let should_fetch = match self.favicon_cache.get(&key) {
                 Some(state) => state.should_fetch(now, FAVICON_RETRY_DELAY),
                 None => true,
@@ -1331,7 +1340,7 @@ impl DesktopShell {
             }
 
             self.favicon_cache
-                .insert(key.clone(), FaviconState::Loading);
+                .insert(key.clone(), FaviconState::Loading { prior_attempts });
             self.spawn_favicon_fetch(key, kind, window, cx);
         }
     }
@@ -1359,12 +1368,25 @@ impl DesktopShell {
                         .await;
 
                     let _ = this.update_in(&mut async_cx, move |this, _window, cx| {
+                        // Recover the prior failure count from the
+                        // Loading entry the dispatch loop wrote in
+                        // sync_favicons. If this fetch failed too,
+                        // bump the count; once it hits MAX_FAVICON_ATTEMPTS
+                        // FaviconState::should_fetch returns false
+                        // forever and the rail falls back to the globe
+                        // glyph instead of pinging a broken origin
+                        // every retry interval.
+                        let prior_attempts = match this.favicon_cache.get(&key) {
+                            Some(FaviconState::Loading { prior_attempts }) => *prior_attempts,
+                            _ => 0,
+                        };
                         this.favicon_cache.insert(
                             key,
                             match image {
                                 Some(image) => FaviconState::Ready(image),
                                 None => FaviconState::Failed {
                                     failed_at: std::time::Instant::now(),
+                                    attempts: prior_attempts + 1,
                                 },
                             },
                         );
@@ -1761,11 +1783,46 @@ fn fetch_image_from_path(path: &std::path::Path) -> Option<Arc<Image>> {
 }
 
 fn fetch_image_from_url(url: &str) -> Option<Arc<Image>> {
-    let response = ureq::get(url).call().ok()?;
+    fetch_image_from_url_with_headers(url, /*reject_non_image=*/ false)
+}
+
+/// HTTP image fetcher shared by the favicon path and the capsule-manifest
+/// icon path. We always send a Safari-shaped User-Agent (mirroring the
+/// Wry webview at `webview.rs:1569`) and `Accept: image/*` because:
+///
+/// * Cloudflare-fronted origins (including `ato.run`) frequently 403
+///   default `ureq/...` UAs, leaving the sidebar showing the globe
+///   placeholder forever.
+/// * Some servers return 406 / serve HTML for `Accept: */*`. Asking
+///   for image-only Content-Type lets them route to the asset
+///   correctly.
+///
+/// `reject_non_image = true` makes the fetcher refuse any response
+/// whose `Content-Type` is not `image/*` *before* parsing bytes.
+/// Without it, the previous favicon path fell through to
+/// `ImageFormat::Ico` for `text/html` 200 responses (typical of SPA
+/// catch-all routes), masking non-image content as a corrupt icon.
+fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Option<Arc<Image>> {
+    let response = ureq::get(url)
+        .set("User-Agent", FAVICON_USER_AGENT)
+        .set("Accept", "image/*")
+        .call()
+        .ok()?;
+
     let content_type = response
         .header("content-type")
         .or_else(|| response.header("Content-Type"))
         .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
+
+    if reject_non_image
+        && !content_type
+            .as_deref()
+            .map(|ct| ct.starts_with("image/"))
+            .unwrap_or(false)
+    {
+        return None;
+    }
+
     let mut bytes = Vec::new();
     response.into_reader().read_to_end(&mut bytes).ok()?;
     if bytes.is_empty() {
@@ -1777,6 +1834,16 @@ fn fetch_image_from_url(url: &str) -> Option<Arc<Image>> {
         .or_else(|| sniff_image_format(&bytes))?;
     Some(Arc::new(Image::from_bytes(format, bytes)))
 }
+
+/// Safari UA used by Wry on `webview.rs:1569`. Reusing it makes origins
+/// treat the favicon probe like the eventual page load — same UA, same
+/// bot-detection / WAF outcome — instead of seeing two unrelated
+/// clients (one of which gets 403'd).
+const FAVICON_USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 ",
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15 AtoDesktop/",
+    env!("CARGO_PKG_VERSION")
+);
 
 fn decode_data_url_image(url: &str) -> Option<Arc<Image>> {
     // Minimal `data:image/<fmt>;base64,...` decoder. We only need to
@@ -1810,26 +1877,13 @@ fn format_for_extension(path: &std::path::Path) -> Option<ImageFormat> {
 }
 
 fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
-    let request_url = favicon_request_url(origin)?;
-    let response = ureq::get(&request_url).call().ok()?;
-    let content_type = response
-        .header("content-type")
-        .or_else(|| response.header("Content-Type"))
-        .map(|value| value.split(';').next().unwrap_or(value).trim().to_string());
-
-    let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes).ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-
-    let format = content_type
-        .as_deref()
-        .and_then(image_format_from_content_type)
-        .or_else(|| sniff_image_format(&bytes))
-        .unwrap_or(ImageFormat::Ico);
-
-    Some(Arc::new(Image::from_bytes(format, bytes)))
+    // Try `/favicon.ico` first (most universal), then `.svg`
+    // (Vite/Next.js default), then `apple-touch-icon.png`. The
+    // strict-content-type fetcher refuses to coerce a `text/html`
+    // 200 (typical of SPA catch-all routes) into a corrupt `Ico`.
+    favicon_candidate_urls(origin)
+        .into_iter()
+        .find_map(|url| fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true))
 }
 
 fn image_format_from_content_type(content_type: &str) -> Option<ImageFormat> {
