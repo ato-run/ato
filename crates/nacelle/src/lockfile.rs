@@ -302,10 +302,8 @@ async fn hydrate_python(
         }
         cmd.env("UV_PROJECT_ENVIRONMENT", ".venv");
         run_command(cmd, "uv sync")?;
-    } else {
-        if !lock_path.exists() {
-            return Err("uv.lock missing for Python hydration".to_string());
-        }
+    } else if source_dir.join("requirements.txt").exists() {
+        let requirements_path = source_dir.join("requirements.txt");
         let venv_path = source_dir.join(".venv");
         let mut venv_cmd = Command::new(&uv);
         if python_cache_dir.is_some() {
@@ -334,13 +332,21 @@ async fn hydrate_python(
         cmd.args([
             "pip",
             "sync",
-            lock_path.to_string_lossy().as_ref(),
+            requirements_path.to_string_lossy().as_ref(),
             "--python",
             venv_python.to_string_lossy().as_ref(),
         ])
         .current_dir(source_dir);
         cmd.env("UV_CACHE_DIR", uv_cache_dir);
-        run_command(cmd, "uv pip sync")?;
+        run_command(cmd, "uv pip sync requirements.txt")?;
+    } else {
+        if lock_path.exists() {
+            return Err(
+                "pyproject.toml is required to hydrate uv.lock; include pyproject.toml or use requirements.txt"
+                    .to_string(),
+            );
+        }
+        return Err("uv.lock or requirements.txt missing for Python hydration".to_string());
     }
     Ok(())
 }
