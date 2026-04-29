@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 
 use crate::application::secrets::store::{write_secure_file, SecretStore};
 
+use super::dependency_root::relative_dependency_root_from_manifest;
 use super::types::{
     ProvisioningAction, ProvisioningAudit, ProvisioningMaterializationStatus, ProvisioningPlan,
     ShadowWorkspaceRef,
@@ -242,7 +243,7 @@ pub fn materialize_shadow_manifest(
 
     let mut manifest = plan.manifest.clone();
     let target_label = plan.selected_target_label();
-    let relative_source_working_dir = relative_working_dir_from_manifest_root(plan);
+    let relative_source_working_dir = relative_dependency_root_from_manifest(plan);
     let shadow_working_dir = if relative_source_working_dir.as_os_str().is_empty() {
         shadow_workspace.workspace_dir.clone()
     } else {
@@ -251,7 +252,7 @@ pub fn materialize_shadow_manifest(
             .join(relative_source_working_dir)
     };
     let relative_working_dir =
-        diff_paths(shadow_working_dir, &shadow_workspace.root_dir).unwrap_or_default();
+        pathdiff::diff_paths(shadow_working_dir, &shadow_workspace.root_dir).unwrap_or_default();
 
     // For v0.3 flat manifests (no [targets] table), synthesize one from top-level fields
     let is_v03_flat = manifest.get("targets").is_none()
@@ -373,49 +374,11 @@ fn default_runtime_version(runtime: &str, driver: &str) -> String {
     }
 }
 
-fn diff_paths(path: PathBuf, base: &Path) -> Option<PathBuf> {
-    pathdiff::diff_paths(path, base)
-}
-
-fn relative_working_dir_from_manifest_root(plan: &ManifestData) -> PathBuf {
-    // 1) Author intent first: explicit `working_dir` from capsule.toml wins.
-    //    This makes Prepare / Provision / Run share a single execution-context
-    //    contract (matches the desired Ato semantics).
-    if let Some(raw) = plan.execution_working_dir() {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() && trimmed != "." {
-            return PathBuf::from(trimmed);
-        }
-    }
-
-    // 2) Fallback: detect a runnable project under `source/`, runtime-agnostic.
-    //    Previously this only matched `source/package.json`, which silently
-    //    skipped Python (`pyproject.toml` / `uv.lock` / `requirements.txt` /
-    //    `Pipfile`), Rust (`Cargo.toml`), and Go (`go.mod`) capsules.
-    let source_dir = plan.manifest_dir.join("source");
-    if looks_like_source_project(&source_dir) {
-        return PathBuf::from("source");
-    }
-
-    // 3) Final fallback: original behavior — derive from execution_working_directory().
-    diff_paths(plan.execution_working_directory(), &plan.manifest_dir).unwrap_or_default()
-}
-
-fn looks_like_source_project(source_dir: &Path) -> bool {
-    source_dir.join("package.json").exists()
-        || source_dir.join("pyproject.toml").exists()
-        || source_dir.join("uv.lock").exists()
-        || source_dir.join("requirements.txt").exists()
-        || source_dir.join("Pipfile").exists()
-        || source_dir.join("Cargo.toml").exists()
-        || source_dir.join("go.mod").exists()
-}
-
 fn shadow_execution_working_directory(
     plan: &ManifestData,
     shadow_workspace: &ShadowWorkspaceRef,
 ) -> Result<PathBuf> {
-    let relative = relative_working_dir_from_manifest_root(plan);
+    let relative = relative_dependency_root_from_manifest(plan);
     let working_dir = if relative.as_os_str().is_empty() {
         shadow_workspace.workspace_dir.clone()
     } else {
@@ -673,9 +636,8 @@ mod tests {
     };
 
     use super::{
-        looks_like_source_project, materialize_shadow_lockfiles, materialize_shadow_manifest,
-        materialize_synthetic_env, prepare_shadow_workspace, python_lock_generation_command,
-        relative_working_dir_from_manifest_root,
+        materialize_shadow_lockfiles, materialize_shadow_manifest, materialize_synthetic_env,
+        prepare_shadow_workspace, python_lock_generation_command,
     };
 
     fn test_plan(dir: &Path, target_manifest: &str) -> ManifestData {
@@ -722,144 +684,10 @@ mod tests {
         )
     }
 
-    fn touch(path: &Path) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dir for touch");
-        }
-        std::fs::write(path, "").expect("touch test fixture");
-    }
-
-    #[test]
-    fn looks_like_source_project_recognises_runtime_agnostic_markers() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-
-        std::fs::create_dir_all(&source).expect("create source");
-        assert!(!looks_like_source_project(&source));
-
-        for marker in [
-            "package.json",
-            "pyproject.toml",
-            "uv.lock",
-            "requirements.txt",
-            "Pipfile",
-            "Cargo.toml",
-            "go.mod",
-        ] {
-            std::fs::remove_dir_all(&source).expect("rm source");
-            std::fs::create_dir_all(&source).expect("create source");
-            touch(&source.join(marker));
-            assert!(
-                looks_like_source_project(&source),
-                "marker `{}` should register",
-                marker
-            );
-        }
-    }
-
-    #[test]
-    fn relative_working_dir_honors_explicit_working_dir() {
-        // Use the [targets.<label>] form because manifest normalization
-        // does not propagate a top-level `working_dir` into the selected
-        // target — that is a separate manifest-pipeline gap. What matters
-        // here is that when the target *does* declare working_dir, the
-        // shadow workspace honors it.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let plan = test_plan(
-            dir.path(),
-            r#"
-schema_version = "0.3"
-name = "explicit-wd"
-version = "0.1.0"
-default_target = "app"
-
-[targets.app]
-runtime = "source"
-driver = "python"
-runtime_version = "3.11"
-run = "start.py"
-working_dir = "source"
-"#,
-        );
-        assert_eq!(
-            relative_working_dir_from_manifest_root(&plan),
-            std::path::PathBuf::from("source")
-        );
-    }
-
-    #[test]
-    fn relative_working_dir_detects_python_source_layout() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-        std::fs::create_dir_all(&source).expect("create source");
-        touch(&source.join("pyproject.toml"));
-        touch(&source.join("uv.lock"));
-
-        let plan = test_plan(
-            dir.path(),
-            r#"
-schema_version = "0.3"
-name = "py-source-only"
-version = "0.1.0"
-runtime = "source/python"
-runtime_version = "3.11"
-run = "start.py"
-"#,
-        );
-        assert_eq!(
-            relative_working_dir_from_manifest_root(&plan),
-            std::path::PathBuf::from("source")
-        );
-    }
-
-    #[test]
-    fn relative_working_dir_preserves_node_source_layout() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-        std::fs::create_dir_all(&source).expect("create source");
-        touch(&source.join("package.json"));
-
-        let plan = test_plan(
-            dir.path(),
-            r#"
-schema_version = "0.3"
-name = "node-source-only"
-version = "0.1.0"
-runtime = "source/node"
-runtime_version = "20"
-run = "start.js"
-"#,
-        );
-        assert_eq!(
-            relative_working_dir_from_manifest_root(&plan),
-            std::path::PathBuf::from("source")
-        );
-    }
-
-    #[test]
-    fn relative_working_dir_falls_back_to_diff_when_no_layout_detected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let plan = test_plan(
-            dir.path(),
-            r#"
-schema_version = "0.3"
-name = "flat-layout"
-version = "0.1.0"
-runtime = "source/python"
-runtime_version = "3.11"
-run = "start.py"
-"#,
-        );
-        // No explicit working_dir, no source/ layout — keep the legacy
-        // behavior of returning a path relative to manifest_dir (empty for
-        // a flat layout).
-        let resolved = relative_working_dir_from_manifest_root(&plan);
-        assert!(
-            resolved.as_os_str().is_empty(),
-            "expected empty PathBuf for flat layout, got {:?}",
-            resolved
-        );
-    }
+    // Tests for `relative_dependency_root_from_manifest` and
+    // `looks_like_source_project` live with the resolver itself in
+    // `provisioning/dependency_root.rs`. Shadow tests below exercise
+    // shadow-workspace behaviour that depends on the resolver being correct.
 
     #[test]
     fn materializes_shadow_manifest_with_runtime_selection() {
