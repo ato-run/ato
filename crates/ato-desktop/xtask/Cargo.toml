@@ -2,7 +2,7 @@
 name = "ato-desktop-xtask"
 # Must track ato-desktop's version because xtask reads
 # env!("CARGO_PKG_VERSION") to embed into MSI/DMG/AppImage filenames.
-version = "0.4.101"
+version = "0.4.102"
 edition = "2021"
 
 # Internal build helper — never shipped via cargo-dist.
