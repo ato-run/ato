@@ -176,17 +176,27 @@ Host アプリ（ato Runtime）内で別の Capsule を実行する機能。Host
 - `Owner` — **書き戻し**（Write-back）権限あり
 
 ### `GuestAction`（enum）
-Guest が Host に対して要求できる操作（現行 `guest.v1`）:
-- `ReadPayload` / `WritePayload` — `.sync` ペイロードの読み書き
+Guest が Host に対して要求できる操作。stdio 上では JSON-RPC 2.0 method 名と
+`guest.v1` envelope の双方から同じ `dispatch_guest_action` に解決される（envelope
+auto-detect — 詳細は `DRAFT_CAPSULE_IPC.md`）:
+- `ReadPayload` / `WritePayload` / `UpdatePayload` — `.sync` ペイロードの読み書き
 - `ReadContext` / `WriteContext` — コンテキスト JSON の読み書き
-- `ExecuteWasm` — sync.wasm の実行
-- `UpdatePayload` — ペイロード更新
+- `ExecuteWasm` — sync.wasm の実行（JSON-RPC 経路では `capsule/wasm.execute` を将来用に予約済み、現状 `-32601`）
 
 ### `GuestRequest` / `GuestResponse`（struct）
-Guest プロトコルのメッセージ型。`GuestRequest` は `version`, `request_id`, `action`, `context`, `input` を持つ。
+旧 `guest.v1` envelope のメッセージ型（compat lane）。`GuestRequest` は
+`version`, `request_id`, `action`, `context`, `input` を持つ。新規実装は
+JSON-RPC 2.0 経路を使うこと。
 
 ### JSON-RPC 2.0
-IPC の統一メッセージフォーマット。Phase 13b.9 で `GuestAction` ベースの旧プロトコルからこの標準に移行中。メソッド名は `capsule/invoke`。
+IPC の統一メッセージフォーマット（Phase 13b.9 で完了 2026-04-29）。Guest stdio で
+受け付ける method 名空間:
+- `capsule/payload.{read,write,update}` — `.sync` ペイロード操作
+- `capsule/context.{read,write}` — コンテキスト操作
+- `capsule/wasm.execute` — 予約（WASM/OCI 整備後に公開）
+
+`capsule/invoke` は Service-to-Service 用に予約されており（params shape:
+`{ service, method, token, args }`）、Host-to-Guest stdio では使用しない。
 
 ### NDJSON（Newline Delimited JSON）
 nacelle の stdout フォーミングに使われるプロトコル。1行1メッセージ。
@@ -346,12 +356,17 @@ Playground のトップページ。`Continue Building` / `Made for You` / `Fresh
 
 ### Guest プロトコル（Host → Guest 注入）
 
+Phase 13b.9 (2026-04-29) で `CAPSULE_IPC_*` 名前空間に統一済み。旧 `GUEST_*` /
+`CAPSULE_GUEST_*` 名は削除（fallback なし）。
+
 | 変数名 | 値例 | 説明 |
 |--------|------|------|
-| `CAPSULE_GUEST_PROTOCOL` | `guest.v2` | プロトコルバージョン |
-| `GUEST_INITIAL_MODE` | `headless` / `widget` / `app` | 起動時の UI モード |
-| `GUEST_ROLE` | `consumer` / `owner` | データアクセス役割 |
-| `SYNC_PATH` | `/path/to/data.sync` | 対象 `.sync` ファイルのパス |
+| `CAPSULE_IPC_PROTOCOL` | `jsonrpc-2.0` / `guest.v1` | Guest stdio envelope の優先プロトコル（auto-detect でも上書き可） |
+| `CAPSULE_IPC_TRANSPORT` | `stdio` | 現状 `stdio` のみ |
+| `CAPSULE_IPC_MODE` | `headless` / `widget` / `app` | 起動時の UI モード |
+| `CAPSULE_IPC_ROLE` | `consumer` / `owner` | データアクセス役割（`GuestContextRole` と一致） |
+| `CAPSULE_IPC_SYNC_PATH` | `/path/to/data.sync` | 対象 `.sync` ファイルのパス（WASI mount path `SYNC_PATH=/sync` は別レイヤーで継続） |
+| `CAPSULE_IPC_WIDGET_BOUNDS` | `120x120+0+0` | widget モードの初期サイズ・位置 |
 | `ALLOW_HOSTS` | `api.example.com,...` | 許可 egress ホスト一覧 |
 | `ALLOW_ENV` | `API_KEY,...` | Guest に透過する環境変数名一覧 |
 
@@ -359,8 +374,9 @@ Playground のトップページ。`Continue Building` / `Made for You` / `Fresh
 
 | 変数名 | 値例 | 説明 |
 |--------|------|------|
-| `CAPSULE_IPC_<SERVICE>_URL` | `http://localhost:34567` | Service への接続 URL |
-| `CAPSULE_IPC_<SERVICE>_TOKEN` | `Bearer <token>` | Service 認証 Bearer Token |
+| `CAPSULE_IPC_<SERVICE>_URL` | `unix:///tmp/capsule-ipc/llm.sock` / `http://localhost:34567` | Service への接続 URL |
+| `CAPSULE_IPC_<SERVICE>_TOKEN` | `tok_abc123` | Service 認証 Bearer Token |
+| `CAPSULE_IPC_<SERVICE>_SOCKET` | `/tmp/capsule-ipc/llm.sock` | Unix ドメインソケットの実パス（`unix://` URL のみ） |
 
 ### 実行環境
 
@@ -403,9 +419,11 @@ Playground のトップページ。`Continue Building` / `Made for You` / `Fresh
 | `public` フィールド（web target） | 廃止 | validation error |
 | `auto_install_deps` | `[lifecycle] setup = "..."` | 段階的廃止中（Phase 2 で deprecation 警告予定） |
 | `ato-coordinator` (Go Registry) | `ato-store` (Cloudflare Workers) | 完全置換済み |
-| `GuestAction` ベース旧 IPC プロトコル | JSON-RPC 2.0 (`capsule/invoke`) | Phase 13b.9 で移行中 |
+| `guest.v1` envelope 単独 | JSON-RPC 2.0 (`capsule/payload.*` / `capsule/context.*`) + `guest.v1` 互換レーン | Phase 13b.9 完了（2026-04-29）— envelope auto-detect で両方受理 |
+| `CAPSULE_GUEST_PROTOCOL` / `GUEST_MODE` / `GUEST_ROLE` / `GUEST_WIDGET_BOUNDS` | `CAPSULE_IPC_PROTOCOL` / `_MODE` / `_ROLE` / `_WIDGET_BOUNDS` | Phase 13b.9 で削除（fallback なし） |
 | `spec_version = "0.1.0"` | `spec_version = "1.0"` | nacelle の legacy 互換のみ受理 |
 | `ato-desktop` (Tauri 版) | `ato-desktop` (GPUI + Wry 版) | アーキテクチャを完全刷新（Zed 型シェル） |
+| macOS sandbox: 静的 `sandbox-exec` predefined profile | 動的 SBPL (`sandbox_init(flags=0)`) | Phase 13a 完了（2026-04-29、ADR-007） |
 
 ---
 

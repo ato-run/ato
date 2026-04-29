@@ -133,8 +133,13 @@ IPC Broker は ato-cli が担う（CAPSULE_IPC_SPEC v1.1）。nacelle は **Sand
 
 ### 6.5 IPC 統合 (v0.3+)
 
-- Guest Protocol を JSON-RPC 2.0 (`capsule/invoke`, `capsule/ui.modeChange` 等) に移行
-- `capsule/ui.modeChange` 要求を受け取った場合、ato-desktop にユーザー確認を委譲
+- Guest Protocol は JSON-RPC 2.0 (`capsule/payload.{read,write,update}`,
+  `capsule/context.{read,write}` 等) と `guest.v1` envelope を auto-detect で
+  併設（Phase 13b.9、2026-04-29 完了）
+- `capsule/invoke` は Service-to-Service 用に予約済みで Host-to-Guest stdio では
+  使用しない。`capsule/wasm.execute` は将来用に予約 (`-32601` を返す)
+- UI 要求 (`capsule/ui.modeChange` 等) を受け取った場合、ato-desktop に
+  ユーザー確認を委譲
 
 ## 7. セキュリティ
 
