@@ -1,7 +1,9 @@
+use crate::ipc::jsonrpc::error_codes;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 
 pub const GUEST_PROTOCOL_VERSION: &str = "guest.v1";
+pub const GUEST_PROTOCOL_VERSION_JSONRPC: &str = "jsonrpc-2.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GuestMode {
@@ -71,7 +73,7 @@ pub struct GuestResponse {
     pub error: Option<GuestError>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum GuestErrorCode {
     PermissionDenied,
     InvalidRequest,
@@ -79,6 +81,23 @@ pub enum GuestErrorCode {
     HostUnavailable,
     ProtocolError,
     IoError,
+}
+
+impl GuestErrorCode {
+    /// Map to the JSON-RPC 2.0 error code documented in CAPSULE_IPC_SPEC §8.2.
+    ///
+    /// Mapping decisions are recorded in
+    /// `claudedocs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` §1 軸 3.
+    pub fn to_jsonrpc_code(self) -> i64 {
+        match self {
+            GuestErrorCode::PermissionDenied => error_codes::PERMISSION_DENIED,
+            GuestErrorCode::InvalidRequest => error_codes::INVALID_PARAMS,
+            GuestErrorCode::ExecutionFailed => error_codes::INTERNAL_ERROR,
+            GuestErrorCode::HostUnavailable => error_codes::SERVICE_UNAVAILABLE,
+            GuestErrorCode::ProtocolError => error_codes::INVALID_REQUEST,
+            GuestErrorCode::IoError => error_codes::INTERNAL_ERROR,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

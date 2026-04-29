@@ -660,14 +660,28 @@ sequenceDiagram
 ### 7.2 Host-Guest 環境変数
 
 ```bash
-CAPSULE_IPC_PROTOCOL="capsule-ipc/1.0"
-CAPSULE_IPC_TRANSPORT="stdio"
-CAPSULE_IPC_ROLE="guest"
-CAPSULE_IPC_MODE="widget"              # headless | widget | app
-CAPSULE_IPC_GUEST_CONTEXT="consumer"   # consumer | owner
+CAPSULE_IPC_PROTOCOL="jsonrpc-2.0"      # "jsonrpc-2.0" | "guest.v1" (compat lane)
+CAPSULE_IPC_TRANSPORT="stdio"           # 現状 stdio のみ
+CAPSULE_IPC_ROLE="consumer"             # consumer | owner — GuestContextRole と一致
+CAPSULE_IPC_MODE="widget"               # headless | widget | app
 CAPSULE_IPC_SYNC_PATH="/path/to/.sync"
-CAPSULE_IPC_TOKEN="eyJ..."
+CAPSULE_IPC_WIDGET_BOUNDS="0,0,300,400" # widget mode のみ必須 (x,y,w,h)
+CAPSULE_IPC_TOKEN="eyJ..."              # 任意 — 認可トークン (将来用)
 ```
+
+各 env の値は **request の `params.context` フィールドと一致しなければならない**。
+不一致の場合 `-32602 Invalid Params` (旧プロトコルでは `InvalidRequest`) を返す。
+env が設定されていない場合は対応する validation を skip (opt-in)。
+
+#### 旧 env (削除済み、Phase 13b.9 v2.1)
+
+| 旧 | 新 | 廃止 |
+|---|---|---|
+| `CAPSULE_GUEST_PROTOCOL` | `CAPSULE_IPC_PROTOCOL` | ✅ |
+| `GUEST_MODE` | `CAPSULE_IPC_MODE` | ✅ |
+| `GUEST_ROLE` | `CAPSULE_IPC_ROLE` | ✅ |
+| `SYNC_PATH` | `CAPSULE_IPC_SYNC_PATH` | ✅ (※ WASI mount path `SYNC_PATH=/sync` は別レイヤーで継続) |
+| `GUEST_WIDGET_BOUNDS` | `CAPSULE_IPC_WIDGET_BOUNDS` | ✅ |
 
 ### 7.3 Display Modes
 
@@ -713,13 +727,50 @@ default_placement = "top-right"
 
 #### .sync Payload / Context アクセス
 
+ato-cli `ato guest` の stdio 経路で実装される 5 メソッド (Phase 13b.9):
+
+| Method | params | result | GuestAction |
+|---|---|---|---|
+| `capsule/payload.read` | `{ context }` | `{ payload_b64: string }` | ReadPayload |
+| `capsule/payload.write` | `{ context, payload_b64 }` | `null` | WritePayload |
+| `capsule/payload.update` | `{ context, payload_b64 }` | `null` | UpdatePayload |
+| `capsule/context.read` | `{ context }` | `{ value: any }` | ReadContext |
+| `capsule/context.write` | `{ context, value }` | `null` | WriteContext |
+
+`context` は `GuestContext` schema (`mode`, `role`, `permissions`, `sync_path`, `host_app`)
+を必ず含む。Host が起動時に渡す `CAPSULE_IPC_*` env と整合する必要がある (§7.2)。
+
 ```json
 // Guest → Host: payload の読み取り
-{ "jsonrpc": "2.0", "id": "req_002", "method": "capsule/payload.read", "params": {} }
+{ "jsonrpc": "2.0", "id": "req_002",
+  "method": "capsule/payload.read",
+  "params": { "context": { "mode": "Headless", "role": "Owner", "permissions": {...},
+                            "sync_path": "/path/to/.sync", "host_app": null } } }
 
 // Host → Guest: payload データ
-{ "jsonrpc": "2.0", "id": "req_002", "result": { "data": "base64-encoded-payload..." } }
+{ "jsonrpc": "2.0", "id": "req_002", "result": { "payload_b64": "base64..." } }
+
+// 書き込み (success time は result: null)
+{ "jsonrpc": "2.0", "id": "req_003",
+  "method": "capsule/payload.write",
+  "params": { "context": {...}, "payload_b64": "base64..." } }
+
+// → { "jsonrpc": "2.0", "id": "req_003", "result": null }
 ```
+
+##### 互換性レーン (guest.v1 — 旧プロトコル)
+
+JSON-RPC 2.0 envelope (`jsonrpc: "2.0"`) 以外を stdin で受け取った場合、
+`version: "guest.v1"` envelope を旧来通り処理する。新規実装は JSON-RPC 経路を
+推奨。両方のフィールドが同時に存在する場合は **JSON-RPC を優先** する。
+
+##### 予約 / 未公開 method
+
+- `capsule/invoke` は Service-to-Service 用に予約 (params shape: `{ service, method, token, args }`)
+  で、Host-to-Guest stdio では使用しない (CAPSULE_IPC ipc/jsonrpc.rs::InvokeParams)
+- `capsule/wasm.execute` は WASM/OCI ランタイム整備後に確定予定
+  (Phase 13b.9 v2.1 では未公開、`-32601 Method not found` を返す)。
+  ExecuteWasm は当面 guest.v1 envelope のみで利用可能
 
 #### UI ネゴシエーション
 
