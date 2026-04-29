@@ -125,7 +125,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
         }
     };
 
-    let _ = client.remove_container(&container_id, true).await;
+    let _ = client.remove_container(&container_id).await;
     let _ = log_task.await;
 
     Ok(exit_code as i32)

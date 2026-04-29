@@ -908,7 +908,7 @@ async fn stop_service<C: OciRuntimeClient>(service: &mut RunningService, client:
             let _ = client
                 .stop_container(&oci.container_id, OCI_STOP_TIMEOUT_SECS)
                 .await;
-            let _ = client.remove_container(&oci.container_id, true).await;
+            let _ = client.remove_container(&oci.container_id).await;
         }
     }
     Ok(())
@@ -1464,11 +1464,7 @@ mod tests {
             Ok(())
         }
 
-        async fn remove_container(
-            &self,
-            container_id: &str,
-            _force: bool,
-        ) -> capsule_core::Result<()> {
+        async fn remove_container(&self, container_id: &str) -> capsule_core::Result<()> {
             self.events
                 .lock()
                 .unwrap()

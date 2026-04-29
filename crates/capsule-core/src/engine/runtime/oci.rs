@@ -81,7 +81,7 @@ pub trait OciRuntimeClient: Send + Sync {
     ) -> Result<mpsc::Receiver<Result<OciLogChunk>>>;
     async fn wait_container(&self, container_id: &str) -> Result<i64>;
     async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()>;
-    async fn remove_container(&self, container_id: &str, force: bool) -> Result<()>;
+    async fn remove_container(&self, container_id: &str) -> Result<()>;
 }
 
 #[derive(Clone)]
@@ -376,12 +376,12 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
             .map_err(map_bollard_error)
     }
 
-    async fn remove_container(&self, container_id: &str, force: bool) -> Result<()> {
+    async fn remove_container(&self, container_id: &str) -> Result<()> {
         self.docker
             .remove_container(
                 container_id,
                 Some(RemoveContainerOptions {
-                    force,
+                    force: true,
                     ..Default::default()
                 }),
             )
