@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::adapters::runtime::provisioning::dependency_root;
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
 use crate::executors::target_runner;
@@ -232,7 +233,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
     let mut provisioned_roots = std::collections::HashSet::new();
     for target_label in plan.selected_target_package_order()? {
         let target_plan = plan.with_selected_target(target_label.clone());
-        let working_dir = resolve_provision_working_dir(&target_plan);
+        let working_dir = dependency_root(&target_plan);
 
         if provisioned_roots.insert(working_dir.clone()) {
             if let Some(command) = plan_v03_provision_command(&target_plan)? {
@@ -264,46 +265,6 @@ pub(crate) async fn run_v03_lifecycle_steps(
     Ok(())
 }
 
-/// Returns the working directory for provision/build lifecycle commands.
-///
-/// Resolution order, runtime-agnostic:
-///
-/// 1. Author intent: explicit `working_dir` from capsule.toml. Honors the
-///    Provision/Run single-execution-context contract — what the manifest
-///    declares is what every phase uses.
-/// 2. Heuristic fallback: a `source/` subdir that looks like a runnable
-///    project (Node, Python, Rust, Go) — not Node-only as before.
-/// 3. Final fallback: `execution_working_directory()` (manifest_dir if no
-///    `working_dir` is set).
-fn resolve_provision_working_dir(plan: &capsule_core::router::ManifestData) -> std::path::PathBuf {
-    if let Some(raw) = plan.execution_working_dir() {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() && trimmed != "." {
-            let candidate = plan.manifest_dir.join(trimmed);
-            if candidate.is_dir() {
-                return candidate;
-            }
-        }
-    }
-
-    let source_dir = plan.manifest_dir.join("source");
-    if looks_like_source_project(&source_dir) {
-        return source_dir;
-    }
-
-    plan.execution_working_directory()
-}
-
-fn looks_like_source_project(source_dir: &std::path::Path) -> bool {
-    source_dir.join("package.json").exists()
-        || source_dir.join("pyproject.toml").exists()
-        || source_dir.join("uv.lock").exists()
-        || source_dir.join("requirements.txt").exists()
-        || source_dir.join("Pipfile").exists()
-        || source_dir.join("Cargo.toml").exists()
-        || source_dir.join("go.mod").exists()
-}
-
 pub(super) fn plan_v03_provision_command(
     plan: &capsule_core::router::ManifestData,
 ) -> Result<Option<String>> {
@@ -312,7 +273,7 @@ pub(super) fn plan_v03_provision_command(
     let runtime = runtime.trim().to_ascii_lowercase();
     let driver = driver.trim().to_ascii_lowercase();
     let manifest_dir = plan.manifest_dir.clone();
-    let execution_working_directory = resolve_provision_working_dir(plan);
+    let execution_working_directory = dependency_root(plan);
 
     if runtime == "web" && driver == "static" {
         debug!(
@@ -609,11 +570,19 @@ fn preflight_python_uv_lock_for_source_driver(
         return Ok(());
     }
 
-    if resolve_python_requirements_path(&plan.manifest_dir).is_some() {
+    // Probe the same root the provision step will `cd` into. Reaching directly
+    // into `plan.manifest_dir` worked only because the legacy probe helpers
+    // dual-checked `<root>` and `<root>/source/`; now that callers must pass
+    // the resolved dependency root explicitly, this preflight gate stays in
+    // sync with `plan_v03_provision_command` instead of relying on a layout
+    // accident.
+    let dep_root = dependency_root(plan);
+
+    if resolve_python_requirements_path(&dep_root).is_some() {
         return Ok(());
     }
 
-    match probe_required_python_lockfile(&plan.manifest_dir)? {
+    match probe_required_python_lockfile(&dep_root)? {
         ProbeResult::Found(_) => return Ok(()),
         ProbeResult::Missing(_) | ProbeResult::NotApplicable => {}
         ProbeResult::Ambiguous(ambiguity) => {
@@ -638,7 +607,8 @@ fn preflight_python_uv_binary_for_source_driver(
         return Ok(());
     }
 
-    if resolve_python_requirements_path(&plan.manifest_dir).is_some() {
+    let dep_root = dependency_root(plan);
+    if resolve_python_requirements_path(&dep_root).is_some() {
         return which::which("uv").map(|_| ()).map_err(|_| {
             AtoExecutionError::lock_incomplete(
                 "source/python target requires uv on PATH when using requirements.txt",
@@ -1091,32 +1061,36 @@ fn detect_host_macos_version() -> Option<String> {
 }
 
 #[cfg(test)]
-fn resolve_uv_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
-    match probe_required_python_lockfile(manifest_dir).ok()? {
+fn resolve_uv_lock_path(dependency_root: &Path) -> Option<PathBuf> {
+    match probe_required_python_lockfile(dependency_root).ok()? {
         ProbeResult::Found(values) => values.first().map(|value| value.primary_path.clone()),
         _ => None,
     }
 }
 
-fn resolve_python_requirements_path(manifest_dir: &Path) -> Option<PathBuf> {
-    [
-        manifest_dir.join("requirements.txt"),
-        manifest_dir.join("source").join("requirements.txt"),
-    ]
-    .into_iter()
-    .find(|path| path.exists())
+/// Probe the dependency root for a Python `requirements.txt`.
+///
+/// Callers must pass an already-resolved root (`dependency_root(plan)` or
+/// equivalent). Earlier this helper silently dual-probed `<root>` and
+/// `<root>/source/`, which papered over wrong roots; that paper-over has
+/// been removed so caller mistakes surface as missing-lock errors instead
+/// of being absorbed.
+fn resolve_python_requirements_path(dependency_root: &Path) -> Option<PathBuf> {
+    let path = dependency_root.join("requirements.txt");
+    path.exists().then_some(path)
 }
 
 #[cfg(test)]
-pub(super) fn resolve_python_dependency_lock_path(manifest_dir: &Path) -> Option<PathBuf> {
-    resolve_uv_lock_path(manifest_dir).or_else(|| resolve_python_requirements_path(manifest_dir))
+pub(super) fn resolve_python_dependency_lock_path(dependency_root: &Path) -> Option<PathBuf> {
+    resolve_uv_lock_path(dependency_root)
+        .or_else(|| resolve_python_requirements_path(dependency_root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_required_glibc_from_lock, looks_like_source_project, preflight_glibc_compat,
-        preflight_single_script_effective_cwd_compat, resolve_provision_working_dir,
+        detect_required_glibc_from_lock, preflight_glibc_compat,
+        preflight_single_script_effective_cwd_compat,
     };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
     use crate::application::pipeline::phases::run::PreparedRunContext;
@@ -1150,159 +1124,12 @@ mod tests {
         .expect("execution descriptor")
     }
 
-    fn build_plan_with_target(
-        manifest_dir: &Path,
-        manifest: &str,
-        target: &str,
-    ) -> capsule_core::router::ManifestData {
-        capsule_core::router::execution_descriptor_from_manifest_parts(
-            toml::from_str::<toml::Value>(manifest).expect("parse manifest"),
-            manifest_dir.join("capsule.toml"),
-            manifest_dir.to_path_buf(),
-            capsule_core::router::ExecutionProfile::Dev,
-            Some(target),
-            std::collections::HashMap::new(),
-        )
-        .expect("execution descriptor")
-    }
-
-    fn touch(path: &Path) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir for touch");
-        }
-        fs::write(path, "").expect("touch test fixture");
-    }
-
-    #[test]
-    fn looks_like_source_project_detects_node_python_rust_go() {
-        let dir = tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-
-        // empty source/ should not register as a runnable project
-        fs::create_dir_all(&source).expect("create source");
-        assert!(!looks_like_source_project(&source));
-
-        for marker in [
-            "package.json",
-            "pyproject.toml",
-            "uv.lock",
-            "requirements.txt",
-            "Pipfile",
-            "Cargo.toml",
-            "go.mod",
-        ] {
-            // wipe and recreate to isolate each marker
-            fs::remove_dir_all(&source).expect("rm source");
-            fs::create_dir_all(&source).expect("create source");
-            touch(&source.join(marker));
-            assert!(
-                looks_like_source_project(&source),
-                "expected `{}` to register as a source project",
-                marker
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_provision_working_dir_honors_explicit_working_dir() {
-        // Author-declared working_dir = "source" (under [targets.app], the
-        // form preserved by manifest normalization at publish time) must
-        // win over heuristic detection. The explicit declaration is the
-        // contract Provision and Run share.
-        //
-        // We create source/ on disk because the function probes existence
-        // before honoring the candidate (defensive guard against typos).
-        let dir = tempdir().expect("tempdir");
-        fs::create_dir_all(dir.path().join("source")).expect("create source");
-        let manifest = r#"
-schema_version = "0.3"
-name = "explicit-wd"
-version = "0.1.0"
-type = "app"
-default_target = "app"
-
-[targets.app]
-runtime = "source"
-driver = "python"
-runtime_version = "3.11"
-run = "start.py"
-working_dir = "source"
-"#;
-        let plan = build_plan_with_target(dir.path(), manifest, "app");
-        let cwd = resolve_provision_working_dir(&plan);
-        assert_eq!(cwd, dir.path().join("source"));
-    }
-
-    #[test]
-    fn resolve_provision_working_dir_detects_python_source_layout() {
-        // A capsule with no explicit working_dir but a Python project under
-        // source/ (pyproject.toml + uv.lock — the layout produced by
-        // `ato pack` for Python capsules) should resolve to source/ so
-        // `uv sync --frozen` finds pyproject.toml.
-        let dir = tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-        fs::create_dir_all(&source).expect("create source");
-        touch(&source.join("pyproject.toml"));
-        touch(&source.join("uv.lock"));
-        touch(&source.join("start.py"));
-
-        let manifest = r#"
-schema_version = "0.3"
-name = "py-source-only"
-version = "0.1.0"
-type = "app"
-runtime = "source/python"
-runtime_version = "3.11"
-run = "start.py"
-"#;
-        let plan = build_plan(dir.path(), manifest);
-        let cwd = resolve_provision_working_dir(&plan);
-        assert_eq!(cwd, source);
-    }
-
-    #[test]
-    fn resolve_provision_working_dir_preserves_node_source_layout() {
-        // Regression: source/package.json was the only marker that worked
-        // before the runtime-agnostic refactor. Make sure Node capsules
-        // still resolve to source/.
-        let dir = tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-        fs::create_dir_all(&source).expect("create source");
-        touch(&source.join("package.json"));
-        touch(&source.join("package-lock.json"));
-
-        let manifest = r#"
-schema_version = "0.3"
-name = "node-source-only"
-version = "0.1.0"
-type = "app"
-runtime = "source/node"
-runtime_version = "20"
-run = "start.js"
-"#;
-        let plan = build_plan_with_target(dir.path(), manifest, "default");
-        let cwd = resolve_provision_working_dir(&plan);
-        assert_eq!(cwd, source);
-    }
-
-    #[test]
-    fn resolve_provision_working_dir_falls_back_to_execution_directory() {
-        // No explicit working_dir AND no recognizable source/ layout →
-        // preserve the original behavior (execution_working_directory()).
-        let dir = tempdir().expect("tempdir");
-        let manifest = r#"
-schema_version = "0.3"
-name = "flat-layout"
-version = "0.1.0"
-type = "app"
-runtime = "source/python"
-runtime_version = "3.11"
-run = "start.py"
-"#;
-        let plan = build_plan(dir.path(), manifest);
-        let cwd = resolve_provision_working_dir(&plan);
-        assert_eq!(cwd, plan.execution_working_directory());
-    }
+    // Tests for the dependency-root resolver (formerly named
+    // `resolve_provision_working_dir` here, then duplicated into
+    // `shadow::relative_working_dir_from_manifest_root`) live with the
+    // unified resolver itself in `provisioning/dependency_root.rs`.
+    // Removing the duplicates here keeps the fixture-heavy filesystem
+    // tests in one place and prevents the two suites from drifting.
 
     #[test]
     fn detect_required_glibc_from_lock_reads_target_constraints_from_json() {
