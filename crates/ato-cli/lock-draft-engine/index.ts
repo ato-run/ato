@@ -101,22 +101,46 @@ import {
 } from "./pkg/lock_draft_engine_bg.js";
 
 type LockDraftWasmExports = {
+  __wbindgen_externrefs?: { grow: (delta: number) => number };
+  __wbindgen_free?: unknown;
+  __wbindgen_malloc?: unknown;
   __wbindgen_start?: () => void;
 };
 
-const wasmExports =
-  "default" in wasmModule
-    ? ((wasmModule as { default: LockDraftWasmExports }).default ??
-      (wasmModule as LockDraftWasmExports))
-    : (wasmModule as LockDraftWasmExports);
+let initialized = false;
 
-__wbg_set_wasm(wasmExports);
-if (typeof wasmExports.__wbindgen_start === "function") {
-  wasmExports.__wbindgen_start();
-} else {
-  __wbindgen_init_externref_table();
+function resolveWasmExports(): LockDraftWasmExports {
+  return "default" in wasmModule
+    ? ((wasmModule as { default: LockDraftWasmExports }).default ??
+        (wasmModule as LockDraftWasmExports))
+    : (wasmModule as LockDraftWasmExports);
+}
+
+function ensureWasmInitialized() {
+  if (initialized) {
+    return;
+  }
+
+  const wasmExports = resolveWasmExports();
+  if (
+    typeof wasmExports.__wbindgen_malloc !== "function" ||
+    typeof wasmExports.__wbindgen_free !== "function"
+  ) {
+    throw new Error("lock-draft WASM exports are unavailable");
+  }
+
+  __wbg_set_wasm(wasmExports);
+  if (typeof wasmExports.__wbindgen_start === "function") {
+    wasmExports.__wbindgen_start();
+  } else if (wasmExports.__wbindgen_externrefs) {
+    __wbindgen_init_externref_table();
+  } else {
+    throw new Error("lock-draft WASM externref table is unavailable");
+  }
+  initialized = true;
 }
 
 export function evaluateLockDraft(input: LockDraftInput): LockDraft {
+  ensureWasmInitialized();
   return JSON.parse(evaluateLockDraftJson(JSON.stringify(input))) as LockDraft;
 }
