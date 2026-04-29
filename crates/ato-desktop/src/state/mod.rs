@@ -1516,16 +1516,20 @@ impl AppState {
 
     /// Aggregate boot progress across the active workspace, in [0.0, 1.0].
     ///
-    /// Returns `None` when no pane is in a transient session state
-    /// (Resolving/Materializing/Launching) — i.e. there is nothing
-    /// worth showing a progress strip for. Each transient state maps
-    /// to a coarse fraction (0.20 / 0.55 / 0.85) so the strip moves
-    /// forward as guests advance through resolve → materialize →
-    /// launch instead of hovering at a single value the whole time.
-    /// Mounted/Closed/Detached/LaunchFailed/non-web panes count as
-    /// fully done; the average across all panes feels honest when
-    /// some tabs are already up while others are still booting.
+    /// Returns `None` when no pane is in a transient session state — i.e.
+    /// there is nothing worth showing a progress strip for. Mounted/Closed/
+    /// Detached/LaunchFailed/non-web panes count as fully done; the average
+    /// across all panes feels honest when some tabs are already up while
+    /// others are still booting. Each transient state advances the strip
+    /// (resolve → materialize → launch) instead of hovering at one value.
     pub fn workspace_loading_progress(&self) -> Option<f32> {
+        // Coarse fractions per transient state. Tuned by feel — not exact —
+        // so the bar moves forward as the guest advances through phases.
+        const RESOLVING_PROGRESS: f32 = 0.20;
+        const MATERIALIZING_PROGRESS: f32 = 0.55;
+        const LAUNCHING_PROGRESS: f32 = 0.85;
+        const TERMINAL_PROGRESS: f32 = 1.0;
+
         let workspace = self.active_workspace()?;
         let mut total = 0.0_f32;
         let mut count = 0_u32;
@@ -1537,22 +1541,22 @@ impl AppState {
                     PaneSurface::Web(web) => match web.session {
                         WebSessionState::Resolving => {
                             transient = true;
-                            0.20
+                            RESOLVING_PROGRESS
                         }
                         WebSessionState::Materializing => {
                             transient = true;
-                            0.55
+                            MATERIALIZING_PROGRESS
                         }
                         WebSessionState::Launching => {
                             transient = true;
-                            0.85
+                            LAUNCHING_PROGRESS
                         }
                         WebSessionState::Mounted
                         | WebSessionState::Closed
                         | WebSessionState::Detached
-                        | WebSessionState::LaunchFailed => 1.0,
+                        | WebSessionState::LaunchFailed => TERMINAL_PROGRESS,
                     },
-                    _ => 1.0,
+                    _ => TERMINAL_PROGRESS,
                 };
                 total += fraction;
             }
