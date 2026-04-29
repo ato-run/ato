@@ -42,7 +42,15 @@ use super::resolve::resolve_local_plan;
 const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
-const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Resolve the readiness budget for `wait_for_http_ready` from the
+/// manifest's `startup_timeout` (per-target → global → 60s default).
+/// The previous code path used a hardcoded 10s ceiling and silently
+/// ignored the manifest field, which timed out heavy first-launch
+/// capsules (Argos/MiniSBD model downloads, build caches, etc.) on
+/// their own declared budget.
+fn session_ready_timeout(plan: &capsule_core::router::ManifestData) -> Duration {
+    Duration::from_secs(plan.execution_startup_timeout() as u64)
+}
 /// Interval between HTTP readiness polls while waiting for a freshly spawned
 /// session to bind its port. The value trades worst-case wasted wait time
 /// against syscall churn: 25ms is short enough that even fast servers
@@ -256,8 +264,12 @@ pub(super) fn start_guest_session(
     let invoke_url = format!("http://127.0.0.1:{}{}", port, guest.rpc_path);
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "wait_http_ready");
-    let ready_result =
-        wait_for_http_ready(&mut child, port, &guest.health_path, SESSION_READY_TIMEOUT);
+    let ready_result = wait_for_http_ready(
+        &mut child,
+        port,
+        &guest.health_path,
+        session_ready_timeout(plan),
+    );
     timer.finish_ok();
     match ready_result {
         Ok(()) => {
@@ -387,7 +399,7 @@ pub(super) fn start_runtime_session(
             &mut runtime_process.child,
             port,
             health_path,
-            SESSION_READY_TIMEOUT,
+            session_ready_timeout(plan),
         );
         timer.finish_ok();
         match ready_result {
