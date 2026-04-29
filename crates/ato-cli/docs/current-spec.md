@@ -978,6 +978,13 @@ Current lockfile and runtime requirements:
 - Tier2 flows require nacelle
 - unsupported or out-of-policy behavior does not auto-fallback; it stops fail-closed
 
+Compound runtime selectors such as `runtime = "web/node"` are authoring sugar.
+The manifest normalizer splits them into a web render intent plus a concrete
+driver. Dynamic web drivers may appear in resolve output as `runtime = "source"`
+with `driver = "node" | "deno" | "python"` while `render_strategy = "web"` and
+`port` preserve the user-visible web behavior. Static web targets keep the
+`runtime = "web"`, `driver = "static"` contract.
+
 Current Deno executor rules include:
 
 - deno.lock or package-lock.json fallback is required unless --no-lock is explicitly used

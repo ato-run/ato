@@ -176,9 +176,23 @@ impl SourceRuntime {
         children.remove(workload_id)
     }
 
+    pub async fn async_child_workload_ids(&self) -> Vec<String> {
+        let children = self.async_children.lock().await;
+        let mut ids = children.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
     pub fn take_child(&self, workload_id: &str) -> Option<Child> {
         let mut children = self.active_children.lock().unwrap();
         children.remove(workload_id)
+    }
+
+    pub fn child_workload_ids(&self) -> Vec<String> {
+        let children = self.active_children.lock().unwrap();
+        let mut ids = children.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 
     /// Get a reference to active children for external management

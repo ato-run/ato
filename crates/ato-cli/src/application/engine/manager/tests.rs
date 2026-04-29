@@ -107,6 +107,28 @@ fn extract_first_sha256_hex_reads_single_file_checksum() {
 }
 
 #[test]
+fn resolve_nacelle_release_uses_github_archive_layout() {
+    let release =
+        release::resolve_nacelle_release("v0.4.107", DEFAULT_NACELLE_RELEASE_BASE_URL, true)
+            .expect("resolve release");
+
+    assert_eq!(release.version, "v0.4.107");
+    assert!(release.binary_name.starts_with("nacelle-"));
+    assert!(
+        release.binary_name.ends_with(".tar.xz") || release.binary_name.ends_with(".zip"),
+        "unexpected asset name: {}",
+        release.binary_name
+    );
+    assert_eq!(
+        release.url,
+        format!(
+            "{}/v0.4.107/{}",
+            DEFAULT_NACELLE_RELEASE_BASE_URL, release.binary_name
+        )
+    );
+}
+
+#[test]
 fn auto_bootstrap_policy_defaults_to_pinned_release() {
     let policy = resolve_auto_bootstrap_policy(
         AutoBootstrapMode::Auto,

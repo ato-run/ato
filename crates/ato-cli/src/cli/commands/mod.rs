@@ -11,6 +11,7 @@ pub mod guest_jsonrpc;
 pub mod inspect;
 pub mod ipc;
 pub mod keygen;
+pub mod lock;
 pub mod logs;
 pub mod profile;
 pub mod ps;

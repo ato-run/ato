@@ -372,7 +372,10 @@ impl AtoExecutionError {
         let lockfile = target.unwrap_or("lockfile");
         Self::from_ato_error(AtoError::DependencyLockMissing {
             message: message.into(),
-            hint: Some("lockfile を生成または同期してから再実行してください。".to_string()),
+            hint: Some(
+                "Run `ato lock` to regenerate .ato/derived/capsule.lock.json, then rerun the command."
+                    .to_string(),
+            ),
             lockfile: lockfile.to_string(),
             package_manager: None,
             target: target.map(ToString::to_string),
@@ -402,7 +405,8 @@ impl AtoExecutionError {
         Self::from_ato_error(AtoError::LockfileTampered {
             message: message.into(),
             hint: Some(
-                "lockfile を再生成し、manifest と一致していることを確認してください。".to_string(),
+                "Run `ato lock` to regenerate .ato/derived/capsule.lock.json so it matches capsule.toml."
+                    .to_string(),
             ),
             lockfile: target.map(ToString::to_string),
         })
