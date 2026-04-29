@@ -211,16 +211,34 @@ const APP_ICON_SIZE: f32 = 22.0;
 
 #[derive(Clone)]
 pub(super) enum FaviconState {
-    Loading,
+    /// In flight. Carries the number of times this origin has previously
+    /// failed so the post-fetch resolver can bump the count if we fail
+    /// again — without that, a permanently broken origin would retry on
+    /// every `retry_delay` interval forever.
+    Loading {
+        prior_attempts: u32,
+    },
     Ready(Arc<Image>),
-    Failed { failed_at: Instant },
+    Failed {
+        failed_at: Instant,
+        attempts: u32,
+    },
 }
+
+/// Cap on how many times we'll retry a single origin's favicon before
+/// giving up permanently. The render path falls back to the globe glyph
+/// once we stop retrying, which is preferable to issuing a request to
+/// the same broken URL every 10 seconds for the lifetime of the app.
+pub(super) const MAX_FAVICON_ATTEMPTS: u32 = 5;
 
 impl FaviconState {
     pub(super) fn should_fetch(&self, now: Instant, retry_delay: Duration) -> bool {
         match self {
-            Self::Loading | Self::Ready(_) => false,
-            Self::Failed { failed_at } => now.duration_since(*failed_at) >= retry_delay,
+            Self::Loading { .. } | Self::Ready(_) => false,
+            Self::Failed {
+                failed_at,
+                attempts,
+            } => *attempts < MAX_FAVICON_ATTEMPTS && now.duration_since(*failed_at) >= retry_delay,
         }
     }
 }
@@ -258,12 +276,28 @@ pub(super) fn render_task_rail(
         .child(render_settings_nav_item(settings_nav_active(state), theme))
 }
 
-pub(super) fn favicon_request_url(origin: &str) -> Option<String> {
-    let parsed = url::Url::parse(origin).ok()?;
-    match parsed.scheme() {
-        "http" | "https" => Some(format!("{origin}/favicon.ico")),
-        _ => None,
+/// Ordered favicon candidate URLs to try for a given origin.
+///
+/// Modern Vite / Next.js / static-site setups frequently ship only
+/// `favicon.svg` or `apple-touch-icon.png` — the legacy `/favicon.ico`
+/// 404s. Returning an ordered fallback list lets the fetcher accept
+/// the first candidate that responds with a real image.
+///
+/// Returns an empty `Vec` for non-`http(s)` origins (e.g. `file://`,
+/// `capsule://`) so the fetcher short-circuits without issuing a
+/// request that would never make sense.
+pub(super) fn favicon_candidate_urls(origin: &str) -> Vec<String> {
+    let Ok(parsed) = url::Url::parse(origin) else {
+        return Vec::new();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Vec::new();
     }
+    vec![
+        format!("{origin}/favicon.ico"),
+        format!("{origin}/favicon.svg"),
+        format!("{origin}/apple-touch-icon.png"),
+    ]
 }
 
 fn render_nav_item(
@@ -390,7 +424,7 @@ fn render_app_icon(
         SidebarTaskIconSpec::Monogram(label) => render_monogram_icon(&label, task_hue(seed), theme),
         SidebarTaskIconSpec::ExternalUrl { origin } => match favicon_cache.get(&origin) {
             Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
-            Some(FaviconState::Loading) | Some(FaviconState::Failed { .. }) | None => {
+            Some(FaviconState::Loading { .. }) | Some(FaviconState::Failed { .. }) | None => {
                 render_globe_icon(theme)
             }
         },
@@ -403,7 +437,7 @@ fn render_app_icon(
             // without an icon would show, so the slot never goes
             // empty.
             Some(FaviconState::Ready(image)) => render_favicon_icon(image.clone(), theme),
-            Some(FaviconState::Loading) | Some(FaviconState::Failed { .. }) | None => {
+            Some(FaviconState::Loading { .. }) | Some(FaviconState::Failed { .. }) | None => {
                 render_monogram_icon("●", task_hue(seed), theme)
             }
         },
@@ -627,7 +661,8 @@ fn settings_nav_active(state: &crate::state::AppState) -> bool {
         return true;
     }
 
-    state.active_task()
+    state
+        .active_task()
         .map(|task| {
             task.panes.iter().any(|pane| {
                 matches!(
@@ -671,20 +706,36 @@ fn render_new_tab_button(theme: &Theme) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{favicon_request_url, FaviconState};
+    use super::{favicon_candidate_urls, FaviconState, MAX_FAVICON_ATTEMPTS};
     use std::time::{Duration, Instant};
 
     #[test]
-    fn favicon_request_is_built_from_origin() {
+    fn favicon_candidates_cover_modern_default_assets() {
+        // Order matters: legacy .ico first (most universal), then SVG
+        // (Vite/Next.js default), then apple-touch-icon (iOS-friendly).
+        // Modern static-site frameworks frequently ship only `.svg` or
+        // `apple-touch-icon.png`, so the .ico fallback alone leaves the
+        // sidebar showing a globe glyph for those origins.
         assert_eq!(
-            favicon_request_url("https://example.com"),
-            Some("https://example.com/favicon.ico".to_string())
+            favicon_candidate_urls("https://example.com"),
+            vec![
+                "https://example.com/favicon.ico".to_string(),
+                "https://example.com/favicon.svg".to_string(),
+                "https://example.com/apple-touch-icon.png".to_string(),
+            ]
         );
         assert_eq!(
-            favicon_request_url("http://localhost:3000"),
-            Some("http://localhost:3000/favicon.ico".to_string())
+            favicon_candidate_urls("http://localhost:3000"),
+            vec![
+                "http://localhost:3000/favicon.ico".to_string(),
+                "http://localhost:3000/favicon.svg".to_string(),
+                "http://localhost:3000/apple-touch-icon.png".to_string(),
+            ]
         );
-        assert_eq!(favicon_request_url("file:///tmp/app"), None);
+        // Non-http(s) origins must yield no candidates so the fetcher
+        // short-circuits without issuing nonsense requests.
+        assert!(favicon_candidate_urls("file:///tmp/app").is_empty());
+        assert!(favicon_candidate_urls("capsule://ato.run/koh0920/x").is_empty());
     }
 
     #[test]
@@ -692,17 +743,41 @@ mod tests {
         let retry_delay = Duration::from_secs(10);
         let now = Instant::now();
 
-        let loading = FaviconState::Loading;
+        let loading = FaviconState::Loading { prior_attempts: 0 };
         assert!(!loading.should_fetch(now, retry_delay));
 
         let failed_recently = FaviconState::Failed {
             failed_at: now - Duration::from_secs(3),
+            attempts: 1,
         };
         assert!(!failed_recently.should_fetch(now, retry_delay));
 
         let failed_long_ago = FaviconState::Failed {
             failed_at: now - Duration::from_secs(12),
+            attempts: 1,
         };
         assert!(failed_long_ago.should_fetch(now, retry_delay));
+    }
+
+    #[test]
+    fn favicon_state_caps_retries_at_max_attempts() {
+        // Past the cap, even a long-elapsed Failed entry must NOT
+        // re-fetch — otherwise a permanently broken origin (404 across
+        // every fallback URL) would generate a request every retry_delay
+        // for the lifetime of the app.
+        let retry_delay = Duration::from_secs(10);
+        let now = Instant::now();
+        let exhausted = FaviconState::Failed {
+            failed_at: now - Duration::from_secs(120),
+            attempts: MAX_FAVICON_ATTEMPTS,
+        };
+        assert!(!exhausted.should_fetch(now, retry_delay));
+
+        // One short of the cap, still retriable after the backoff.
+        let almost_exhausted = FaviconState::Failed {
+            failed_at: now - Duration::from_secs(120),
+            attempts: MAX_FAVICON_ATTEMPTS - 1,
+        };
+        assert!(almost_exhausted.should_fetch(now, retry_delay));
     }
 }
