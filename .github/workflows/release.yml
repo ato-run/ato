@@ -272,11 +272,32 @@ jobs:
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
+          TAG: "${{ needs.plan.outputs.tag }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          # Idempotent: desktop-release.yml may have created the release
+          # already (it falls through to creating one if cargo-dist is
+          # late). When that happens we edit the existing release with
+          # cargo-dist's authoritative title/body and clobber-upload our
+          # artifacts — no duplicate release objects per tag. See the
+          # ato-release skill for the v0.4.101 race that motivated this.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              $PRERELEASE_FLAG \
+              --title "$ANNOUNCEMENT_TITLE" \
+              --notes-file "$RUNNER_TEMP/notes.txt" \
+              --draft=false
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" \
+              --target "$RELEASE_COMMIT" \
+              $PRERELEASE_FLAG \
+              --title "$ANNOUNCEMENT_TITLE" \
+              --notes-file "$RUNNER_TEMP/notes.txt" \
+              artifacts/*
+          fi
 
   publish-homebrew-formula:
     needs:
