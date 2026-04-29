@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use sha2::Digest;
 use std::fs;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 use super::http::http_get_bytes;
@@ -23,13 +24,13 @@ impl EngineManager {
 
         if output_path.exists() {
             futures::executor::block_on(
-                reporter.notify(format!("✅ Engine {} v{} already installed", name, version)),
+                reporter.notify(format!("✅ Engine {} {} already installed", name, version)),
             )?;
             return Ok(output_path);
         }
 
         futures::executor::block_on(
-            reporter.notify(format!("⬇️  Downloading {} v{}...", name, version)),
+            reporter.notify(format!("⬇️  Downloading {} {}...", name, version)),
         )?;
 
         let temp_path = output_path.with_extension("tmp");
@@ -57,8 +58,14 @@ impl EngineManager {
             }
         }
 
-        fs::write(&temp_path, &content)
-            .with_context(|| format!("Failed to write to: {}", temp_path.display()))?;
+        if url.ends_with(".tar.xz") {
+            write_binary_from_tar_xz(&content, name, &temp_path)?;
+        } else if url.ends_with(".zip") {
+            write_binary_from_zip(&content, name, &temp_path)?;
+        } else {
+            fs::write(&temp_path, &content)
+                .with_context(|| format!("Failed to write to: {}", temp_path.display()))?;
+        }
 
         fs::rename(&temp_path, &output_path)
             .with_context(|| format!("Failed to move to: {}", output_path.display()))?;
@@ -77,13 +84,83 @@ impl EngineManager {
         }
 
         futures::executor::block_on(reporter.notify(format!(
-            "✅ Installed {} v{} to {}",
+            "✅ Installed {} {} to {}",
             name,
             version,
             output_path.display()
         )))?;
 
         Ok(output_path)
+    }
+}
+
+fn write_binary_from_tar_xz(content: &[u8], engine_name: &str, output_path: &Path) -> Result<()> {
+    let decoder = xz2::read::XzDecoder::new(Cursor::new(content));
+    let mut archive = tar::Archive::new(decoder);
+    let binary_file_name = engine_binary_file_name(engine_name);
+
+    for entry in archive.entries().context("Failed to read engine archive")? {
+        let mut entry = entry.context("Failed to read engine archive entry")?;
+        let path = entry
+            .path()
+            .context("Failed to read engine archive entry path")?;
+        if path.file_name().and_then(|name| name.to_str()) != Some(binary_file_name.as_str()) {
+            continue;
+        }
+
+        let mut out = fs::File::create(output_path)
+            .with_context(|| format!("Failed to create: {}", output_path.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .with_context(|| format!("Failed to extract engine to: {}", output_path.display()))?;
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Engine archive did not contain expected binary '{}'",
+        binary_file_name
+    )
+}
+
+fn write_binary_from_zip(content: &[u8], engine_name: &str, output_path: &Path) -> Result<()> {
+    let cursor = Cursor::new(content);
+    let mut archive = zip::ZipArchive::new(cursor).context("Failed to read engine zip archive")?;
+    let binary_file_name = engine_binary_file_name(engine_name);
+
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .context("Failed to read engine zip entry")?;
+        let Some(name) = Path::new(file.name())
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        if name != binary_file_name {
+            continue;
+        }
+
+        let mut out = fs::File::create(output_path)
+            .with_context(|| format!("Failed to create: {}", output_path.display()))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .context("Failed to read engine binary from zip")?;
+        std::io::copy(&mut Cursor::new(bytes), &mut out)
+            .with_context(|| format!("Failed to extract engine to: {}", output_path.display()))?;
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Engine zip archive did not contain expected binary '{}'",
+        binary_file_name
+    )
+}
+
+fn engine_binary_file_name(engine_name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{engine_name}.exe")
+    } else {
+        engine_name.to_string()
     }
 }
 

@@ -279,6 +279,15 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             Ok(())
         }
 
+        Commands::Lock {
+            path,
+            timings,
+            json: command_json,
+        } => {
+            crate::commands::lock::execute(path, timings, json || command_json, reporter.clone())?;
+            Ok(())
+        }
+
         Commands::Update => {
             commands::update::update()?;
             Ok(())

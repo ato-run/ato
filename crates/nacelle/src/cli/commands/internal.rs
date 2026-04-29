@@ -5,7 +5,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tracing::info;
+use tracing::{error, info};
 
 use nacelle::internal_api::{
     validate_spec_version, NacelleEvent, CURRENT_SPEC_VERSION, NEXT_SPEC_VERSION,
@@ -1297,7 +1297,22 @@ async fn execute_prepared_launch(
         } else if let Some(child) = runtime.take_child(&prepared.run_id) {
             ManagedChild::Sync(child)
         } else {
-            anyhow::bail!("Internal exec lost child handle for PID {}", child_pid);
+            let async_workload_ids = runtime.async_child_workload_ids().await;
+            let sync_workload_ids = runtime.child_workload_ids();
+            error!(
+                run_id = %prepared.run_id,
+                child_pid,
+                ?async_workload_ids,
+                ?sync_workload_ids,
+                "internal exec lost child handle"
+            );
+            anyhow::bail!(
+                "Internal exec lost child handle for PID {} (run_id={}, async_handles={:?}, sync_handles={:?})",
+                child_pid,
+                prepared.run_id,
+                async_workload_ids,
+                sync_workload_ids
+            );
         };
 
         start_log_forwarding(&mut child);
@@ -1559,8 +1574,14 @@ http_get = "/health"
             port: None,
         };
         let value: Value = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
-        let obj = value.as_object().expect("ipc_ready event must be a JSON object");
-        assert_eq!(obj.len(), 3, "Unix-socket IpcReady must have exactly 3 fields, got: {obj:?}");
+        let obj = value
+            .as_object()
+            .expect("ipc_ready event must be a JSON object");
+        assert_eq!(
+            obj.len(),
+            3,
+            "Unix-socket IpcReady must have exactly 3 fields, got: {obj:?}"
+        );
         assert_eq!(obj["event"], Value::String("ipc_ready".to_string()));
         assert_eq!(obj["service"], Value::String("llm-service".to_string()));
         assert_eq!(
@@ -1577,8 +1598,14 @@ http_get = "/health"
             port: Some(54321),
         };
         let value: Value = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
-        let obj = value.as_object().expect("ipc_ready event must be a JSON object");
-        assert_eq!(obj.len(), 4, "TCP IpcReady must have exactly 4 fields, got: {obj:?}");
+        let obj = value
+            .as_object()
+            .expect("ipc_ready event must be a JSON object");
+        assert_eq!(
+            obj.len(),
+            4,
+            "TCP IpcReady must have exactly 4 fields, got: {obj:?}"
+        );
         assert_eq!(obj["port"], Value::Number(54321.into()));
     }
 

@@ -89,7 +89,7 @@ export type LockDraftRepoFileEntry = RepoFileEntry;
 export type LockDraftSelectedTarget = SelectedTarget;
 
 // Wrapper function for Cloudflare Workers (synchronous WASM execution)
-import { evaluateLockDraftJson } from "./pkg/lock_draft_engine_bg.js";
+import { evaluateLockDraftJson } from "./pkg/lock_draft_engine.js";
 
 export function evaluateLockDraft(input: LockDraftInput): LockDraft {
   return JSON.parse(evaluateLockDraftJson(JSON.stringify(input))) as LockDraft;
