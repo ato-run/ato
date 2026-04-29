@@ -165,7 +165,7 @@ same standard applies to the rest of the workspace.
 **残タスク（主要）:**
 
 - [x] **13a.1〜13a.4**: nacelle — IPC ソケットパスの Sandbox 許可、`ipc_env` 透過、readiness 報告 (完了 2026-04-29、ADR-007)
-- [ ] **13b.9**: Guest プロトコル JSON-RPC 2.0 移行 (`GuestAction` → `capsule/invoke`)
+- [x] **13b.9**: Guest プロトコル JSON-RPC 2.0 移行 (envelope auto-detect、`capsule/payload.*` / `capsule/context.*`、`capsule/wasm.execute` 予約) (完了 2026-04-29)
 - [ ] **Phase 8.4**: Desktop での Profile 表示・キャッシュ
 - [ ] **Phase 9.2〜9.4**: license.sync — entitlements 注入、Desktop 統合
 - [ ] **Phase 10.2**: sync-fs マルチマウント対応 (WebDAV 統合)
