@@ -721,15 +721,44 @@ pnpm -C apps/ato-store-web exec astro check
 - [x] `capsule/ping` 型定義
 - [x] テスト: ハンドシェイク、invoke、エラー応答、Notification
 
-#### 13b.9 Guest Protocol JSON-RPC 2.0 移行
+#### 13b.9 Guest Protocol JSON-RPC 2.0 移行 ✅ (完了 2026-04-29)
 
-- [ ] `src/commands/guest.rs` の独自プロトコル (`GuestAction`) を JSON-RPC 2.0 に移行
-  - `InvokeCapability` → `capsule/invoke`
-  - `ReadPayload` / `WritePayload` → `capsule/payload.read` / `.write`
-  - `ReadContext` / `WriteContext` → `capsule/context.read` / `.write`
-- [ ] Host-Guest 環境変数の統一 (`CAPSULE_IPC_PROTOCOL`, `_TRANSPORT`, `_ROLE`, `_MODE`)
-- [ ] 後方互換: 旧プロトコル (guest.v2) も一時的にサポート (バージョンネゴシエーション)
-- [ ] テスト: 旧/新プロトコルの両方で動作確認
+> **設計**: `claudedocs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` (v2.1)
+>
+> **WASM/OCI 関連は defer**: `capsule/wasm.execute` メソッドおよび OCI/WASM
+> executor の env 注入は本 PR スコープ外 (ランタイム整備待ち)。`ExecuteWasm`
+> は guest.v1 envelope 経由でのみ引き続き利用可。
+
+- [x] `src/cli/commands/guest.rs` に envelope 自動判別ロジックを追加
+  (`jsonrpc=2.0` / `version=guest.v1` / 不明) — LSP 流の auto-detect
+- [x] `src/cli/commands/guest_jsonrpc.rs` を新規作成 — JSON-RPC 2.0 wire layer
+  - `handle_jsonrpc_request`, `method_to_action`, `parse_method_params`,
+    `jsonrpc_error_from_guest`, `wrap_result`
+  - 5 method を実装: `capsule/payload.{read,write,update}`, `capsule/context.{read,write}`
+  - `capsule/wasm.execute` は `-32601 Method not found` (将来用に予約)
+- [x] `src/cli/commands/guest.rs` に `dispatch_guest_action` 純粋関数を抽出
+  (legacy/JSON-RPC 両 wire layer から共有)
+- [x] `ensure_permissions` signature を `(action, role, &permissions)` に縮退
+- [x] `src/adapters/ipc/guest_protocol.rs` に `GuestErrorCode::to_jsonrpc_code()` impl 追加
+- [x] Host-Guest 環境変数を新命名規則に統一 (旧名は破棄、fallback なし):
+  - `CAPSULE_IPC_PROTOCOL` (旧 `CAPSULE_GUEST_PROTOCOL`)
+  - `CAPSULE_IPC_MODE` (旧 `GUEST_MODE`)
+  - `CAPSULE_IPC_ROLE` (旧 `GUEST_ROLE`)
+  - `CAPSULE_IPC_SYNC_PATH` (旧 `SYNC_PATH` ※ WASI mount は別レイヤー)
+  - `CAPSULE_IPC_WIDGET_BOUNDS` (旧 `GUEST_WIDGET_BOUNDS`)
+- [x] result/params に object wrapper 採用:
+  - `payload.read` → `{ payload_b64: string }`
+  - `context.read` → `{ value: any }`
+  - write 系は `result: null`
+- [x] テスト: 14 件 E2E (`tests/guest_jsonrpc_e2e.rs`) + 10 件ユニット (guest_jsonrpc::tests)
+- [x] 既存 `guest_e2e.rs` (7 件) は無変更で全通過 — 後方互換確認
+
+**ato-cli テスト合計**: 1312 passed / 0 failed
+
+**残: WASM/OCI ランタイム整備後に実施**:
+- [ ] `capsule/wasm.execute` method の正式公開
+- [ ] OCI executor の `CAPSULE_IPC_*` env 注入 (`adapters/runtime/executors/oci.rs`)
+- [ ] WASM executor の `CAPSULE_IPC_*` env 注入 (`adapters/runtime/executors/wasm.rs`)
 
 #### 13b.10 `ato ipc` サブコマンド
 
