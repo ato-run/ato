@@ -68,7 +68,10 @@ pub fn execute(plan: &ManifestData) -> Result<i32> {
 
     let mut args = plan.targets_oci_cmd();
     if args.is_empty() {
-        if let Some(entrypoint) = plan.execution_entrypoint() {
+        if let Some(entrypoint) = plan
+            .execution_entrypoint()
+            .or_else(|| plan.execution_run_command())
+        {
             if let Ok(parsed) = shell_words::split(&entrypoint) {
                 args = parsed;
             }

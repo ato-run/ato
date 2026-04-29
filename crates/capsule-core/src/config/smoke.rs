@@ -633,18 +633,10 @@ fn prepare_smoke_working_directory(
 ) -> std::result::Result<(), SmokeFailureReport> {
     let cwd_path = resolve_path(root, &service.cwd);
     if service.executable.trim() == "uv" && cwd_path.join("uv.lock").exists() {
-        let install_dir = cwd_path.join(".ato-smoke-site-packages");
-        if !install_dir.exists() {
+        let venv_dir = cwd_path.join(".venv");
+        if !venv_dir.exists() {
             let mut command = Command::new("uv");
-            command.args([
-                "pip",
-                "sync",
-                "uv.lock",
-                "--python",
-                "python3",
-                "--target",
-                ".ato-smoke-site-packages",
-            ]);
+            command.args(["sync", "--frozen"]);
             if let Some(uv_cache_dir) = resolve_bundled_uv_cache_dir(root, service) {
                 command.args(["--cache-dir", &uv_cache_dir]);
             }
@@ -666,7 +658,7 @@ fn prepare_smoke_working_directory(
                 return Err(SmokeFailureReport::new(
                     SmokeFailureClass::SpawnFailed,
                     format!(
-                        "smoke python dependency preparation failed (status {}): uv pip sync",
+                        "smoke python dependency preparation failed (status {}): uv sync --frozen",
                         output.status
                     ),
                     String::from_utf8_lossy(&output.stderr).trim().to_string(),

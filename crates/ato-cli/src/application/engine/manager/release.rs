@@ -108,9 +108,10 @@ pub(super) fn resolve_nacelle_release(
     release_base_url: &str,
     skip_verify: bool,
 ) -> Result<NacelleRelease> {
-    let (os, arch) = host_platform_parts()?;
+    let target_triple = host_target_triple()?;
     let normalized_base = release_base_url.trim_end_matches('/');
-    let binary_name = format!("nacelle-{}-{}-{}", requested_version, os, arch);
+    let archive_ext = host_archive_extension()?;
+    let binary_name = format!("nacelle-{target_triple}.{archive_ext}");
     let version_base_url = format!("{}/{}", normalized_base, requested_version);
     let url = format!("{}/{}", version_base_url, binary_name);
     let sha256 = if skip_verify {
@@ -127,22 +128,30 @@ pub(super) fn resolve_nacelle_release(
     })
 }
 
-fn host_platform_parts() -> Result<(&'static str, &'static str)> {
-    let os = if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "linux") {
-        "linux"
+fn host_target_triple() -> Result<&'static str> {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Ok("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Ok("aarch64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok("x86_64-pc-windows-msvc")
     } else {
-        anyhow::bail!("Unsupported OS");
-    };
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x64"
-    } else if cfg!(target_arch = "aarch64") {
-        "arm64"
+        anyhow::bail!("Unsupported nacelle release target");
+    }
+}
+
+fn host_archive_extension() -> Result<&'static str> {
+    if cfg!(target_os = "windows") {
+        Ok("zip")
+    } else if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+        Ok("tar.xz")
     } else {
-        anyhow::bail!("Unsupported architecture");
-    };
-    Ok((os, arch))
+        anyhow::bail!("Unsupported nacelle release archive format");
+    }
 }
 
 fn is_sha256_hex(value: &str) -> bool {
