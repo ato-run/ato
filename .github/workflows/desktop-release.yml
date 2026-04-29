@@ -71,6 +71,25 @@ jobs:
           # don't trample each other's incremental artifacts.
           key: desktop-release-${{ matrix.target }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.15.0"
+
+      - name: Build frontend
+        # ato-desktop/build.rs panics if frontend/dist is missing; vite
+        # output must exist before `cargo run -- bundle` triggers the
+        # ato-desktop build script.
+        working-directory: crates/ato-desktop/frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
       - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
         # MAC_DEVELOPER_ID_NAME is unset (v0.5 default), Developer ID
@@ -127,6 +146,25 @@ jobs:
         # preinstalled; --allow-downgrade lets choco no-op gracefully
         # when the preinstalled version is newer than 3.14.0.
         run: choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.15.0"
+
+      - name: Build frontend
+        # ato-desktop/build.rs panics if frontend/dist is missing; vite
+        # output must exist before `cargo run -- bundle` triggers the
+        # ato-desktop build script.
+        working-directory: crates/ato-desktop/frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Bundle and package .msi + .zip
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
@@ -197,6 +235,25 @@ jobs:
             "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${arch_suffix}.AppImage"
           chmod +x "$RUNNER_TEMP/appimagetool"
           sudo mv "$RUNNER_TEMP/appimagetool" /usr/local/bin/appimagetool
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.15.0"
+
+      - name: Build frontend
+        # ato-desktop/build.rs panics if frontend/dist is missing; vite
+        # output must exist before `cargo run -- bundle` triggers the
+        # ato-desktop build script.
+        working-directory: crates/ato-desktop/frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Bundle and package .AppImage
         working-directory: crates/ato-desktop/xtask
