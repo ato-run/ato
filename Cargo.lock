@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cli"
-version = "0.4.100"
+version = "0.4.101"
 dependencies = [
  "adk-core",
  "adk-model",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop"
-version = "0.4.100"
+version = "0.4.101"
 dependencies = [
  "anyhow",
  "ato-session-core",
@@ -832,7 +832,7 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop-xtask"
-version = "0.4.100"
+version = "0.4.101"
 dependencies = [
  "anyhow",
 ]
@@ -6887,7 +6887,7 @@ dependencies = [
 
 [[package]]
 name = "nacelle"
-version = "0.4.97"
+version = "0.4.101"
 dependencies = [
  "anyhow",
  "async-trait",
