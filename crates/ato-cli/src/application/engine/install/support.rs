@@ -2258,8 +2258,18 @@ pub(crate) fn execute_run_command(
         read_grants: read,
         write_grants: write,
         read_write_grants: read_write,
-        caller_cwd: std::env::current_dir()
-            .context("failed to resolve current working directory")?,
+        caller_cwd: std::env::current_dir().or_else(|_| {
+            // Stale cwd (shell sat in a directory whose inode was replaced —
+            // e.g. the .app bundle was reinstalled under an open fish shell)
+            // returns ENOENT from getcwd(2). For remote-handle runs the
+            // caller_cwd is only used as a fallback for relative path
+            // resolution, so degrading to $HOME keeps `ato run koh0920/...`
+            // working from a stale shell. Local-path runs already failed
+            // earlier in dispatch when their relative path couldn't resolve.
+            dirs::home_dir().ok_or_else(|| {
+                anyhow::anyhow!("failed to resolve current working directory and $HOME is unset")
+            })
+        })?,
         effective_cwd: cwd,
         export_request: None,
         state_bindings: state,
