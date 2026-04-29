@@ -295,23 +295,29 @@ jobs:
           set -euo pipefail
           tag='${{ steps.tag.outputs.tag }}'
           # On unified `v*` tags the release is created by cargo-dist's
-          # host job (release.yml). Desktop bundles take longer than
-          # cargo-dist's CLI build, so by the time we get here the v*
-          # release should exist — but if cargo-dist failed or this is
-          # an `ato-desktop-v*` tag, fall back to creating a draft so
-          # the upload below has somewhere to land.
-          for attempt in 1 2 3 4 5 6; do
+          # host job (release.yml). cargo-dist's `host` job typically
+          # starts ~8–12 min after desktop bundles complete (Windows +
+          # global-artifacts are the long pole), so we wait up to 15 min
+          # before falling through. v0.4.101 used a 3-min budget and
+          # produced two releases sharing the tag — see the ato-release
+          # skill (.claude/skills/ato-release/SKILL.md).
+          for attempt in $(seq 1 30); do
             if gh release view "$tag" >/dev/null 2>&1; then
               break
             fi
-            echo "release $tag not visible yet (attempt $attempt); sleeping 30s"
+            echo "release $tag not visible yet (attempt $attempt/30); sleeping 30s"
             sleep 30
           done
           if ! gh release view "$tag" >/dev/null 2>&1; then
+            # cargo-dist host failed or hasn't run. Create the release
+            # with the canonical name (no "Ato Desktop" prefix, no
+            # --draft) so there is at most one release object per tag.
+            # release.yml's host step is idempotent — when it later
+            # runs, it will edit this release and add CLI artifacts.
             gh release create "$tag" \
-              --title "Ato Desktop $tag" \
-              --notes "Automated build — see CHANGELOG.md for details." \
-              --draft
+              --target "$GITHUB_SHA" \
+              --title "$tag" \
+              --notes "Automated build — see CHANGELOG.md for details."
           fi
           # Upload every bundle artifact the matrix produced.
           find artifacts \( -name "*.zip" -o -name "*.msi" -o -name "*.AppImage" \) -print0 \
