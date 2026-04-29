@@ -1066,35 +1066,16 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .unwrap_or(input.project_root.as_path()),
         input.single_script_language,
     );
-    let inferred_runtime_kind = desktop_execution
-        .as_ref()
-        .and_then(|override_contract| {
-            override_contract
-                .resolved_target
-                .get("driver")
-                .and_then(Value::as_str)
-        })
-        .unwrap_or_else(|| runtime_kind_from_project(&detected));
     let process_candidates = if desktop_execution.is_some() {
         Vec::new()
     } else {
         process_candidates_for_source(&detected, &info)
     };
-    let runtime_kind = if inferred_runtime_kind == "source" {
-        runtime_kind_from_process_candidates(&process_candidates).unwrap_or(inferred_runtime_kind)
-    } else {
-        inferred_runtime_kind
-    };
+    let runtime_kind =
+        resolve_runtime_kind(&detected, desktop_execution.as_ref(), &process_candidates);
+
     let mut lock = AtoLock::default();
-    let mut provenance = vec![SourceInferenceProvenance {
-        field: "contract.metadata".to_string(),
-        kind: SourceInferenceProvenanceKind::ExplicitArtifact,
-        source_path: Some(input.project_root.clone()),
-        importer_id: None,
-        evidence_kind: None,
-        source_field: Some("project_root".to_string()),
-        note: Some("source-only workspace analyzed for shared inference".to_string()),
-    }];
+    let mut provenance = vec![initial_metadata_provenance(&input.project_root)];
     let mut diagnostics = Vec::new();
     let mut unresolved = Vec::new();
     let candidate_set = CandidateSet {
@@ -1102,21 +1083,13 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         ranked: process_candidates.clone(),
     };
 
-    lock.contract
-        .entries
-        .insert("metadata".to_string(), metadata);
-    lock.contract.entries.insert(
-        "network".to_string(),
-        inferred_network_contract(&detected, input.single_script_language, &input.project_root),
+    insert_base_contract_entries(
+        &mut lock,
+        &detected,
+        &input,
+        metadata,
     );
-    lock.contract.entries.insert(
-        "env_contract".to_string(),
-        inferred_env_contract(&input.project_root),
-    );
-    lock.contract.entries.insert(
-        "filesystem".to_string(),
-        inferred_filesystem_contract(&detected),
-    );
+
     let runtime_resolution = desktop_execution
         .as_ref()
         .map(|override_contract| override_contract.runtime.clone())
@@ -1126,30 +1099,11 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         .insert("runtime".to_string(), runtime_resolution.clone());
     lock.resolution.entries.insert(
         "resolved_targets".to_string(),
-        desktop_execution
-            .as_ref()
-            .map(|override_contract| Value::Array(vec![override_contract.resolved_target.clone()]))
-            .unwrap_or_else(|| {
-                Value::Array(vec![{
-                    let mut target = serde_json::Map::new();
-                    target.insert("label".to_string(), Value::String("default".to_string()));
-                    target.insert("runtime".to_string(), Value::String("source".to_string()));
-                    if runtime_kind != "source" {
-                        target.insert(
-                            "driver".to_string(),
-                            Value::String(runtime_kind.to_string()),
-                        );
-                    }
-                    if input.single_script_language.is_some() {
-                        target.insert(
-                            "source_layout".to_string(),
-                            Value::String("anchored_entrypoint".to_string()),
-                        );
-                    }
-                    target.insert("compatible".to_string(), Value::Bool(true));
-                    Value::Object(target)
-                }])
-            }),
+        resolved_targets_value(
+            desktop_execution.as_ref(),
+            &runtime_kind,
+            input.single_script_language.is_some(),
+        ),
     );
     lock.resolution.entries.insert(
         "closure".to_string(),
@@ -1164,22 +1118,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         &mut diagnostics,
     )?;
 
-    provenance.push(SourceInferenceProvenance {
-        field: "resolution.runtime".to_string(),
-        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-        source_path: Some(input.project_root.clone()),
-        importer_id: None,
-        evidence_kind: None,
-        source_field: Some("project_type".to_string()),
-        note: Some(format!(
-            "runtime resolved from deterministic project-type inference{}",
-            runtime_resolution
-                .get("version")
-                .and_then(Value::as_str)
-                .map(|version| format!(" with version {version}"))
-                .unwrap_or_default()
-        )),
-    });
+    attach_runtime_provenance(&mut provenance, &input.project_root, &runtime_resolution);
     for evidence in observed_closure_evidence(&input.project_root) {
         provenance.push(importer_observation_provenance(
             "resolution.closure",
@@ -1189,114 +1128,28 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     }
 
     if let Some(override_contract) = desktop_execution {
-        lock.contract.entries.insert(
-            "workloads".to_string(),
-            Value::Array(vec![json!({
-                "name": "main",
-                "target": "desktop",
-                "process": override_contract.process.clone(),
-            })]),
+        apply_desktop_execution_override(
+            &mut lock,
+            &mut provenance,
+            &input.project_root,
+            override_contract,
         );
-        lock.contract
-            .entries
-            .insert("process".to_string(), override_contract.process);
-        lock.resolution.entries.insert(
-            "target_selection".to_string(),
-            json!({
-                "default_target": "desktop",
-                "source": "shared_source_inference",
-            }),
-        );
-        provenance.push(SourceInferenceProvenance {
-            field: "contract.process".to_string(),
-            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-            source_path: Some(input.project_root.clone()),
-            importer_id: None,
-            evidence_kind: Some("desktop_native_execution".to_string()),
-            source_field: Some(override_contract.source_field.clone()),
-            note: Some(override_contract.provenance_note.clone()),
-        });
-        provenance.push(SourceInferenceProvenance {
-            field: "resolution.runtime".to_string(),
-            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-            source_path: Some(input.project_root.clone()),
-            importer_id: None,
-            evidence_kind: Some("desktop_native_execution".to_string()),
-            source_field: Some(override_contract.source_field.clone()),
-            note: Some(
-                "desktop native execution overrides runtime selection to driver=native with a fixed desktop target"
-                    .to_string(),
-            ),
-        });
-        provenance.push(SourceInferenceProvenance {
-            field: "resolution.resolved_targets".to_string(),
-            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-            source_path: Some(input.project_root.clone()),
-            importer_id: None,
-            evidence_kind: Some("desktop_native_execution".to_string()),
-            source_field: Some(override_contract.source_field),
-            note: Some(
-                "desktop native execution records a single immutable target-compatible native run contract"
-                    .to_string(),
-            ),
-        });
     } else if process_candidates.is_empty() {
-        lock.contract
-            .entries
-            .insert("workloads".to_string(), Value::Array(Vec::new()));
-        lock.contract.unresolved.push(UnresolvedValue {
-            field: Some("contract.process".to_string()),
-            reason: UnresolvedReason::InsufficientEvidence,
-            detail: Some("could not infer a primary process from source evidence".to_string()),
-            candidates: Vec::new(),
-        });
-        diagnostics.push(SourceInferenceDiagnostic {
-            severity: SourceInferenceDiagnosticSeverity::Error,
-            field: "contract.process".to_string(),
-            message: "source inference could not determine a runnable process".to_string(),
-        });
-        unresolved.push("contract.process".to_string());
+        record_no_runnable_process(&mut lock, &mut diagnostics, &mut unresolved);
     } else if is_equal_ranked(&process_candidates) {
-        lock.contract
-            .entries
-            .insert("workloads".to_string(), Value::Array(Vec::new()));
-        lock.contract.unresolved.push(UnresolvedValue {
-            field: Some("contract.process".to_string()),
-            reason: UnresolvedReason::ExplicitSelectionRequired,
-            detail: Some("multiple equal-ranked process candidates remain".to_string()),
-            candidates: process_candidates
-                .iter()
-                .map(|candidate| candidate.label.clone())
-                .collect(),
-        });
-        diagnostics.push(SourceInferenceDiagnostic {
-            severity: SourceInferenceDiagnosticSeverity::Warning,
-            field: "contract.process".to_string(),
-            message: "multiple equal-ranked process candidates require explicit selection"
-                .to_string(),
-        });
-        unresolved.push("contract.process".to_string());
+        record_equal_ranked_process_candidates(
+            &mut lock,
+            &mut diagnostics,
+            &mut unresolved,
+            &process_candidates,
+        );
     } else if let Some(candidate) = process_candidates.first() {
-        lock.contract.entries.insert(
-            "workloads".to_string(),
-            Value::Array(vec![json!({
-                "name": "main",
-                "process": process_value_from_candidate(Some(input.project_root.as_path()), Some(candidate)),
-            })]),
+        apply_unique_process_candidate(
+            &mut lock,
+            &mut provenance,
+            &input.project_root,
+            candidate,
         );
-        lock.contract.entries.insert(
-            "process".to_string(),
-            process_value_from_candidate(Some(input.project_root.as_path()), Some(candidate)),
-        );
-        provenance.push(SourceInferenceProvenance {
-            field: "contract.process".to_string(),
-            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
-            source_path: Some(input.project_root.clone()),
-            importer_id: None,
-            evidence_kind: None,
-            source_field: Some(candidate.label.clone()),
-            note: Some(candidate.rationale.clone()),
-        });
     }
 
     Ok(SourceInferenceResult {
@@ -1322,6 +1175,257 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         selection_gate: None,
         approval_gate: None,
     })
+}
+
+/// Pick the runtime kind: desktop overrides win, then the project-type
+/// heuristic, then the top-ranked process candidate when the heuristic is
+/// inconclusive ("source").
+fn resolve_runtime_kind<'a>(
+    detected: &'a DetectedProject,
+    desktop_execution: Option<&'a DesktopExecutionOverride>,
+    process_candidates: &'a [RankedCandidate],
+) -> &'a str {
+    let inferred = desktop_execution
+        .and_then(|override_contract| {
+            override_contract
+                .resolved_target
+                .get("driver")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_else(|| runtime_kind_from_project(detected));
+    if inferred == "source" {
+        runtime_kind_from_process_candidates(process_candidates).unwrap_or(inferred)
+    } else {
+        inferred
+    }
+}
+
+fn initial_metadata_provenance(project_root: &Path) -> SourceInferenceProvenance {
+    SourceInferenceProvenance {
+        field: "contract.metadata".to_string(),
+        kind: SourceInferenceProvenanceKind::ExplicitArtifact,
+        source_path: Some(project_root.to_path_buf()),
+        importer_id: None,
+        evidence_kind: None,
+        source_field: Some("project_root".to_string()),
+        note: Some("source-only workspace analyzed for shared inference".to_string()),
+    }
+}
+
+fn insert_base_contract_entries(
+    lock: &mut AtoLock,
+    detected: &DetectedProject,
+    input: &SourceEvidenceInput,
+    metadata: Value,
+) {
+    lock.contract
+        .entries
+        .insert("metadata".to_string(), metadata);
+    lock.contract.entries.insert(
+        "network".to_string(),
+        inferred_network_contract(detected, input.single_script_language, &input.project_root),
+    );
+    lock.contract.entries.insert(
+        "env_contract".to_string(),
+        inferred_env_contract(&input.project_root),
+    );
+    lock.contract.entries.insert(
+        "filesystem".to_string(),
+        inferred_filesystem_contract(detected),
+    );
+}
+
+fn resolved_targets_value(
+    desktop_execution: Option<&DesktopExecutionOverride>,
+    runtime_kind: &str,
+    has_single_script: bool,
+) -> Value {
+    if let Some(override_contract) = desktop_execution {
+        return Value::Array(vec![override_contract.resolved_target.clone()]);
+    }
+    let mut target = serde_json::Map::new();
+    target.insert("label".to_string(), Value::String("default".to_string()));
+    target.insert("runtime".to_string(), Value::String("source".to_string()));
+    if runtime_kind != "source" {
+        target.insert(
+            "driver".to_string(),
+            Value::String(runtime_kind.to_string()),
+        );
+    }
+    if has_single_script {
+        target.insert(
+            "source_layout".to_string(),
+            Value::String("anchored_entrypoint".to_string()),
+        );
+    }
+    target.insert("compatible".to_string(), Value::Bool(true));
+    Value::Array(vec![Value::Object(target)])
+}
+
+fn attach_runtime_provenance(
+    provenance: &mut Vec<SourceInferenceProvenance>,
+    project_root: &Path,
+    runtime_resolution: &Value,
+) {
+    let version_suffix = runtime_resolution
+        .get("version")
+        .and_then(Value::as_str)
+        .map(|version| format!(" with version {version}"))
+        .unwrap_or_default();
+    provenance.push(SourceInferenceProvenance {
+        field: "resolution.runtime".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(project_root.to_path_buf()),
+        importer_id: None,
+        evidence_kind: None,
+        source_field: Some("project_type".to_string()),
+        note: Some(format!(
+            "runtime resolved from deterministic project-type inference{version_suffix}"
+        )),
+    });
+}
+
+fn apply_desktop_execution_override(
+    lock: &mut AtoLock,
+    provenance: &mut Vec<SourceInferenceProvenance>,
+    project_root: &Path,
+    override_contract: DesktopExecutionOverride,
+) {
+    let DesktopExecutionOverride {
+        process,
+        provenance_note,
+        source_field,
+        ..
+    } = override_contract;
+
+    lock.contract.entries.insert(
+        "workloads".to_string(),
+        Value::Array(vec![json!({
+            "name": "main",
+            "target": "desktop",
+            "process": process.clone(),
+        })]),
+    );
+    lock.contract
+        .entries
+        .insert("process".to_string(), process);
+    lock.resolution.entries.insert(
+        "target_selection".to_string(),
+        json!({
+            "default_target": "desktop",
+            "source": "shared_source_inference",
+        }),
+    );
+    provenance.push(SourceInferenceProvenance {
+        field: "contract.process".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(project_root.to_path_buf()),
+        importer_id: None,
+        evidence_kind: Some("desktop_native_execution".to_string()),
+        source_field: Some(source_field.clone()),
+        note: Some(provenance_note),
+    });
+    provenance.push(SourceInferenceProvenance {
+        field: "resolution.runtime".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(project_root.to_path_buf()),
+        importer_id: None,
+        evidence_kind: Some("desktop_native_execution".to_string()),
+        source_field: Some(source_field.clone()),
+        note: Some(
+            "desktop native execution overrides runtime selection to driver=native with a fixed desktop target"
+                .to_string(),
+        ),
+    });
+    provenance.push(SourceInferenceProvenance {
+        field: "resolution.resolved_targets".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(project_root.to_path_buf()),
+        importer_id: None,
+        evidence_kind: Some("desktop_native_execution".to_string()),
+        source_field: Some(source_field),
+        note: Some(
+            "desktop native execution records a single immutable target-compatible native run contract"
+                .to_string(),
+        ),
+    });
+}
+
+fn record_no_runnable_process(
+    lock: &mut AtoLock,
+    diagnostics: &mut Vec<SourceInferenceDiagnostic>,
+    unresolved: &mut Vec<String>,
+) {
+    lock.contract
+        .entries
+        .insert("workloads".to_string(), Value::Array(Vec::new()));
+    lock.contract.unresolved.push(UnresolvedValue {
+        field: Some("contract.process".to_string()),
+        reason: UnresolvedReason::InsufficientEvidence,
+        detail: Some("could not infer a primary process from source evidence".to_string()),
+        candidates: Vec::new(),
+    });
+    diagnostics.push(SourceInferenceDiagnostic {
+        severity: SourceInferenceDiagnosticSeverity::Error,
+        field: "contract.process".to_string(),
+        message: "source inference could not determine a runnable process".to_string(),
+    });
+    unresolved.push("contract.process".to_string());
+}
+
+fn record_equal_ranked_process_candidates(
+    lock: &mut AtoLock,
+    diagnostics: &mut Vec<SourceInferenceDiagnostic>,
+    unresolved: &mut Vec<String>,
+    process_candidates: &[RankedCandidate],
+) {
+    lock.contract
+        .entries
+        .insert("workloads".to_string(), Value::Array(Vec::new()));
+    lock.contract.unresolved.push(UnresolvedValue {
+        field: Some("contract.process".to_string()),
+        reason: UnresolvedReason::ExplicitSelectionRequired,
+        detail: Some("multiple equal-ranked process candidates remain".to_string()),
+        candidates: process_candidates
+            .iter()
+            .map(|candidate| candidate.label.clone())
+            .collect(),
+    });
+    diagnostics.push(SourceInferenceDiagnostic {
+        severity: SourceInferenceDiagnosticSeverity::Warning,
+        field: "contract.process".to_string(),
+        message: "multiple equal-ranked process candidates require explicit selection"
+            .to_string(),
+    });
+    unresolved.push("contract.process".to_string());
+}
+
+fn apply_unique_process_candidate(
+    lock: &mut AtoLock,
+    provenance: &mut Vec<SourceInferenceProvenance>,
+    project_root: &Path,
+    candidate: &RankedCandidate,
+) {
+    let process = process_value_from_candidate(Some(project_root), Some(candidate));
+    lock.contract.entries.insert(
+        "workloads".to_string(),
+        Value::Array(vec![json!({
+            "name": "main",
+            "process": process.clone(),
+        })]),
+    );
+    lock.contract
+        .entries
+        .insert("process".to_string(), process);
+    provenance.push(SourceInferenceProvenance {
+        field: "contract.process".to_string(),
+        kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+        source_path: Some(project_root.to_path_buf()),
+        importer_id: None,
+        evidence_kind: None,
+        source_field: Some(candidate.label.clone()),
+        note: Some(candidate.rationale.clone()),
+    });
 }
 
 fn infer_from_draft_lock(input: DraftLockInput) -> Result<SourceInferenceResult> {
