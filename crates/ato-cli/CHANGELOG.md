@@ -4,6 +4,45 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `ato guest` now accepts JSON-RPC 2.0 envelopes alongside the legacy
+  `guest.v1` envelope. The wire layer auto-detects which envelope is in use
+  (LSP-style — no explicit version negotiation). 5 methods are dispatched on
+  the new path: `capsule/payload.read`, `capsule/payload.write`,
+  `capsule/payload.update`, `capsule/context.read`, `capsule/context.write`.
+  Results use object wrappers (`{ payload_b64 }`, `{ value }`) and write
+  methods reply with `result: null`. Permission/protocol errors map to
+  `-32001`, `-32602`, `-32603`, `-32002`, `-32600`. (Phase 13b.9)
+- New unit + E2E coverage: 10 unit tests in `commands::guest_jsonrpc` and 14
+  E2E tests in `tests/guest_jsonrpc_e2e.rs`, including parse-error
+  (`-32700` with `id: null`), unknown-envelope, envelope-priority, and the
+  legacy-env-must-be-ignored guard.
+
+### Changed (BREAKING)
+
+- `ato guest` env validation now uses the `CAPSULE_IPC_*` namespace and no
+  longer recognises the legacy names. The rename is internal-only — no
+  source-level writers of the old names exist in the workspace, so external
+  callers (ato-desktop binary, test fixtures) automatically pick up the new
+  names on rebuild. Mapping:
+  - `CAPSULE_GUEST_PROTOCOL` → `CAPSULE_IPC_PROTOCOL`
+  - `GUEST_MODE` → `CAPSULE_IPC_MODE`
+  - `GUEST_ROLE` → `CAPSULE_IPC_ROLE`
+  - `SYNC_PATH` → `CAPSULE_IPC_SYNC_PATH` (the WASI mount path
+    `SYNC_PATH=/sync` for `sync.wasm` is a separate layer and unchanged)
+  - `GUEST_WIDGET_BOUNDS` → `CAPSULE_IPC_WIDGET_BOUNDS`
+
+### Deferred
+
+- `capsule/wasm.execute` method is reserved but not exposed on the JSON-RPC
+  envelope until the WASM/OCI runtime integration lands. Until then,
+  requests for that method return `-32601 Method not found`. `ExecuteWasm`
+  remains reachable through the legacy `guest.v1` envelope.
+- `CAPSULE_IPC_*` env injection in `executors/oci.rs` and `executors/wasm.rs`
+  is intentionally not implemented in this release; only the source executor
+  path was in scope for Phase 13b.9.
+
 ## [0.4.84] - 2026-04-25
 
 ### What Changed

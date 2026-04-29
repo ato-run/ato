@@ -6,6 +6,8 @@ pub mod guest;
 #[cfg(windows)]
 #[path = "guest_windows.rs"]
 pub mod guest;
+#[cfg(not(windows))]
+pub mod guest_jsonrpc;
 pub mod inspect;
 pub mod ipc;
 pub mod keygen;

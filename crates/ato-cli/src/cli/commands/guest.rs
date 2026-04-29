@@ -1,6 +1,6 @@
 use crate::guest_protocol::{
-    decode_payload_base64, encode_payload_base64, GuestAction, GuestContextRole, GuestError,
-    GuestErrorCode, GuestMode, GuestPermission, GuestRequest, GuestResponse,
+    decode_payload_base64, encode_payload_base64, GuestAction, GuestContext, GuestContextRole,
+    GuestError, GuestErrorCode, GuestMode, GuestPermission, GuestRequest, GuestResponse,
     GUEST_PROTOCOL_VERSION,
 };
 use anyhow::Result;
@@ -64,6 +64,7 @@ pub fn execute(args: GuestArgs) -> Result<()> {
     let payload = stdin.trim();
 
     if payload.is_empty() {
+        // Empty stdin → reply in legacy shape (no envelope to inspect).
         write_response(GuestResponse {
             version: GUEST_PROTOCOL_VERSION.to_string(),
             request_id: "unknown".to_string(),
@@ -77,7 +78,38 @@ pub fn execute(args: GuestArgs) -> Result<()> {
         return Ok(());
     }
 
-    let request: GuestRequest = match serde_json::from_str(payload) {
+    // Phase 13b.9: detect envelope shape and route to the matching wire layer.
+    // - `jsonrpc: "2.0"`   → JSON-RPC 2.0 (Phase 13b.9 new path)
+    // - `version: "guest.v1"` → legacy custom envelope
+    // - anything else → JSON-RPC `-32600 Invalid Request` with id=null
+    let raw: Value = match serde_json::from_str(payload) {
+        Ok(value) => value,
+        Err(err) => {
+            return super::guest_jsonrpc::write_parse_error(err.to_string());
+        }
+    };
+
+    let is_jsonrpc = raw
+        .get("jsonrpc")
+        .and_then(|v| v.as_str())
+        .map(|v| v == "2.0")
+        .unwrap_or(false);
+
+    if is_jsonrpc {
+        return super::guest_jsonrpc::handle_jsonrpc_request(raw, &args.sync_path);
+    }
+
+    let is_legacy = raw
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|v| v == GUEST_PROTOCOL_VERSION)
+        .unwrap_or(false);
+
+    if !is_legacy {
+        return super::guest_jsonrpc::write_unknown_envelope_error();
+    }
+
+    let request: GuestRequest = match serde_json::from_value(raw) {
         Ok(request) => request,
         Err(err) => {
             write_response(GuestResponse {
@@ -111,67 +143,75 @@ fn handle_request(sync_path: &PathBuf, request: &GuestRequest) -> GuestResponse 
         );
     }
 
-    if let Err(err) = validate_env_context(request) {
-        return error_response(&request_id, err.code, err.message);
-    }
-
-    let requested_sync_path = request.context.sync_path.clone();
-    let resolved_sync_path = sync_path.to_string_lossy().to_string();
-    if requested_sync_path != resolved_sync_path {
-        return error_response(
-            &request_id,
-            GuestErrorCode::InvalidRequest,
-            "sync_path mismatch",
-        );
-    }
-
-    let permissions = match effective_permissions(sync_path, &request.context.permissions) {
-        Ok(perms) => perms,
-        Err(err) => return error_response(&request_id, err.code, err.message),
-    };
-
-    if let Err(err) = ensure_permissions(request, &permissions) {
-        return error_response(&request_id, err.code, err.message);
-    }
-
-    match request.action {
-        GuestAction::ReadPayload => match read_payload(sync_path) {
-            Ok(payload) => ok_response(&request_id, Some(Value::String(payload))),
-            Err(err) => error_response(&request_id, err.code, err.message),
-        },
-        GuestAction::ReadContext => match read_context(sync_path) {
-            Ok(context) => ok_response(&request_id, Some(context)),
-            Err(err) => error_response(&request_id, err.code, err.message),
-        },
-        GuestAction::WritePayload => match write_payload(sync_path, &request.input) {
-            Ok(()) => ok_response(&request_id, None),
-            Err(err) => error_response(&request_id, err.code, err.message),
-        },
-        GuestAction::UpdatePayload => match update_payload(sync_path, &request.input, &permissions)
-        {
-            Ok(()) => ok_response(&request_id, None),
-            Err(err) => error_response(&request_id, err.code, err.message),
-        },
-        GuestAction::WriteContext => match write_context(sync_path, &request.input) {
-            Ok(()) => ok_response(&request_id, None),
-            Err(err) => error_response(&request_id, err.code, err.message),
-        },
-        GuestAction::ExecuteWasm => match execute_wasm(sync_path, &permissions, None) {
-            Ok(output) => ok_response(
-                &request_id,
-                Some(Value::String(encode_payload_base64(&output))),
-            ),
-            Err(err) => error_response(&request_id, err.code, err.message),
-        },
+    match dispatch_guest_action(sync_path, &request.action, &request.context, &request.input) {
+        Ok(value) => ok_response(&request_id, value),
+        Err(err) => error_response(&request_id, err.code, err.message),
     }
 }
 
+/// Phase 13b.9 — pure dispatch shared between guest.v1 and JSON-RPC 2.0 wire layers.
+///
+/// Performs (in order): env-vs-context validation, sync_path mismatch check,
+/// effective permission computation, role/permission gate, and the actual
+/// action dispatch. Returns `Ok(Some(value))` for read/exec actions or
+/// `Ok(None)` for write-only actions; permission/IO failures are returned
+/// as `GuestError`.
+pub(crate) fn dispatch_guest_action(
+    sync_path: &PathBuf,
+    action: &GuestAction,
+    context: &GuestContext,
+    input: &Value,
+) -> Result<Option<Value>, GuestError> {
+    validate_env_context(context)?;
+
+    let resolved = sync_path.to_string_lossy();
+    if context.sync_path != resolved.as_ref() {
+        return Err(GuestError::new(
+            GuestErrorCode::InvalidRequest,
+            "sync_path mismatch",
+        ));
+    }
+
+    let permissions = effective_permissions(sync_path, &context.permissions)?;
+    ensure_permissions(action, &context.role, &permissions)?;
+
+    match action {
+        GuestAction::ReadPayload => {
+            let payload = read_payload(sync_path)?;
+            Ok(Some(Value::String(payload)))
+        }
+        GuestAction::ReadContext => {
+            let ctx = read_context(sync_path)?;
+            Ok(Some(ctx))
+        }
+        GuestAction::WritePayload => {
+            write_payload(sync_path, input)?;
+            Ok(None)
+        }
+        GuestAction::UpdatePayload => {
+            update_payload(sync_path, input, &permissions)?;
+            Ok(None)
+        }
+        GuestAction::WriteContext => {
+            write_context(sync_path, input)?;
+            Ok(None)
+        }
+        GuestAction::ExecuteWasm => {
+            let output = execute_wasm(sync_path, &permissions, None)?;
+            Ok(Some(Value::String(encode_payload_base64(&output))))
+        }
+    }
+}
+
+/// Phase 13b.9 v2.1 — signature reduced to (action, role, permissions) so the
+/// JSON-RPC dispatcher can call it without constructing a `GuestRequest`.
 fn ensure_permissions(
-    request: &GuestRequest,
+    action: &GuestAction,
+    role: &GuestContextRole,
     permissions: &GuestPermission,
 ) -> Result<(), GuestError> {
-    if matches!(request.context.role, GuestContextRole::Consumer) {
-        match request.action {
+    if matches!(role, GuestContextRole::Consumer) {
+        match action {
             GuestAction::ReadPayload | GuestAction::ReadContext => {}
             _ => {
                 return Err(GuestError::new(
@@ -182,7 +222,7 @@ fn ensure_permissions(
         }
     }
 
-    match request.action {
+    match action {
         GuestAction::ReadPayload => {
             if !permissions.can_read_payload {
                 return Err(GuestError::new(
@@ -228,58 +268,61 @@ fn ensure_permissions(
     Ok(())
 }
 
-fn validate_env_context(request: &GuestRequest) -> Result<(), GuestError> {
-    if let Ok(protocol) = std::env::var("CAPSULE_GUEST_PROTOCOL") {
-        if protocol != request.version {
-            return Err(GuestError::new(
-                GuestErrorCode::ProtocolError,
-                "CAPSULE_GUEST_PROTOCOL mismatch",
-            ));
-        }
-    }
-
-    if let Ok(mode) = std::env::var("GUEST_MODE") {
-        let expected = match request.context.mode {
+/// Phase 13b.9 v2.1 — env names use the new `CAPSULE_IPC_*` prefix.
+///
+/// Legacy names (`CAPSULE_GUEST_PROTOCOL`, `GUEST_MODE`, `GUEST_ROLE`,
+/// `SYNC_PATH`, `GUEST_WIDGET_BOUNDS`) are no longer recognised. The
+/// rename is internal-only — grep across the workspace confirmed there
+/// are no source-level writers of the old names. See
+/// `claudedocs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` §2.
+///
+/// Note: protocol-version validation is now handled by the wire-format
+/// layer (`execute()` selects the dispatcher based on envelope shape),
+/// so `CAPSULE_IPC_PROTOCOL`, when set, is treated as informational and
+/// not checked against the request envelope.
+fn validate_env_context(context: &GuestContext) -> Result<(), GuestError> {
+    if let Ok(mode) = std::env::var("CAPSULE_IPC_MODE") {
+        let expected = match context.mode {
             GuestMode::Widget => "widget",
             GuestMode::Headless => "headless",
         };
         if mode.to_ascii_lowercase() != expected {
             return Err(GuestError::new(
                 GuestErrorCode::InvalidRequest,
-                "GUEST_MODE mismatch",
+                "CAPSULE_IPC_MODE mismatch",
             ));
         }
     }
 
-    if let Ok(role) = std::env::var("GUEST_ROLE") {
-        let expected = match request.context.role {
+    if let Ok(role) = std::env::var("CAPSULE_IPC_ROLE") {
+        let expected = match context.role {
             GuestContextRole::Consumer => "consumer",
             GuestContextRole::Owner => "owner",
         };
         if role.to_ascii_lowercase() != expected {
             return Err(GuestError::new(
                 GuestErrorCode::InvalidRequest,
-                "GUEST_ROLE mismatch",
+                "CAPSULE_IPC_ROLE mismatch",
             ));
         }
     }
 
-    if let Ok(sync_path) = std::env::var("SYNC_PATH") {
-        if sync_path != request.context.sync_path {
+    if let Ok(sync_path) = std::env::var("CAPSULE_IPC_SYNC_PATH") {
+        if sync_path != context.sync_path {
             return Err(GuestError::new(
                 GuestErrorCode::InvalidRequest,
-                "SYNC_PATH mismatch",
+                "CAPSULE_IPC_SYNC_PATH mismatch",
             ));
         }
     }
 
-    let widget_bounds = std::env::var("GUEST_WIDGET_BOUNDS").ok();
-    match request.context.mode {
+    let widget_bounds = std::env::var("CAPSULE_IPC_WIDGET_BOUNDS").ok();
+    match context.mode {
         GuestMode::Widget => {
             let value = widget_bounds.ok_or_else(|| {
                 GuestError::new(
                     GuestErrorCode::InvalidRequest,
-                    "GUEST_WIDGET_BOUNDS is required for widget mode",
+                    "CAPSULE_IPC_WIDGET_BOUNDS is required for widget mode",
                 )
             })?;
             parse_widget_bounds(&value)?;
@@ -288,7 +331,7 @@ fn validate_env_context(request: &GuestRequest) -> Result<(), GuestError> {
             if widget_bounds.is_some() {
                 return Err(GuestError::new(
                     GuestErrorCode::InvalidRequest,
-                    "GUEST_WIDGET_BOUNDS is not allowed in headless mode",
+                    "CAPSULE_IPC_WIDGET_BOUNDS is not allowed in headless mode",
                 ));
             }
         }
@@ -302,7 +345,7 @@ fn parse_widget_bounds(value: &str) -> Result<(u32, u32, u32, u32), GuestError> 
     if parts.len() != 4 {
         return Err(GuestError::new(
             GuestErrorCode::InvalidRequest,
-            "GUEST_WIDGET_BOUNDS must be x,y,width,height",
+            "CAPSULE_IPC_WIDGET_BOUNDS must be x,y,width,height",
         ));
     }
 
@@ -322,7 +365,7 @@ fn parse_widget_bounds(value: &str) -> Result<(u32, u32, u32, u32), GuestError> 
     if width == 0 || height == 0 {
         return Err(GuestError::new(
             GuestErrorCode::InvalidRequest,
-            "GUEST_WIDGET_BOUNDS width and height must be > 0",
+            "CAPSULE_IPC_WIDGET_BOUNDS width and height must be > 0",
         ));
     }
 
