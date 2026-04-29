@@ -476,6 +476,19 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Generate .ato/derived/capsule.lock.json from capsule.toml"
+    )]
+    Lock {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = false)]
+        timings: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
     #[command(hide = true, about = "Update ato CLI to the latest version")]
     Update,
 

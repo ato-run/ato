@@ -30,7 +30,10 @@ pub fn execute(
 
     let mut args = plan.targets_wasm_args();
     if args.is_empty() {
-        if let Some(entrypoint) = plan.execution_entrypoint() {
+        if let Some(entrypoint) = plan
+            .execution_entrypoint()
+            .or_else(|| plan.execution_run_command())
+        {
             if let Ok(mut parsed) = shell_words::split(&entrypoint) {
                 if !parsed.is_empty() {
                     parsed.remove(0);
@@ -69,7 +72,10 @@ fn resolve_component(plan: &ManifestData) -> Result<String> {
         return Ok(component);
     }
 
-    if let Some(entrypoint) = plan.execution_entrypoint() {
+    if let Some(entrypoint) = plan
+        .execution_entrypoint()
+        .or_else(|| plan.execution_run_command())
+    {
         if is_wasm_path(&entrypoint) {
             return Ok(entrypoint);
         }

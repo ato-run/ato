@@ -19,14 +19,15 @@ pub(crate) use release::{
 };
 
 pub(super) const ENGINE_LOCK_DIR: &str = ".locks";
-pub(super) const DEFAULT_NACELLE_RELEASE_BASE_URL: &str = "https://releases.capsule.dev/nacelle";
+pub(super) const DEFAULT_NACELLE_RELEASE_BASE_URL: &str =
+    "https://github.com/ato-run/ato/releases/download";
 pub(super) const AUTO_BOOTSTRAP_ENV: &str = "ATO_NACELLE_AUTO_BOOTSTRAP";
 pub(super) const OFFLINE_ENV: &str = "ATO_OFFLINE";
 pub(super) const DISABLE_NETWORK_BOOTSTRAP_ENV: &str = "ATO_DISABLE_NETWORK_BOOTSTRAP";
 pub(super) const NACELLE_VERSION_ENV: &str = "ATO_NACELLE_VERSION";
 pub(super) const NACELLE_RELEASE_BASE_URL_ENV: &str = "ATO_NACELLE_RELEASE_BASE_URL";
 
-pub const PINNED_NACELLE_VERSION: &str = "v0.2.1";
+pub const PINNED_NACELLE_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 #[cfg(test)]
 use serde::{Deserialize, Serialize};

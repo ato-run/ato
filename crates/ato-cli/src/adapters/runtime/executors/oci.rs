@@ -66,13 +66,22 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
 
     let mut env = plan.targets_oci_env();
     env.extend(launch_ctx.merged_env());
+    let mut cmd = plan.targets_oci_cmd();
+    if cmd.is_empty() {
+        if let Some(entrypoint) = plan
+            .execution_entrypoint()
+            .or_else(|| plan.execution_run_command())
+        {
+            cmd = shell_words::split(&entrypoint).unwrap_or_else(|_| vec![entrypoint]);
+        }
+    }
 
     client.pull_image(&image).await?;
     let container_id = client
         .create_container(&OciContainerRequest {
             name: container_name,
             image,
-            cmd: plan.targets_oci_cmd(),
+            cmd,
             env,
             working_dir: plan.targets_oci_working_dir(),
             labels,
