@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ato_session_core::{
-    read_session_records, validate_record_only, RecordValidationOutcome,
-    RecordValidationParams, StoredSessionInfo,
+    read_session_records, validate_record_only, RecordValidationOutcome, RecordValidationParams,
+    StoredSessionInfo,
 };
 use base64::Engine as _;
 use capsule_wire::handle::{
@@ -429,7 +429,10 @@ pub fn resolve_and_start_capsule(
             return Ok(session);
         }
         Ok(None) => {
-            debug!(handle, "session-record fast path miss; falling back to subprocess");
+            debug!(
+                handle,
+                "session-record fast path miss; falling back to subprocess"
+            );
         }
         Err(err) => {
             // The fast path is best-effort — every failure (corrupt
@@ -2521,6 +2524,81 @@ mod tests {
         // 4th BS: None → REPL must NOT emit `\x08 \x08`, preserving `ato>`.
         assert_eq!(pop_last_codepoint_width(&mut line), None);
     }
+
+    // ── REPL CSI / SS3 consumption ───────────────────────────────────────
+    //
+    // Regression coverage for the bug where ArrowUp/Down inside the
+    // `ato://cli` REPL pane caused `[A`/`[B`-shaped glyphs to bleed into
+    // the prompt: the byte loop swallowed the bare ESC byte but echoed
+    // the trailing CSI bytes (`[`, `A`, …) as printable input.
+    //
+    // The contract here is just: given a chunk that begins at an ESC,
+    // `consume_terminal_escape_sequence` returns the index of the first
+    // byte that is *not* part of the sequence. The byte loop wraps that
+    // with `i = consume_terminal_escape_sequence(bytes, i); continue;`.
+    use super::consume_terminal_escape_sequence;
+
+    fn idx_after(bytes: &[u8]) -> usize {
+        consume_terminal_escape_sequence(bytes, 0)
+    }
+
+    #[test]
+    fn csi_arrow_keys_consume_three_bytes() {
+        for terminator in [b'A', b'B', b'C', b'D'] {
+            let bytes = [0x1b, b'[', terminator];
+            assert_eq!(
+                idx_after(&bytes),
+                3,
+                "ESC [ {} should consume 3 bytes",
+                terminator as char
+            );
+        }
+    }
+
+    #[test]
+    fn csi_with_parameters_consumes_through_terminator() {
+        // PageUp = ESC [ 5 ~  → terminator is `~` (0x7E, in CSI final-byte range).
+        let bytes = [0x1b, b'[', b'5', b'~'];
+        assert_eq!(idx_after(&bytes), 4);
+        // Home = ESC [ H  (CSI with no params, terminator `H`).
+        let bytes = [0x1b, b'[', b'H'];
+        assert_eq!(idx_after(&bytes), 3);
+        // CSI with multiple parameters: ESC [ 1 ; 2 H (cursor position).
+        let bytes = [0x1b, b'[', b'1', b';', b'2', b'H'];
+        assert_eq!(idx_after(&bytes), 6);
+    }
+
+    #[test]
+    fn ss3_function_keys_consume_three_bytes() {
+        // F1 = ESC O P. SS3 is a single-parameter form xterm.js uses for
+        // F1–F4 and some terminal-mode arrow keys.
+        let bytes = [0x1b, b'O', b'P'];
+        assert_eq!(idx_after(&bytes), 3);
+    }
+
+    #[test]
+    fn bare_esc_consumes_only_one_byte() {
+        // The user pressed ESC alone (or the chunk ended right after ESC);
+        // we must not over-consume into the next normal byte.
+        let bytes = [0x1b];
+        assert_eq!(idx_after(&bytes), 1);
+        // Same when followed by a non-CSI/non-SS3 byte: only the ESC is
+        // consumed and the loop's next iteration sees `b'a'` as printable.
+        let bytes = [0x1b, b'a'];
+        assert_eq!(idx_after(&bytes), 1);
+    }
+
+    #[test]
+    fn csi_truncated_chunk_consumes_to_end() {
+        // Chunk boundaries can split a CSI sequence. If the terminator
+        // is missing, we consume to end-of-chunk and return the chunk
+        // length — preferable to leaving `[A` in the buffer.
+        let bytes = [0x1b, b'[', b'5'];
+        assert_eq!(idx_after(&bytes), 3);
+        // Pure CSI start (`ESC [`) with no following byte at all.
+        let bytes = [0x1b, b'['];
+        assert_eq!(idx_after(&bytes), 2);
+    }
 }
 
 // ── Terminal PTY session management ──────────────────────────────────────────
@@ -2910,6 +2988,52 @@ pub fn spawn_cli_session(
 /// Spawn a line-oriented REPL that routes each input line through `ato run`.
 ///
 /// The REPL lives entirely in Rust (no PTY required): xterm.js keystrokes are
+/// Skip past one terminal escape sequence in `bytes` starting at `start`
+/// (which must be `0x1B`/ESC). Returns the index of the next byte AFTER the
+/// sequence — so the caller can `i = consume_terminal_escape_sequence(bytes, i)`
+/// and continue without falling into the default printable-byte arm.
+///
+/// Recognises three forms emitted by xterm.js (and most other terminals) on
+/// arrow keys, navigation keys, and function keys:
+///
+/// * **CSI** (`ESC [ ... terminator`): consumes through the first byte in
+///   the range `0x40..=0x7E` (the CSI "final byte" range). Covers ArrowUp/
+///   Down/Left/Right (`ESC [ A`/`B`/`C`/`D`), PageUp/Down (`ESC [ 5~`/`6~`),
+///   Home/End (`ESC [ H`/`F`), and other CSI-encoded keys.
+/// * **SS3** (`ESC O X`): consumes one extra byte. xterm.js sends F1–F4 and
+///   some terminal-mode arrow keys this way.
+/// * **bare ESC**: nothing follows in this chunk — consumes only the ESC.
+///
+/// Without this helper, the previous byte loop swallowed the ESC byte itself
+/// but echoed the trailing CSI bytes (`[A`, `[B`, …) as printable input —
+/// surfacing as `[A`/`[B`-shaped glyphs the user described as `""`-like
+/// characters when pressing arrow keys in the `ato://cli` REPL pane.
+fn consume_terminal_escape_sequence(bytes: &[u8], start: usize) -> usize {
+    debug_assert_eq!(bytes.get(start), Some(&0x1B));
+    let mut i = start + 1;
+    match bytes.get(i) {
+        Some(&b'[') => {
+            // CSI: walk forward until we hit a byte in 0x40..=0x7E (final byte).
+            i += 1;
+            while let Some(&b) = bytes.get(i) {
+                i += 1;
+                if (0x40..=0x7E).contains(&b) {
+                    break;
+                }
+            }
+            i
+        }
+        Some(&b'O') => {
+            // SS3: one parameter byte.
+            i + 2
+        }
+        // Bare ESC, or some other less-common 7-bit form we don't decode here.
+        // Either way, consume just the ESC byte and let the next iteration
+        // re-examine `bytes[start + 1]` as a normal byte.
+        _ => i,
+    }
+}
+
 /// decoded from `input_tx`, echoed back through `output_tx` with minimal line
 /// editing, and on Enter the current buffer is forwarded to `ato run -- <line>`.
 /// Child stdout/stderr stream back as base64-encoded chunks.
@@ -2920,6 +3044,8 @@ pub fn spawn_cli_session(
 /// - `\x7f` / `\x08` (DEL / Backspace): erase one char with `\b \b`.
 /// - `\x03` (Ctrl-C): cancel the current line (or kill the running child).
 /// - `\x04` (Ctrl-D) on an empty line: close the session.
+/// - `\x1b` followed by CSI/SS3: consumed as a single escape sequence so
+///   arrow keys / function keys never leak into the line buffer.
 pub fn spawn_ato_run_repl(
     session_id: String,
     cols: u16,
@@ -3048,7 +3174,18 @@ pub fn spawn_ato_run_repl(
         let mut line: Vec<u8> = Vec::new();
 
         while let Ok(bytes) = input_rx.recv() {
-            for &b in &bytes {
+            // We walk `bytes` with an explicit cursor (rather than `for &b`)
+            // so an ESC byte can advance `i` past the rest of its escape
+            // sequence in one step. Without that, the trailing CSI bytes
+            // (e.g. `[A` from ArrowUp) leak into the default printable-byte
+            // arm and surface as visible glyphs in the prompt.
+            let mut i = 0;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b == 0x1b {
+                    i = consume_terminal_escape_sequence(&bytes, i);
+                    continue;
+                }
                 match b {
                     // Enter → submit
                     b'\r' | b'\n' => {
@@ -3584,14 +3721,6 @@ pub fn spawn_ato_run_repl(
                             return;
                         }
                     }
-                    // ESC sequence — swallow a few common ones (arrow keys) to
-                    // avoid polluting the buffer. We peek only the single byte
-                    // here; subsequent bytes in the same chunk will be handled
-                    // on the next iterations but are harmless printable-ish
-                    // values the buffer ignores.
-                    0x1b => {
-                        // Ignore; a more complete impl would parse CSI sequences.
-                    }
                     // Printable / UTF-8 byte
                     _ => {
                         line.push(b);
@@ -3600,6 +3729,7 @@ pub fn spawn_ato_run_repl(
                         }
                     }
                 }
+                i += 1;
             }
         }
 
@@ -3934,12 +4064,9 @@ mod fast_path_tests {
         let dir = TempDir::new().expect("tempdir");
         let missing = dir.path().join("never");
         // read_session_records tolerates missing root → Ok(empty).
-        let result = try_session_record_fast_path_inner(
-            TEST_HANDLE,
-            &missing,
-            TEST_HEALTHCHECK_TIMEOUT,
-        )
-        .expect("missing root must not error");
+        let result =
+            try_session_record_fast_path_inner(TEST_HANDLE, &missing, TEST_HEALTHCHECK_TIMEOUT)
+                .expect("missing root must not error");
         assert!(result.is_none());
     }
 
