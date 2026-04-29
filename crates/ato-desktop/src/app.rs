@@ -378,30 +378,29 @@ fn resolve_assets_dir() -> anyhow::Result<PathBuf> {
         }
     }
 
-    let cwd_assets = std::env::current_dir()?.join("assets");
-    if cwd_assets.is_dir() {
-        return Ok(cwd_assets);
-    }
-
-    let exe = std::env::current_exe()?;
-    let macos_dir = exe
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("ato-desktop executable has no parent directory"))?;
-
-    let bundled_assets = macos_dir.parent().and_then(|contents| {
-        contents
-            .parent()
-            .map(|_| contents.join("Resources").join("assets"))
-    });
-    if let Some(path) = bundled_assets {
-        if path.is_dir() {
-            return Ok(path);
+    // current_dir/current_exe failures must not crash launch — when the
+    // shell's cwd inode is stale (bundle replaced under an open shell),
+    // getcwd(2) returns ENOENT. Fall through to the next strategy instead.
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_assets = cwd.join("assets");
+        if cwd_assets.is_dir() {
+            return Ok(cwd_assets);
         }
     }
 
-    let sibling_assets = macos_dir.join("assets");
-    if sibling_assets.is_dir() {
-        return Ok(sibling_assets);
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents) = macos_dir.parent() {
+                let bundled = contents.join("Resources").join("assets");
+                if bundled.is_dir() {
+                    return Ok(bundled);
+                }
+            }
+            let sibling = macos_dir.join("assets");
+            if sibling.is_dir() {
+                return Ok(sibling);
+            }
+        }
     }
 
     Err(anyhow::anyhow!(
