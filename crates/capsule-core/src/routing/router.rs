@@ -786,6 +786,28 @@ impl ExecutionDescriptor {
         self.target_working_dir(&self.selected_target)
     }
 
+    /// Startup timeout in seconds for waiting on a freshly spawned session
+    /// to bind its port. Resolution order:
+    ///   1. [targets.<label>].startup_timeout   (per-target override)
+    ///   2. [targets].startup_timeout           (global)
+    ///   3. 60s default (matches the schema default in
+    ///      `foundation/types/manifest.rs::default_startup_timeout`).
+    /// Used by `ato app session start`'s readiness loop. Without this,
+    /// the loop ran a hardcoded 10s ceiling and silently ignored the
+    /// manifest field — so heavy first-launch capsules (model DLs, build
+    /// caches, etc.) timed out on their own declared budget.
+    pub fn execution_startup_timeout(&self) -> u32 {
+        let pick = |path: &[&str]| -> Option<u32> {
+            self.compat_value(path)
+                .and_then(|v| v.as_integer())
+                .and_then(|secs| u32::try_from(secs).ok())
+                .filter(|&secs| secs > 0)
+        };
+        pick(&["targets", &self.selected_target, "startup_timeout"])
+            .or_else(|| pick(&["targets", "startup_timeout"]))
+            .unwrap_or(60)
+    }
+
     pub fn execution_source_layout(&self) -> Option<String> {
         self.target_source_layout(&self.selected_target)
     }
