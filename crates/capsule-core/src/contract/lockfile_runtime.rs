@@ -269,21 +269,22 @@ pub(super) async fn prepare_python_artifacts(
 
     let mut cmd = std::process::Command::new(&uv_path);
     cmd.args([
-        "pip",
         "sync",
-        lock_path.to_string_lossy().as_ref(),
+        "--frozen",
         "--python",
         python_path.to_string_lossy().as_ref(),
         "--cache-dir",
         cache_dir.to_string_lossy().as_ref(),
-        "--target",
-        install_dir.to_string_lossy().as_ref(),
     ])
+    .env(
+        "UV_PROJECT_ENVIRONMENT",
+        install_dir.to_string_lossy().as_ref(),
+    )
     .current_dir(manifest_dir);
 
     let status = run_command_inner_with_manifest_env(cmd, Some(manifest)).await?;
     if !status.success() {
-        return Err(CapsuleError::Pack("uv pip sync failed".to_string()));
+        return Err(CapsuleError::Pack("uv sync --frozen failed".to_string()));
     }
 
     if install_dir.exists() {

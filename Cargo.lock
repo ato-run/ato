@@ -789,6 +789,7 @@ dependencies = [
  "wasmtime-wasi",
  "wat",
  "which 6.0.3",
+ "xz2",
  "zip",
  "zstd 0.13.3",
 ]

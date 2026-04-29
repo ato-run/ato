@@ -121,6 +121,14 @@ run = "main.py"
 - `run` は shell command ではなく script file path でなければならない
 - `run` は project root または `source/` 配下に実在する必要がある
 
+#### Compound selector authoring (`runtime = "web/node"` 等)
+
+- authoring では `runtime = "web/node"`, `"web/deno"`, `"web/python"`, `"web/static"` を受理できる
+- normalizer はこれを `runtime = "web"` + `driver = "<suffix>"` として解釈する
+- 実行計画の target summary では dynamic web driver (`node` / `deno` / `python`) が `runtime = "source"` + `driver = "<suffix>"` として表示されることがある
+- この場合でも `render_strategy = "web"` と `port` が web 表示契約を保持するため、Desktop / web pane は web capsule として扱う
+- `web/static` は静的配布契約なので `runtime = "web"` + `driver = "static"` を維持する
+
 ### 4.3 `runtime = "wasm"`
 
 - 現行 `open/build/validate` 契約では `run` を要求する

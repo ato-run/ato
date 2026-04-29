@@ -66,6 +66,7 @@ notify = "7"
 fs2 = "0.4"
 tar = "0.4"
 flate2 = "1.0"
+xz2 = "0.1"
 zip = "2.1"
 zstd = { version = "0.13", features = ["zstdmt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "net", "signal"] }
