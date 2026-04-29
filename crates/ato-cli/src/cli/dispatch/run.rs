@@ -2,8 +2,9 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::handle::normalize_capsule_handle;
 use capsule_core::CapsuleReporter;
 
 #[cfg(test)]
@@ -55,13 +56,30 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
 
-pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
+fn normalize_run_like_target(mut args: RunLikeCommandArgs) -> Result<RunLikeCommandArgs> {
     let raw_target = args.path.to_string_lossy();
     if raw_target.trim_start().starts_with("capsule://") {
-        bail!(
-            "`ato run` does not accept canonical capsule handles in phase 1. Re-run with a terse ref such as `ato run github.com/owner/repo` or `ato run publisher/slug`."
-        );
+        let canonical = normalize_capsule_handle(raw_target.trim()).with_context(|| {
+            format!(
+                "failed to parse canonical capsule handle '{}'",
+                raw_target.trim()
+            )
+        })?;
+        let cli_ref = canonical
+            .to_cli_ref()
+            .ok_or_else(|| anyhow::anyhow!("handle cannot be launched through ato-cli"))?;
+        if args.registry.is_none() {
+            args.registry = canonical.registry_url_override().map(str::to_string);
+        }
+        args.path = PathBuf::from(cli_ref);
     }
+
+    Ok(args)
+}
+
+pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
+    let args = normalize_run_like_target(args)?;
+    let raw_target = args.path.to_string_lossy();
 
     if let Some(warning) = args.deprecation_warning {
         eprintln!("{warning}");
@@ -521,9 +539,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_capsule_handles_are_rejected_by_run_surface() {
+    fn canonical_capsule_handles_are_accepted_by_run_surface() {
         let reporter = Arc::new(crate::reporters::CliReporter::new(true));
-        let error = super::execute_run_like_command(super::RunLikeCommandArgs {
+        let normalized = super::normalize_run_like_target(super::RunLikeCommandArgs {
             path: PathBuf::from("capsule://github.com/acme/chat"),
             target: None,
             entry: None,
@@ -557,11 +575,10 @@ mod tests {
             deprecation_warning: None,
             reporter,
         })
-        .expect_err("canonical handle should be rejected");
+        .expect("canonical handle should normalize");
 
-        assert!(error
-            .to_string()
-            .contains("does not accept canonical capsule handles"));
+        assert_eq!(normalized.path, PathBuf::from("github.com/acme/chat"));
+        assert!(normalized.registry.is_none());
     }
 
     #[test]
