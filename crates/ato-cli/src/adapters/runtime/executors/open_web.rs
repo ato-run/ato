@@ -55,10 +55,21 @@ fn build_static_server_command(plan: &ManifestData) -> Result<(PathBuf, Vec<Stri
         );
     }
 
+    // Accept `run_command` as a fallback when `entrypoint` is unset.
+    // For runtime=web + driver=node|deno|python, the manifest validator
+    // already accepts run_command as a script-name shorthand (see
+    // config/diagnostics/manifest.rs); driver=static was the only case
+    // requiring a hard `entrypoint = "<dir>"`. Real-world capsules
+    // (e.g. browser-daw 0.1.2) ship `run_command = "dist"` only — the
+    // semantics are identical (both name the directory to serve), so
+    // honor either form here instead of bailing the session start.
     let entrypoint = plan
         .execution_entrypoint()
+        .or_else(|| plan.execution_run_command())
         .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| anyhow::anyhow!("runtime=web target requires entrypoint"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("runtime=web target requires entrypoint or run_command")
+        })?;
     let port = runtime_overrides::override_port(plan.execution_port()).ok_or_else(|| {
         anyhow::anyhow!(
             "runtime=web target '{}' requires targets.<label>.port",
