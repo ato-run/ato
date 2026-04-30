@@ -85,8 +85,8 @@ pub fn apply_seatbelt_sandbox(policy: &SandboxPolicy) -> Result<SandboxResult> {
     let profile = generate_sbpl_profile(policy);
     debug!("Generated SBPL profile ({} bytes)", profile.len());
 
-    let profile_cstr = CString::new(profile)
-        .context("Generated SBPL profile contained an interior NUL byte")?;
+    let profile_cstr =
+        CString::new(profile).context("Generated SBPL profile contained an interior NUL byte")?;
 
     // flags = 0 → profile is raw SBPL source (NOT a predefined profile name).
     let mut error_buf: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -220,9 +220,8 @@ pub(crate) fn generate_sbpl_profile(policy: &SandboxPolicy) -> String {
     if !policy.ipc_socket_paths.is_empty() {
         profile.push_str("\n; IPC socket paths (ato-cli IPC Broker)\n");
         for path in &policy.ipc_socket_paths {
-            let target_escaped = escape_path_for_sbpl(path).or_else(|| {
-                path.parent().and_then(escape_path_for_sbpl)
-            });
+            let target_escaped =
+                escape_path_for_sbpl(path).or_else(|| path.parent().and_then(escape_path_for_sbpl));
 
             if let Some(escaped) = target_escaped {
                 profile.push_str(&format!(

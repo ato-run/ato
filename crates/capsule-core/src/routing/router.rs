@@ -792,6 +792,7 @@ impl ExecutionDescriptor {
     ///   2. [targets].startup_timeout           (global)
     ///   3. 60s default (matches the schema default in
     ///      `foundation/types/manifest.rs::default_startup_timeout`).
+    ///
     /// Used by `ato app session start`'s readiness loop. Without this,
     /// the loop ran a hardcoded 10s ceiling and silently ignored the
     /// manifest field — so heavy first-launch capsules (model DLs, build
