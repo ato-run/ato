@@ -1,7 +1,7 @@
 mod chrome;
 mod modals;
 mod panels;
-mod share;
+pub(crate) mod share;
 mod sidebar;
 mod theme;
 
@@ -23,7 +23,10 @@ use gpui_component::scroll::ScrollableElement;
 
 use self::chrome::render_command_chrome;
 use self::panels::{render_settings_overlay, render_stage};
-use self::sidebar::{favicon_candidate_urls, render_task_rail, FaviconState};
+use self::sidebar::{
+    favicon_candidate_urls, parse_link_icon_candidates, render_task_rail, FaviconState,
+};
+use crate::logging::TARGET_FAVICON;
 
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
@@ -1339,6 +1342,13 @@ impl DesktopShell {
                 continue;
             }
 
+            tracing::info!(
+                target: TARGET_FAVICON,
+                source = %key,
+                kind = kind.label(),
+                prior_attempts,
+                "starting icon image fetch"
+            );
             self.favicon_cache
                 .insert(key.clone(), FaviconState::Loading { prior_attempts });
             self.spawn_favicon_fetch(key, kind, window, cx);
@@ -1381,13 +1391,37 @@ impl DesktopShell {
                             _ => 0,
                         };
                         this.favicon_cache.insert(
-                            key,
+                            key.clone(),
                             match image {
-                                Some(image) => FaviconState::Ready(image),
-                                None => FaviconState::Failed {
-                                    failed_at: std::time::Instant::now(),
-                                    attempts: prior_attempts + 1,
-                                },
+                                Some(image) => {
+                                    tracing::info!(
+                                        target: TARGET_FAVICON,
+                                        source = %key,
+                                        kind = kind.label(),
+                                        "resolved icon image"
+                                    );
+                                    FaviconState::Ready(image)
+                                }
+                                None => {
+                                    // Outcome summary, not a bug — sites without
+                                    // any usable favicon are common (TiddlyWiki,
+                                    // bare dev servers, intranet hosts). WARN so a
+                                    // single line per origin × attempt remains
+                                    // visible at default log level for diagnosing
+                                    // genuinely broken servers, without the per-
+                                    // candidate noise.
+                                    tracing::warn!(
+                                        target: TARGET_FAVICON,
+                                        source = %key,
+                                        kind = kind.label(),
+                                        attempts = prior_attempts + 1,
+                                        "failed to resolve icon image"
+                                    );
+                                    FaviconState::Failed {
+                                        failed_at: std::time::Instant::now(),
+                                        attempts: prior_attempts + 1,
+                                    }
+                                }
                             },
                         );
                         cx.notify();
@@ -1763,7 +1797,17 @@ enum IconKind {
     Direct,
 }
 
+impl IconKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Favicon => "favicon",
+            Self::Direct => "direct",
+        }
+    }
+}
+
 fn fetch_direct_image(source: &str) -> Option<Arc<Image>> {
+    tracing::info!(target: TARGET_FAVICON, source, "fetching direct icon image");
     if source.starts_with("http://") || source.starts_with("https://") {
         return fetch_image_from_url(source);
     }
@@ -1777,9 +1821,38 @@ fn fetch_direct_image(source: &str) -> Option<Arc<Image>> {
 }
 
 fn fetch_image_from_path(path: &std::path::Path) -> Option<Arc<Image>> {
-    let bytes = std::fs::read(path).ok()?;
-    let format = format_for_extension(path).or_else(|| sniff_image_format(&bytes))?;
-    Some(Arc::new(Image::from_bytes(format, bytes)))
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(
+                target: TARGET_FAVICON,
+                path = %path.display(),
+                error = %error,
+                "failed to read icon image file"
+            );
+            return None;
+        }
+    };
+    // Prefer byte sniffing over the file extension for the same
+    // reason `fetch_image_from_url_with_headers` prefers it over the
+    // server-declared content-type: extensions lie too (an `.ico` file
+    // that is actually PNG, an SVG saved as `.png`, etc.). The
+    // extension only acts as a tiebreaker when sniffing fails.
+    let Some(format) = sniff_image_format(&bytes).or_else(|| format_for_extension(path)) else {
+        tracing::error!(
+            target: TARGET_FAVICON,
+            path = %path.display(),
+            "failed to determine icon image format"
+        );
+        return None;
+    };
+    tracing::info!(
+        target: TARGET_FAVICON,
+        path = %path.display(),
+        bytes = bytes.len(),
+        "loaded icon image file"
+    );
+    Some(arc_image_from_bytes(format, bytes))
 }
 
 fn fetch_image_from_url(url: &str) -> Option<Arc<Image>> {
@@ -1803,11 +1876,28 @@ fn fetch_image_from_url(url: &str) -> Option<Arc<Image>> {
 /// `ImageFormat::Ico` for `text/html` 200 responses (typical of SPA
 /// catch-all routes), masking non-image content as a corrupt icon.
 fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Option<Arc<Image>> {
-    let response = ureq::get(url)
+    tracing::info!(target: TARGET_FAVICON, url, reject_non_image, "fetching icon image URL");
+    let response = match ureq::get(url)
         .set("User-Agent", FAVICON_USER_AGENT)
         .set("Accept", "image/*")
         .call()
-        .ok()?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            // Per-candidate miss (404, network blip, etc.). The umbrella
+            // `failed to resolve any favicon candidate` WARN summarizes the
+            // outcome at the end of the fallback walk; logging each candidate
+            // failure at ERROR drowns the rail in noise for sites that simply
+            // don't ship a favicon (TiddlyWiki, blank dev servers).
+            tracing::debug!(
+                target: TARGET_FAVICON,
+                url,
+                error = %error,
+                "icon image URL request failed"
+            );
+            return None;
+        }
+    };
 
     let content_type = response
         .header("content-type")
@@ -1820,19 +1910,69 @@ fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Optio
             .map(|ct| ct.starts_with("image/"))
             .unwrap_or(false)
     {
+        tracing::debug!(
+            target: TARGET_FAVICON,
+            url,
+            content_type = ?content_type,
+            "icon image URL returned non-image content type"
+        );
         return None;
     }
 
     let mut bytes = Vec::new();
-    response.into_reader().read_to_end(&mut bytes).ok()?;
-    if bytes.is_empty() {
+    if let Err(error) = response.into_reader().read_to_end(&mut bytes) {
+        // Mid-stream read failure is unusual enough to surface — keep at
+        // WARN so a flaky upstream still leaves a breadcrumb at default
+        // log level.
+        tracing::warn!(
+            target: TARGET_FAVICON,
+            url,
+            error = %error,
+            "failed to read icon image URL body"
+        );
         return None;
     }
-    let format = content_type
-        .as_deref()
-        .and_then(image_format_from_content_type)
-        .or_else(|| sniff_image_format(&bytes))?;
-    Some(Arc::new(Image::from_bytes(format, bytes)))
+    if bytes.is_empty() {
+        tracing::debug!(target: TARGET_FAVICON, url, "icon image URL returned an empty body");
+        return None;
+    }
+    let Some(format) = determine_image_format(&bytes, content_type.as_deref()) else {
+        tracing::debug!(
+            target: TARGET_FAVICON,
+            url,
+            content_type = ?content_type,
+            bytes = bytes.len(),
+            "failed to determine icon image URL format"
+        );
+        return None;
+    };
+    tracing::info!(
+        target: TARGET_FAVICON,
+        url,
+        content_type = ?content_type,
+        bytes = bytes.len(),
+        format = ?format,
+        "loaded icon image URL"
+    );
+    Some(arc_image_from_bytes(format, bytes))
+}
+
+/// Pick an image format for a fetched body, preferring magic-byte
+/// sniffing over the declared `Content-Type`.
+///
+/// Real-world favicon servers lie about their content type all the
+/// time. Notably Google's gstatic CDN and MDN serve **PNG bytes** at
+/// `/favicon.ico` with `Content-Type: image/x-icon` — every browser
+/// content-sniffs and renders them as PNG, but if we trust the header
+/// we hand the bytes to `ico::IconDir::read` which correctly rejects
+/// the file ("Invalid reserved field value in ICONDIR (was 20617, but
+/// must be 0)" — 20617 = 0x5089 = the first two bytes of PNG magic).
+/// Sniffing first matches the browser behavior; falling back to the
+/// declared content-type only when sniff fails (truncated body, etc.)
+/// preserves correctness for unusual formats whose magic bytes we
+/// don't enumerate in `sniff_image_format`.
+fn determine_image_format(bytes: &[u8], content_type: Option<&str>) -> Option<ImageFormat> {
+    sniff_image_format(bytes).or_else(|| content_type.and_then(image_format_from_content_type))
 }
 
 /// Safari UA used by Wry on `webview.rs:1569`. Reusing it makes origins
@@ -1849,20 +1989,47 @@ fn decode_data_url_image(url: &str) -> Option<Arc<Image>> {
     // Minimal `data:image/<fmt>;base64,...` decoder. We only need to
     // handle the base64 form because the icon plumbing is the only
     // producer and we control its output.
-    let body = url.strip_prefix("data:")?;
-    let (meta, payload) = body.split_once(',')?;
+    let Some(body) = url.strip_prefix("data:") else {
+        tracing::error!(target: TARGET_FAVICON, "icon data URL did not start with data:");
+        return None;
+    };
+    let Some((meta, payload)) = body.split_once(',') else {
+        tracing::error!(target: TARGET_FAVICON, "icon data URL was missing comma separator");
+        return None;
+    };
     let mime = meta.split(';').next().unwrap_or("");
-    let format =
-        image_format_from_content_type(mime).or_else(|| sniff_image_format(payload.as_bytes()))?;
+    // Sniff the (possibly base64) payload first — same reason as
+    // `fetch_image_from_url_with_headers`, the declared mime can lie.
+    // For base64 payloads this mostly matters when the encoded bytes
+    // happen to start with magic that disagrees with the data URL's
+    // mime field; we trust the bytes.
+    let Some(format) = determine_image_format(payload.as_bytes(), Some(mime)) else {
+        tracing::error!(
+            target: TARGET_FAVICON,
+            mime,
+            "failed to determine icon data URL image format"
+        );
+        return None;
+    };
     let bytes = if meta.contains(";base64") {
         use base64::Engine;
-        base64::engine::general_purpose::STANDARD
-            .decode(payload)
-            .ok()?
+        match base64::engine::general_purpose::STANDARD.decode(payload) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(
+                    target: TARGET_FAVICON,
+                    mime,
+                    error = %error,
+                    "failed to decode icon data URL base64 payload"
+                );
+                return None;
+            }
+        }
     } else {
         payload.as_bytes().to_vec()
     };
-    Some(Arc::new(Image::from_bytes(format, bytes)))
+    tracing::info!(target: TARGET_FAVICON, mime, bytes = bytes.len(), "decoded icon data URL image");
+    Some(arc_image_from_bytes(format, bytes))
 }
 
 fn format_for_extension(path: &std::path::Path) -> Option<ImageFormat> {
@@ -1876,14 +2043,293 @@ fn format_for_extension(path: &std::path::Path) -> Option<ImageFormat> {
     }
 }
 
+/// Build an `Arc<Image>` for GPUI, normalizing ICO and SVG to PNG first.
+///
+/// The pinned `gpui` rev mishandles SVG bytes when fed through
+/// `Image::from_bytes`: `Image::to_image_data` (gpui platform.rs:2109-2113)
+/// passes `to_brga = false` to the SVG renderer, leaving the rendered
+/// buffer in RGBA-PA when the rest of GPUI's render pipeline expects
+/// BGRA. The result on macOS Metal is an effectively invisible image.
+/// `image::load_from_memory_with_format` for ICO also occasionally
+/// fails on multi-resolution icons whose entries are PNG-encoded
+/// (Google's `/favicon.ico` is one such file).
+///
+/// Pre-rasterizing both to PNG bypasses both special cases and routes
+/// every favicon through the well-trodden raster path that demonstrably
+/// works (PNG / WEBP / JPEG / GIF / BMP).
+fn arc_image_from_bytes(format: ImageFormat, bytes: Vec<u8>) -> Arc<Image> {
+    let (final_format, final_bytes) = normalize_icon_bytes(format, bytes);
+    Arc::new(Image::from_bytes(final_format, final_bytes))
+}
+
+fn normalize_icon_bytes(format: ImageFormat, bytes: Vec<u8>) -> (ImageFormat, Vec<u8>) {
+    match format {
+        ImageFormat::Svg => match render_svg_to_png(&bytes, SVG_RASTER_TARGET_PX) {
+            Some(png) => {
+                tracing::info!(
+                    input_bytes = bytes.len(),
+                    output_bytes = png.len(),
+                    "normalized SVG icon to PNG"
+                );
+                (ImageFormat::Png, png)
+            }
+            None => {
+                tracing::error!(
+                    input_bytes = bytes.len(),
+                    "SVG-to-PNG normalization failed; falling back to original SVG bytes"
+                );
+                (format, bytes)
+            }
+        },
+        ImageFormat::Ico => match transcode_ico_to_png(&bytes) {
+            Some(png) => {
+                tracing::info!(
+                    input_bytes = bytes.len(),
+                    output_bytes = png.len(),
+                    "normalized ICO icon to PNG"
+                );
+                (ImageFormat::Png, png)
+            }
+            None => {
+                tracing::error!(
+                    input_bytes = bytes.len(),
+                    "ICO-to-PNG normalization failed; falling back to original ICO bytes"
+                );
+                (format, bytes)
+            }
+        },
+        ImageFormat::Tiff => match transcode_to_png(&bytes, image::ImageFormat::Tiff) {
+            Some(png) => (ImageFormat::Png, png),
+            None => (format, bytes),
+        },
+        _ => (format, bytes),
+    }
+}
+
+/// Pixel size to rasterize SVG favicons at. The rail glyph itself is
+/// 22 px (sidebar `APP_ICON_SIZE`); 96 px gives the GPU a clean
+/// downscale at @1x and still looks crisp at @2x retina without
+/// blowing up tiny-skia allocations for SVGs that declare large
+/// natural sizes.
+const SVG_RASTER_TARGET_PX: u32 = 96;
+
+/// Lenient ICO → PNG conversion via the `ico` crate.
+///
+/// The `image` crate's ICO parser strictly validates ICONDIRENTRY's
+/// `wPlanes` and `wBitCount` fields and rejects real-world `favicon.ico`
+/// files served by Google (gstatic), MDN, and many other major sites
+/// because they carry non-canonical reserved/planes bytes — even
+/// though every browser renders them fine. The `ico` crate handles
+/// both PNG-encoded and DIB-encoded entries leniently, so we route all
+/// ICO normalization through it and re-encode the resulting RGBA
+/// pixels as PNG via the `image` crate.
+fn transcode_ico_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let icon_dir = match ico::IconDir::read(std::io::Cursor::new(bytes)) {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::error!(target: TARGET_FAVICON, error = %error, "ico crate failed to parse ICO directory");
+            return None;
+        }
+    };
+    // Pick the entry with the largest pixel area. Browsers normally
+    // pick the entry closest to the target display size; for our 22 px
+    // sidebar chip rendered up to @2x retina, anything ≥ 32 px works
+    // and the largest available has the most fidelity to downscale
+    // from.
+    let entry = icon_dir.entries().iter().max_by_key(|entry| {
+        let w = entry.width() as u64;
+        let h = entry.height() as u64;
+        w.saturating_mul(h)
+    })?;
+    let icon_image = match entry.decode() {
+        Ok(image) => image,
+        Err(error) => {
+            tracing::error!(target: TARGET_FAVICON, error = %error, "ico crate failed to decode entry");
+            return None;
+        }
+    };
+    let width = icon_image.width();
+    let height = icon_image.height();
+    let rgba = icon_image.rgba_data().to_vec();
+    let Some(buffer) = image::RgbaImage::from_raw(width, height, rgba) else {
+        tracing::error!(
+            target: TARGET_FAVICON,
+            width,
+            height,
+            "rgba buffer length mismatch from ICO entry decode"
+        );
+        return None;
+    };
+    let mut out = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut out);
+    if let Err(error) =
+        image::DynamicImage::ImageRgba8(buffer).write_to(&mut cursor, image::ImageFormat::Png)
+    {
+        tracing::error!(target: TARGET_FAVICON, error = %error, "PNG re-encode failed for ICO entry");
+        return None;
+    }
+    Some(out)
+}
+
+fn transcode_to_png(bytes: &[u8], format: image::ImageFormat) -> Option<Vec<u8>> {
+    let img = match image::load_from_memory_with_format(bytes, format) {
+        Ok(img) => img,
+        Err(error) => {
+            tracing::error!(
+                target: TARGET_FAVICON,
+                ?format,
+                error = %error,
+                "image decode failed during PNG transcode"
+            );
+            return None;
+        }
+    };
+    let mut out = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut out);
+    if let Err(error) = img.write_to(&mut cursor, image::ImageFormat::Png) {
+        tracing::error!(
+            target: TARGET_FAVICON,
+            ?format,
+            error = %error,
+            "PNG re-encode failed during transcode"
+        );
+        return None;
+    }
+    Some(out)
+}
+
+fn render_svg_to_png(bytes: &[u8], target_px: u32) -> Option<Vec<u8>> {
+    let options = usvg::Options::default();
+    let tree = match usvg::Tree::from_data(bytes, &options) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::error!(target: TARGET_FAVICON, error = %error, "usvg parse failed during SVG normalization");
+            return None;
+        }
+    };
+    let svg_size = tree.size();
+    let max_dim = svg_size.width().max(svg_size.height()).max(1.0);
+    let scale = (target_px as f32) / max_dim;
+    let pixmap_w = (svg_size.width() * scale).round().max(1.0) as u32;
+    let pixmap_h = (svg_size.height() * scale).round().max(1.0) as u32;
+    let mut pixmap = match tiny_skia::Pixmap::new(pixmap_w, pixmap_h) {
+        Some(pm) => pm,
+        None => {
+            tracing::error!(
+                target: TARGET_FAVICON,
+                pixmap_w,
+                pixmap_h,
+                "tiny_skia Pixmap::new failed during SVG normalization"
+            );
+            return None;
+        }
+    };
+    let transform = tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    match pixmap.encode_png() {
+        Ok(png) => Some(png),
+        Err(error) => {
+            tracing::error!(target: TARGET_FAVICON, error = %error, "tiny_skia PNG encode failed");
+            None
+        }
+    }
+}
+
 fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
-    // Try `/favicon.ico` first (most universal), then `.svg`
-    // (Vite/Next.js default), then `apple-touch-icon.png`. The
-    // strict-content-type fetcher refuses to coerce a `text/html`
-    // 200 (typical of SPA catch-all routes) into a corrupt `Ico`.
-    favicon_candidate_urls(origin)
-        .into_iter()
-        .find_map(|url| fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true))
+    tracing::info!(target: TARGET_FAVICON, origin, "fetching favicon image candidates");
+
+    // First: parse `<link rel="icon">` declarations from the origin's
+    // root HTML. Required for SPA / catch-all servers where
+    // `/favicon.ico`, `/favicon.svg`, etc. all 200 with `text/html`
+    // (e.g. grok.com), which the strict-content-type fetcher correctly
+    // refuses but which leaves the rail showing a globe forever
+    // without this path.
+    for url in fetch_html_link_icon_candidates(origin) {
+        tracing::info!(target: TARGET_FAVICON, origin, url, "trying link-icon candidate");
+        if let Some(image) = fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true) {
+            tracing::info!(target: TARGET_FAVICON, origin, url, "resolved link-icon candidate");
+            return Some(image);
+        }
+    }
+
+    // Fallback: well-known paths. Try `/favicon.ico` first (most
+    // universal), then `.svg` (Vite/Next.js default), then
+    // `apple-touch-icon.png`.
+    for url in favicon_candidate_urls(origin) {
+        tracing::info!(target: TARGET_FAVICON, origin, url, "trying favicon candidate");
+        if let Some(image) = fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true) {
+            tracing::info!(target: TARGET_FAVICON, origin, url, "resolved favicon candidate");
+            return Some(image);
+        }
+    }
+    tracing::warn!(target: TARGET_FAVICON, origin, "failed to resolve any favicon candidate");
+    None
+}
+
+/// Fetch the origin root HTML and extract `<link rel="icon">` hrefs.
+///
+/// Returns an empty Vec on any network/parse failure so callers can
+/// fall through to the well-known-paths probe. URL resolution uses the
+/// response's final URL (after redirects), so an origin that 301s
+/// `https://example.com` → `https://www.example.com` still resolves
+/// relative `<link href="...">` against `www.`.
+fn fetch_html_link_icon_candidates(origin: &str) -> Vec<String> {
+    if !matches!(
+        url::Url::parse(origin)
+            .ok()
+            .as_ref()
+            .map(url::Url::scheme),
+        Some("http") | Some("https")
+    ) {
+        return Vec::new();
+    }
+    let url = format!("{origin}/");
+    tracing::info!(target: TARGET_FAVICON, origin, url, "fetching origin HTML for link-icon parsing");
+    let response = match ureq::get(&url)
+        .set("User-Agent", FAVICON_USER_AGENT)
+        .set("Accept", "text/html,application/xhtml+xml")
+        .call()
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(
+                target: TARGET_FAVICON,
+                origin,
+                url,
+                error = %error,
+                "origin HTML request failed; skipping link-icon parse"
+            );
+            return Vec::new();
+        }
+    };
+    let final_url = response.get_url().to_string();
+    let mut bytes = Vec::new();
+    // Cap the read at 2 MB. Real-world `<head>` is well under this; the
+    // limit just guards against a tar-pit endpoint that streams an
+    // unbounded `text/html` body.
+    if let Err(error) = response
+        .into_reader()
+        .take(2 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+    {
+        tracing::error!(
+            target: TARGET_FAVICON,
+            origin,
+            error = %error,
+            "origin HTML body read failed; skipping link-icon parse"
+        );
+        return Vec::new();
+    }
+    let body = String::from_utf8_lossy(&bytes);
+    let candidates = parse_link_icon_candidates(&body, &final_url);
+    tracing::info!(
+        target: TARGET_FAVICON,
+        origin,
+        final_url,
+        candidate_count = candidates.len(),
+        "parsed link-icon candidates from origin HTML"
+    );
+    candidates
 }
 
 fn image_format_from_content_type(content_type: &str) -> Option<ImageFormat> {
@@ -3554,4 +4000,173 @@ fn render_permission_button<A: gpui::Action + Clone + 'static>(
             window.dispatch_action(Box::new(action.clone()), cx);
         })
         .child(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        determine_image_format, fetch_image_from_url_with_headers, transcode_ico_to_png,
+        ImageFormat,
+    };
+
+    /// Real PNG header (8-byte magic + an IHDR chunk for a 1×1 image).
+    /// Used to simulate the wire payload Google's gstatic and MDN
+    /// favicon URLs serve under `Content-Type: image/x-icon`.
+    const TINY_PNG_HEADER: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+
+    #[test]
+    fn determine_format_prefers_sniff_over_lying_content_type() {
+        // Google / MDN serve PNG bytes as `image/x-icon`. The browser
+        // content-sniffs and renders PNG; we must do the same or
+        // `transcode_ico_to_png` rejects the bytes ("Invalid reserved
+        // field value in ICONDIR (was 20617, but must be 0)" — those
+        // bytes are the first two of PNG magic).
+        assert_eq!(
+            determine_image_format(TINY_PNG_HEADER, Some("image/x-icon")),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            determine_image_format(TINY_PNG_HEADER, Some("image/vnd.microsoft.icon")),
+            Some(ImageFormat::Png)
+        );
+    }
+
+    #[test]
+    fn determine_format_returns_real_ico_when_bytes_are_ico() {
+        // ICO directory header: reserved=0, type=1 (ICO), count=1.
+        // The format-decision function must NOT regress for genuine ICOs.
+        let mut ico = vec![0u8, 0, 1, 0, 1, 0];
+        ico.extend_from_slice(&[0u8; 16]); // single dir entry
+        assert_eq!(
+            determine_image_format(&ico, Some("image/x-icon")),
+            Some(ImageFormat::Ico)
+        );
+    }
+
+    #[test]
+    fn determine_format_falls_back_to_content_type_when_sniff_fails() {
+        // Empty / unrecognized bytes must still resolve to a format
+        // when the server declares one. Otherwise a slow / chunked
+        // response that hasn't streamed magic bytes yet would 404.
+        let unknown = b"unrecognized";
+        assert_eq!(
+            determine_image_format(unknown, Some("image/png")),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(determine_image_format(unknown, None), None);
+    }
+
+    #[test]
+    fn determine_format_recognizes_svg_regardless_of_content_type() {
+        // Some Vite dev servers and a few CDNs serve SVG as
+        // `application/octet-stream` or `text/plain`. Sniffing keeps
+        // those rendering instead of failing the format-decision step.
+        let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+        assert_eq!(
+            determine_image_format(svg, Some("application/octet-stream")),
+            Some(ImageFormat::Svg)
+        );
+    }
+
+    /// Build a real ICO with a single 4×4 BGRA entry using the `ico`
+    /// crate as the encoder, then verify our decoder round-trips it
+    /// back to a non-empty PNG. Using the same crate to encode/decode
+    /// keeps the fixture independent of any browser-specific quirks
+    /// while still exercising the DIB-encoded path that browsers like
+    /// Google's gstatic favicon and MDN's ICO actually use (i.e. the
+    /// path the prior `image`-crate-only normalization rejected).
+    #[test]
+    fn round_trips_dib_encoded_ico_to_png() {
+        let mut rgba = Vec::with_capacity(4 * 4 * 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                rgba.extend_from_slice(&[(x * 60) as u8, (y * 60) as u8, 0, 255]);
+            }
+        }
+        let icon_image = ico::IconImage::from_rgba_data(4, 4, rgba);
+        let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
+        dir.add_entry(
+            ico::IconDirEntry::encode_as_bmp(&icon_image).expect("encode BMP entry"),
+        );
+        let mut ico_bytes = Vec::new();
+        dir.write(&mut ico_bytes).expect("write ICO");
+
+        let png = transcode_ico_to_png(&ico_bytes).expect("transcode succeeded");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn picks_largest_entry_when_multiple_resolutions_exist() {
+        let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
+        for size in [4u32, 8, 16] {
+            let pixels = (0..size * size * 4).map(|i| i as u8).collect();
+            let img = ico::IconImage::from_rgba_data(size, size, pixels);
+            dir.add_entry(ico::IconDirEntry::encode_as_bmp(&img).expect("encode entry"));
+        }
+        let mut ico_bytes = Vec::new();
+        dir.write(&mut ico_bytes).expect("write ICO");
+
+        let png = transcode_ico_to_png(&ico_bytes).expect("transcode succeeded");
+        // Decode the produced PNG and assert the dimensions match the
+        // largest entry (16×16) — proves we picked the right one.
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("decode produced PNG");
+        assert_eq!(decoded.width(), 16);
+        assert_eq!(decoded.height(), 16);
+    }
+
+    #[test]
+    fn rejects_garbage_bytes() {
+        assert!(transcode_ico_to_png(b"not an ICO").is_none());
+        assert!(transcode_ico_to_png(&[]).is_none());
+    }
+
+    /// Live regression tests against the actual Google and MDN
+    /// `/favicon.ico` URLs that triggered the original failure: both
+    /// servers return PNG bytes labeled `Content-Type: image/x-icon`,
+    /// so the icon-fetch pipeline must content-sniff and produce an
+    /// `Arc<Image>` with `format == Png`.
+    ///
+    /// Marked `#[ignore]` because they require network access — run
+    /// locally with `cargo test --bin ato-desktop -- --ignored
+    /// google_or_mdn`. CI is unaffected by transient outages on the
+    /// remote servers.
+    #[test]
+    #[ignore = "requires network access to gstatic.com / developer.mozilla.org"]
+    fn google_or_mdn_favicon_url_resolves_to_png_image() {
+        for url in [
+            "https://www.gstatic.com/images/branding/searchlogo/ico/favicon.ico",
+            "https://developer.mozilla.org/favicon.ico",
+        ] {
+            let image = fetch_image_from_url_with_headers(url, /*reject_non_image=*/ true)
+                .unwrap_or_else(|| panic!("expected to resolve favicon for {url}"));
+            assert_eq!(
+                image.format,
+                ImageFormat::Png,
+                "expected PNG bytes after sniff for {url} (server lies via image/x-icon)"
+            );
+            assert!(
+                !image.bytes.is_empty(),
+                "favicon body for {url} unexpectedly empty"
+            );
+            assert!(
+                image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "favicon body for {url} did not start with PNG magic"
+            );
+        }
+    }
+
+    /// Same idea as the favicon test but against ato.run's SVG
+    /// favicon: the pipeline must run it through `render_svg_to_png`
+    /// and return a PNG-formatted `Arc<Image>` (not a raw SVG, which
+    /// the pinned `gpui` rev mishandles).
+    #[test]
+    #[ignore = "requires network access to ato.run"]
+    fn ato_run_svg_favicon_url_resolves_to_png_image() {
+        let url = "https://ato.run/favicon.svg";
+        let image = fetch_image_from_url_with_headers(url, /*reject_non_image=*/ true)
+            .unwrap_or_else(|| panic!("expected to resolve favicon for {url}"));
+        assert_eq!(image.format, ImageFormat::Png);
+        assert!(image.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
 }
