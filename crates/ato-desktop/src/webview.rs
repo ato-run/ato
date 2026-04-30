@@ -39,6 +39,7 @@ use crate::automation::command::{AutomationCommand, PendingAutomationRequest};
 use crate::automation::AutomationHost;
 use crate::bridge::{BridgeProxy, GuestBridgeResponse, GuestSessionContext, ShellEvent};
 use crate::config::SecretEntry;
+use crate::logging::TARGET_FAVICON;
 use crate::orchestrator::{
     resolve_and_start_guest, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
@@ -49,9 +50,8 @@ use crate::state::{
     BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest, ShellMode,
     WebSessionState,
 };
-use crate::logging::TARGET_FAVICON;
 use crate::terminal::{TerminalCore, TryRecvOutput};
-use crate::ui::share::{resolve_share_icon, ShareIconSource};
+use crate::ui::share::{resolve_share_icon, web_favicon_origin, ShareIconSource};
 use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
@@ -221,6 +221,10 @@ struct HostPanelIpcEnvelope {
 struct HostPanelIpcMessage {
     kind: String,
     path: Option<String>,
+    command: Option<String>,
+    payload: Option<Value>,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
 }
 
 impl ManagedWebView {
@@ -574,6 +578,13 @@ impl WebViewManager {
                         format_bounds(webview_bounds)
                     ));
                 }
+            }
+
+            if active.profile == HOST_PANEL_PROFILE {
+                let payload = crate::settings::host_panel_payload_for_url(state, &route_key);
+                let payload_json =
+                    serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string());
+                sync_host_panel_payload(existing, &payload_json, state);
             }
         }
 
@@ -971,6 +982,7 @@ impl WebViewManager {
                         }
                     }
                 }
+                ShellEvent::HostPanelCommand { .. } => {}
                 ShellEvent::UrlChanged { pane_id, url } => {
                     if let Some(view) = self.views.get_mut(pane_id) {
                         if let Ok(parsed) = url.parse() {
@@ -2026,6 +2038,16 @@ impl WebViewManager {
                     bridge.push_shell_event(ShellEvent::HostPanelRouteChanged {
                         pane_id: envelope.pane_id.unwrap_or(pane_id),
                         path,
+                    });
+                    notify_window(async_app.clone(), window_handle);
+                }
+            } else if envelope.message.kind == "settings-command" {
+                if let Some(command) = envelope.message.command {
+                    bridge.push_shell_event(ShellEvent::HostPanelCommand {
+                        pane_id: envelope.pane_id.unwrap_or(pane_id),
+                        command,
+                        payload: envelope.message.payload.unwrap_or(Value::Null),
+                        request_id: envelope.message.request_id,
                     });
                     notify_window(async_app.clone(), window_handle);
                 }
@@ -3513,6 +3535,32 @@ fn sync_host_panel_payload(view: &mut ManagedWebView, payload_json: &str, state:
     view.host_panel_payload_json = Some(payload_json.to_string());
 }
 
+fn resolve_icon_source_for_payload(raw: &str) -> Option<String> {
+    if raw.starts_with("http://")
+        || raw.starts_with("https://")
+        || raw.starts_with("data:")
+        || raw.starts_with("file://")
+    {
+        return Some(raw.to_string());
+    }
+    let bytes = std::fs::read(raw).ok()?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let ext = std::path::Path::new(raw)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+    let mime = match ext.to_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        _ => "image/png",
+    };
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
 pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
     let inspector = state.active_capsule_inspector()?;
     let capabilities = state
@@ -3592,6 +3640,20 @@ pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
         .clone()
         .or_else(|| inspector.invoke_url.clone())
         .or_else(|| inspector.healthcheck_url.clone());
+    let icon_source = state
+        .pane_icons
+        .get(&inspector.pane_id)
+        .and_then(|raw| resolve_icon_source_for_payload(raw))
+        .or_else(|| {
+            // No manifest icon — fall back to the capsule's web favicon.
+            // The host panel WebView has no img-src CSP restriction, so an
+            // http://127.0.0.1 URL is loadable as long as the capsule is running.
+            inspector
+                .local_url
+                .as_deref()
+                .and_then(|u| web_favicon_origin(u))
+                .map(|origin| format!("{origin}/favicon.ico"))
+        });
 
     Some(serde_json::json!({
         "capsuleDetail": {
@@ -3620,6 +3682,7 @@ pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
             "logs": logs,
             "network": network,
             "update": update,
+            "iconSource": icon_source,
         }
     }))
 }

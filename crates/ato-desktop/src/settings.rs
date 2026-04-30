@@ -7,6 +7,7 @@ use crate::config::{
     CapsulePolicyOverride, EgressPolicyMode, LanguageConfig, LogLevel, ThemeConfig, UpdateChannel,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
+use crate::ui::share::web_favicon_origin;
 
 #[derive(Clone, Copy)]
 enum SettingSource {
@@ -341,7 +342,7 @@ fn capsule_snapshot(state: &AppState, pane_id: Option<PaneId>) -> Value {
             "canonicalHandle": inspector.canonical_handle,
             "trustLabel": inspector.trust_state.unwrap_or_else(|| if inspector.restricted { "untrusted".to_string() } else { "pending".to_string() }),
             "versionLabel": inspector.snapshot_label.unwrap_or_else(|| "unversioned".to_string()),
-            "iconSource": resolve_icon_source(state, inspector.pane_id),
+            "iconSource": resolve_icon_source(state, inspector.pane_id, inspector.local_url.as_deref()),
         },
         "policyDeclaration": {
             "networkKillSwitch": overrides.network_kill_switch,
@@ -392,31 +393,36 @@ fn capsule_snapshot(state: &AppState, pane_id: Option<PaneId>) -> Value {
     })
 }
 
-fn resolve_icon_source(state: &AppState, pane_id: PaneId) -> Option<String> {
-    let raw = state.pane_icons.get(&pane_id)?;
-    if raw.starts_with("http://")
-        || raw.starts_with("https://")
-        || raw.starts_with("data:")
-        || raw.starts_with("file://")
-    {
-        return Some(raw.clone());
+fn resolve_icon_source(state: &AppState, pane_id: PaneId, local_url: Option<&str>) -> Option<String> {
+    if let Some(raw) = state.pane_icons.get(&pane_id) {
+        if raw.starts_with("http://")
+            || raw.starts_with("https://")
+            || raw.starts_with("data:")
+            || raw.starts_with("file://")
+        {
+            return Some(raw.clone());
+        }
+        let bytes = std::fs::read(raw).ok()?;
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let ext = Path::new(raw)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png");
+        let mime = match ext.to_lowercase().as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "svg" => "image/svg+xml",
+            "webp" => "image/webp",
+            "ico" => "image/x-icon",
+            _ => "image/png",
+        };
+        return Some(format!("data:{mime};base64,{encoded}"));
     }
-    let bytes = std::fs::read(raw).ok()?;
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let ext = Path::new(raw)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
-    let mime = match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        _ => "image/png",
-    };
-    Some(format!("data:{mime};base64,{encoded}"))
+    // No manifest icon — fall back to the capsule's web favicon.
+    local_url
+        .and_then(|u| web_favicon_origin(u))
+        .map(|origin| format!("{origin}/favicon.ico"))
 }
 
 fn active_or_matching_capsule(
