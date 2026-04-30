@@ -155,9 +155,7 @@ fn healthcheck_url_for(record: &StoredSessionInfo) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
-    use capsule_wire::handle::{
-        CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState,
-    };
+    use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
     fn base_record() -> StoredSessionInfo {
         StoredSessionInfo {
@@ -214,7 +212,10 @@ mod tests {
     #[test]
     fn handle_matches_canonical_or_normalized() {
         let record = base_record();
-        assert!(handle_matches_record("capsule://ato.run/koh0920/byok-ai-chat", &record));
+        assert!(handle_matches_record(
+            "capsule://ato.run/koh0920/byok-ai-chat",
+            &record
+        ));
         assert!(handle_matches_record("koh0920/byok-ai-chat", &record));
     }
 
