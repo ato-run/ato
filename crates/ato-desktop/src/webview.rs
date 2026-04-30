@@ -497,6 +497,40 @@ impl WebViewManager {
                 GuestRoute::CapsuleHandle { handle, .. } => {
                     self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
                 }
+                _ if active.profile == HOST_PANEL_PROFILE => {
+                    let payload =
+                        crate::settings::host_panel_payload_for_url(state, &route_key);
+                    match self.build_host_panel_child_webview(
+                        window,
+                        active.pane_id,
+                        active.route.clone(),
+                        active.bounds,
+                        Some(payload),
+                    ) {
+                        Ok(webview) => {
+                            state.sync_web_session_state(
+                                active.pane_id,
+                                WebSessionState::Mounted,
+                            );
+                            self.bridge.log(
+                                ActivityTone::Info,
+                                format!("Built host panel WebView for {}", active.route),
+                            );
+                            self.views.insert(active.pane_id, webview);
+                        }
+                        Err(error) => {
+                            state.sync_web_session_state(
+                                active.pane_id,
+                                WebSessionState::Closed,
+                            );
+                            state.push_activity(
+                                ActivityTone::Error,
+                                format!("Failed to build host panel WebView: {error}"),
+                            );
+                            return;
+                        }
+                    }
+                }
                 _ => match self.build_webview(
                     window,
                     &active,

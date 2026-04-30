@@ -361,7 +361,7 @@ function App() {
     <>
       {view.kind === "launcher" && renderLauncher(setPath, payload?.launcherData ?? null)}
       {view.kind === "settings" && renderSettings(view.section, path, setPath)}
-      {view.kind === "capsule-detail" && renderCapsuleDetail(view.paneId, view.tab, path, setPath, payload?.capsuleDetail ?? null)}
+      {view.kind === "capsule-detail" && renderCapsuleDetail(view.paneId, view.tab, path, setPath, payload?.capsuleDetail ?? null, payload)}
       {view.kind === "unknown" && <div className="home" style={{ padding: "48px" }}>Unknown route: {path}</div>}
 
       {/* Toast Container */}
@@ -1837,13 +1837,13 @@ function renderCapsuleDetail(
   path: string,
   setPath: (path: string) => void,
   detail: CapsuleDetailPayload | null,
+  fullPayload?: HostPanelPayload | null,
 ) {
-  const capsuleName = detail?.handle ?? detail?.canonicalHandle ?? "Unknown";
   const title = detail?.title ?? `Pane ${paneId}`;
-  const capsuleSettings: any = readHostPanelPayload();
+  const rawPayload = fullPayload ?? readHostPanelPayload();
   const iconSource: string | null =
     detail?.iconSource ??
-    (capsuleSettings as any)?.capsuleSettings?.identity?.iconSource ??
+    (rawPayload as any)?.capsuleSettings?.identity?.iconSource ??
     null;
 
   return (
@@ -1932,7 +1932,7 @@ function renderCapsuleDetail(
 
         {/* 3. Logs */}
         <div id="tab-logs" className={`tab-pane ${tab.id === "logs" ? "active" : ""}`} style={{ padding: 0 }}>
-          {tab.id === "logs" && renderCapsuleLogs(detail, capsuleSettings)}
+          {tab.id === "logs" && renderCapsuleLogs(detail, rawPayload)}
         </div>
 
         {/* 4. Update */}
