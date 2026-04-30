@@ -37,12 +37,6 @@ const SESSION_FILE_SUFFIX: &str = ".json";
 /// Origin of the current LaunchSpec — useful in diagnostics, not consumed by
 /// digest input itself (the digest commits to the bytes, not where they
 /// came from).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LaunchSource {
-    /// Resolved from an existing v0.3 manifest (`derive_launch_spec`-driven).
-    DerivedFromV03Manifest,
-}
-
 /// Canonical launch contract used for both digest computation and stale
 /// detection.
 #[derive(Debug, Clone)]
@@ -57,7 +51,6 @@ pub(crate) struct LaunchSpec {
     pub(crate) build_input_digest: Option<String>,
     pub(crate) lock_digest: Option<String>,
     pub(crate) toolchain_fingerprint: String,
-    pub(crate) source: LaunchSource,
 }
 
 /// Identity of the logical launch slot — independent of spec version. Used
@@ -107,7 +100,10 @@ pub(crate) fn compute_launch_digest(spec: &LaunchSpec) -> String {
         &mut hasher,
         spec.build_input_digest.as_deref().unwrap_or("unknown"),
     );
-    update_text(&mut hasher, spec.lock_digest.as_deref().unwrap_or("unknown"));
+    update_text(
+        &mut hasher,
+        spec.lock_digest.as_deref().unwrap_or("unknown"),
+    );
     update_text(&mut hasher, &spec.toolchain_fingerprint);
     format!("blake3:{}", hasher.finalize().to_hex())
 }
@@ -201,16 +197,12 @@ impl PriorKind {
 pub(crate) enum ReuseDecision {
     /// A valid, healthy session record matched the current LaunchSpec — the
     /// caller should return its envelope without spawning.
-    Reuse {
-        record: Box<StoredSessionInfo>,
-    },
+    Reuse { record: Box<StoredSessionInfo> },
     /// No record satisfied all five reuse conditions. The caller should
     /// spawn a fresh process. `prior_kind` records the most-relevant
     /// rejection reason among the candidates inspected (None = no record
     /// existed at all).
-    Spawn {
-        prior_kind: Option<PriorKind>,
-    },
+    Spawn { prior_kind: Option<PriorKind> },
 }
 
 /// Inspect every session record under `<session_root>/desky-session-*.json`,
@@ -235,8 +227,8 @@ pub(crate) fn prepare_reuse_decision(
         return Ok(ReuseDecision::Spawn { prior_kind: None });
     }
 
-    let entries = fs::read_dir(&root)
-        .with_context(|| format!("failed to enumerate {}", root.display()))?;
+    let entries =
+        fs::read_dir(&root).with_context(|| format!("failed to enumerate {}", root.display()))?;
 
     let mut best_prior: Option<PriorKind> = None;
     for entry in entries {
@@ -248,8 +240,7 @@ pub(crate) fn prepare_reuse_decision(
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !file_name.starts_with(SESSION_FILE_PREFIX)
-            || !file_name.ends_with(SESSION_FILE_SUFFIX)
+        if !file_name.starts_with(SESSION_FILE_PREFIX) || !file_name.ends_with(SESSION_FILE_SUFFIX)
         {
             continue;
         }
@@ -418,8 +409,7 @@ pub(crate) fn persist_after_spawn(
     let serialized = serde_json::to_vec_pretty(&record)
         .with_context(|| format!("failed to serialize enriched record {}", path.display()))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, &serialized)
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    fs::write(&tmp, &serialized).with_context(|| format!("failed to write {}", tmp.display()))?;
     fs::rename(&tmp, &path)
         .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -519,7 +509,7 @@ mod platform {
         let info = unsafe { info.assume_init() };
         let secs = info.pbi_start_tvsec;
         let usecs = info.pbi_start_tvusec;
-        Some(secs.checked_mul(1_000)?.checked_add(usecs / 1_000)?)
+        secs.checked_mul(1_000)?.checked_add(usecs / 1_000)
     }
 }
 
@@ -618,7 +608,6 @@ pub(crate) fn canonicalize_launch_spec(
         build_input_digest: None,
         lock_digest: None,
         toolchain_fingerprint,
-        source: LaunchSource::DerivedFromV03Manifest,
     })
 }
 
@@ -634,7 +623,9 @@ fn canonicalize_identity(handle_input: &str, manifest_path: &Path) -> Result<Lau
 
     // Otherwise treat as a local path: canonicalize the manifest_path so
     // distinct surface paths into the same project share a single slot.
-    let canonical = manifest_path.canonicalize().unwrap_or_else(|_| manifest_path.to_path_buf());
+    let canonical = manifest_path
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_path.to_path_buf());
     Ok(LaunchIdentity::LocalManifest(canonical))
 }
 
@@ -654,7 +645,6 @@ mod tests {
             build_input_digest: None,
             lock_digest: None,
             toolchain_fingerprint: "node:20|darwin-arm64".to_string(),
-            source: LaunchSource::DerivedFromV03Manifest,
         }
     }
 
