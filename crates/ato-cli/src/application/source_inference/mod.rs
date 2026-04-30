@@ -3926,6 +3926,13 @@ mod tests {
         Arc::new(CliReporter::new(false))
     }
 
+    fn isolate_ato_home(dir: &tempfile::TempDir) -> (MutexGuard<'static, ()>, EnvVarGuard) {
+        let guard = env_lock();
+        let ato_home = dir.path().join("ato-home");
+        let env_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        (guard, env_guard)
+    }
+
     fn load_materialized_lock(path: &Path) -> AtoLock {
         ato_lock::load_unvalidated_from_path(path).expect("load durable ato.lock.json")
     }
@@ -4346,6 +4353,7 @@ mod tests {
         }
 
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         let script_path = dir.path().join("hello.js");
         fs::write(&script_path, "console.log('hello from js');\n").expect("write script");
 
@@ -4449,6 +4457,7 @@ mod tests {
         }
 
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         let script_path = dir.path().join("hello.ts");
         fs::write(
             &script_path,
@@ -4500,6 +4509,7 @@ mod tests {
         }
 
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         let script_path = dir.path().join("hello.jsx");
         fs::write(
             &script_path,
@@ -5752,6 +5762,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
             return;
         }
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         let script_path = dir.path().join("hello.ts");
         fs::write(&script_path, "console.log('hello');\n").expect("write script");
 
@@ -5798,6 +5809,7 @@ print('ok')
         }
 
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         let script_path = dir.path().join("hello.ts");
         fs::write(&script_path, "console.log('hello from ts');\n").expect("write script");
 
@@ -5848,6 +5860,7 @@ print('ok')
         }
 
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         let script_path = dir.path().join("hello.tsx");
         fs::write(
             &script_path,
