@@ -1,33 +1,233 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 /// Persistent configuration for the ato-desktop application.
 ///
 /// Stored at `~/.ato/desktop-config.json` and loaded on startup.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct DesktopConfig {
-    /// Light or Dark theme.
-    pub theme: ThemeConfig,
-    /// Default egress allow patterns for new sessions.
     #[serde(default)]
-    pub default_egress_allow: Vec<String>,
+    pub general: GeneralSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
+    #[serde(default)]
+    pub runtime: RuntimeSettings,
+    #[serde(default)]
+    pub sandbox: SandboxSettings,
+    #[serde(default)]
+    pub trust: TrustSettings,
+    #[serde(default)]
+    pub registry: RegistrySettings,
+    #[serde(default)]
+    pub delivery: DeliverySettings,
+    #[serde(default)]
+    pub developer: DeveloperSettings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GeneralSettings {
+    /// Light or Dark theme. System theme is a UI-level option for now.
+    #[serde(default)]
+    pub theme: ThemeConfig,
+    #[serde(default)]
+    pub language: LanguageConfig,
+    #[serde(default)]
+    pub launch_at_login: bool,
+    #[serde(default = "default_show_in_tray")]
+    pub show_in_tray: bool,
+    #[serde(default = "default_show_whats_new")]
+    pub show_whats_new: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default)]
+    pub channel: UpdateChannel,
+    #[serde(default = "default_auto_updates")]
+    pub automatic_updates: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RuntimeSettings {
+    #[serde(default = "default_cache_location")]
+    pub cache_location: String,
+    #[serde(default = "default_cache_size_limit_gb")]
+    pub cache_size_limit_gb: u16,
+    #[serde(default = "default_workspace_root")]
+    pub workspace_root: String,
+    #[serde(default = "default_watch_debounce_ms")]
+    pub watch_debounce_ms: u64,
+    #[serde(default)]
+    pub execution_boundary: ExecutionBoundary,
+    #[serde(default)]
+    pub unsafe_prompt: UnsafePrompt,
+    #[serde(default)]
+    pub allow_unsafe_env: bool,
     /// Terminal font size in pixels.
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: u16,
     /// Maximum number of concurrent terminal sessions.
     #[serde(default = "default_terminal_max_sessions")]
     pub terminal_max_sessions: usize,
-    /// Automatically open devtools when a capsule is loaded.
-    #[serde(default)]
-    pub auto_open_devtools: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SandboxSettings {
+    #[serde(default = "default_require_nacelle")]
+    pub require_nacelle: bool,
+    #[serde(default)]
+    pub default_egress_policy: EgressPolicyMode,
+    /// Default egress allow patterns for new sessions.
+    #[serde(default)]
+    pub default_egress_allow: Vec<String>,
+    #[serde(default)]
+    pub tailnet_sidecar: bool,
+    #[serde(default = "default_headscale_url")]
+    pub headscale_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrustSettings {
+    #[serde(default = "default_revocation_frequency_hours")]
+    pub revocation_frequency_hours: u16,
+    #[serde(default)]
+    pub revocation_source: RevocationSource,
+    #[serde(default)]
+    pub unknown_publisher: UnknownPublisherPolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegistrySettings {
+    #[serde(default = "default_store_api_url")]
+    pub store_api_url: String,
+    #[serde(default = "default_store_site_url")]
+    pub store_site_url: String,
+    #[serde(default)]
+    pub private_registries: Vec<PrivateRegistrySettings>,
+    #[serde(default = "default_local_registry_port")]
+    pub local_registry_port: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeliverySettings {
+    #[serde(default)]
+    pub projection_enabled_by_default: bool,
+    #[serde(default = "default_projection_directory")]
+    pub projection_directory: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeveloperSettings {
+    #[serde(default)]
+    pub log_level: LogLevel,
+    #[serde(default)]
+    pub telemetry: bool,
+    #[serde(default)]
+    pub auto_open_devtools: bool,
+    #[serde(default)]
+    pub feature_flags: HashSet<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivateRegistrySettings {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default = "default_registry_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub trust_mode: RegistryTrustMode,
+    #[serde(default)]
+    pub priority: u16,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeConfig {
     Light,
+    #[default]
     Dark,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LanguageConfig {
+    #[default]
+    System,
+    English,
+    Japanese,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateChannel {
+    #[default]
+    Stable,
+    Beta,
+    Nightly,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionBoundary {
+    #[default]
+    Tier1Only,
+    Tier1PlusTier2Confirm,
+    Tier1PlusTier2Auto,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnsafePrompt {
+    #[default]
+    AlwaysConfirm,
+    ConfirmOncePerCapsule,
+    Never,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum EgressPolicyMode {
+    #[default]
+    DenyAll,
+    Allowlist,
+    ProxyOnly,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RevocationSource {
+    #[default]
+    DnsTxt,
+    Https,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnknownPublisherPolicy {
+    #[default]
+    Prompt,
+    AutoTrust,
+    Reject,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Error,
+    #[default]
+    Warn,
+    Info,
+    Debug,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegistryTrustMode {
+    #[default]
+    Prompt,
+    Pinned,
 }
 
 fn default_terminal_font_size() -> u16 {
@@ -38,15 +238,238 @@ fn default_terminal_max_sessions() -> usize {
     4
 }
 
+fn default_show_in_tray() -> bool {
+    true
+}
+
+fn default_show_whats_new() -> bool {
+    true
+}
+
+fn default_auto_updates() -> bool {
+    true
+}
+
+fn default_cache_location() -> String {
+    "~/.ato/cache".to_string()
+}
+
+fn default_cache_size_limit_gb() -> u16 {
+    10
+}
+
+fn default_workspace_root() -> String {
+    "~/.ato/workspaces".to_string()
+}
+
+fn default_watch_debounce_ms() -> u64 {
+    300
+}
+
+fn default_require_nacelle() -> bool {
+    true
+}
+
+fn default_headscale_url() -> String {
+    "https://hs.ato.run".to_string()
+}
+
+fn default_revocation_frequency_hours() -> u16 {
+    24
+}
+
+fn default_store_api_url() -> String {
+    "https://api.ato.run".to_string()
+}
+
+fn default_store_site_url() -> String {
+    "https://ato.run".to_string()
+}
+
+fn default_local_registry_port() -> u16 {
+    8080
+}
+
+fn default_projection_directory() -> String {
+    "/Applications".to_string()
+}
+
+fn default_registry_enabled() -> bool {
+    true
+}
+
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
+            general: GeneralSettings::default(),
+            updates: UpdateSettings::default(),
+            runtime: RuntimeSettings::default(),
+            sandbox: SandboxSettings::default(),
+            trust: TrustSettings::default(),
+            registry: RegistrySettings::default(),
+            delivery: DeliverySettings::default(),
+            developer: DeveloperSettings::default(),
+        }
+    }
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
             theme: ThemeConfig::Dark,
-            default_egress_allow: Vec::new(),
+            language: LanguageConfig::System,
+            launch_at_login: false,
+            show_in_tray: default_show_in_tray(),
+            show_whats_new: default_show_whats_new(),
+        }
+    }
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            channel: UpdateChannel::Stable,
+            automatic_updates: default_auto_updates(),
+        }
+    }
+}
+
+impl Default for RuntimeSettings {
+    fn default() -> Self {
+        Self {
+            cache_location: default_cache_location(),
+            cache_size_limit_gb: default_cache_size_limit_gb(),
+            workspace_root: default_workspace_root(),
+            watch_debounce_ms: default_watch_debounce_ms(),
+            execution_boundary: ExecutionBoundary::Tier1Only,
+            unsafe_prompt: UnsafePrompt::AlwaysConfirm,
+            allow_unsafe_env: false,
             terminal_font_size: default_terminal_font_size(),
             terminal_max_sessions: default_terminal_max_sessions(),
-            auto_open_devtools: false,
         }
+    }
+}
+
+impl Default for SandboxSettings {
+    fn default() -> Self {
+        Self {
+            require_nacelle: default_require_nacelle(),
+            default_egress_policy: EgressPolicyMode::DenyAll,
+            default_egress_allow: Vec::new(),
+            tailnet_sidecar: false,
+            headscale_url: default_headscale_url(),
+        }
+    }
+}
+
+impl Default for TrustSettings {
+    fn default() -> Self {
+        Self {
+            revocation_frequency_hours: default_revocation_frequency_hours(),
+            revocation_source: RevocationSource::DnsTxt,
+            unknown_publisher: UnknownPublisherPolicy::Prompt,
+        }
+    }
+}
+
+impl Default for RegistrySettings {
+    fn default() -> Self {
+        Self {
+            store_api_url: default_store_api_url(),
+            store_site_url: default_store_site_url(),
+            private_registries: Vec::new(),
+            local_registry_port: default_local_registry_port(),
+        }
+    }
+}
+
+impl Default for DeliverySettings {
+    fn default() -> Self {
+        Self {
+            projection_enabled_by_default: false,
+            projection_directory: default_projection_directory(),
+        }
+    }
+}
+
+impl Default for DeveloperSettings {
+    fn default() -> Self {
+        Self {
+            log_level: LogLevel::Warn,
+            telemetry: false,
+            auto_open_devtools: false,
+            feature_flags: HashSet::new(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DesktopConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            #[serde(default)]
+            general: GeneralSettings,
+            #[serde(default)]
+            updates: UpdateSettings,
+            #[serde(default)]
+            runtime: RuntimeSettings,
+            #[serde(default)]
+            sandbox: SandboxSettings,
+            #[serde(default)]
+            trust: TrustSettings,
+            #[serde(default)]
+            registry: RegistrySettings,
+            #[serde(default)]
+            delivery: DeliverySettings,
+            #[serde(default)]
+            developer: DeveloperSettings,
+            #[serde(default)]
+            theme: Option<ThemeConfig>,
+            #[serde(default)]
+            default_egress_allow: Option<Vec<String>>,
+            #[serde(default)]
+            terminal_font_size: Option<u16>,
+            #[serde(default)]
+            terminal_max_sessions: Option<usize>,
+            #[serde(default)]
+            auto_open_devtools: Option<bool>,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let mut config = DesktopConfig {
+            general: helper.general,
+            updates: helper.updates,
+            runtime: helper.runtime,
+            sandbox: helper.sandbox,
+            trust: helper.trust,
+            registry: helper.registry,
+            delivery: helper.delivery,
+            developer: helper.developer,
+        };
+
+        if let Some(theme) = helper.theme {
+            config.general.theme = theme;
+        }
+        if let Some(allow) = helper.default_egress_allow {
+            config.sandbox.default_egress_allow = allow;
+            if !config.sandbox.default_egress_allow.is_empty() {
+                config.sandbox.default_egress_policy = EgressPolicyMode::Allowlist;
+            }
+        }
+        if let Some(font_size) = helper.terminal_font_size {
+            config.runtime.terminal_font_size = font_size;
+        }
+        if let Some(max_sessions) = helper.terminal_max_sessions {
+            config.runtime.terminal_max_sessions = max_sessions;
+        }
+        if let Some(auto_open) = helper.auto_open_devtools {
+            config.developer.auto_open_devtools = auto_open;
+        }
+
+        Ok(config)
     }
 }
 
@@ -315,6 +738,94 @@ pub fn save_capsule_configs(store: &CapsuleConfigStore) {
     }
 }
 
+// ── Capsule Policy Override Store ────────────────────────────────────────────
+
+/// Per-capsule user overrides for security / execution boundary policy.
+///
+/// This store intentionally excludes non-policy capsule preferences. Those stay
+/// in `CapsuleConfigStore`, while secret material stays in `SecretStore`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CapsulePolicyOverrideStore {
+    #[serde(default)]
+    pub overrides: HashMap<String, CapsulePolicyOverride>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CapsulePolicyOverride {
+    #[serde(default)]
+    pub network_kill_switch: Option<bool>,
+    #[serde(default)]
+    pub egress_allow: Vec<String>,
+    #[serde(default)]
+    pub readonly_paths: Vec<String>,
+    #[serde(default)]
+    pub readwrite_paths: Vec<String>,
+    #[serde(default)]
+    pub env_grants: Vec<String>,
+    #[serde(default)]
+    pub revoked_capabilities: Vec<String>,
+}
+
+impl CapsulePolicyOverrideStore {
+    pub fn override_for(&self, handle: &str) -> CapsulePolicyOverride {
+        self.overrides.get(handle).cloned().unwrap_or_default()
+    }
+
+    pub fn override_for_mut(&mut self, handle: &str) -> &mut CapsulePolicyOverride {
+        self.overrides.entry(handle.to_string()).or_default()
+    }
+
+    pub fn reset(&mut self, handle: &str) {
+        self.overrides.remove(handle);
+    }
+}
+
+fn capsule_policy_overrides_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ato").join("capsule-policy-overrides.json"))
+}
+
+pub fn load_capsule_policy_overrides() -> CapsulePolicyOverrideStore {
+    let Some(path) = capsule_policy_overrides_path() else {
+        return CapsulePolicyOverrideStore::default();
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(store) => {
+                info!(path = %path.display(), "Loaded capsule policy override store");
+                store
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Failed to parse capsule policy override store, using empty");
+                CapsulePolicyOverrideStore::default()
+            }
+        },
+        Err(_) => CapsulePolicyOverrideStore::default(),
+    }
+}
+
+pub fn save_capsule_policy_overrides(store: &CapsulePolicyOverrideStore) {
+    let Some(path) = capsule_policy_overrides_path() else {
+        warn!("Cannot determine home directory, capsule policy overrides not saved");
+        return;
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    match serde_json::to_string_pretty(store) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!(path = %path.display(), error = %e, "Failed to write capsule policy override store");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to serialize capsule policy override store");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,19 +835,61 @@ mod tests {
         let config = DesktopConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.terminal_font_size, 14);
-        assert_eq!(parsed.terminal_max_sessions, 4);
-        assert!(!parsed.auto_open_devtools);
-        assert_eq!(parsed.theme, ThemeConfig::Dark);
+        assert_eq!(parsed.runtime.terminal_font_size, 14);
+        assert_eq!(parsed.runtime.terminal_max_sessions, 4);
+        assert!(!parsed.developer.auto_open_devtools);
+        assert_eq!(parsed.general.theme, ThemeConfig::Dark);
     }
 
     #[test]
-    fn partial_json_uses_defaults() {
+    fn legacy_partial_json_migrates_to_structured_config() {
         let json = r#"{"theme": "light"}"#;
         let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.theme, ThemeConfig::Light);
-        assert_eq!(parsed.terminal_font_size, 14);
-        assert!(parsed.default_egress_allow.is_empty());
+        assert_eq!(parsed.general.theme, ThemeConfig::Light);
+        assert_eq!(parsed.runtime.terminal_font_size, 14);
+        assert!(parsed.sandbox.default_egress_allow.is_empty());
+    }
+
+    #[test]
+    fn legacy_flat_config_migrates_existing_settings() {
+        let json = r#"{
+            "theme": "light",
+            "terminal_font_size": 16,
+            "terminal_max_sessions": 8,
+            "default_egress_allow": ["api.github.com"],
+            "auto_open_devtools": true
+        }"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.general.theme, ThemeConfig::Light);
+        assert_eq!(parsed.runtime.terminal_font_size, 16);
+        assert_eq!(parsed.runtime.terminal_max_sessions, 8);
+        assert_eq!(
+            parsed.sandbox.default_egress_policy,
+            EgressPolicyMode::Allowlist
+        );
+        assert_eq!(parsed.sandbox.default_egress_allow, vec!["api.github.com"]);
+        assert!(parsed.developer.auto_open_devtools);
+    }
+
+    #[test]
+    fn capsule_policy_overrides_are_separate_from_capsule_config() {
+        let mut configs = CapsuleConfigStore::default();
+        configs.set_config("capsule.x", "MODEL".into(), "gpt-5".into());
+
+        let mut policies = CapsulePolicyOverrideStore::default();
+        policies
+            .override_for_mut("capsule.x")
+            .egress_allow
+            .push("api.github.com".into());
+
+        assert_eq!(
+            configs.configs_for_capsule("capsule.x"),
+            vec![("MODEL".to_string(), "gpt-5".to_string())]
+        );
+        assert_eq!(
+            policies.override_for("capsule.x").egress_allow,
+            vec!["api.github.com".to_string()]
+        );
     }
 
     #[test]

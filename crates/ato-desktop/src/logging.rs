@@ -30,7 +30,9 @@ pub fn build_env_filter() -> EnvFilter {
     if let Ok(filter) = EnvFilter::try_from_default_env() {
         return filter;
     }
-    EnvFilter::new(build_directives(std::env::var("ATO_DESKTOP_LOG").ok().as_deref()))
+    EnvFilter::new(build_directives(
+        std::env::var("ATO_DESKTOP_LOG").ok().as_deref(),
+    ))
 }
 
 fn build_directives(ato_desktop_log: Option<&str>) -> String {
@@ -39,7 +41,11 @@ fn build_directives(ato_desktop_log: Option<&str>) -> String {
     let feature_enabled = "info";
 
     let mut directives: Vec<String> = std::iter::once(format!("ato_desktop={baseline_level}"))
-        .chain(FEATURE_TARGETS.iter().map(|t| format!("{t}={feature_default}")))
+        .chain(
+            FEATURE_TARGETS
+                .iter()
+                .map(|t| format!("{t}={feature_default}")),
+        )
         .collect();
 
     let Some(raw) = ato_desktop_log else {

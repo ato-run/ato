@@ -272,14 +272,14 @@ fn render_runtime_page(state: &AppState, theme: &Theme) -> Div {
                             .into_any_element(),
                         render_value_row(
                             "Terminal font",
-                            &format!("{} px", state.config.terminal_font_size),
+                            &format!("{} px", state.config.runtime.terminal_font_size),
                             "Shared terminal font size baseline.",
                             theme,
                         )
                         .into_any_element(),
                         render_value_row(
                             "Max sessions",
-                            &state.config.terminal_max_sessions.to_string(),
+                            &state.config.runtime.terminal_max_sessions.to_string(),
                             "Concurrent host terminal sessions allowed.",
                             theme,
                         )
@@ -340,7 +340,7 @@ fn render_runtime_page(state: &AppState, theme: &Theme) -> Div {
 }
 
 fn render_sandbox_page(state: &AppState, theme: &Theme) -> Div {
-    let egress_summary = if state.config.default_egress_allow.is_empty() {
+    let egress_summary = if state.config.sandbox.default_egress_allow.is_empty() {
         "Deny-all"
     } else {
         "Allowlist"
@@ -372,7 +372,7 @@ fn render_sandbox_page(state: &AppState, theme: &Theme) -> Div {
                             theme,
                         )
                         .into_any_element(),
-                        render_hosts_row(&state.config.default_egress_allow, theme)
+                        render_hosts_row(&state.config.sandbox.default_egress_allow, theme)
                             .into_any_element(),
                     ],
                     theme,
@@ -1137,7 +1137,10 @@ fn render_auto_devtools_row(state: &AppState, theme: &Theme) -> Div {
             div()
                 .id("toggle-auto-devtools")
                 .cursor_pointer()
-                .child(render_toggle(state.config.auto_open_devtools, theme))
+                .child(render_toggle(
+                    state.config.developer.auto_open_devtools,
+                    theme,
+                ))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     cx.stop_propagation();
                     window.dispatch_action(Box::new(ToggleAutoDevtools), cx);
