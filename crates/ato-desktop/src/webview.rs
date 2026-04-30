@@ -49,6 +49,7 @@ use crate::state::{
     BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest, ShellMode,
     WebSessionState,
 };
+use crate::logging::TARGET_FAVICON;
 use crate::terminal::{TerminalCore, TryRecvOutput};
 use crate::ui::share::{resolve_share_icon, ShareIconSource};
 use capsule_wire::handle::CapsuleDisplayStrategy;
@@ -1234,6 +1235,7 @@ impl WebViewManager {
                                     match resolve_share_icon(session) {
                                         Some(ShareIconSource::Direct(icon)) => {
                                             info!(
+                                                target: TARGET_FAVICON,
                                                 pane_id = active.pane_id,
                                                 session_id = %session.session_id,
                                                 source = %icon,
@@ -1243,6 +1245,7 @@ impl WebViewManager {
                                         }
                                         Some(ShareIconSource::FaviconOrigin(origin)) => {
                                             info!(
+                                                target: TARGET_FAVICON,
                                                 pane_id = active.pane_id,
                                                 session_id = %session.session_id,
                                                 origin = %origin,
@@ -1252,6 +1255,7 @@ impl WebViewManager {
                                         }
                                         None => {
                                             error!(
+                                                target: TARGET_FAVICON,
                                                 pane_id = active.pane_id,
                                                 session_id = %session.session_id,
                                                 "share icon resolution returned no source"

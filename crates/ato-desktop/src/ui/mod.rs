@@ -1403,7 +1403,14 @@ impl DesktopShell {
                                     FaviconState::Ready(image)
                                 }
                                 None => {
-                                    tracing::error!(
+                                    // Outcome summary, not a bug — sites without
+                                    // any usable favicon are common (TiddlyWiki,
+                                    // bare dev servers, intranet hosts). WARN so a
+                                    // single line per origin × attempt remains
+                                    // visible at default log level for diagnosing
+                                    // genuinely broken servers, without the per-
+                                    // candidate noise.
+                                    tracing::warn!(
                                         target: TARGET_FAVICON,
                                         source = %key,
                                         kind = kind.label(),
@@ -1877,7 +1884,12 @@ fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Optio
     {
         Ok(response) => response,
         Err(error) => {
-            tracing::error!(
+            // Per-candidate miss (404, network blip, etc.). The umbrella
+            // `failed to resolve any favicon candidate` WARN summarizes the
+            // outcome at the end of the fallback walk; logging each candidate
+            // failure at ERROR drowns the rail in noise for sites that simply
+            // don't ship a favicon (TiddlyWiki, blank dev servers).
+            tracing::debug!(
                 target: TARGET_FAVICON,
                 url,
                 error = %error,
@@ -1898,7 +1910,7 @@ fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Optio
             .map(|ct| ct.starts_with("image/"))
             .unwrap_or(false)
     {
-        tracing::error!(
+        tracing::debug!(
             target: TARGET_FAVICON,
             url,
             content_type = ?content_type,
@@ -1909,7 +1921,10 @@ fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Optio
 
     let mut bytes = Vec::new();
     if let Err(error) = response.into_reader().read_to_end(&mut bytes) {
-        tracing::error!(
+        // Mid-stream read failure is unusual enough to surface — keep at
+        // WARN so a flaky upstream still leaves a breadcrumb at default
+        // log level.
+        tracing::warn!(
             target: TARGET_FAVICON,
             url,
             error = %error,
@@ -1918,11 +1933,11 @@ fn fetch_image_from_url_with_headers(url: &str, reject_non_image: bool) -> Optio
         return None;
     }
     if bytes.is_empty() {
-        tracing::error!(target: TARGET_FAVICON, url, "icon image URL returned an empty body");
+        tracing::debug!(target: TARGET_FAVICON, url, "icon image URL returned an empty body");
         return None;
     }
     let Some(format) = determine_image_format(&bytes, content_type.as_deref()) else {
-        tracing::error!(
+        tracing::debug!(
             target: TARGET_FAVICON,
             url,
             content_type = ?content_type,
@@ -2247,7 +2262,7 @@ fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
             return Some(image);
         }
     }
-    tracing::error!(target: TARGET_FAVICON, origin, "failed to resolve any favicon candidate");
+    tracing::warn!(target: TARGET_FAVICON, origin, "failed to resolve any favicon candidate");
     None
 }
 
