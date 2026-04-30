@@ -14,6 +14,7 @@ pub(crate) mod app_control;
 pub(crate) mod application;
 pub(crate) mod cli;
 pub(crate) mod common;
+pub(crate) mod logging;
 pub(crate) mod utils;
 
 /// Ensures the optional sidecar is stopped exactly once across normal exit,
@@ -154,6 +155,12 @@ pub(crate) use utils::payload_guard;
 /// Runs the CLI entry flow and converts failures into the user-facing output
 /// format selected by the original raw arguments.
 pub fn main_entry() {
+    // Activate the tracing pipeline before any guest-runtime path can fire
+    // a `tracing::*!` event. Without this, every event in the executors
+    // would be a no-op (no global subscriber) and `ATO_CLI_LOG=...` would
+    // silently do nothing.
+    logging::init_subscriber();
+
     let args: Vec<String> = std::env::args().collect();
     // Detect JSON mode before Clap parsing so even parse-time failures can be
     // rendered as machine-readable diagnostics.

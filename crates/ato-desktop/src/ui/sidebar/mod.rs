@@ -1,3 +1,7 @@
+mod favicon_links;
+
+pub(super) use favicon_links::parse_link_icon_candidates;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -489,7 +493,13 @@ fn render_monogram_icon(label: &str, hue: f32, theme: &Theme) -> Div {
 }
 
 fn render_favicon_icon(image: Arc<Image>, theme: &Theme) -> Div {
-    let bg = theme.surface_hover;
+    // White chip behind the favicon: SVG / PNG icons are routinely
+    // designed against a white card (browser tab strips, OS docks) and
+    // ato.run / Google Material icons in particular invert badly on the
+    // panel-tinted `surface_hover`. Keeping the chip white matches the
+    // canonical browser tab rendering and keeps transparent areas of
+    // the icon legible.
+    let bg = ICON_CHIP_BG;
     let border_color = theme.border_default;
 
     div()
@@ -507,7 +517,10 @@ fn render_favicon_icon(image: Arc<Image>, theme: &Theme) -> Div {
 }
 
 fn render_globe_icon(theme: &Theme) -> Div {
-    let bg = theme.surface_hover;
+    // Globe placeholder uses the same white chip as `render_favicon_icon`
+    // so the rail stays visually uniform whether or not a given origin
+    // resolves a favicon.
+    let bg = ICON_CHIP_BG;
     let border_color = theme.border_default;
     let text_color = theme.text_tertiary;
 
@@ -526,6 +539,18 @@ fn render_globe_icon(theme: &Theme) -> Div {
         .font_weight(FontWeight::BOLD)
         .child("◎")
 }
+
+/// Solid white chip behind favicon images and the globe placeholder.
+/// Decoupled from `theme.surface_hover` because favicons are designed
+/// against white in the browser tab strip — re-tinting them with the
+/// panel hover color makes Google / MDN-style colored marks read as
+/// muddy gray. See `render_favicon_icon` / `render_globe_icon`.
+const ICON_CHIP_BG: gpui::Hsla = gpui::Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 1.0,
+    a: 1.0,
+};
 
 fn render_system_icon(page_type: SystemPageIcon, theme: &Theme) -> Div {
     // Hue is per-role (Terminal=green, Console=purple, …) rather than
