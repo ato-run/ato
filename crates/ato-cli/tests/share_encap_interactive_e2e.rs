@@ -1,6 +1,6 @@
 //! E2E interactive tests for `ato encap` primary entry selection via PTY.
 //!
-//! These tests drive `ato --json encap --save-config .` through a PTY session and verify
+//! These tests drive `ato encap --local --save-config .` through a PTY session and verify
 //! that primary-entry changes are persisted in the saved `share.spec.json`.
 //!
 //! Prompt patterns used:
@@ -64,9 +64,14 @@ fn git_in(dir: &Path, args: &[&str]) {
 /// The workspace root itself has no `.git` so it is not detected as a source.
 #[cfg(unix)]
 fn setup_encap_workspace(root: &Path) {
+    let remotes = root.join("remotes");
+    fs::create_dir_all(&remotes).unwrap();
+
     for name in ["api", "web"] {
         let dir = root.join(name);
+        let remote = remotes.join(format!("{name}.git"));
         fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&remote).unwrap();
         fs::write(
             dir.join("package.json"),
             format!(
@@ -75,18 +80,13 @@ fn setup_encap_workspace(root: &Path) {
             ),
         )
         .unwrap();
+        git_in(&remote, &["init", "--bare"]);
         git_in(&dir, &["init"]);
-        git_in(
-            &dir,
-            &[
-                "remote",
-                "add",
-                "origin",
-                &format!("https://github.com/test/{}", name),
-            ],
-        );
+        git_in(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
         git_in(&dir, &["add", "."]);
         git_in(&dir, &["commit", "-m", "init"]);
+        git_in(&dir, &["branch", "-M", "main"]);
+        git_in(&dir, &["push", "-u", "origin", "main"]);
     }
 }
 
@@ -99,6 +99,21 @@ fn read_spec(workspace: &Path) -> serde_json::Value {
     serde_json::from_str(&contents).expect("parse share.spec.json")
 }
 
+#[cfg(unix)]
+fn encap_pty_command(workspace: &Path, home: &Path) -> std::process::Command {
+    let ato = env!("CARGO_BIN_EXE_ato");
+    assert!(
+        !ato.contains('\''),
+        "test binary path must be shell-quotable"
+    );
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(format!("'{ato}' encap --local --save-config . 2>&1"))
+        .current_dir(workspace)
+        .env("HOME", home);
+    cmd
+}
+
 /// E2E-7: Accept all detected items; verify saved spec keeps exactly one primary entry.
 #[cfg(unix)]
 #[test]
@@ -108,11 +123,7 @@ fn test_e2e_7_bulk_accept_persists_single_primary() {
     let tmp_home = workspace_tempdir("e2e7-home-");
     setup_encap_workspace(tmp.path());
 
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ato"));
-    cmd.args(["--json", "encap", "--save-config", "."])
-        .current_dir(tmp.path())
-        .env("HOME", tmp_home.path());
-
+    let cmd = encap_pty_command(tmp.path(), tmp_home.path());
     let mut session = Session::spawn(cmd).expect("spawn encap PTY");
     session.set_expect_timeout(Some(Duration::from_secs(60)));
 
@@ -146,11 +157,7 @@ fn test_e2e_8_skip_default_primary_promotes_remaining_entry() {
     let tmp_home = workspace_tempdir("e2e8-home-");
     setup_encap_workspace(tmp.path());
 
-    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ato"));
-    cmd.args(["--json", "encap", "--save-config", "."])
-        .current_dir(tmp.path())
-        .env("HOME", tmp_home.path());
-
+    let cmd = encap_pty_command(tmp.path(), tmp_home.path());
     let mut session = Session::spawn(cmd).expect("spawn encap PTY");
     session.set_expect_timeout(Some(Duration::from_secs(60)));
 
