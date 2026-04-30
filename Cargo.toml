@@ -21,7 +21,6 @@ exclude = [
 
 [workspace.package]
 edition = "2021"
-license = "Apache-2.0"
 repository = "https://github.com/ato-run/ato"
 homepage = "https://ato.run"
 authors = ["ato-run"]

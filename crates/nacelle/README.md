@@ -26,3 +26,7 @@
 - `docs/adr/2026-01-03_000000_supervisor-mode.md`
 - `docs/adr/2026-01-15_000001_socket-activation.md`
 - `docs/adr/2026-01-07_000000_system-abstraction.md`
+
+## License
+
+MPL-2.0.
