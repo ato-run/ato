@@ -2401,7 +2401,7 @@ fn inset_bounds(bounds: PaneBounds, inset: f32) -> PaneBounds {
 }
 
 fn route_metadata_overlay_webview_bounds(stage_bounds: PaneBounds) -> PaneBounds {
-    inset_bounds(stage_bounds, 22.0)
+    stage_bounds
 }
 
 fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement {
@@ -2640,8 +2640,7 @@ fn render_route_metadata_host_panel_overlay(
         .id("route-metadata-backdrop")
         .absolute()
         .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.20))
-        .p(px(10.0))
+        .bg(hsla(0.0, 0.0, 0.0, 0.0))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
         })
@@ -2649,43 +2648,24 @@ fn render_route_metadata_host_panel_overlay(
             div()
                 .id("route-metadata-panel")
                 .size_full()
-                .rounded(px(14.0))
-                .bg(theme.settings_panel_bg)
-                .border_1()
-                .border_color(theme.border_default)
-                .shadow(vec![BoxShadow {
-                    color: hsla(0.0, 0.0, 0.0, 0.30),
-                    offset: point(px(0.0), px(12.0)),
-                    blur_radius: px(36.0),
-                    spread_radius: px(0.0),
-                }])
-                .p(px(12.0))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                     cx.stop_propagation();
                 })
+                .flex()
+                .items_start()
+                .justify_end()
+                .p(px(14.0))
                 .child(
                     div()
-                        .size_full()
-                        .rounded(px(12.0))
-                        .bg(theme.canvas_bg)
+                        .rounded(px(999.0))
+                        .bg(theme.panel_bg)
                         .border_1()
                         .border_color(theme.border_subtle)
-                        .flex()
-                        .items_start()
-                        .justify_end()
-                        .p(px(14.0))
-                        .child(
-                            div()
-                                .rounded(px(999.0))
-                                .bg(theme.panel_bg)
-                                .border_1()
-                                .border_color(theme.border_subtle)
-                                .px(px(12.0))
-                                .py(px(6.0))
-                                .text_size(px(11.0))
-                                .text_color(theme.text_secondary)
-                                .child(route.label()),
-                        ),
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.text_secondary)
+                        .child(route.label()),
                 ),
         )
 }
