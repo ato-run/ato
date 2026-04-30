@@ -1722,16 +1722,12 @@ impl WebViewManager {
                     // worker thread; emit_stage is thread-safe (just
                     // an eprintln behind an env check).
                     let extras = match click_origin {
-                        Some(origin) => base_extras.clone().with_since_click_ms(origin.elapsed_ms()),
+                        Some(origin) => {
+                            base_extras.clone().with_since_click_ms(origin.elapsed_ms())
+                        }
                         None => base_extras.clone(),
                     };
-                    crate::surface_timing::emit_stage(
-                        "navigation_start",
-                        "ok",
-                        0,
-                        None,
-                        &extras,
-                    );
+                    crate::surface_timing::emit_stage("navigation_start", "ok", 0, None, &extras);
                     automation.mark_page_unloaded(pane_id);
                 }
                 PageLoadEvent::Finished => {
@@ -1743,7 +1739,9 @@ impl WebViewManager {
                     // Phase 3a's native overlay will produce a more
                     // precise first_visible_signal once it lands.
                     let extras = match click_origin {
-                        Some(origin) => base_extras.clone().with_since_click_ms(origin.elapsed_ms()),
+                        Some(origin) => {
+                            base_extras.clone().with_since_click_ms(origin.elapsed_ms())
+                        }
                         None => base_extras.clone(),
                     };
                     crate::surface_timing::emit_stage(
@@ -1863,13 +1861,7 @@ impl WebViewManager {
                 .with_since_click_ms(origin.elapsed_ms()),
             None => surface_base_extras.clone(),
         };
-        crate::surface_timing::emit_stage(
-            "webview_create_start",
-            "ok",
-            0,
-            None,
-            &extras_at_start,
-        );
+        crate::surface_timing::emit_stage("webview_create_start", "ok", 0, None, &extras_at_start);
         let webview = builder
             .build_as_child(window)
             .with_context(|| format!("unable to create Wry child webview for {url}"))?;
@@ -2257,10 +2249,7 @@ impl WebViewManager {
                 handle = %entry.handle,
                 "stop_all_retained_sessions: graceful stop scheduled"
             );
-            crate::retention::spawn_graceful_stop(
-                entry,
-                crate::retention::EvictionReason::AppQuit,
-            );
+            crate::retention::spawn_graceful_stop(entry, crate::retention::EvictionReason::AppQuit);
         }
         count
     }
@@ -3579,28 +3568,31 @@ pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
             })
         })
         .collect::<Vec<_>>();
-    let update = state.capsule_updates.get(&inspector.pane_id).map(|update| match update {
-        crate::state::CapsuleUpdate::Idle => serde_json::json!({ "kind": "idle" }),
-        crate::state::CapsuleUpdate::Checking => serde_json::json!({ "kind": "checking" }),
-        crate::state::CapsuleUpdate::UpToDate { current } => serde_json::json!({
-            "kind": "up-to-date",
-            "current": current,
-        }),
-        crate::state::CapsuleUpdate::Available {
-            current,
-            latest,
-            target_handle,
-        } => serde_json::json!({
-            "kind": "available",
-            "current": current,
-            "latest": latest,
-            "targetHandle": target_handle,
-        }),
-        crate::state::CapsuleUpdate::Failed { message } => serde_json::json!({
-            "kind": "failed",
-            "message": message,
-        }),
-    });
+    let update = state
+        .capsule_updates
+        .get(&inspector.pane_id)
+        .map(|update| match update {
+            crate::state::CapsuleUpdate::Idle => serde_json::json!({ "kind": "idle" }),
+            crate::state::CapsuleUpdate::Checking => serde_json::json!({ "kind": "checking" }),
+            crate::state::CapsuleUpdate::UpToDate { current } => serde_json::json!({
+                "kind": "up-to-date",
+                "current": current,
+            }),
+            crate::state::CapsuleUpdate::Available {
+                current,
+                latest,
+                target_handle,
+            } => serde_json::json!({
+                "kind": "available",
+                "current": current,
+                "latest": latest,
+                "targetHandle": target_handle,
+            }),
+            crate::state::CapsuleUpdate::Failed { message } => serde_json::json!({
+                "kind": "failed",
+                "message": message,
+            }),
+        });
     let trust_label = inspector.trust_state.clone().unwrap_or_else(|| {
         if inspector.restricted {
             "untrusted".to_string()
