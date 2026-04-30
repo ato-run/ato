@@ -205,7 +205,8 @@ impl<'a> SessionStartPhaseRunner<'a> {
         // protection," which is no worse than the pre-RFC behavior.
         let launch_spec = lm::canonicalize_launch_spec(
             self.handle,
-            self.target_label.unwrap_or_else(|| plan.selected_target_label()),
+            self.target_label
+                .unwrap_or_else(|| plan.selected_target_label()),
             plan,
             launch,
             manifest_path,
@@ -282,7 +283,10 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let pid = info.pid() as u32;
         let process_start_time = lm::process_start_time_unix_ms(pid);
         if let Err(err) = lm::persist_after_spawn(pid, &launch_digest, process_start_time) {
-            eprintln!("ATO-WARN failed to enrich session record with reuse metadata: {}", err);
+            eprintln!(
+                "ATO-WARN failed to enrich session record with reuse metadata: {}",
+                err
+            );
         }
 
         self.session_info = Some(info);

@@ -551,7 +551,7 @@ mod platform {
 
         let unix_secs = btime_secs.checked_add(starttime_jiffies / clk_tck)?;
         let frac_ms = ((starttime_jiffies % clk_tck) * 1_000) / clk_tck;
-        Some(unix_secs.checked_mul(1_000)?.checked_add(frac_ms)?)
+        unix_secs.checked_mul(1_000)?.checked_add(frac_ms)
     }
 }
 
