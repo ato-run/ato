@@ -539,11 +539,35 @@ fn build_runtime_command(
         cmd.args(args);
     }
 
+    log_runtime_cmd(&cmd, runtime_dir, entrypoint);
+
     Ok(PreparedCommand {
         cmd,
         #[cfg(unix)]
         _secret_fd_guard: secret_fd_guard,
     })
+}
+
+/// Trace the fully-assembled Deno command line that will run a node-compat
+/// guest. Diagnoses permission denials whose stderr reports only the
+/// offending path (e.g. tiddlywiki's `mkdirSync("workspace")` failing) by
+/// letting the user opt in to the full argv via `ATO_CLI_LOG=node-compat`.
+/// Default filter (`node-compat=warn`) keeps this silent so happy-path
+/// runs don't dump a 30-arg Deno line per session.
+fn log_runtime_cmd(cmd: &Command, runtime_dir: &Path, entrypoint: &str) {
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let args = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        target: crate::logging::TARGET_NODE_COMPAT,
+        program,
+        cwd = %runtime_dir.display(),
+        entrypoint,
+        args = ?args,
+        "node-compat Deno command assembled"
+    );
 }
 
 fn build_host_node_package_command(

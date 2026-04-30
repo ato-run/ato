@@ -6,6 +6,7 @@ mod cli_install;
 mod config;
 mod egress_policy;
 mod egress_proxy;
+mod logging;
 mod orchestrator;
 mod retention;
 mod state;
@@ -22,10 +23,7 @@ fn main() {
     }
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ato_desktop=info")),
-        )
+        .with_env_filter(logging::build_env_filter())
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();
