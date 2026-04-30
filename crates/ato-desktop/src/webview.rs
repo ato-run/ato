@@ -50,6 +50,7 @@ use crate::state::{
     WebSessionState,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
+use crate::ui::share::{resolve_share_icon, ShareIconSource};
 use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
@@ -1230,11 +1231,33 @@ impl WebViewManager {
                                     );
                                 }
                                 if let Some(session) = webview.launched_session.as_ref() {
-                                    if let Some(icon) = read_capsule_icon_source(
-                                        &session.manifest_path,
-                                        &session.app_root,
-                                    ) {
-                                        state.pane_icons.insert(active.pane_id, icon);
+                                    match resolve_share_icon(session) {
+                                        Some(ShareIconSource::Direct(icon)) => {
+                                            info!(
+                                                pane_id = active.pane_id,
+                                                session_id = %session.session_id,
+                                                source = %icon,
+                                                "applying direct share icon to pane"
+                                            );
+                                            state.pane_icons.insert(active.pane_id, icon);
+                                        }
+                                        Some(ShareIconSource::FaviconOrigin(origin)) => {
+                                            info!(
+                                                pane_id = active.pane_id,
+                                                session_id = %session.session_id,
+                                                origin = %origin,
+                                                "share icon will use favicon fallback via pane local_url"
+                                            );
+                                            state.pane_icons.remove(&active.pane_id);
+                                        }
+                                        None => {
+                                            error!(
+                                                pane_id = active.pane_id,
+                                                session_id = %session.session_id,
+                                                "share icon resolution returned no source"
+                                            );
+                                            state.pane_icons.remove(&active.pane_id);
+                                        }
                                     }
                                     // Mirror session metadata onto the WebPane so the
                                     // route-info popover (and inspector) can show the
@@ -2717,46 +2740,6 @@ fn target_handle_for_version(canonical_handle: &str, latest: &str) -> String {
         None => canonical_handle,
     };
     format!("{}@{}", base, latest)
-}
-
-/// Read `[metadata].icon` from a capsule manifest and resolve it to
-/// a value the sidebar can fetch — an absolute filesystem path for
-/// relative entries, or the raw string for `http(s)://` / `file://`
-/// / `data:` URLs (left for the image fetcher to dispatch on).
-///
-/// Errors are silently swallowed: the icon is purely cosmetic, and a
-/// missing or malformed `icon` should fall back to the monogram tile
-/// rather than break the launch flow.
-fn read_capsule_icon_source(manifest_path: &Path, app_root: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(manifest_path).ok()?;
-    let manifest: capsule_core::types::CapsuleManifest = toml::from_str(&raw).ok()?;
-    let icon = manifest.metadata.icon.filter(|s| !s.is_empty())?;
-    if icon.starts_with("http://")
-        || icon.starts_with("https://")
-        || icon.starts_with("file://")
-        || icon.starts_with("data:")
-    {
-        return Some(icon);
-    }
-    // Two layouts in the wild for relative icon paths:
-    //   1. Local dev: capsule.toml + assets/ siblings under the same dir
-    //      (`ato app session start` against samples/byok-ai-chat/).
-    //   2. Published: capsule.toml at the sandbox root with source files
-    //      under a `source/` subdirectory (cli/commands/run extracts to
-    //      `manifest_dir/source/` — see runtime/provisioning/shadow.rs).
-    // Try the source-prefixed path first so the published path wins for
-    // registry installs, then fall back to the bare path for local dev.
-    let with_source = app_root.join("source").join(&icon);
-    if with_source.exists() {
-        let absolute = with_source.canonicalize().unwrap_or(with_source);
-        return Some(absolute.to_string_lossy().to_string());
-    }
-    let bare = app_root.join(&icon);
-    if bare.exists() {
-        let absolute = bare.canonicalize().unwrap_or(bare);
-        return Some(absolute.to_string_lossy().to_string());
-    }
-    None
 }
 
 fn should_install_ato_auth_cookies(url: &str) -> bool {
