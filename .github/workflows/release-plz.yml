@@ -44,6 +44,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Prepare previous tag for release-plz package comparison
+        shell: bash
+        run: |
+          .github/scripts/prepare-release-plz-previous-tag.sh
+
       - name: Validate PAT for release
         if: ${{ github.event.inputs.command == 'release' }}
         shell: bash
