@@ -1110,10 +1110,10 @@ pub(crate) async fn resolve_run_target_or_install(
 }
 
 fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
-    let invocation_dir =
-        std::env::current_dir().context("Failed to resolve current directory for GitHub run")?;
-    let transient_root =
-        capsule_core::common::paths::workspace_tmp_dir(&invocation_dir).join("gh-run");
+    let transient_root = capsule_core::common::paths::nacelle_home_dir()
+        .context("Failed to resolve Ato home directory for GitHub run")?
+        .join("tmp")
+        .join("gh-run");
     std::fs::create_dir_all(&transient_root).with_context(|| {
         format!(
             "Failed to create transient GitHub run root: {}",
@@ -2567,6 +2567,30 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn relocate_github_run_checkout_uses_ato_home_tmp_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join(".ato");
+        let checkout_root = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout_root).expect("create checkout");
+        std::fs::write(
+            checkout_root.join("capsule.toml"),
+            "schema_version = \"0.3\"\n",
+        )
+        .expect("write manifest");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
+        let relocated = relocate_github_run_checkout(&checkout_root).expect("relocate checkout");
+
+        assert_eq!(
+            relocated,
+            ato_home.join("tmp").join("gh-run").join("checkout")
+        );
+        assert!(relocated.join("capsule.toml").exists());
+        assert!(!checkout_root.exists());
     }
 
     fn write_installed_capsule(
