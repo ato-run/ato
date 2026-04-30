@@ -17,6 +17,7 @@ use url::{form_urlencoded, Url};
 use crate::bridge::ShellEvent;
 use crate::config::SecretEntry;
 use crate::orchestrator::{register_pending_cli_command, CliLaunchSpec};
+use crate::ui::share::web_favicon_origin;
 
 pub type WorkspaceId = usize;
 pub type TaskSetId = usize;
@@ -3772,13 +3773,16 @@ fn sidebar_icon_for_task(
             GuestRoute::ExternalUrl(url) => external_origin(url)
                 .map(|origin| SidebarTaskIconSpec::ExternalUrl { origin })
                 .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
-            GuestRoute::Terminal { .. } => {
-                SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal)
-            }
             GuestRoute::Capsule { .. }
             | GuestRoute::CapsuleHandle { .. }
-            | GuestRoute::CapsuleUrl { .. } => {
-                SidebarTaskIconSpec::Monogram(short_label(&task.title))
+            | GuestRoute::CapsuleUrl { .. } => web
+                .local_url
+                .as_deref()
+                .and_then(web_favicon_origin)
+                .map(|origin| SidebarTaskIconSpec::ExternalUrl { origin })
+                .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
+            GuestRoute::Terminal { .. } => {
+                SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal)
             }
         },
         PaneSurface::HostPanel(route) => match route {
