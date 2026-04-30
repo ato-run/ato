@@ -83,6 +83,12 @@ pub enum ShellEvent {
         pane_id: usize,
         path: String,
     },
+    HostPanelCommand {
+        pane_id: usize,
+        command: String,
+        payload: Value,
+        request_id: Option<String>,
+    },
     PermissionDenied {
         pane_id: usize,
         capability: String,
