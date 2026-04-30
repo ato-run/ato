@@ -1,0 +1,2671 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ato Desktop</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://code.iconify.design/3/3.1.0/iconify.min.js"></script>
+    <style>
+      *,
+      *::before,
+      *::after {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      :root {
+        --bg-base: #09090b;
+        --bg-elevated: #18181b;
+        --bg-surface: #27272a;
+        --bg-input: #09090b;
+        --bg-card: #18181b;
+        --bg-hover: #1f1f23;
+        --border-default: #27272a;
+        --border-subtle: #1c1c1f;
+        --border-medium: #3f3f46;
+        /* Text — zinc-400 minimum for readable text */
+        --text-primary: #fafafa;
+        --text-secondary: #d4d4d8;
+        --text-body: #a1a1aa;
+        --text-muted: #71717a;
+        --text-ghost: #52525b;
+        --text-invisible: #3f3f46;
+        --accent: #6366f1;
+        --accent-dim: rgba(99, 102, 241, 0.12);
+        --accent-glow: rgba(99, 102, 241, 0.25);
+        --green: #34d399;
+        --green-dim: rgba(52, 211, 153, 0.1);
+        --amber: #fbbf24;
+        --amber-dim: rgba(251, 191, 36, 0.1);
+        --rose: #fb7185;
+        --rose-dim: rgba(251, 113, 133, 0.1);
+        --radius-sm: 6px;
+        --radius-md: 8px;
+        --radius-lg: 12px;
+        --radius-xl: 16px;
+        --ease: cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+        font-family:
+          "Inter",
+          -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        background: var(--bg-base);
+        color: var(--text-primary);
+        -webkit-font-smoothing: antialiased;
+      }
+      .shell {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        width: 100vw;
+      }
+
+      /* ═══ TITLEBAR — Native, no URL bar ═══ */
+      .titlebar {
+        display: flex;
+        align-items: center;
+        height: 46px;
+        min-height: 46px;
+        padding: 0 16px;
+        background: var(--bg-base);
+        border-bottom: 1px solid var(--border-subtle);
+        z-index: 100;
+        gap: 12px;
+        user-select: none;
+        -webkit-app-region: drag;
+      }
+      .traffic-lights {
+        display: flex;
+        gap: 7px;
+        -webkit-app-region: no-drag;
+      }
+      .tl {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        cursor: pointer;
+        transition: filter 0.15s;
+      }
+      .tl:hover {
+        filter: brightness(1.15);
+      }
+      .tl-c {
+        background: #ff5f57;
+      }
+      .tl-m {
+        background: #febc2e;
+      }
+      .tl-x {
+        background: #28c840;
+      }
+      .tb-title {
+        flex: 1;
+        text-align: center;
+        font-size: 11.5px;
+        font-weight: 500;
+        color: var(--text-ghost);
+        letter-spacing: 0.02em;
+      }
+      .tb-right {
+        width: 28px;
+      }
+
+      /* ═══ MAIN LAYOUT ═══ */
+      .main {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+      }
+
+      /* ═══ ICON DOCK (far left) ═══ */
+      .dock {
+        width: 52px;
+        min-width: 52px;
+        background: var(--bg-base);
+        border-right: 1px solid var(--border-subtle);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 12px 0;
+        gap: 4px;
+        z-index: 60;
+      }
+      .dock-btn {
+        width: 34px;
+        height: 34px;
+        border-radius: var(--radius-md);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.15s;
+        border: none;
+        background: none;
+        color: var(--text-muted);
+        font-size: 14px;
+        font-weight: 700;
+        font-family: inherit;
+      }
+      .dock-btn:hover {
+        background: var(--bg-elevated);
+        color: var(--text-secondary);
+      }
+      .dock-btn.active {
+        background: var(--accent);
+        color: #fff;
+        box-shadow: 0 2px 12px var(--accent-glow);
+      }
+      .dock-sep {
+        width: 20px;
+        height: 1px;
+        background: var(--border-default);
+        margin: 4px 0;
+      }
+      .dock-spacer {
+        flex: 1;
+      }
+      .dock-avatar {
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: linear-gradient(135deg, #6366f1, #a78bfa);
+        border: 1.5px solid rgba(255, 255, 255, 0.08);
+        transition: transform 0.15s;
+      }
+      .dock-avatar:hover {
+        transform: scale(1.1);
+      }
+      .dock-avatar svg {
+        width: 13px;
+        height: 13px;
+        fill: #fff;
+      }
+
+      /* ═══ HOME CONTENT ═══ */
+      .home {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 0 48px 80px;
+      }
+      .home::-webkit-scrollbar {
+        width: 5px;
+      }
+      .home::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .home::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+      }
+      .home-hero {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        margin-top: clamp(48px, 9vh, 96px);
+        margin-bottom: 48px;
+        width: 100%;
+        max-width: 600px;
+      }
+      .omnibar {
+        width: 100%;
+        position: relative;
+      }
+      .omnibar-input {
+        width: 100%;
+        height: 52px;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-lg);
+        padding: 0 84px 0 46px;
+        font-size: 15px;
+        color: var(--text-primary);
+        font-family: inherit;
+        outline: none;
+        transition: all 0.2s var(--ease);
+      }
+      .omnibar-input::placeholder {
+        color: var(--text-ghost);
+      }
+      .omnibar-input:focus {
+        border-color: var(--accent);
+        box-shadow:
+          0 0 0 3px var(--accent-dim),
+          0 4px 20px rgba(0, 0, 0, 0.3);
+      }
+      .omnibar-icon {
+        position: absolute;
+        left: 16px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--text-muted);
+        font-size: 18px;
+        pointer-events: none;
+        transition: color 0.15s;
+      }
+      .omnibar-input:focus ~ .omnibar-icon {
+        color: var(--accent);
+      }
+      .omnibar-kbd {
+        position: absolute;
+        right: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        align-items: center;
+        gap: 3px;
+        pointer-events: none;
+      }
+      .kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 24px;
+        height: 22px;
+        padding: 0 6px;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-medium);
+        border-radius: 5px;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--text-secondary);
+        font-family: "Inter", sans-serif;
+      }
+      .omnibar-hint {
+        margin-top: 12px;
+        font-size: 13px;
+        color: var(--text-body);
+        text-align: center;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .omnibar-hint .kbd {
+        height: 20px;
+        min-width: 20px;
+        font-size: 9.5px;
+        padding: 0 5px;
+      }
+      .omnibar-hint .sep {
+        color: var(--text-invisible);
+      }
+
+      /* Section headers */
+      .sec-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        max-width: 740px;
+        margin-bottom: 14px;
+      }
+      .sec-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-body);
+      }
+      .sec-link {
+        font-size: 11.5px;
+        color: var(--text-body);
+        cursor: pointer;
+        transition: color 0.15s;
+        border: none;
+        background: none;
+        font-family: inherit;
+        padding: 0;
+      }
+      .sec-link:hover {
+        color: var(--text-primary);
+      }
+
+      /* Capsule cards */
+      .cards-grid {
+        width: 100%;
+        max-width: 740px;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin-bottom: 44px;
+      }
+      .cc {
+        padding: 16px;
+        background: var(--bg-card);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-lg);
+        cursor: pointer;
+        transition: all 0.2s var(--ease);
+      }
+      .cc:hover {
+        background: var(--bg-hover);
+        border-color: var(--border-medium);
+        transform: translateY(-1px);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+      }
+      .cc-top {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .cc-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-sm);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        flex-shrink: 0;
+        color: #fff;
+      }
+      .cc-icon.py {
+        background: linear-gradient(135deg, #306998, #ffd43b);
+      }
+      .cc-icon.js {
+        background: linear-gradient(135deg, #f7df1e, #323330);
+      }
+      .cc-icon.rs {
+        background: linear-gradient(135deg, #ce422b, #a72145);
+      }
+      .cc-icon.go {
+        background: linear-gradient(135deg, #00add8, #007d9c);
+      }
+      .badge {
+        font-size: 9px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 4px;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+      .badge.running {
+        background: var(--green-dim);
+        color: var(--green);
+        border: 1px solid rgba(52, 211, 153, 0.2);
+      }
+      .badge.stopped {
+        background: var(--bg-surface);
+        color: var(--text-muted);
+        border: 1px solid var(--border-default);
+      }
+      .cc-name {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--text-primary);
+        margin-bottom: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .cc-author {
+        font-size: 11px;
+        color: var(--text-body);
+        margin-bottom: 12px;
+      }
+      .cc-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .cc-rt {
+        font-size: 9.5px;
+        font-weight: 500;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: var(--bg-surface);
+        color: var(--text-muted);
+        font-family: "JetBrains Mono", monospace;
+        border: 1px solid var(--border-subtle);
+      }
+      .cc-sz {
+        font-size: 10px;
+        color: var(--text-ghost);
+      }
+
+      /* Quick Actions */
+      .qa-grid {
+        width: 100%;
+        max-width: 740px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-bottom: 48px;
+      }
+      .qa {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 16px 18px;
+        background: var(--bg-card);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-lg);
+        cursor: pointer;
+        transition: all 0.15s var(--ease);
+        text-align: left;
+        border: none;
+        font-family: inherit;
+        width: 100%;
+      }
+      .qa:hover {
+        background: var(--bg-hover);
+        border-color: var(--border-medium);
+      }
+      .qa-ico {
+        width: 40px;
+        height: 40px;
+        border-radius: var(--radius-md);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        font-size: 20px;
+        transition: all 0.15s;
+      }
+      .qa-ico.gh {
+        background: var(--bg-surface);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-subtle);
+      }
+      .qa:hover .qa-ico.gh {
+        color: var(--text-primary);
+        background: var(--border-default);
+      }
+      .qa-ico.local {
+        background: var(--accent-dim);
+        color: var(--accent);
+        border: 1px solid rgba(99, 102, 241, 0.15);
+      }
+      .qa:hover .qa-ico.local {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      .qa-t {
+        font-size: 13.5px;
+        font-weight: 500;
+        color: var(--text-primary);
+      }
+      .qa-d {
+        font-size: 11.5px;
+        color: var(--text-body);
+        margin-top: 2px;
+      }
+
+      /* Recommended */
+      .reco {
+        width: 100%;
+        max-width: 740px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .reco-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 14px;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: all 0.12s;
+      }
+      .reco-row:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .reco-ico {
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        flex-shrink: 0;
+        color: #fff;
+      }
+      .reco-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .reco-n {
+        font-size: 12.5px;
+        font-weight: 500;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .reco-d {
+        font-size: 11px;
+        color: var(--text-body);
+        margin-top: 1px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .reco-btn {
+        flex-shrink: 0;
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid var(--border-default);
+        background: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s;
+        font-size: 13px;
+      }
+      .reco-btn:hover {
+        background: var(--accent-dim);
+        border-color: rgba(99, 102, 241, 0.3);
+        color: var(--accent);
+      }
+      .reco-btn.installed {
+        color: var(--green);
+        border-color: rgba(52, 211, 153, 0.25);
+      }
+
+      /* ═══ SETTINGS LAYOUT ═══ */
+      .settings {
+        flex: 1;
+        display: none;
+        overflow: hidden;
+      }
+      .settings.visible {
+        display: flex;
+      }
+      /* Secondary sidebar */
+      .ss {
+        width: 200px;
+        min-width: 200px;
+        background: var(--bg-base);
+        border-right: 1px solid var(--border-subtle);
+        display: flex;
+        flex-direction: column;
+        padding: 16px 10px;
+        overflow-y: auto;
+      }
+      .ss::-webkit-scrollbar {
+        width: 3px;
+      }
+      .ss::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 2px;
+      }
+      .ss-search {
+        margin-bottom: 12px;
+      }
+      .ss-search-box {
+        display: flex;
+        align-items: center;
+        height: 26px;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border-subtle);
+        border-radius: 6px;
+        padding: 0 8px;
+        gap: 5px;
+        transition: all 0.2s;
+      }
+      .ss-search-box:focus-within {
+        border-color: var(--border-medium);
+      }
+      .ss-search-box input {
+        flex: 1;
+        border: none;
+        background: none;
+        outline: none;
+        font-size: 10.5px;
+        color: var(--text-primary);
+        font-family: inherit;
+      }
+      .ss-search-box input::placeholder {
+        color: var(--text-ghost);
+      }
+      .ss-search-box .iconify {
+        font-size: 11px;
+        color: var(--text-ghost);
+      }
+      .ss-sec {
+        margin-bottom: 16px;
+      }
+      .ss-sec-title {
+        font-size: 9px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--text-muted);
+        padding: 0 10px 6px;
+      }
+      .ss-item {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 10px;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: all 0.12s;
+        font-size: 12px;
+        color: var(--text-body);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        position: relative;
+        width: 100%;
+        border: none;
+        background: none;
+        font-family: inherit;
+        text-align: left;
+      }
+      .ss-item:hover {
+        background: var(--bg-elevated);
+        color: var(--text-secondary);
+      }
+      .ss-item.active {
+        background: var(--accent-dim);
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .ss-item.active::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 5px;
+        bottom: 5px;
+        width: 2.5px;
+        border-radius: 0 2px 2px 0;
+        background: var(--accent);
+      }
+      .ss-item .iconify {
+        font-size: 14px;
+        flex-shrink: 0;
+        opacity: 0.65;
+      }
+      .ss-item.active .iconify {
+        opacity: 1;
+      }
+      .ss-badge {
+        margin-left: auto;
+        font-size: 8px;
+        font-weight: 700;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: var(--amber-dim);
+        color: var(--amber);
+        flex-shrink: 0;
+        border: 1px solid rgba(251, 191, 36, 0.15);
+      }
+
+      /* Settings content */
+      .s-content {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      .s-content::-webkit-scrollbar {
+        width: 5px;
+      }
+      .s-content::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .s-content::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 3px;
+      }
+      .sp {
+        display: none;
+        max-width: 640px;
+        padding: 32px 40px 80px;
+      }
+      .sp.active {
+        display: block;
+      }
+      .sp-title {
+        font-size: 20px;
+        font-weight: 600;
+        color: var(--text-primary);
+        letter-spacing: -0.01em;
+        margin-bottom: 24px;
+      }
+
+      /* Setting card container */
+      .s-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border-default);
+        border-radius: var(--radius-xl);
+        overflow: hidden;
+        margin-bottom: 24px;
+      }
+      .s-card:last-child {
+        margin-bottom: 0;
+      }
+      .s-card-sec {
+        padding: 24px;
+      }
+      .s-card-sec + .s-card-sec {
+        border-top: 1px solid var(--border-subtle);
+      }
+      .s-card-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-body);
+        margin-bottom: 20px;
+      }
+      .sr {
+        display: flex;
+        align-items: center;
+        min-height: 38px;
+        padding: 5px 0;
+        gap: 16px;
+      }
+      .sr + .sr {
+        border-top: 1px solid rgba(255, 255, 255, 0.03);
+        margin-top: 5px;
+        padding-top: 10px;
+      }
+      .sl {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+      }
+      .sl-t {
+        font-size: 13px;
+        font-weight: 450;
+        color: var(--text-secondary);
+      }
+      .sl-d {
+        font-size: 11.5px;
+        color: var(--text-body);
+        line-height: 1.4;
+      }
+      .sc {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* Toggle */
+      .tog {
+        width: 38px;
+        height: 21px;
+        border-radius: 11px;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-medium);
+        cursor: pointer;
+        position: relative;
+        transition: all 0.2s;
+        flex-shrink: 0;
+      }
+      .tog.on {
+        background: var(--accent);
+        border-color: rgba(99, 102, 241, 0.4);
+      }
+      .tog::after {
+        content: "";
+        position: absolute;
+        top: 2.5px;
+        left: 2.5px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #fff;
+        transition: transform 0.2s var(--ease);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      }
+      .tog.on::after {
+        transform: translateX(17px);
+      }
+
+      /* Select */
+      .sel {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        height: 30px;
+        padding: 0 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-medium);
+        border-radius: var(--radius-md);
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--text-secondary);
+        cursor: pointer;
+        transition: all 0.15s;
+        font-family: inherit;
+        white-space: nowrap;
+      }
+      .sel:hover {
+        border-color: var(--text-ghost);
+        background: var(--bg-elevated);
+      }
+      .sel .iconify {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+
+      /* Radio pills */
+      .rg {
+        display: flex;
+        gap: 0;
+        background: var(--bg-input);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 2px;
+      }
+      .rp {
+        padding: 5px 13px;
+        border-radius: 5px;
+        border: none;
+        background: none;
+        font-size: 11.5px;
+        font-weight: 500;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.15s;
+        font-family: inherit;
+        white-space: nowrap;
+      }
+      .rp:hover {
+        color: var(--text-body);
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .rp.active {
+        background: var(--accent-dim);
+        color: var(--accent);
+      }
+      .rg-v {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        padding: 2px;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        background: var(--bg-input);
+        align-items: stretch;
+      }
+      .rg-v .rp {
+        justify-content: flex-start;
+        width: 100%;
+        border-radius: 5px;
+        padding: 7px 12px;
+      }
+
+      /* Text input */
+      .ti {
+        height: 30px;
+        padding: 0 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-medium);
+        border-radius: var(--radius-md);
+        font-size: 12px;
+        color: var(--text-secondary);
+        font-family: inherit;
+        outline: none;
+        transition: all 0.15s;
+      }
+      .ti:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent-dim);
+      }
+      .ti.mono {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        color: var(--text-body);
+      }
+
+      /* Path display */
+      .pd {
+        display: flex;
+        align-items: center;
+        height: 30px;
+        padding: 0 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-medium);
+        border-radius: var(--radius-md);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        color: var(--text-body);
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .pc {
+        width: 30px;
+        height: 30px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-default);
+        background: var(--bg-surface);
+        color: var(--text-muted);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s;
+        flex-shrink: 0;
+      }
+      .pc:hover {
+        background: var(--bg-elevated);
+        color: var(--text-secondary);
+        border-color: var(--border-medium);
+      }
+
+      /* Slider */
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .slider {
+        flex: 1;
+        -webkit-appearance: none;
+        appearance: none;
+        height: 3px;
+        border-radius: 2px;
+        background: var(--border-default);
+        outline: none;
+        cursor: pointer;
+      }
+      .slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--accent);
+        border: 2px solid var(--bg-base);
+        cursor: pointer;
+        box-shadow: 0 0 0 1px var(--accent-dim);
+      }
+      .sv {
+        font-size: 11px;
+        font-family: "JetBrains Mono", monospace;
+        color: var(--text-body);
+        min-width: 44px;
+        text-align: right;
+      }
+
+      /* Buttons */
+      .btn {
+        height: 28px;
+        padding: 0 12px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-default);
+        background: var(--bg-surface);
+        font-size: 11.5px;
+        font-weight: 500;
+        color: var(--text-body);
+        cursor: pointer;
+        font-family: inherit;
+        transition: all 0.15s;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }
+      .btn:hover {
+        background: var(--bg-elevated);
+        border-color: var(--border-medium);
+        color: var(--text-secondary);
+      }
+      /* Danger — always tinted */
+      .btn.danger {
+        border-color: rgba(251, 113, 133, 0.25);
+        color: var(--rose);
+        background: var(--rose-dim);
+      }
+      .btn.danger:hover {
+        background: rgba(251, 113, 133, 0.18);
+        border-color: rgba(251, 113, 133, 0.4);
+      }
+      .btn.secondary {
+        border-color: var(--border-medium);
+        color: var(--text-body);
+      }
+
+      /* Trust table */
+      .tt {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+      }
+      .tt th {
+        text-align: left;
+        font-size: 9.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-body);
+        padding: 8px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .tt td {
+        font-size: 12px;
+        padding: 10px 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        color: var(--text-body);
+        vertical-align: middle;
+      }
+      .tt tr:last-child td {
+        border-bottom: none;
+      }
+      .fp {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 9.5px;
+        color: var(--text-muted);
+      }
+      .ts {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 9.5px;
+        font-weight: 600;
+      }
+      .ts.ok {
+        background: var(--green-dim);
+        color: var(--green);
+        border: 1px solid rgba(52, 211, 153, 0.15);
+      }
+      .ts.no {
+        background: var(--amber-dim);
+        color: var(--amber);
+        border: 1px solid rgba(251, 191, 36, 0.15);
+      }
+      .ts.uk {
+        background: var(--bg-surface);
+        color: var(--text-muted);
+        border: 1px solid var(--border-default);
+      }
+      .ts .d {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+      .ts.ok .d {
+        background: var(--green);
+      }
+      .ts.no .d {
+        background: var(--amber);
+      }
+      .ts.uk .d {
+        background: var(--text-muted);
+      }
+      .pe {
+        background: none;
+        border: none;
+        border-bottom: 1px solid transparent;
+        color: var(--text-body);
+        font-size: 12px;
+        font-family: inherit;
+        padding: 2px 0;
+        outline: none;
+        cursor: text;
+        transition: border-color 0.15s;
+        width: 110px;
+      }
+      .pe:focus {
+        border-bottom-color: var(--accent);
+        color: var(--text-primary);
+      }
+
+      /* Diagnostics */
+      .dg {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .dc {
+        padding: 12px;
+        background: var(--bg-input);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+      }
+      .dc-l {
+        font-size: 9px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--text-muted);
+        margin-bottom: 4px;
+      }
+      .dc-v {
+        font-size: 12.5px;
+        color: var(--text-primary);
+        font-family: "JetBrains Mono", monospace;
+      }
+      .dc-v.sub {
+        color: var(--text-body);
+        font-size: 11.5px;
+      }
+      .svc-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      }
+      .svc-info {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .svc-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+      }
+      .svc-dot.on {
+        background: var(--green);
+        box-shadow: 0 0 6px rgba(52, 211, 153, 0.3);
+      }
+      .svc-dot.off {
+        background: var(--text-ghost);
+      }
+      .svc-name {
+        font-size: 11.5px;
+        color: var(--text-body);
+        font-family: "JetBrains Mono", monospace;
+      }
+      .svc-meta {
+        font-size: 10.5px;
+        font-family: "JetBrains Mono", monospace;
+        color: var(--text-muted);
+      }
+      .flag-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      }
+      .flag-label {
+        font-size: 12.5px;
+        color: var(--text-body);
+      }
+      .flag-desc {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 1px;
+      }
+      .diag-copy {
+        margin-top: 20px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 20px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-default);
+        background: var(--bg-card);
+        color: var(--text-body);
+        font-size: 12.5px;
+        font-weight: 500;
+        cursor: pointer;
+        font-family: inherit;
+        transition: all 0.15s;
+      }
+      .diag-copy:hover {
+        background: var(--bg-hover);
+        border-color: var(--border-medium);
+        color: var(--text-secondary);
+      }
+      .license {
+        margin-top: 20px;
+        font-size: 11px;
+        color: var(--text-muted);
+        line-height: 1.7;
+      }
+      .empty-text {
+        font-size: 12px;
+        color: var(--text-muted);
+        padding: 4px 0;
+      }
+
+      /* Toast */
+      .toast-box {
+        position: fixed;
+        top: 58px;
+        right: 16px;
+        z-index: 200;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        pointer-events: none;
+      }
+      .toast {
+        padding: 10px 16px;
+        background: var(--bg-card);
+        backdrop-filter: blur(20px);
+        border: 1px solid var(--border-medium);
+        border-radius: var(--radius-md);
+        font-size: 12px;
+        color: var(--text-primary);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        animation:
+          tin 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+          tout 0.3s 2.5s var(--ease) forwards;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        pointer-events: auto;
+      }
+      @keyframes tin {
+        from {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      @keyframes tout {
+        to {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <!-- Titlebar — clean, no URL bar -->
+      <div class="titlebar">
+        <div class="traffic-lights">
+          <div class="tl tl-c"></div>
+          <div class="tl tl-m"></div>
+          <div class="tl tl-x"></div>
+        </div>
+        <div class="tb-title" id="tbTitle">ato Desktop</div>
+        <div class="tb-right"></div>
+      </div>
+
+      <div class="main">
+        <!-- Icon Dock -->
+        <div class="dock">
+          <button
+            class="dock-btn active"
+            id="dockHome"
+            onclick="go('home')"
+            title="Home"
+          >
+            a
+          </button>
+          <div class="dock-sep"></div>
+          <button
+            class="dock-btn"
+            id="dockSettings"
+            onclick="go('general')"
+            title="Settings"
+          >
+            <span
+              class="iconify"
+              data-icon="lucide:settings"
+              style="font-size: 15px"
+            ></span>
+          </button>
+          <div class="dock-spacer"></div>
+          <div class="dock-avatar">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"
+              />
+            </svg>
+          </div>
+        </div>
+
+        <!-- ═══ HOME ═══ -->
+        <div class="home" id="viewHome">
+          <div class="home-hero">
+            <div class="omnibar">
+              <input
+                class="omnibar-input"
+                type="text"
+                placeholder="Search capsules, paste a GitHub URL…"
+                id="omniInput"
+              />
+              <span
+                class="iconify omnibar-icon"
+                data-icon="lucide:search"
+              ></span>
+              <div class="omnibar-kbd">
+                <span class="kbd">⌘</span><span class="kbd">K</span>
+              </div>
+            </div>
+            <div class="omnibar-hint">
+              Press <span class="kbd">Enter</span> to search
+              <span class="sep">·</span> <span class="kbd">⌘</span
+              ><span class="kbd">V</span> to paste URL
+            </div>
+          </div>
+
+          <div class="sec-head">
+            <span class="sec-title">Recently Used</span
+            ><button class="sec-link" onclick="toast('View all capsules')">
+              View all →
+            </button>
+          </div>
+          <div class="cards-grid">
+            <div class="cc" onclick="toast('Opening libretranslate-py…')">
+              <div class="cc-top">
+                <div class="cc-icon py">
+                  <span class="iconify" data-icon="lucide:languages"></span>
+                </div>
+                <span class="badge running">Running</span>
+              </div>
+              <div class="cc-name">libretranslate-py</div>
+              <div class="cc-author">@kyotori</div>
+              <div class="cc-meta">
+                <span class="cc-rt">Python 3.12</span
+                ><span class="cc-sz">142 MB</span>
+              </div>
+            </div>
+            <div class="cc" onclick="toast('Opening image-resizer…')">
+              <div class="cc-top">
+                <div class="cc-icon js">
+                  <span class="iconify" data-icon="lucide:image"></span>
+                </div>
+                <span class="badge stopped">Stopped</span>
+              </div>
+              <div class="cc-name">image-resizer</div>
+              <div class="cc-author">@sarah</div>
+              <div class="cc-meta">
+                <span class="cc-rt">Node 20</span
+                ><span class="cc-sz">28 MB</span>
+              </div>
+            </div>
+            <div class="cc" onclick="toast('Opening mdbook-renderer…')">
+              <div class="cc-top">
+                <div class="cc-icon rs">
+                  <span class="iconify" data-icon="lucide:book-open"></span>
+                </div>
+                <span class="badge running">Running</span>
+              </div>
+              <div class="cc-name">mdbook-renderer</div>
+              <div class="cc-author">@rust-lang</div>
+              <div class="cc-meta">
+                <span class="cc-rt">Rust 1.78</span
+                ><span class="cc-sz">4.1 MB</span>
+              </div>
+            </div>
+            <div class="cc" onclick="toast('Opening sqlite-explorer…')">
+              <div class="cc-top">
+                <div class="cc-icon go">
+                  <span class="iconify" data-icon="lucide:database"></span>
+                </div>
+                <span class="badge stopped">Stopped</span>
+              </div>
+              <div class="cc-name">sqlite-explorer</div>
+              <div class="cc-author">@glebarez</div>
+              <div class="cc-meta">
+                <span class="cc-rt">Go 1.22</span
+                ><span class="cc-sz">8.3 MB</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="sec-head">
+            <span class="sec-title">Quick Actions</span>
+          </div>
+          <div class="qa-grid">
+            <button
+              class="qa"
+              onclick="
+                document.getElementById('omniInput').focus();
+                toast('Paste a GitHub URL to install');
+              "
+            >
+              <div class="qa-ico gh">
+                <span class="iconify" data-icon="mdi:github"></span>
+              </div>
+              <div>
+                <div class="qa-t">Install from GitHub</div>
+                <div class="qa-d">Paste a repository URL above</div>
+              </div>
+            </button>
+            <button class="qa" onclick="toast('Opening local workspace…')">
+              <div class="qa-ico local">
+                <span class="iconify" data-icon="lucide:folder-open"></span>
+              </div>
+              <div>
+                <div class="qa-t">Open Local Capsule</div>
+                <div class="qa-d">Browse ~/.ato/workspaces</div>
+              </div>
+            </button>
+          </div>
+
+          <div class="sec-head">
+            <span class="sec-title">Recommended</span
+            ><button class="sec-link" onclick="toast('Browse store…')">
+              Browse store →
+            </button>
+          </div>
+          <div class="reco">
+            <div class="reco-row">
+              <div
+                class="reco-ico"
+                style="background: linear-gradient(135deg, #2563eb, #1d4ed8)"
+              >
+                <span class="iconify" data-icon="lucide:file-text"></span>
+              </div>
+              <div class="reco-info">
+                <div class="reco-n">markdown-preview</div>
+                <div class="reco-d">
+                  Live Markdown renderer with math support
+                </div>
+              </div>
+              <button
+                class="reco-btn"
+                onclick="
+                  event.stopPropagation();
+                  toggleInstall(this);
+                "
+              >
+                <span class="iconify" data-icon="lucide:plus"></span>
+              </button>
+            </div>
+            <div class="reco-row">
+              <div
+                class="reco-ico"
+                style="background: linear-gradient(135deg, #dc2626, #991b1b)"
+              >
+                <span class="iconify" data-icon="lucide:git-branch"></span>
+              </div>
+              <div class="reco-info">
+                <div class="reco-n">git-stats</div>
+                <div class="reco-d">
+                  Local repository contribution analytics
+                </div>
+              </div>
+              <button
+                class="reco-btn"
+                onclick="
+                  event.stopPropagation();
+                  toggleInstall(this);
+                "
+              >
+                <span class="iconify" data-icon="lucide:plus"></span>
+              </button>
+            </div>
+            <div class="reco-row">
+              <div
+                class="reco-ico"
+                style="background: linear-gradient(135deg, #7c3aed, #5b21b6)"
+              >
+                <span class="iconify" data-icon="lucide:palette"></span>
+              </div>
+              <div class="reco-info">
+                <div class="reco-n">color-converter</div>
+                <div class="reco-d">HEX / RGB / HSL / OKLCH color tool</div>
+              </div>
+              <button
+                class="reco-btn installed"
+                onclick="
+                  event.stopPropagation();
+                  toggleInstall(this);
+                "
+              >
+                <span class="iconify" data-icon="lucide:check"></span>
+              </button>
+            </div>
+            <div class="reco-row">
+              <div
+                class="reco-ico"
+                style="background: linear-gradient(135deg, #059669, #047857)"
+              >
+                <span class="iconify" data-icon="lucide:json"></span>
+              </div>
+              <div class="reco-info">
+                <div class="reco-n">json-formatter</div>
+                <div class="reco-d">
+                  Pretty-print, minify, and validate JSON
+                </div>
+              </div>
+              <button
+                class="reco-btn"
+                onclick="
+                  event.stopPropagation();
+                  toggleInstall(this);
+                "
+              >
+                <span class="iconify" data-icon="lucide:plus"></span>
+              </button>
+            </div>
+            <div class="reco-row">
+              <div
+                class="reco-ico"
+                style="background: linear-gradient(135deg, #d97706, #b45309)"
+              >
+                <span class="iconify" data-icon="lucide:key"></span>
+              </div>
+              <div class="reco-info">
+                <div class="reco-n">jwt-decoder</div>
+                <div class="reco-d">Decode and inspect JWT tokens</div>
+              </div>
+              <button
+                class="reco-btn"
+                onclick="
+                  event.stopPropagation();
+                  toggleInstall(this);
+                "
+              >
+                <span class="iconify" data-icon="lucide:plus"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ SETTINGS ═══ -->
+        <div class="settings" id="viewSettings">
+          <div class="ss">
+            <div class="ss-search">
+              <div class="ss-search-box">
+                <span class="iconify" data-icon="lucide:search"></span
+                ><input type="text" placeholder="Search…" id="ssSearch" />
+              </div>
+            </div>
+            <div class="ss-sec">
+              <div class="ss-sec-title">Settings</div>
+              <button
+                class="ss-item"
+                data-tab="general"
+                onclick="go('general')"
+              >
+                <span
+                  class="iconify"
+                  data-icon="lucide:sliders-horizontal"
+                ></span
+                >General
+              </button>
+              <button
+                class="ss-item"
+                data-tab="account"
+                onclick="go('account')"
+              >
+                <span class="iconify" data-icon="lucide:user"></span>Account
+              </button>
+              <button
+                class="ss-item"
+                data-tab="runtime"
+                onclick="go('runtime')"
+              >
+                <span class="iconify" data-icon="lucide:cpu"></span>Runtime
+                <span class="ss-badge">Core</span>
+              </button>
+              <button
+                class="ss-item"
+                data-tab="sandbox"
+                onclick="go('sandbox')"
+              >
+                <span class="iconify" data-icon="lucide:shield"></span>Sandbox
+              </button>
+              <button class="ss-item" data-tab="trust" onclick="go('trust')">
+                <span class="iconify" data-icon="lucide:fingerprint"></span
+                >Trust Store <span class="ss-badge">3</span>
+              </button>
+            </div>
+            <div class="ss-sec">
+              <div class="ss-sec-title">System</div>
+              <button
+                class="ss-item"
+                data-tab="registry"
+                onclick="go('registry')"
+              >
+                <span class="iconify" data-icon="lucide:package"></span>Registry
+              </button>
+              <button
+                class="ss-item"
+                data-tab="projection"
+                onclick="go('projection')"
+              >
+                <span class="iconify" data-icon="lucide:monitor"></span>Delivery
+              </button>
+              <button
+                class="ss-item"
+                data-tab="developer"
+                onclick="go('developer')"
+              >
+                <span class="iconify" data-icon="lucide:code"></span>Developer
+              </button>
+              <button class="ss-item" data-tab="about" onclick="go('about')">
+                <span class="iconify" data-icon="lucide:info"></span>About
+              </button>
+            </div>
+          </div>
+
+          <div class="s-content">
+            <!-- General -->
+            <div class="sp" id="tab-general">
+              <div class="sp-title">General</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Startup</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Launch at login</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog"
+                        onclick="
+                          this.classList.toggle('on');
+                          toast(
+                            this.classList.contains('on')
+                              ? 'Enabled'
+                              : 'Disabled',
+                          );
+                        "
+                      ></div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Show in menu bar / system tray</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog on"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Show What's New on update</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog on"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Appearance</div>
+                  <div class="sr">
+                    <div class="sl"><span class="sl-t">Language</span></div>
+                    <div class="sc">
+                      <div class="sel" onclick="toast('Dropdown')">
+                        System
+                        <span
+                          class="iconify"
+                          data-icon="lucide:chevron-down"
+                        ></span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl"><span class="sl-t">Theme</span></div>
+                    <div class="sc">
+                      <div class="rg">
+                        <button class="rp active" onclick="rpick(this)">
+                          System</button
+                        ><button class="rp" onclick="rpick(this)">Light</button
+                        ><button class="rp" onclick="rpick(this)">Dark</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Updates</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Update channel</span>
+                    </div>
+                    <div class="sc">
+                      <div class="rg">
+                        <button class="rp active" onclick="rpick(this)">
+                          Stable</button
+                        ><button class="rp" onclick="rpick(this)">Beta</button
+                        ><button class="rp" onclick="rpick(this)">
+                          Nightly
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Automatic updates</span
+                      ><span class="sl-d">Includes bundled CLI</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog on"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Account -->
+            <div class="sp" id="tab-account">
+              <div class="sp-title">Account</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Authentication</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t"
+                        >Signed in as
+                        <strong style="color: var(--accent)"
+                          >@kyotori</strong
+                        ></span
+                      ><span class="sl-d">ato.run/u/kyotori</span>
+                    </div>
+                    <div class="sc">
+                      <button
+                        class="btn danger"
+                        onclick="toast('Signing out…')"
+                      >
+                        Sign Out
+                      </button>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl"><span class="sl-t">Device name</span></div>
+                    <div class="sc">
+                      <input
+                        class="ti"
+                        value="macbook-pro-m2"
+                        style="width: 180px"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Credentials</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">ATO_TOKEN</span
+                      ><span class="sl-d">Stored in system keychain</span>
+                    </div>
+                    <div class="sc">
+                      <span
+                        style="
+                          font-size: 12px;
+                          font-family: &quot;JetBrains Mono&quot;, monospace;
+                          color: var(--text-ghost);
+                          letter-spacing: 2px;
+                        "
+                        >•••••••••••</span
+                      ><button
+                        class="btn danger"
+                        onclick="toast('Token revoked')"
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">credentials.toml</span>
+                    </div>
+                    <div class="sc" style="gap: 6px">
+                      <div class="pd">~/.config/ato/credentials.toml</div>
+                      <button class="pc" onclick="toast('Path copied')">
+                        <span
+                          class="iconify"
+                          data-icon="lucide:copy"
+                          style="font-size: 12px"
+                        ></span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Runtime -->
+            <div class="sp" id="tab-runtime">
+              <div class="sp-title">Runtime</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Cache</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Cache location</span>
+                    </div>
+                    <div class="sc" style="gap: 6px">
+                      <div class="pd">~/.ato/cache</div>
+                      <button class="pc" onclick="toast('Path copied')">
+                        <span
+                          class="iconify"
+                          data-icon="lucide:copy"
+                          style="font-size: 12px"
+                        ></span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Cache size limit</span>
+                    </div>
+                    <div class="sc">
+                      <div class="slider-row">
+                        <input
+                          type="range"
+                          class="slider"
+                          min="1"
+                          max="50"
+                          value="10"
+                          oninput="
+                            this.nextElementSibling.textContent =
+                              this.value + ' GB'
+                          "
+                        /><span class="sv">10 GB</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl"></div>
+                    <div class="sc">
+                      <button
+                        class="btn secondary"
+                        onclick="toast('Cache cleared — 4.2 GB freed')"
+                      >
+                        <span
+                          class="iconify"
+                          data-icon="lucide:trash-2"
+                          style="font-size: 12px"
+                        ></span
+                        >Clear Cache
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Workspace</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Workspace root</span>
+                    </div>
+                    <div class="sc" style="gap: 6px">
+                      <div class="pd">~/.ato/workspaces</div>
+                      <button class="pc" onclick="toast('Path copied')">
+                        <span
+                          class="iconify"
+                          data-icon="lucide:copy"
+                          style="font-size: 12px"
+                        ></span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Watch debounce</span
+                      ><span class="sl-d">CAPSULE_WATCH_DEBOUNCE_MS</span>
+                    </div>
+                    <div class="sc">
+                      <div class="slider-row">
+                        <input
+                          type="range"
+                          class="slider"
+                          min="50"
+                          max="2000"
+                          value="300"
+                          step="50"
+                          oninput="
+                            this.nextElementSibling.textContent =
+                              this.value + ' ms'
+                          "
+                        /><span class="sv">300 ms</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Sandbox Tier Policy</div>
+                  <div class="sr" style="align-items: flex-start">
+                    <div class="sl">
+                      <span class="sl-t">Default tier policy</span
+                      ><span class="sl-d"
+                        >Controls which capsule tiers can execute</span
+                      >
+                    </div>
+                    <div class="sc">
+                      <div class="rg-v">
+                        <button class="rp active" onclick="rpick(this)">
+                          Tier 1 only</button
+                        ><button class="rp" onclick="rpick(this)">
+                          Tier 1 + Tier 2 (confirm)</button
+                        ><button
+                          class="rp"
+                          onclick="rpick(this)"
+                          style="color: var(--amber)"
+                        >
+                          Tier 1 + Tier 2 auto
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Unsafe execution prompt</span
+                      ><span class="sl-d">When --unsafe is required</span>
+                    </div>
+                    <div class="sc">
+                      <div class="sel" onclick="toast('Dropdown')">
+                        Always confirm
+                        <span
+                          class="iconify"
+                          data-icon="lucide:chevron-down"
+                        ></span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">CAPSULE_ALLOW_UNSAFE</span
+                      ><span class="sl-d">Env var shadow</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Sandbox -->
+            <div class="sp" id="tab-sandbox">
+              <div class="sp-title">Sandbox</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Nacelle</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Nacelle engine</span
+                      ><span class="sl-d">Required for Tier 2 execution</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog on"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Network Egress</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Default egress policy</span>
+                    </div>
+                    <div class="sc">
+                      <div class="rg">
+                        <button class="rp active" onclick="rpick(this)">
+                          Deny-all</button
+                        ><button class="rp" onclick="rpick(this)">
+                          Allowlist</button
+                        ><button class="rp" onclick="rpick(this)">
+                          Proxy-only
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Tailnet</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Tailnet sidecar</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog"
+                        onclick="
+                          this.classList.toggle('on');
+                          toast(
+                            this.classList.contains('on')
+                              ? 'Enabled'
+                              : 'Disabled',
+                          );
+                        "
+                      ></div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Headscale control plane</span>
+                    </div>
+                    <div class="sc">
+                      <input
+                        class="ti mono"
+                        value="https://hs.ato.run"
+                        style="width: 220px"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Host Bridge Sockets</div>
+                  <div class="sr" style="border: none; margin: 0; padding: 0">
+                    <div class="svc-info">
+                      <div class="svc-dot on"></div>
+                      <span class="svc-name">nacelle.sock</span>
+                    </div>
+                    <span class="svc-meta">pid 48291 — listening</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Trust Store -->
+            <div class="sp" id="tab-trust">
+              <div class="sp-title">Trust Store</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Revocation</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Update frequency</span>
+                    </div>
+                    <div class="sc">
+                      <div class="sel" onclick="toast('Dropdown')">
+                        24 hours
+                        <span
+                          class="iconify"
+                          data-icon="lucide:chevron-down"
+                        ></span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Revocation source</span>
+                    </div>
+                    <div class="sc">
+                      <div class="sel" onclick="toast('Dropdown')">
+                        DNS TXT (default)
+                        <span
+                          class="iconify"
+                          data-icon="lucide:chevron-down"
+                        ></span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Unknown publisher TOFU</span
+                      ><span class="sl-d">First-time trust</span>
+                    </div>
+                    <div class="sc">
+                      <div class="rg">
+                        <button class="rp active" onclick="rpick(this)">
+                          Always prompt</button
+                        ><button class="rp" onclick="rpick(this)">
+                          Auto-trust</button
+                        ><button class="rp" onclick="rpick(this)">
+                          Always reject
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec" style="padding: 0 24px 24px">
+                  <div class="s-card-title">Known Publishers</div>
+                  <table class="tt">
+                    <thead>
+                      <tr>
+                        <th>Publisher</th>
+                        <th>Petname</th>
+                        <th>Fingerprint</th>
+                        <th>State</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td
+                          style="color: var(--text-primary); font-weight: 500"
+                        >
+                          figma.com
+                        </td>
+                        <td><input class="pe" value="Figma" /></td>
+                        <td class="fp">sha256:a3f2…8c1d</td>
+                        <td>
+                          <span class="ts ok"
+                            ><span class="d"></span>Verified</span
+                          >
+                        </td>
+                        <td>
+                          <button
+                            class="btn danger"
+                            style="padding: 0 8px; font-size: 10px"
+                            onclick="toast('Revoked')"
+                          >
+                            Revoke
+                          </button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td
+                          style="color: var(--text-primary); font-weight: 500"
+                        >
+                          linear.app
+                        </td>
+                        <td><input class="pe" value="Linear" /></td>
+                        <td class="fp">sha256:7b1c…d4e2</td>
+                        <td>
+                          <span class="ts ok"
+                            ><span class="d"></span>Verified</span
+                          >
+                        </td>
+                        <td>
+                          <button
+                            class="btn danger"
+                            style="padding: 0 8px; font-size: 10px"
+                            onclick="toast('Revoked')"
+                          >
+                            Revoke
+                          </button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td
+                          style="color: var(--text-primary); font-weight: 500"
+                        >
+                          untrusted.dev
+                        </td>
+                        <td><input class="pe" value="" /></td>
+                        <td class="fp">sha256:e9a0…3f7b</td>
+                        <td>
+                          <span class="ts no"
+                            ><span class="d"></span>Untrusted</span
+                          >
+                        </td>
+                        <td>
+                          <button
+                            class="btn danger"
+                            style="padding: 0 8px; font-size: 10px"
+                            onclick="toast('Revoked')"
+                          >
+                            Revoke
+                          </button>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td
+                          style="color: var(--text-primary); font-weight: 500"
+                        >
+                          registry.local
+                        </td>
+                        <td><input class="pe" value="Local Dev" /></td>
+                        <td class="fp">sha256:f122…a891</td>
+                        <td>
+                          <span class="ts uk"
+                            ><span class="d"></span>Unknown</span
+                          >
+                        </td>
+                        <td>
+                          <button
+                            class="btn secondary"
+                            style="padding: 0 8px; font-size: 10px"
+                            onclick="toast('Revoked')"
+                          >
+                            Revoke
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Registry -->
+            <div class="sp" id="tab-registry">
+              <div class="sp-title">Registry</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Store API</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Store API URL</span>
+                    </div>
+                    <div class="sc">
+                      <input
+                        class="ti mono"
+                        value="https://api.ato.run"
+                        style="width: 220px"
+                      />
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Store site URL</span>
+                    </div>
+                    <div class="sc">
+                      <input
+                        class="ti mono"
+                        value="https://ato.run"
+                        style="width: 220px"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Private Registries</div>
+                  <div class="empty-text">
+                    No private registries configured.
+                  </div>
+                  <div
+                    class="sr"
+                    style="border: none; margin: 0; padding: 8px 0 0"
+                  >
+                    <div class="sl"></div>
+                    <div class="sc">
+                      <button
+                        class="btn secondary"
+                        onclick="toast('Add registry…')"
+                      >
+                        <span
+                          class="iconify"
+                          data-icon="lucide:plus"
+                          style="font-size: 12px"
+                        ></span
+                        >Add Registry
+                      </button>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Local registry port</span
+                      ><span class="sl-d">ato registry serve</span>
+                    </div>
+                    <div class="sc">
+                      <input class="ti mono" value="8080" style="width: 80px" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Delivery -->
+            <div class="sp" id="tab-projection">
+              <div class="sp-title">Delivery</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Projection</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Enable projection by default</span
+                      ><span class="sl-d">ato install --project</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Projection directory</span>
+                    </div>
+                    <div class="sc" style="gap: 6px">
+                      <div class="pd">/Applications</div>
+                      <button class="pc" onclick="toast('Path copied')">
+                        <span
+                          class="iconify"
+                          data-icon="lucide:copy"
+                          style="font-size: 12px"
+                        ></span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Installed Capsules</div>
+                  <div class="empty-text">No projected capsules installed.</div>
+                  <div
+                    class="sr"
+                    style="border: none; margin: 0; padding: 8px 0 0"
+                  >
+                    <div class="sl"></div>
+                    <div class="sc">
+                      <button class="btn secondary" onclick="toast('Install…')">
+                        <span
+                          class="iconify"
+                          data-icon="lucide:download"
+                          style="font-size: 12px"
+                        ></span
+                        >Install Capsule
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Developer -->
+            <div class="sp" id="tab-developer">
+              <div class="sp-title">Developer</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Logging</div>
+                  <div class="sr">
+                    <div class="sl"><span class="sl-t">Log level</span></div>
+                    <div class="sc">
+                      <div class="sel" onclick="toast('Dropdown')">
+                        warn
+                        <span
+                          class="iconify"
+                          data-icon="lucide:chevron-down"
+                        ></span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl"><span class="sl-t">Log output</span></div>
+                    <div class="sc" style="gap: 6px">
+                      <div class="pd">stderr</div>
+                      <button class="pc">
+                        <span
+                          class="iconify"
+                          data-icon="lucide:copy"
+                          style="font-size: 12px"
+                        ></span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Telemetry</div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Send crash reports</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog on"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                  <div class="sr">
+                    <div class="sl">
+                      <span class="sl-t">Include usage statistics</span>
+                    </div>
+                    <div class="sc">
+                      <div
+                        class="tog"
+                        onclick="this.classList.toggle('on')"
+                      ></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Experimental Features</div>
+                  <div class="flag-row">
+                    <div>
+                      <span class="flag-label">Parallel branch execution</span
+                      ><span class="flag-desc"
+                        >Run multiple agent branches</span
+                      >
+                    </div>
+                    <div
+                      class="tog on"
+                      onclick="this.classList.toggle('on')"
+                    ></div>
+                  </div>
+                  <div class="flag-row">
+                    <div>
+                      <span class="flag-label">Projected file preview</span
+                      ><span class="flag-desc"
+                        >Preview native-installed files</span
+                      >
+                    </div>
+                    <div
+                      class="tog"
+                      onclick="this.classList.toggle('on')"
+                    ></div>
+                  </div>
+                  <div class="flag-row">
+                    <div>
+                      <span class="flag-label">Hot-reload capsules</span
+                      ><span class="flag-desc"
+                        >Auto-reload on source change</span
+                      >
+                    </div>
+                    <div
+                      class="tog"
+                      onclick="this.classList.toggle('on')"
+                    ></div>
+                  </div>
+                  <div class="flag-row" style="border: none">
+                    <div>
+                      <span class="flag-label">Incremental GC</span
+                      ><span class="flag-desc">Experimental collector</span>
+                    </div>
+                    <div
+                      class="tog"
+                      onclick="this.classList.toggle('on')"
+                    ></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- About -->
+            <div class="sp" id="tab-about">
+              <div class="sp-title">About</div>
+              <div class="s-card">
+                <div class="s-card-sec">
+                  <div class="s-card-title">Version</div>
+                  <div class="dg">
+                    <div class="dc">
+                      <div class="dc-l">ato</div>
+                      <div class="dc-v">0.24.1</div>
+                    </div>
+                    <div class="dc">
+                      <div class="dc-l">Build</div>
+                      <div class="dc-v sub">a3f2c8d (main)</div>
+                    </div>
+                  </div>
+                  <div class="dg" style="margin-top: 8px">
+                    <div class="dc">
+                      <div class="dc-l">Nacelle</div>
+                      <div class="dc-v sub">0.18.0</div>
+                    </div>
+                    <div class="dc">
+                      <div class="dc-l">Protocol</div>
+                      <div class="dc-v sub">capsule://v2.1</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">System</div>
+                  <div class="dg">
+                    <div class="dc">
+                      <div class="dc-l">OS</div>
+                      <div class="dc-v sub">macOS 15.3.1</div>
+                    </div>
+                    <div class="dc">
+                      <div class="dc-l">Arch</div>
+                      <div class="dc-v sub">arm64</div>
+                    </div>
+                  </div>
+                  <div class="dg" style="margin-top: 8px">
+                    <div class="dc">
+                      <div class="dc-l">Kernel</div>
+                      <div class="dc-v sub">24.3.0</div>
+                    </div>
+                    <div class="dc">
+                      <div class="dc-l">Device</div>
+                      <div class="dc-v sub">MacBook Pro M2</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="s-card-sec">
+                  <div class="s-card-title">Running Services</div>
+                  <div class="svc-row">
+                    <div class="svc-info">
+                      <div class="svc-dot on"></div>
+                      <span class="svc-name">nacelle</span>
+                    </div>
+                    <span class="svc-meta">pid 48291</span>
+                  </div>
+                  <div class="svc-row">
+                    <div class="svc-info">
+                      <div class="svc-dot on"></div>
+                      <span class="svc-name">ato-tsnetd</span>
+                    </div>
+                    <span class="svc-meta" style="color: var(--green)"
+                      >connected</span
+                    >
+                  </div>
+                  <div class="svc-row" style="border: none">
+                    <div class="svc-info">
+                      <div class="svc-dot off"></div>
+                      <span class="svc-name">ato-registry</span>
+                    </div>
+                    <span class="svc-meta">idle</span>
+                  </div>
+                </div>
+              </div>
+              <button
+                class="diag-copy"
+                onclick="toast('Diagnostics copied to clipboard')"
+              >
+                <span
+                  class="iconify"
+                  data-icon="lucide:clipboard-copy"
+                  style="font-size: 14px"
+                ></span
+                >Copy Diagnostics for Bug Report
+              </button>
+              <div class="license">
+                © 2025 ato.run · Open source under Apache 2.0 · Built with Rust
+                + Wry<br />Trust-on-First-Use · Zero-Default-Trust · Capsule
+                Protocol v2.1
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-box" id="toastBox"></div>
+
+    <script>
+      function go(view) {
+        const isHome = view === "home";
+        const homeEl = document.getElementById("viewHome");
+        const settEl = document.getElementById("viewSettings");
+
+        // Dock active state
+        document.getElementById("dockHome").classList.toggle("active", isHome);
+        document
+          .getElementById("dockSettings")
+          .classList.toggle("active", !isHome);
+
+        // Titlebar
+        document.getElementById("tbTitle").textContent = isHome
+          ? "ato Desktop"
+          : "Settings";
+
+        if (isHome) {
+          homeEl.style.display = "";
+          settEl.classList.remove("visible");
+        } else {
+          homeEl.style.display = "none";
+          settEl.classList.add("visible");
+          // Settings sidebar active
+          document
+            .querySelectorAll(".ss-item")
+            .forEach((i) => i.classList.remove("active"));
+          const item = document.querySelector(`.ss-item[data-tab="${view}"]`);
+          if (item) item.classList.add("active");
+          // Page
+          document
+            .querySelectorAll(".sp")
+            .forEach((p) => p.classList.remove("active"));
+          const page = document.getElementById("tab-" + view);
+          if (page) page.classList.add("active");
+          document.querySelector(".s-content").scrollTop = 0;
+        }
+      }
+
+      function rpick(btn) {
+        btn.parentElement
+          .querySelectorAll(".rp")
+          .forEach((p) => p.classList.remove("active"));
+        btn.classList.add("active");
+      }
+
+      function toggleInstall(btn) {
+        const on = btn.classList.toggle("installed");
+        btn
+          .querySelector(".iconify")
+          .setAttribute("data-icon", on ? "lucide:check" : "lucide:plus");
+        toast(on ? "Installed" : "Removed");
+      }
+
+      // Settings sidebar search
+      document
+        .getElementById("ssSearch")
+        .addEventListener("input", function () {
+          const q = this.value.toLowerCase();
+          document.querySelectorAll(".ss-item").forEach((item) => {
+            item.style.display =
+              !q || item.textContent.toLowerCase().includes(q) ? "" : "none";
+          });
+        });
+
+      // Toast
+      function toast(msg) {
+        const box = document.getElementById("toastBox");
+        const t = document.createElement("div");
+        t.className = "toast";
+        t.innerHTML =
+          '<span class="iconify" data-icon="lucide:check-circle" style="font-size:13px;color:var(--green);flex-shrink:0"></span>' +
+          msg;
+        box.appendChild(t);
+        setTimeout(() => t.remove(), 3000);
+      }
+
+      // ⌘K shortcut
+      document.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+          e.preventDefault();
+          if (document.getElementById("viewHome").style.display === "none")
+            go("home");
+          setTimeout(() => document.getElementById("omniInput").focus(), 50);
+        }
+      });
+    </script>
+  </body>
+</html>
