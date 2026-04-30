@@ -2,142 +2,297 @@
 
 [![Rust CI](https://github.com/ato-run/ato/actions/workflows/rust-ci.yml/badge.svg?branch=main)](https://github.com/ato-run/ato/actions/workflows/rust-ci.yml)
 
-`ato` runs any project instantly without setup. Point it at a Python script,
-a Node app, a Rust binary, or a GitHub repo — `ato` resolves the runtime,
-bootstraps only what's needed, and runs inside a sandboxed environment.
+Run a project before you set it up.
 
-This repository is the monorepo for the [Capsule Protocol](https://ato.run)
-meta-runtime: the `ato` CLI, the GPUI desktop shell, the shared
-`capsule-core` library, the `nacelle` source-runtime sandbox, and the
-Tailscale tsnet sidecar.
+`ato` is a command-line tool for trying local projects, GitHub repositories,
+and shared app links in a controlled runtime. It detects what the project needs,
+prepares the missing tools, and runs it without asking you to manually install
+Python, Node, Rust, or other project-specific dependencies first.
 
 ```bash
-curl -fsSL https://ato.run/install.sh | sh
-
-ato run .                             # local project
-ato run github.com/owner/repo         # any GitHub repo
-ato run https://ato.run/s/demo@r1     # share URL
+ato run .                      # run the current project
+ato run github.com/owner/repo  # try a GitHub repository
+ato run https://ato.run/s/demo # open a shared ato app
 ```
 
-## Workspace layout
+`ato` is useful when you want to:
 
-```
-ato/
-├── Cargo.toml                           # workspace root
-├── crates/
-│   ├── capsule-wire/                    # IPC surface (DAG root, no internal deps)
-│   │   ├── ccp/                         #   CCP envelope schema + tolerance
-│   │   ├── handle.rs                    #   URL/handle classifier
-│   │   ├── config.rs                    #   ConfigField / ConfigKind
-│   │   └── error.rs                     #   slim WireError
-│   ├── capsule-core/                    # runtime / orchestration library
-│   ├── ato-cli/                         # the meta-runtime CLI
-│   │   └── lock-draft-engine/           #   lock generation, exposed as WASM
-│   ├── ato-desktop/                     # GPUI-based desktop bundle
-│   │   └── xtask/                       #   bundle build / packaging
-│   └── nacelle/                         # source-runtime sandbox (Seatbelt / bubblewrap / Landlock)
-├── sidecars/
-│   └── ato-tsnetd/                      # Go: Tailscale tsnet + gRPC + SOCKS5
-├── docs/
-│   ├── rfcs/                            # accepted / draft architectural RFCs
-│   ├── core-architecture.md
-│   ├── GLOSSARY.md
-│   └── …
-├── tests/manual/                        # human-driven release verification
-└── .github/workflows/                   # workspace CI (incl. dep-direction lint)
-```
+- try a repository without reading its setup instructions first
+- share a runnable project with someone else
+- run a project with a repeatable setup
+- keep the project's runtime separate from your machine as much as possible
 
-## Components
-
-| Crate / module | Role |
-|---|---|
-| **`ato-cli`** | Meta-runtime entry point. Detects project type, resolves runtime, builds sandbox, runs workload. |
-| **`ato-desktop`** | GPUI shell hosting capsules in embedded Wry WebViews. Spawns `ato-cli` as a child for guest sessions. |
-| **`capsule-core`** | Runtime / orchestration library shared by CLI and Desktop. |
-| **`capsule-wire`** | Pure wire-shape definitions (CCP envelope, handles, config, errors). DAG root with no internal deps. |
-| **`nacelle`** | Source-runtime sandbox using OS isolation. Spawned as a child of `ato-cli`. |
-| **`ato-tsnetd`** (Go sidecar) | Embedded Tailscale tsnet daemon for capsule egress filtering. Spawned at runtime when `ATO_TSNET_*` env vars are set. Auto-attach pending v0.5.1. |
-
-**Process hierarchy invariant:** `ato-desktop` is always the parent process
-and spawns `ato-cli` as a child. Never the reverse.
-
-**Dependency DAG (enforced by `.github/workflows/dep-direction.yml`):**
-`ato-desktop` → `capsule-core` → `capsule-wire`, and
-`ato-cli` → `capsule-core` → `capsule-wire`.
-`nacelle` is a runtime sibling, not a build-time dep.
+> ato is still pre-1.0. Some sandboxing and network controls are still being
+> completed. See [Known limitations](crates/ato-cli/docs/known-limitations.md)
+> before using ato with untrusted code.
 
 ## Install
 
 ```bash
-# Recommended — installs CLI + Desktop + nacelle. Uses curl + unzip and
-# never produces a quarantined .dmg, so macOS Gatekeeper does not
-# interrupt first launch.
 curl -fsSL https://ato.run/install.sh | sh
+```
 
-# Homebrew (CLI only). The Cask is gone — use install.sh for the Desktop.
+Homebrew:
+
+```bash
 brew install ato-run/ato/ato-cli
+```
 
-# Windows .zip / .msi — extract / install from the latest release.
-# https://github.com/ato-run/ato/releases/latest
+From source:
 
-# From source (this monorepo)
+```bash
 cargo build -p ato-cli --release
 ```
 
-### Uninstall
+Check that it works:
 
 ```bash
-# install.sh deployments
-ato uninstall          # interactive; --keep-data to retain ~/.ato/desktop
-# or: curl -fsSL https://raw.githubusercontent.com/ato-run/ato/main/scripts/uninstall.sh | sh
-
-# Homebrew deployments
-brew uninstall ato-cli
-brew uninstall --cask ato 2>/dev/null || true   # legacy Cask, removed in v0.4.88
+ato --help
 ```
+
+To uninstall an `install.sh` deployment:
+
+```bash
+ato uninstall
+```
+
+## Quick Start
+
+### Run the Current Directory
+
+```bash
+cd my-project
+ato run .
+```
+
+ato will inspect the project, prepare what it needs, and start it.
+
+### Run a GitHub Repository
+
+```bash
+ato run github.com/owner/repo
+```
+
+This is useful for trying examples, demos, small tools, or projects you do not
+want to install globally.
+
+### Create a Lock File
+
+```bash
+ato lock .
+```
+
+A lock file records the resolved runtime setup for the project. Commit it when
+you want other people or CI to run the project the same way.
+
+### Share a Project
+
+```bash
+ato encap .
+```
+
+`encap` captures the project into a shareable description.
+
+```bash
+ato decap https://ato.run/s/demo --into ./demo
+```
+
+`decap` materializes a shared project into a local directory.
+
+## How It Works
+
+ato turns a project into a runnable plan.
+
+```text
+project files
+  |
+  v
+detect what the project needs
+  |
+  v
+resolve tools and runtimes
+  |
+  v
+write a lock file
+  |
+  v
+run in a controlled environment
+```
+
+In practice, this means ato tries to answer these questions for you:
+
+1. What kind of project is this?
+2. What tools or runtimes are needed?
+3. Can the result be recorded so the next run is repeatable?
+4. What access should the running project have to the host machine?
+
+The main file ato looks for is:
+
+```text
+capsule.toml
+```
+
+A `capsule.toml` describes how a project should run. If a project does not have
+one, ato can try to infer a basic setup.
+
+## Examples
+
+### Python Script
+
+```bash
+ato run ./scripts/report.py
+```
+
+### Node App
+
+```bash
+ato run ./examples/web
+```
+
+### Rust Project
+
+```bash
+ato run ./crates/my-tool
+```
+
+### Shared App
+
+```bash
+ato run https://ato.run/s/demo
+```
+
+## What ato Is Not
+
+ato is not a full replacement for every tool in your stack.
+
+- It is not Docker. It does not require writing a Dockerfile first.
+- It is not Nix. It focuses on running and sharing projects, not replacing your whole system environment.
+- It is not just `npx` or `uvx`. It can run whole projects, not only single packages.
+- It is not a remote development environment. It runs locally.
+
+ato sits between these tools: it gives you a fast way to try, lock, and share a
+project without turning the project into a container image or asking every user
+to reproduce the setup by hand.
+
+## Safety Model
+
+ato is designed to reduce accidental access to your machine, but it should not
+be treated as a perfect security boundary yet.
+
+Current behavior:
+
+- project files are run through ato's runtime path instead of directly on your host
+- common secret files such as `.env`, `.env.*`, private keys, and credentials files
+  are excluded from capsule archives by default
+- some OS-level isolation is available for source runtimes
+- deny-all networking is supported for supported runtime paths
+
+Known gaps in the current version:
+
+- hostname allowlists for source runtimes are not fully enforced yet
+- missing required environment variables may warn instead of stopping the run
+- stricter sandbox mode is not available for every runtime
+- some Desktop builds are still beta-quality on non-macOS platforms
+
+Read the full list here:
+
+```text
+crates/ato-cli/docs/known-limitations.md
+```
+
+When running code you do not trust, prefer:
+
+```bash
+ato run github.com/owner/repo --no-build
+```
+
+or inspect the repository first.
+
+## Common Commands
+
+```bash
+ato run .                  # run a local project
+ato run github.com/o/r     # run a GitHub repository
+ato lock .                 # generate a lock file
+ato encap .                # create a shareable project description
+ato decap <share> --into . # materialize a shared project
+ato ps                     # list running apps
+ato stop --all             # stop running apps
+ato logs                   # show logs
+```
+
+## Repository Layout
+
+This repository contains the CLI, runtime libraries, desktop app, and supporting
+tools.
+
+```text
+ato/
+├── crates/
+│   ├── ato-cli/          # command-line interface
+│   ├── capsule-core/     # project detection, locking, packing, runtime logic
+│   ├── capsule-wire/     # small shared message types
+│   ├── ato-session-core/ # session process and state helpers
+│   ├── ato-desktop/      # desktop app
+│   └── nacelle/          # source runtime sandbox
+├── sidecars/
+│   └── ato-tsnetd/       # optional network sidecar
+├── docs/
+│   └── rfcs/             # design notes and proposals
+└── .github/workflows/    # CI
+```
+
+Most users only need `ato-cli`.
 
 ## Develop
 
 ```bash
-# Workspace check (all crates)
 cargo check --workspace --all-targets
-
-# Run the CLI
-cargo run -p ato-cli -- run ./your-project
-
-# Run the Desktop shell (builds GPUI; needs platform native toolchain)
-cargo run -p ato-desktop
-
-# Per-crate test
 cargo test -p ato-cli
 cargo test -p capsule-core
+cargo run -p ato-cli -- run .
 ```
 
-### Bundle the desktop app
+Run the desktop app:
 
 ```bash
-cargo xtask bundle darwin-arm64    # macOS:   dist/darwin-arm64/Ato Desktop.app
-cargo xtask bundle windows-x86_64  # Windows: .msi via WiX
-cargo xtask bundle linux-x86_64    # Linux:   .AppImage
+cargo run -p ato-desktop
 ```
 
-### Manual test suite
+Build the CLI:
 
 ```bash
-# Wipes prior results, runs all 15 release-verification suites.
-# Set ATO_TEST_KEEP_RESULTS=1 to preserve artifacts across runs.
-tests/manual/run-all.sh
+cargo build -p ato-cli --release
+```
+
+Bundle the desktop app:
+
+```bash
+cargo xtask bundle darwin-arm64
+cargo xtask bundle windows-x86_64
+cargo xtask bundle linux-x86_64
 ```
 
 ## Documentation
 
-- [Capsule Protocol RFCs](docs/rfcs/) — `accepted/` is normative, `draft/` is in flight
-- [Core architecture](docs/core-architecture.md)
-- [Glossary](docs/GLOSSARY.md)
 - [Known limitations](crates/ato-cli/docs/known-limitations.md)
-- [Agent guidelines](AGENTS.md)
-- [Monorepo consolidation history](docs/monorepo-consolidation-plan.md)
+- [Core architecture](docs/core-architecture.md)
+- [Design RFCs](docs/rfcs/)
+- [Glossary](docs/GLOSSARY.md)
+- [Contributing guidelines](AGENTS.md)
 
 ## License
 
-Apache-2.0. See [crates/ato-cli/LICENSE](crates/ato-cli/LICENSE).
+This repository uses per-component licensing:
+
+| Component | License |
+|---|---|
+| `capsule-wire` | Apache-2.0 |
+| `ato-cli` | Apache-2.0 OR MPL-2.0 |
+| `capsule-core` | MPL-2.0 |
+| `nacelle` | MPL-2.0 |
+| `ato-desktop` | MPL-2.0 |
+| Hosted registry/backend services | Private or separately commercial-licensed |
+
+The hosted registry/backend services are not licensed for use by this source
+repository unless a separate commercial agreement says otherwise.

@@ -4,6 +4,7 @@ version = "0.4.108"
 edition = "2021"
 authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
+license = "MPL-2.0"
 build = "build.rs"
 
 # Opt out of cargo-dist (the CLI release pipeline). Desktop bundles

@@ -3,7 +3,7 @@
 [![CI](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml/badge.svg?branch=main)](https://github.com/ato-run/ato-cli/actions/workflows/build-multi-os.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/ato-run/ato-cli)](https://github.com/ato-run/ato-cli/releases)
 [![GitHub stars](https://img.shields.io/github/stars/ato-run/ato-cli?style=social)](https://github.com/ato-run/ato-cli/stargazers)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MPL--2.0-blue)](LICENSE)
 
 **Run any project instantly. Share it with one URL.**
 
@@ -242,7 +242,7 @@ Foundation transfer is not a v0.5 milestone. Published for transparency.
 
 ## License
 
-Apache License 2.0 (SPDX: Apache-2.0). See [LICENSE](LICENSE).
+Apache License 2.0 or Mozilla Public License 2.0 (SPDX: Apache-2.0 OR MPL-2.0).
 
 ## capsule.toml reference
 
