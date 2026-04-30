@@ -216,10 +216,7 @@ fn parse_attributes(tag_body: &str) -> Vec<(String, String)> {
 
         let name_start = i;
         while i < bytes.len()
-            && !matches!(
-                bytes[i],
-                b'=' | b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'
-            )
+            && !matches!(bytes[i], b'=' | b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>')
         {
             i += 1;
         }
