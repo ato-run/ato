@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::application::source_inventory::{
-    collect_source_files, native_lockfiles, normalize_outputs, OutputSpec,
+    collect_source_files, native_lockfiles, normalize_outputs,
 };
 
 /// Marker version for the digest layout. Bump if the digest composition
@@ -585,27 +586,39 @@ pub(crate) struct RecommendationRecord {
 pub(crate) enum LoadOutcome {
     Loaded(MaterializationFile),
     Missing,
-    Invalid(String),
+    Invalid(()),
 }
 
 /// Read state with non-fatal error semantics: a missing file yields
-/// `Missing`, a corrupted file yields `Invalid(error)`. Both are recoverable
-/// — callers should treat them as "no usable record".
+/// `Missing`, a corrupted file yields `Invalid(())`. Both are recoverable —
+/// callers should treat them as "no usable record". The reason for an
+/// `Invalid` outcome is logged via `tracing::warn!` so operators can
+/// diagnose corrupted state without the variant carrying a payload no
+/// caller currently inspects.
 pub(crate) fn load_state(workspace_root: &Path) -> LoadOutcome {
     let path = workspace_root.join(STATE_RELATIVE_PATH);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return LoadOutcome::Missing,
-        Err(err) => return LoadOutcome::Invalid(format!("{}: {}", path.display(), err)),
+        Err(err) => {
+            warn!(path = %path.display(), %err, "materialization state read failed");
+            return LoadOutcome::Invalid(());
+        }
     };
     match serde_json::from_slice::<MaterializationFile>(&bytes) {
         Ok(file) if file.schema_version == STATE_SCHEMA_VERSION => LoadOutcome::Loaded(file),
-        Ok(file) => LoadOutcome::Invalid(format!(
-            "{}: unsupported materialization schema_version={}",
-            path.display(),
-            file.schema_version
-        )),
-        Err(err) => LoadOutcome::Invalid(format!("{}: {}", path.display(), err)),
+        Ok(file) => {
+            warn!(
+                path = %path.display(),
+                schema_version = file.schema_version,
+                "materialization state has unsupported schema_version"
+            );
+            LoadOutcome::Invalid(())
+        }
+        Err(err) => {
+            warn!(path = %path.display(), %err, "materialization state JSON parse failed");
+            LoadOutcome::Invalid(())
+        }
     }
 }
 
