@@ -94,7 +94,11 @@ pub fn write_session_record_atomic(root: &Path, session: &StoredSessionInfo) -> 
     fs::create_dir_all(root)
         .with_context(|| format!("failed to create session root {}", root.display()))?;
     let final_path = session_record_path(root, &session.session_id);
-    let tmp_path = root.join(format!(".{}.json.tmp.{}", session.session_id, std::process::id()));
+    let tmp_path = root.join(format!(
+        ".{}.json.tmp.{}",
+        session.session_id,
+        std::process::id()
+    ));
 
     let payload = serde_json::to_vec_pretty(session)
         .with_context(|| format!("failed to encode session record {}", session.session_id))?;
@@ -132,9 +136,7 @@ pub fn write_session_record_atomic(root: &Path, session: &StoredSessionInfo) -> 
 mod tests {
     use super::*;
     use crate::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
-    use capsule_wire::handle::{
-        CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState,
-    };
+    use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use tempfile::tempdir;
 
     fn make_record(id: &str) -> StoredSessionInfo {
