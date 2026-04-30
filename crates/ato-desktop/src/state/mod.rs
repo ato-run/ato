@@ -995,6 +995,8 @@ pub struct AppState {
     pub auth_policy_registry: AuthPolicyRegistry,
     pub console_logs: Vec<ConsoleLogEntry>,
     pub network_logs: Vec<NetworkLogEntry>,
+    pub host_panel_payload_revision: u64,
+    pub host_panel_last_response: Option<serde_json::Value>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
     /// Per-capsule plaintext configuration (model name, port, etc.)
@@ -1004,6 +1006,10 @@ pub struct AppState {
     /// `crate::config::CapsuleConfigStore` for the threat-model
     /// reasoning behind the split.
     pub capsule_config_store: crate::config::CapsuleConfigStore,
+    /// Per-capsule security / execution boundary overrides. This is
+    /// deliberately separate from `capsule_config_store`, which stores
+    /// non-policy capsule-local config.
+    pub capsule_policy_overrides: crate::config::CapsulePolicyOverrideStore,
     pub capsule_search_results: Vec<CapsuleSearchResult>,
     pub capsule_search_query: String,
     next_task_id: TaskSetId,
@@ -1097,9 +1103,12 @@ impl AppState {
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             console_logs: Vec::new(),
             network_logs: Vec::new(),
+            host_panel_payload_revision: 0,
+            host_panel_last_response: None,
             config: crate::config::load_config(),
             secret_store: crate::config::load_secrets(),
             capsule_config_store: crate::config::load_capsule_configs(),
+            capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
             next_task_id: 2,
@@ -1280,9 +1289,12 @@ impl AppState {
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             console_logs: Vec::new(),
             network_logs: Vec::new(),
+            host_panel_payload_revision: 0,
+            host_panel_last_response: None,
             config: crate::config::load_config(),
             secret_store: crate::config::load_secrets(),
             capsule_config_store: crate::config::load_capsule_configs(),
+            capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
             next_task_id: 4,
@@ -1298,7 +1310,7 @@ impl AppState {
             ThemeMode::Light => ThemeMode::Dark,
             ThemeMode::Dark => ThemeMode::Light,
         };
-        self.config.theme = match self.theme_mode {
+        self.config.general.theme = match self.theme_mode {
             ThemeMode::Light => crate::config::ThemeConfig::Light,
             ThemeMode::Dark => crate::config::ThemeConfig::Dark,
         };
@@ -1307,10 +1319,14 @@ impl AppState {
 
     /// Sync theme_mode from the persisted config.
     fn sync_theme_from_config(&mut self) {
-        self.theme_mode = match self.config.theme {
+        self.theme_mode = match self.config.general.theme {
             crate::config::ThemeConfig::Light => ThemeMode::Light,
             crate::config::ThemeConfig::Dark => ThemeMode::Dark,
         };
+    }
+
+    pub fn sync_theme_from_settings(&mut self) {
+        self.sync_theme_from_config();
     }
 
     /// Update a config value and persist to disk.
@@ -1333,6 +1349,15 @@ impl AppState {
         self.capsule_config_store
             .set_config(capsule_handle, key, value);
         crate::config::save_capsule_configs(&self.capsule_config_store);
+    }
+
+    /// Persist security / execution boundary overrides for one capsule.
+    pub fn update_capsule_policy_overrides(
+        &mut self,
+        f: impl FnOnce(&mut crate::config::CapsulePolicyOverrideStore),
+    ) {
+        f(&mut self.capsule_policy_overrides);
+        crate::config::save_capsule_policy_overrides(&self.capsule_policy_overrides);
     }
 
     /// Install a pending config request (overwriting any prior one).
@@ -2408,6 +2433,19 @@ impl AppState {
                 ShellEvent::HostPanelRouteChanged { pane_id: _, path } => {
                     self.apply_host_panel_route_path(&path);
                 }
+                ShellEvent::HostPanelCommand {
+                    pane_id,
+                    command,
+                    payload,
+                    request_id,
+                } => {
+                    let response = crate::settings::handle_host_panel_command(
+                        self, pane_id, &command, payload, request_id,
+                    );
+                    self.host_panel_payload_revision =
+                        self.host_panel_payload_revision.saturating_add(1);
+                    self.host_panel_last_response = Some(response);
+                }
                 ShellEvent::PermissionDenied {
                     pane_id,
                     capability,
@@ -2945,6 +2983,77 @@ impl AppState {
 
     pub fn active_capsule_inspector(&self) -> Option<CapsuleInspectorView> {
         let active = self.active_capsule_pane()?;
+        self.capsule_inspector_from_active(active)
+    }
+
+    /// Find the capsule inspector for a specific pane ID, searching all panes regardless
+    /// of focus state. Use this when the HostPanel pane is focused but we need to inspect
+    /// a background capsule pane (e.g., the capsule detail screen).
+    pub fn capsule_inspector_by_pane_id(&self, pane_id: PaneId) -> Option<CapsuleInspectorView> {
+        let active = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.tasks.iter())
+            .flat_map(|t| t.panes.iter())
+            .find(|pane| pane.id == pane_id)
+            .and_then(|pane| match &pane.surface {
+                PaneSurface::Web(web)
+                    if matches!(
+                        web.route,
+                        GuestRoute::CapsuleHandle { .. }
+                            | GuestRoute::Capsule { .. }
+                            | GuestRoute::CapsuleUrl { .. }
+                    ) =>
+                {
+                    Some(ActiveCapsulePane {
+                        pane_id: pane.id,
+                        title: pane.title.clone(),
+                        route: web.route.clone(),
+                        session: web.session.clone(),
+                        source_label: web.source_label.clone(),
+                        trust_state: web.trust_state.clone(),
+                        restricted: web.restricted,
+                        snapshot_label: web.snapshot_label.clone(),
+                        canonical_handle: web.canonical_handle.clone(),
+                        session_id: web.session_id.clone(),
+                        adapter: web.adapter.clone(),
+                        manifest_path: web.manifest_path.clone(),
+                        runtime_label: web.runtime_label.clone(),
+                        display_strategy: web.display_strategy.clone(),
+                        log_path: web.log_path.clone(),
+                        local_url: web.local_url.clone(),
+                        healthcheck_url: web.healthcheck_url.clone(),
+                        invoke_url: web.invoke_url.clone(),
+                        served_by: web.served_by.clone(),
+                    })
+                }
+                PaneSurface::CapsuleStatus(capsule) => Some(ActiveCapsulePane {
+                    pane_id: pane.id,
+                    title: pane.title.clone(),
+                    route: capsule.route.clone(),
+                    session: capsule.session.clone(),
+                    source_label: capsule.source_label.clone(),
+                    trust_state: capsule.trust_state.clone(),
+                    restricted: capsule.restricted,
+                    snapshot_label: capsule.snapshot_label.clone(),
+                    canonical_handle: capsule.canonical_handle.clone(),
+                    session_id: capsule.session_id.clone(),
+                    adapter: capsule.adapter.clone(),
+                    manifest_path: capsule.manifest_path.clone(),
+                    runtime_label: capsule.runtime_label.clone(),
+                    display_strategy: capsule.display_strategy.clone(),
+                    log_path: capsule.log_path.clone(),
+                    local_url: capsule.local_url.clone(),
+                    healthcheck_url: capsule.healthcheck_url.clone(),
+                    invoke_url: capsule.invoke_url.clone(),
+                    served_by: capsule.served_by.clone(),
+                }),
+                _ => None,
+            })?;
+        self.capsule_inspector_from_active(active)
+    }
+
+    fn capsule_inspector_from_active(&self, active: ActiveCapsulePane) -> Option<CapsuleInspectorView> {
         Some(CapsuleInspectorView {
             pane_id: active.pane_id,
             title: active.title,
