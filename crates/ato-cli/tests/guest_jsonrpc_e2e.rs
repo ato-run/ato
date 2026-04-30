@@ -213,7 +213,9 @@ fn jsonrpc_wasm_execute_is_deferred_returns_method_not_found() {
     });
     let resp = run_jsonrpc(&sync, &req);
 
-    let err = resp.get("error").expect("wasm.execute should be Method not found");
+    let err = resp
+        .get("error")
+        .expect("wasm.execute should be Method not found");
     assert_eq!(err["code"], -32601);
     assert_eq!(resp["id"], "req-wasm");
 }
@@ -319,7 +321,9 @@ fn jsonrpc_permission_denied_returns_minus_32001() {
     });
     let resp = run_jsonrpc(&sync, &req);
 
-    let err = resp.get("error").expect("write without permission → -32001");
+    let err = resp
+        .get("error")
+        .expect("write without permission → -32001");
     assert_eq!(err["code"], -32001);
     assert_eq!(resp["id"], "req-perm");
 }
@@ -343,7 +347,9 @@ fn jsonrpc_envelope_priority_jsonrpc_wins_when_both_fields_present() {
     // raw base64 string under `result`. Asserting on the wrapper proves which
     // dispatcher was selected.
     assert_eq!(resp["jsonrpc"], "2.0");
-    let result = resp.get("result").expect("expected JSON-RPC success result");
+    let result = resp
+        .get("result")
+        .expect("expected JSON-RPC success result");
     assert_eq!(result["payload_b64"], encode_b64(b"hi"));
 }
 

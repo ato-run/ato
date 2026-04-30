@@ -64,9 +64,15 @@ pub(super) fn handle_jsonrpc_request(raw: Value, sync_path: &PathBuf) -> Result<
     };
 
     match super::guest::dispatch_guest_action(sync_path, &action, &context, &input) {
-        Ok(Some(value)) => write_response(JsonRpcResponse::success(req.id, wrap_result(&action, value))),
+        Ok(Some(value)) => write_response(JsonRpcResponse::success(
+            req.id,
+            wrap_result(&action, value),
+        )),
         Ok(None) => write_response(JsonRpcResponse::success(req.id, Value::Null)),
-        Err(err) => write_response(JsonRpcResponse::error(req.id, jsonrpc_error_from_guest(err))),
+        Err(err) => write_response(JsonRpcResponse::error(
+            req.id,
+            jsonrpc_error_from_guest(err),
+        )),
     }
 }
 
@@ -316,10 +322,16 @@ mod tests {
     #[test]
     fn jsonrpc_error_from_guest_maps_each_code() {
         let cases = [
-            (GuestErrorCode::PermissionDenied, error_codes::PERMISSION_DENIED),
+            (
+                GuestErrorCode::PermissionDenied,
+                error_codes::PERMISSION_DENIED,
+            ),
             (GuestErrorCode::InvalidRequest, error_codes::INVALID_PARAMS),
             (GuestErrorCode::ExecutionFailed, error_codes::INTERNAL_ERROR),
-            (GuestErrorCode::HostUnavailable, error_codes::SERVICE_UNAVAILABLE),
+            (
+                GuestErrorCode::HostUnavailable,
+                error_codes::SERVICE_UNAVAILABLE,
+            ),
             (GuestErrorCode::ProtocolError, error_codes::INVALID_REQUEST),
             (GuestErrorCode::IoError, error_codes::INTERNAL_ERROR),
         ];
@@ -335,8 +347,11 @@ mod tests {
         // claim in module docs.
         let value = sample_context_value();
         let ctx: GuestContext = serde_json::from_value(value).unwrap();
-        assert_eq!(ctx.permissions.can_read_payload, true);
-        assert!(matches!(ctx.role, crate::guest_protocol::GuestContextRole::Owner));
+        assert!(ctx.permissions.can_read_payload);
+        assert!(matches!(
+            ctx.role,
+            crate::guest_protocol::GuestContextRole::Owner
+        ));
         assert_eq!(ctx.sync_path, "/tmp/foo.zip");
         // Avoid an unused-import warning in this scoped test.
         let _ = GuestPermission::default();

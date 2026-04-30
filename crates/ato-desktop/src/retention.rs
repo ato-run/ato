@@ -163,7 +163,10 @@ impl RetentionTable {
     /// retained session_id, the slot is no longer "retained" but
     /// "active". No stop is issued — the session is now in use.
     pub fn take_by_session_id(&mut self, session_id: &str) -> Option<RetainedSession> {
-        let idx = self.entries.iter().position(|e| e.session_id == session_id)?;
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| e.session_id == session_id)?;
         Some(self.entries.remove(idx))
     }
 
@@ -277,7 +280,10 @@ mod tests {
         // at the original retain+TTL should NOT remove this entry.
         let after = t0 + DEFAULT_TTL;
         let evicted = t.evict_expired(after);
-        assert!(evicted.is_empty(), "refreshed entry must outlast its first window");
+        assert!(
+            evicted.is_empty(),
+            "refreshed entry must outlast its first window"
+        );
     }
 
     #[test]

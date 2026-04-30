@@ -697,10 +697,16 @@ pub struct SidebarTaskItem {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OmnibarSuggestionAction {
-    Navigate { url: String },
-    SelectTask { task_id: TaskSetId },
+    Navigate {
+        url: String,
+    },
+    SelectTask {
+        task_id: TaskSetId,
+    },
     ShowSettings,
-    LaunchCapsule { handle: String },
+    LaunchCapsule {
+        handle: String,
+    },
     /// RFC: SURFACE_CLOSE_SEMANTICS §6.2 — explicit Stop UI for the
     /// active pane's underlying capsule session.
     StopActiveSession,
@@ -1391,7 +1397,8 @@ impl AppState {
         // types "stop" (or any prefix); the "all retained" item is
         // suppressed when the table is empty so the count never
         // shows `(0)`.
-        let matches_stop = query.is_empty() || "stop".contains(&query) || "stop session".contains(&query);
+        let matches_stop =
+            query.is_empty() || "stop".contains(&query) || "stop session".contains(&query);
         if matches_stop {
             suggestions.push(OmnibarSuggestion {
                 title: "Stop capsule session".to_string(),
@@ -1400,10 +1407,7 @@ impl AppState {
             });
             if self.retention_count > 0 {
                 suggestions.push(OmnibarSuggestion {
-                    title: format!(
-                        "Stop all retained sessions ({})",
-                        self.retention_count
-                    ),
+                    title: format!("Stop all retained sessions ({})", self.retention_count),
                     detail: "Drain the retention table — sessions kept warm by recent pane closes"
                         .to_string(),
                     action: OmnibarSuggestionAction::StopAllRetainedSessions,
@@ -1480,7 +1484,10 @@ impl AppState {
     }
 
     fn apply_host_panel_route_path(&mut self, path: &str) {
-        let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+        let segments: Vec<&str> = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
         let Some(first) = segments.first().copied() else {
             return;
         };

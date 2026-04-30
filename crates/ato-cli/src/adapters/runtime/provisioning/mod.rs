@@ -3,9 +3,7 @@ mod diagnose;
 mod shadow;
 mod types;
 
-pub(crate) use dependency_root::{
-    dependency_root, looks_like_source_project, relative_dependency_root_from_manifest,
-};
+pub(crate) use dependency_root::dependency_root;
 
 use std::sync::Arc;
 

@@ -67,9 +67,7 @@ fn build_static_server_command(plan: &ManifestData) -> Result<(PathBuf, Vec<Stri
         .execution_entrypoint()
         .or_else(|| plan.execution_run_command())
         .filter(|v| !v.trim().is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("runtime=web target requires entrypoint or run_command")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("runtime=web target requires entrypoint or run_command"))?;
     let port = runtime_overrides::override_port(plan.execution_port()).ok_or_else(|| {
         anyhow::anyhow!(
             "runtime=web target '{}' requires targets.<label>.port",
