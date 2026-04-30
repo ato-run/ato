@@ -2,7 +2,7 @@
 name = "lock-draft-engine"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "Apache-2.0 OR MPL-2.0"
 
 [lib]
 name = "lock_draft_engine"
