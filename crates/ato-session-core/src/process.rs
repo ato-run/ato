@@ -95,7 +95,7 @@ mod platform {
         let info = unsafe { info.assume_init() };
         let secs = info.pbi_start_tvsec;
         let usecs = info.pbi_start_tvusec;
-        Some(secs.checked_mul(1_000)?.checked_add(usecs / 1_000)?)
+        secs.checked_mul(1_000)?.checked_add(usecs / 1_000)
     }
 }
 
@@ -137,7 +137,7 @@ mod platform {
 
         let unix_secs = btime_secs.checked_add(starttime_jiffies / clk_tck)?;
         let frac_ms = ((starttime_jiffies % clk_tck) * 1_000) / clk_tck;
-        Some(unix_secs.checked_mul(1_000)?.checked_add(frac_ms)?)
+        unix_secs.checked_mul(1_000)?.checked_add(frac_ms)
     }
 }
 
