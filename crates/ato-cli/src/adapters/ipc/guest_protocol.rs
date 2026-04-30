@@ -3,7 +3,6 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 
 pub const GUEST_PROTOCOL_VERSION: &str = "guest.v1";
-pub const GUEST_PROTOCOL_VERSION_JSONRPC: &str = "jsonrpc-2.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GuestMode {

@@ -10,6 +10,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
+use tar::Builder;
 
 use capsule_core::execution_plan::derive::compile_execution_plan;
 use capsule_core::router::ExecutionProfile;
@@ -641,23 +642,20 @@ exit 1
 }
 
 #[cfg(unix)]
-pub fn host_nacelle_release_binary_name(version: &str) -> String {
-    let os = if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "linux") {
-        "linux"
+pub fn host_nacelle_release_archive_name() -> String {
+    let target = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
     } else {
-        panic!("unsupported OS for mock nacelle release test");
-    };
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x64"
-    } else if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        panic!("unsupported architecture for mock nacelle release test");
+        panic!("unsupported target triple for mock nacelle release test");
     };
 
-    format!("nacelle-{}-{}-{}", version, os, arch)
+    format!("nacelle-{target}.tar.xz")
 }
 
 #[cfg(unix)]
@@ -665,22 +663,37 @@ pub fn write_mock_nacelle_release(root: &Path, version: &str) -> PathBuf {
     let version_dir = root.join(version);
     fs::create_dir_all(&version_dir).expect("failed to create mock release dir");
 
-    let binary_name = host_nacelle_release_binary_name(version);
-    let binary_path = version_dir.join(&binary_name);
-    write_mock_nacelle(&binary_path);
+    let staged_binary_path = version_dir.join("nacelle");
+    write_mock_nacelle(&staged_binary_path);
 
-    let bytes = fs::read(&binary_path).expect("failed to read mock nacelle binary");
+    let archive_name = host_nacelle_release_archive_name();
+    let archive_path = version_dir.join(&archive_name);
+    let archive_file =
+        fs::File::create(&archive_path).expect("failed to create mock release archive");
+    let encoder = xz2::write::XzEncoder::new(archive_file, 6);
+    let mut archive = Builder::new(encoder);
+    archive
+        .append_path_with_name(&staged_binary_path, "nacelle")
+        .expect("failed to append mock nacelle binary to archive");
+    let encoder = archive
+        .into_inner()
+        .expect("failed to finish mock release tar archive");
+    encoder
+        .finish()
+        .expect("failed to finish mock release xz stream");
+
+    let bytes = fs::read(&archive_path).expect("failed to read mock nacelle release archive");
     let sha256 = sha2::Sha256::digest(&bytes)
         .iter()
         .map(|byte| format!("{:02x}", byte))
         .collect::<String>();
     fs::write(
-        version_dir.join(format!("{}.sha256", binary_name)),
-        format!("{}  {}\n", sha256, binary_name),
+        version_dir.join(format!("{archive_name}.sha256")),
+        format!("{sha256}  {archive_name}\n"),
     )
     .expect("failed to write mock nacelle checksum");
 
-    binary_path
+    archive_path
 }
 
 pub struct StaticFileServer {
