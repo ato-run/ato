@@ -83,10 +83,27 @@ type CapsuleDetailPayload = {
   logs: CapsuleDetailLogEntry[];
   network: CapsuleDetailNetworkEntry[];
   update?: CapsuleDetailUpdate | null;
+  iconSource?: string | null;
+};
+
+type OpenCapsuleSummary = {
+  paneId: number;
+  title: string;
+  handle: string;
+  sessionLabel: string;
+  runtimeLabel: string | null;
+  logCount: number;
+};
+
+type LauncherData = {
+  openCapsules: OpenCapsuleSummary[];
+  authStatus: string;
+  publisherHandle: string | null;
 };
 
 type HostPanelPayload = {
   capsuleDetail?: CapsuleDetailPayload | null;
+  launcherData?: LauncherData | null;
 };
 
 declare global {
@@ -194,40 +211,6 @@ const capsuleDetailTabs: CapsuleDetailTab[] = [
   },
 ];
 
-const recentCapsules = [
-  {
-    name: "libretranslate-py",
-    author: "@kyotori",
-    runtime: "Python 3.12",
-    size: "142 MB",
-    status: "running",
-    icon: "py",
-  },
-  {
-    name: "image-resizer",
-    author: "@sarah",
-    runtime: "Node 20",
-    size: "28 MB",
-    status: "stopped",
-    icon: "js",
-  },
-  {
-    name: "mdbook-renderer",
-    author: "@rust-lang",
-    runtime: "Rust 1.78",
-    size: "4.1 MB",
-    status: "running",
-    icon: "rs",
-  },
-  {
-    name: "sqlite-explorer",
-    author: "@glebarez",
-    runtime: "Go 1.22",
-    size: "8.3 MB",
-    status: "stopped",
-    icon: "go",
-  },
-];
 
 const recommendedCapsules = [
   {
@@ -358,6 +341,7 @@ function rpick(e: React.MouseEvent<HTMLButtonElement>) {
 
 function App() {
   const [path, setPath] = useState(window.location.pathname);
+  const [payload, setPayload] = useState<HostPanelPayload | null>(readHostPanelPayload);
   const view = parseHostPanelView(path);
 
   useEffect(() => {
@@ -366,11 +350,18 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  useEffect(() => {
+    const onPayload = (e: Event) =>
+      setPayload((e as CustomEvent<HostPanelPayload>).detail);
+    window.addEventListener("ato-host-panel-payload", onPayload);
+    return () => window.removeEventListener("ato-host-panel-payload", onPayload);
+  }, []);
+
   return (
     <>
-      {view.kind === "launcher" && renderLauncher(setPath)}
+      {view.kind === "launcher" && renderLauncher(setPath, payload?.launcherData ?? null)}
       {view.kind === "settings" && renderSettings(view.section, path, setPath)}
-      {view.kind === "capsule-detail" && renderCapsuleDetail(view.paneId, view.tab, path, setPath, readHostPanelPayload()?.capsuleDetail ?? null)}
+      {view.kind === "capsule-detail" && renderCapsuleDetail(view.paneId, view.tab, path, setPath, payload?.capsuleDetail ?? null)}
       {view.kind === "unknown" && <div className="home" style={{ padding: "48px" }}>Unknown route: {path}</div>}
 
       {/* Toast Container */}
@@ -379,7 +370,34 @@ function App() {
   );
 }
 
-function renderLauncher(setPath: (path: string) => void) {
+function getIconForRuntime(runtimeLabel: string | null): string {
+  const label = (runtimeLabel ?? "").toLowerCase();
+  if (label.includes("python")) return "py";
+  if (label.includes("node") || label.includes("deno") || label.includes("bun")) return "js";
+  if (label.includes("rust")) return "rs";
+  if (label.includes("go")) return "go";
+  return "default";
+}
+
+function sessionBadge(sessionLabel: string): { text: string; status: string } {
+  switch (sessionLabel) {
+    case "Mounted":
+      return { text: "Running", status: "running" };
+    case "Launching":
+    case "Resolving":
+    case "Materializing":
+      return { text: sessionLabel, status: "starting" };
+    case "Closed":
+      return { text: "Stopped", status: "stopped" };
+    case "LaunchFailed":
+      return { text: "Failed", status: "failed" };
+    default:
+      return { text: sessionLabel, status: "stopped" };
+  }
+}
+
+function renderLauncher(setPath: (path: string) => void, launcherData: LauncherData | null) {
+  const openCapsules = launcherData?.openCapsules ?? [];
   return (
     <div className="home">
       <div className="home-hero">
@@ -404,34 +422,42 @@ function renderLauncher(setPath: (path: string) => void) {
       </div>
 
       <div className="sec-head">
-        <span className="sec-title">Recently Used</span>
+        <span className="sec-title">Open Capsules</span>
         <button className="sec-link" onClick={() => toast("View all capsules")}>
           View all →
         </button>
       </div>
       <div className="cards-grid">
-        {recentCapsules.map((capsule) => (
-          <div
-            className="cc"
-            key={capsule.name}
-            onClick={() => toast(`Opening ${capsule.name}…`)}
-          >
-            <div className="cc-top">
-              <div className={`cc-icon ${capsule.icon}`}>
-                <span className="iconify" data-icon={getIconForLanguage(capsule.icon)}></span>
+        {openCapsules.length === 0 ? (
+          <div className="launcher-empty">No capsules are currently open.</div>
+        ) : (
+          openCapsules.map((capsule) => {
+            const iconKey = getIconForRuntime(capsule.runtimeLabel);
+            const badge = sessionBadge(capsule.sessionLabel);
+            return (
+              <div
+                className="cc"
+                key={capsule.paneId}
+                onClick={() => toast(`Switching to ${capsule.title}…`)}
+              >
+                <div className="cc-top">
+                  <div className={`cc-icon ${iconKey}`}>
+                    <span className="iconify" data-icon={getIconForLanguage(iconKey)}></span>
+                  </div>
+                  <span className={`badge ${badge.status}`}>{badge.text}</span>
+                </div>
+                <div className="cc-name">{capsule.title}</div>
+                <div className="cc-author">{capsule.handle}</div>
+                <div className="cc-meta">
+                  <span className="cc-rt">{capsule.runtimeLabel ?? "—"}</span>
+                  {capsule.logCount > 0 && (
+                    <span className="cc-sz">{capsule.logCount} logs</span>
+                  )}
+                </div>
               </div>
-              <span className={`badge ${capsule.status}`}>
-                {capsule.status === "running" ? "Running" : "Stopped"}
-              </span>
-            </div>
-            <div className="cc-name">{capsule.name}</div>
-            <div className="cc-author">{capsule.author}</div>
-            <div className="cc-meta">
-              <span className="cc-rt">{capsule.runtime}</span>
-              <span className="cc-sz">{capsule.size}</span>
-            </div>
-          </div>
-        ))}
+            );
+          })
+        )}
       </div>
 
       <div className="sec-head">
@@ -1539,7 +1565,11 @@ function renderCapsulePermissions(detail: CapsuleDetailPayload | null) {
   );
 }
 
-function renderCapsuleLogs(detail: CapsuleDetailPayload | null) {
+function renderCapsuleLogs(detail: CapsuleDetailPayload | null, capsuleSettings: any | null) {
+  const logs: CapsuleDetailLogEntry[] = capsuleSettings?.activity ?? detail?.logs ?? [];
+  const stages = Array.from(new Set(logs.map((entry) => entry.stage).filter(Boolean)));
+  const errorCount = logs.filter((entry) => normalizeLogTone(entry.tone) === "err").length;
+
   return (
     <div className="log-container">
       {/* Filter Bar */}
@@ -1569,31 +1599,47 @@ function renderCapsuleLogs(detail: CapsuleDetailPayload | null) {
         </div>
         <div className="log-pills">
           <div className="log-pill active">
-            All Services <span style={{ background: "var(--rose)", color: "#fff", padding: "2px 6px", borderRadius: "10px", fontSize: "10px", fontWeight: 700 }}>2</span>
+            All stages {errorCount > 0 && <span style={{ background: "var(--rose)", color: "#fff", padding: "2px 6px", borderRadius: "10px", fontSize: "10px", fontWeight: 700 }}>{errorCount}</span>}
           </div>
-          <div className="log-pill">web</div>
-          <div className="log-pill">
-            worker <span style={{ background: "var(--rose)", color: "#fff", padding: "2px 6px", borderRadius: "10px", fontSize: "10px", fontWeight: 700 }}>2</span>
-          </div>
+          {stages.map((stage) => (
+            <div className="log-pill" key={stage}>{stage}</div>
+          ))}
         </div>
       </div>
     
       {/* Log Stream */}
       <div className="log-viewer scrollable">
-        <div className="log-row"><span className="lr-time">14:02:11</span><span className="lr-svc">sys</span><span className="lr-lvl info">INFO</span><span className="lr-msg">Starting capsule <strong style={{ color: "var(--text-secondary)" }}>libretranslate-py</strong>...</span></div>
-        <div className="log-row"><span className="lr-time">14:02:12</span><span className="lr-svc">sys</span><span className="lr-lvl info">INFO</span><span className="lr-msg">Resolving dependencies via uv...</span></div>
-        <div className="log-row"><span className="lr-time">14:02:13</span><span className="lr-svc">sys</span><span className="lr-lvl info" style={{ color: "var(--green)" }}>OK</span><span className="lr-msg text-secondary">Environment ready.</span></div>
-        <br />
-        <div className="log-row"><span className="lr-time">14:02:14</span><span className="lr-svc">web</span><span className="lr-lvl info">INFO</span><span className="lr-msg"> * Serving Flask app 'app'</span></div>
-        <div className="log-row"><span className="lr-time">14:02:14</span><span className="lr-svc">web</span><span className="lr-lvl info">INFO</span><span className="lr-msg"> * Debug mode: off</span></div>
-        <div className="log-row"><span className="lr-time">14:02:14</span><span className="lr-svc">web</span><span className="lr-lvl info">INFO</span><span className="lr-msg"> * Running on <span style={{ color: "var(--accent)", textDecoration: "underline" }}>http://127.0.0.1:5000</span></span></div>
-        <br />
-        <div className="log-row"><span className="lr-time">14:05:22</span><span className="lr-svc worker">worker</span><span className="lr-lvl warn">WARN</span><span className="lr-msg">GPU not detected or accessible. Falling back to CPU execution.</span></div>
-        <div className="log-row"><span className="lr-time">14:05:23</span><span className="lr-svc worker">worker</span><span className="lr-lvl err">ERR</span><span className="lr-msg">Failed to load model 'en-ja'. File not found.</span></div>
-        <div className="log-row"><span className="lr-time">14:05:23</span><span className="lr-svc worker">worker</span><span className="lr-lvl err">ERR</span><span className="lr-msg" style={{ color: "var(--text-ghost)" }}>  File "/app/model_loader.py", line 42, in load<br />    raise FileNotFoundError("Model not found")</span></div>
+        {logs.length === 0 ? (
+          <div className="log-empty">No capsule logs recorded yet.</div>
+        ) : (
+          logs.map((entry, index) => {
+            const tone = normalizeLogTone(entry.tone);
+            return (
+              <div className="log-row" key={`${entry.stage}-${index}-${entry.message}`}>
+                <span className="lr-time">{String(index + 1).padStart(4, "0")}</span>
+                <span className={`lr-svc ${entry.stage}`}>{entry.stage || "runtime"}</span>
+                <span className={`lr-lvl ${tone}`}>{logLevelLabel(tone)}</span>
+                <span className="lr-msg">{entry.message}</span>
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
+}
+
+function normalizeLogTone(tone: string | undefined): "info" | "warn" | "err" {
+  const normalized = (tone ?? "").toLowerCase();
+  if (normalized === "error" || normalized === "err") return "err";
+  if (normalized === "warning" || normalized === "warn") return "warn";
+  return "info";
+}
+
+function logLevelLabel(tone: "info" | "warn" | "err") {
+  if (tone === "err") return "ERR";
+  if (tone === "warn") return "WARN";
+  return "INFO";
 }
 
 function renderCapsuleUpdate(detail: CapsuleDetailPayload | null) {
@@ -1794,17 +1840,31 @@ function renderCapsuleDetail(
 ) {
   const capsuleName = detail?.handle ?? detail?.canonicalHandle ?? "Unknown";
   const title = detail?.title ?? `Pane ${paneId}`;
+  const capsuleSettings: any = readHostPanelPayload();
+  const iconSource: string | null =
+    detail?.iconSource ??
+    (capsuleSettings as any)?.capsuleSettings?.identity?.iconSource ??
+    null;
 
   return (
-    <div>
+    <div className="capsule-detail-screen">
       {/* Header */}
       <div className="header">
         <div className="header-drag"></div>
         <div className="header-content">
           <div className="identity">
             <div className="id-icon">
-              <span className="iconify" data-icon="lucide:languages"></span>
-            </div>
+                {iconSource
+                  ? <>
+                      <img src={iconSource} className="id-icon-img" alt="" onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = "none";
+                        const fb = (e.target as HTMLImageElement).nextElementSibling as HTMLElement | null;
+                        if (fb) fb.removeAttribute("hidden");
+                      }} />
+                      <span className="iconify" data-icon="lucide:package" hidden></span>
+                    </>
+                  : <span className="iconify" data-icon="lucide:package"></span>}
+              </div>
             <div className="id-info">
               <div className="id-title-row">
                 <h1 className="id-title">{title}</h1>
@@ -1871,8 +1931,8 @@ function renderCapsuleDetail(
         </div>
 
         {/* 3. Logs */}
-        <div id="tab-logs" className={`tab-pane ${tab.id === "logs" ? "active" : ""}`}>
-          {tab.id === "logs" && renderCapsuleLogs(detail)}
+        <div id="tab-logs" className={`tab-pane ${tab.id === "logs" ? "active" : ""}`} style={{ padding: 0 }}>
+          {tab.id === "logs" && renderCapsuleLogs(detail, capsuleSettings)}
         </div>
 
         {/* 4. Update */}
