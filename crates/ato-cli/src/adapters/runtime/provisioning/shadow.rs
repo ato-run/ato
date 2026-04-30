@@ -684,6 +684,13 @@ mod tests {
         )
     }
 
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir for touch");
+        }
+        std::fs::write(path, "").expect("touch test fixture");
+    }
+
     // Tests for `relative_dependency_root_from_manifest` and
     // `looks_like_source_project` live with the resolver itself in
     // `provisioning/dependency_root.rs`. Shadow tests below exercise
