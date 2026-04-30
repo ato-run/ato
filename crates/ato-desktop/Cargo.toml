@@ -40,7 +40,26 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "15d86607
 gpui-component = { git = "https://github.com/ato-run/gpui-component", rev = "00ea23fbf0d15e229c9ec3034b2c3c16846908f9" }
 gpui-component-assets = { git = "https://github.com/ato-run/gpui-component", rev = "00ea23fbf0d15e229c9ec3034b2c3c16846908f9" }
 http = "1.4.0"
+# ico / image / usvg / resvg / tiny-skia: pre-normalize favicons to PNG
+# before handing bytes to GPUI's `Image::from_bytes`. We need this for
+# two reasons:
+#
+# 1. The pinned `gpui` rev's SVG path passes `to_brga = false` to the
+#    SVG renderer (gpui platform.rs:2109-2113), leaving the buffer in
+#    RGBA-PA when the rest of GPUI expects BGRA — the image renders
+#    invisibly on Metal.
+# 2. The `image` crate's ICO parser strictly validates ICONDIRENTRY's
+#    reserved/planes/bitcount fields and rejects real-world favicons
+#    served by Google (gstatic), MDN, and others ("ICO image entry has
+#    too many color planes or too large hotspot value"), even though
+#    every browser renders them fine. The `ico` crate is purpose-built
+#    and lenient, supporting both PNG-encoded and DIB-encoded entries.
+ico = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
 include_dir = "0.7"
+resvg = "0.45"
+tiny-skia = "0.11"
+usvg = "0.45"
 portable-pty = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
