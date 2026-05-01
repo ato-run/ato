@@ -371,7 +371,7 @@ fn provision_command_from_python_importer(
             .to_string_lossy()
             .replace('\\', "/");
         return Ok(Some(format!(
-            "uv venv && uv pip install -r {requirements_arg}"
+            "uv venv --clear && uv pip install -r {requirements_arg}"
         )));
     }
 
@@ -1089,7 +1089,7 @@ pub(super) fn resolve_python_dependency_lock_path(dependency_root: &Path) -> Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_required_glibc_from_lock, preflight_glibc_compat,
+        detect_required_glibc_from_lock, plan_v03_provision_command, preflight_glibc_compat,
         preflight_single_script_effective_cwd_compat,
     };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
@@ -1130,6 +1130,70 @@ mod tests {
     // unified resolver itself in `provisioning/dependency_root.rs`.
     // Removing the duplicates here keeps the fixture-heavy filesystem
     // tests in one place and prevents the two suites from drifting.
+
+    #[test]
+    fn provision_command_uses_explicit_python_working_dir_requirements() {
+        let dir = tempdir().expect("tempdir");
+        let backend = dir.path().join("backend");
+        fs::create_dir_all(&backend).expect("create backend");
+        fs::write(backend.join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        fs::write(backend.join("serve.py"), "print('ok')\n").expect("write serve");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+working_dir = "backend"
+run_command = "serve.py"
+"#,
+        );
+
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python requirements should provision");
+
+        assert_eq!(
+            command,
+            "uv venv --clear && uv pip install -r requirements.txt"
+        );
+    }
+
+    #[test]
+    fn provision_command_clears_existing_python_venv_before_install() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+run_command = "main.py"
+"#,
+        );
+
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python requirements should provision");
+
+        assert!(
+            command.starts_with("uv venv --clear &&"),
+            "command={command}"
+        );
+    }
 
     #[test]
     fn detect_required_glibc_from_lock_reads_target_constraints_from_json() {
