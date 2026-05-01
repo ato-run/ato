@@ -2246,7 +2246,9 @@ fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
     // without this path.
     for url in fetch_html_link_icon_candidates(origin) {
         tracing::info!(target: TARGET_FAVICON, origin, url, "trying link-icon candidate");
-        if let Some(image) = fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true) {
+        if let Some(image) =
+            fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true)
+        {
             tracing::info!(target: TARGET_FAVICON, origin, url, "resolved link-icon candidate");
             return Some(image);
         }
@@ -2257,7 +2259,9 @@ fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
     // `apple-touch-icon.png`.
     for url in favicon_candidate_urls(origin) {
         tracing::info!(target: TARGET_FAVICON, origin, url, "trying favicon candidate");
-        if let Some(image) = fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true) {
+        if let Some(image) =
+            fetch_image_from_url_with_headers(&url, /*reject_non_image=*/ true)
+        {
             tracing::info!(target: TARGET_FAVICON, origin, url, "resolved favicon candidate");
             return Some(image);
         }
@@ -2275,10 +2279,7 @@ fn fetch_favicon_image(origin: &str) -> Option<Arc<Image>> {
 /// relative `<link href="...">` against `www.`.
 fn fetch_html_link_icon_candidates(origin: &str) -> Vec<String> {
     if !matches!(
-        url::Url::parse(origin)
-            .ok()
-            .as_ref()
-            .map(url::Url::scheme),
+        url::Url::parse(origin).ok().as_ref().map(url::Url::scheme),
         Some("http") | Some("https")
     ) {
         return Vec::new();
@@ -4065,9 +4066,7 @@ mod tests {
         }
         let icon_image = ico::IconImage::from_rgba_data(4, 4, rgba);
         let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
-        dir.add_entry(
-            ico::IconDirEntry::encode_as_bmp(&icon_image).expect("encode BMP entry"),
-        );
+        dir.add_entry(ico::IconDirEntry::encode_as_bmp(&icon_image).expect("encode BMP entry"));
         let mut ico_bytes = Vec::new();
         dir.write(&mut ico_bytes).expect("write ICO");
 
