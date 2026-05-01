@@ -170,8 +170,11 @@ fn launcher_snapshot(state: &AppState) -> Value {
                             .canonical_handle
                             .clone()
                             .unwrap_or_else(|| web.route.to_string());
-                        let log_count =
-                            state.capsule_logs.get(&pane.id).map(|l| l.len()).unwrap_or(0);
+                        let log_count = state
+                            .capsule_logs
+                            .get(&pane.id)
+                            .map(|l| l.len())
+                            .unwrap_or(0);
                         Some(json!({
                             "paneId": pane.id,
                             "title": pane.title,
@@ -186,8 +189,11 @@ fn launcher_snapshot(state: &AppState) -> Value {
                             .canonical_handle
                             .clone()
                             .unwrap_or_else(|| capsule.route.to_string());
-                        let log_count =
-                            state.capsule_logs.get(&pane.id).map(|l| l.len()).unwrap_or(0);
+                        let log_count = state
+                            .capsule_logs
+                            .get(&pane.id)
+                            .map(|l| l.len())
+                            .unwrap_or(0);
                         Some(json!({
                             "paneId": pane.id,
                             "title": pane.title,
@@ -393,7 +399,11 @@ fn capsule_snapshot(state: &AppState, pane_id: Option<PaneId>) -> Value {
     })
 }
 
-fn resolve_icon_source(state: &AppState, pane_id: PaneId, local_url: Option<&str>) -> Option<String> {
+fn resolve_icon_source(
+    state: &AppState,
+    pane_id: PaneId,
+    local_url: Option<&str>,
+) -> Option<String> {
     if let Some(raw) = state.pane_icons.get(&pane_id) {
         if raw.starts_with("http://")
             || raw.starts_with("https://")
