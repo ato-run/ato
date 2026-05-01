@@ -31,7 +31,9 @@ pub fn build_env_filter() -> EnvFilter {
     if let Ok(filter) = EnvFilter::try_from_default_env() {
         return filter;
     }
-    EnvFilter::new(build_directives(std::env::var("ATO_CLI_LOG").ok().as_deref()))
+    EnvFilter::new(build_directives(
+        std::env::var("ATO_CLI_LOG").ok().as_deref(),
+    ))
 }
 
 fn build_directives(ato_cli_log: Option<&str>) -> String {
