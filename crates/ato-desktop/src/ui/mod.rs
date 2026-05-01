@@ -581,9 +581,9 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self.state.config.auto_open_devtools;
+        let current = self.state.config.developer.auto_open_devtools;
         self.state
-            .update_config(|c| c.auto_open_devtools = !current);
+            .update_config(|c| c.developer.auto_open_devtools = !current);
         cx.notify();
     }
 
@@ -3017,10 +3017,10 @@ fn render_capsule_permissions_page(
         .get(canonical_handle)
         .cloned()
         .unwrap_or_default();
-    let allowlist_detail = if state.config.default_egress_allow.is_empty() {
+    let allowlist_detail = if state.config.sandbox.default_egress_allow.is_empty() {
         None
     } else {
-        Some(state.config.default_egress_allow.join(", "))
+        Some(state.config.sandbox.default_egress_allow.join(", "))
     };
     let capabilities = active_web
         .map(|pane| pane.capabilities.clone())
@@ -3036,12 +3036,12 @@ fn render_capsule_permissions_page(
             vec![
                 render_capsule_detail_row(
                     "Egress allow",
-                    if state.config.default_egress_allow.is_empty() {
+                    if state.config.sandbox.default_egress_allow.is_empty() {
                         "No explicit allowlist"
                     } else {
                         "Configured allow hosts"
                     },
-                    if state.config.default_egress_allow.is_empty() {
+                    if state.config.sandbox.default_egress_allow.is_empty() {
                         "Block all egress remains the effective default."
                     } else {
                         allowlist_detail.as_deref().unwrap_or("")
@@ -3058,7 +3058,7 @@ fn render_capsule_permissions_page(
                 .into_any_element(),
                 render_capsule_detail_row(
                     "Block all egress",
-                    if state.config.default_egress_allow.is_empty() {
+                    if state.config.sandbox.default_egress_allow.is_empty() {
                         "Enabled"
                     } else {
                         "Disabled"
