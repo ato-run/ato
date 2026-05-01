@@ -3053,7 +3053,10 @@ impl AppState {
         self.capsule_inspector_from_active(active)
     }
 
-    fn capsule_inspector_from_active(&self, active: ActiveCapsulePane) -> Option<CapsuleInspectorView> {
+    fn capsule_inspector_from_active(
+        &self,
+        active: ActiveCapsulePane,
+    ) -> Option<CapsuleInspectorView> {
         Some(CapsuleInspectorView {
             pane_id: active.pane_id,
             title: active.title,
