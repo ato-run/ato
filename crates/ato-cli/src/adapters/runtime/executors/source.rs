@@ -655,7 +655,11 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
         .execution_entrypoint()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| launch_spec.command.clone());
-    let sandbox_entrypoint = sandbox_source_entrypoint(plan, &entrypoint);
+    let sandbox_entrypoint = if is_python_module_flag(&entrypoint) {
+        entrypoint.clone()
+    } else {
+        sandbox_source_entrypoint(plan, &entrypoint)
+    };
     let mut cmd_args = if plan
         .execution_entrypoint()
         .filter(|value| !value.trim().is_empty())
@@ -780,6 +784,10 @@ fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
     } else {
         plan.manifest_dir.join(relative).display().to_string()
     }
+}
+
+fn is_python_module_flag(entrypoint: &str) -> bool {
+    entrypoint.trim() == "-m"
 }
 
 fn sandbox_source_entrypoint_relative(plan: &ManifestData, entrypoint: &str) -> PathBuf {
@@ -1304,6 +1312,38 @@ mod tests {
 
         assert!(!normalized.contains("UV_MANAGED_PYTHON"));
         assert!(!normalized.contains("UV_PYTHON"));
+    }
+
+    #[test]
+    fn test_write_normalized_manifest_preserves_python_module_invocation() {
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            runtime_version = "3.11.10"
+            run_command = "python -m uvicorn main:app --host 127.0.0.1 --port 8765"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+
+        assert!(normalized.contains("entrypoint = \"uv\""));
+        assert!(normalized.contains(
+            "command = \"run python3 -m uvicorn main:app --host 127.0.0.1 --port 8765\""
+        ));
+        assert!(
+            !normalized.contains("source/-m") && !normalized.contains("source\\\\-m"),
+            "normalized={normalized}"
+        );
     }
 
     #[test]

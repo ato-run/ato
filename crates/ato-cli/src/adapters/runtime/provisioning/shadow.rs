@@ -11,7 +11,7 @@ use walkdir::WalkDir;
 
 use crate::application::secrets::store::{write_secure_file, SecretStore};
 
-use super::dependency_root::relative_dependency_root_from_manifest;
+use super::relative_dependency_root_from_manifest;
 use super::types::{
     ProvisioningAction, ProvisioningAudit, ProvisioningMaterializationStatus, ProvisioningPlan,
     ShadowWorkspaceRef,
@@ -682,13 +682,6 @@ mod tests {
             },
             summary,
         )
-    }
-
-    fn touch(path: &Path) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dir for touch");
-        }
-        std::fs::write(path, "").expect("touch test fixture");
     }
 
     // Tests for `relative_dependency_root_from_manifest` and
