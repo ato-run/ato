@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod freeze;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
