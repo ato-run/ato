@@ -140,10 +140,20 @@ pub fn execute_host(
     let mut cmd = if let Some(bundle_path) = desktop_open_bundle.as_ref() {
         build_desktop_open_command(bundle_path, &launch_spec.args)
     } else if force_python_no_bytecode {
-        let python_bin = resolve_host_managed_runtime_binary(
-            plan,
-            authoritative_lock,
-            ManagedRuntimeKind::Python,
+        // Prefer the venv's interpreter when the build phase produced
+        // one, so installed deps are visible without needing `uv run`.
+        // Falls back to the ato-managed toolchain if no venv exists
+        // (e.g. capsules that ship deps via PYTHONPATH or rely on
+        // host-installed packages).
+        let python_bin = venv_python_binary(&launch_spec.working_dir).map_or_else(
+            || {
+                resolve_host_managed_runtime_binary(
+                    plan,
+                    authoritative_lock,
+                    ManagedRuntimeKind::Python,
+                )
+            },
+            Ok,
         )?;
         let mut python = Command::new(python_bin);
         python.arg(&host_command_path);
@@ -449,6 +459,24 @@ fn build_desktop_open_command(bundle_path: &Path, args: &[String]) -> Command {
         let _ = args;
         unreachable!("desktop app open command is only used on macOS")
     }
+}
+
+/// Locate the Python interpreter inside `<working_dir>/.venv` if the
+/// provisioning step created one. Returns `None` when the venv (or its
+/// `bin/python`) is missing, so callers can fall back to the
+/// ato-managed toolchain.
+fn venv_python_binary(working_dir: &Path) -> Option<PathBuf> {
+    // POSIX: `.venv/bin/python`. Windows: `.venv/Scripts/python.exe`.
+    // We probe both candidates so the same code path works on every
+    // platform that ships an `ato` binary.
+    let candidates = [
+        working_dir.join(".venv").join("bin").join("python"),
+        working_dir
+            .join(".venv")
+            .join("Scripts")
+            .join("python.exe"),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
