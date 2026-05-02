@@ -30,5 +30,8 @@ pub(super) fn execute_inspect_command(command: InspectCommands, json_mode: bool)
         InspectCommands::Remediation { path, json } => {
             commands::inspect::execute_remediation_view(path, json_mode || json).map(|_| ())
         }
+        InspectCommands::Execution { id, compare, json } => {
+            commands::inspect::execute_execution_view(id, compare, json_mode || json).map(|_| ())
+        }
     }
 }
