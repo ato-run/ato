@@ -729,6 +729,7 @@ fn materialize_generic_target(
         PathBuf::from(input),
         true,
         crate::ProviderToolchain::Auto,
+        None,
         false,
         None,
         false,

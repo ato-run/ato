@@ -585,6 +585,7 @@ pub(super) fn resolve_session_launch_plan(
                 PathBuf::from(cli_ref),
                 true,
                 ProviderToolchain::Auto,
+                None,
                 false,
                 None,
                 false,

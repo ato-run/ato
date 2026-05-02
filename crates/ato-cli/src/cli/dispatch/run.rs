@@ -41,6 +41,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<CompatibilityFallbackBackend>,
     pub(crate) provider_toolchain: ProviderToolchain,
+    pub(crate) explicit_commit: Option<String>,
     pub(crate) yes: bool,
     pub(crate) verbose: bool,
     pub(crate) agent_mode: RunAgentMode,
@@ -149,6 +150,7 @@ fn execute_standard_run_with_env_assistance(
                 .map(CompatibilityFallbackBackend::as_str)
                 .map(str::to_string),
             args.provider_toolchain,
+            args.explicit_commit.clone(),
             args.yes,
             resolve_run_verbose(args.verbose),
             args.agent_mode,
@@ -561,6 +563,7 @@ mod tests {
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
             yes: false,
             verbose: false,
             agent_mode: crate::RunAgentMode::Auto,
