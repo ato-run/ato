@@ -5,10 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use capsule_core::blob::BlobManifest;
 use capsule_core::common::paths::{
     ato_run_layout, ato_store_attestations_dir, ato_store_blobs_dir, ato_store_refs_dir,
     ato_trust_policies_dir, ato_trust_roots_dir, AtoRunLayout,
 };
+use capsule_core::common::store::{ato_store_dep_ref_path, BlobAddress};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -278,14 +280,21 @@ impl SessionDependencyMaterializer {
 impl DependencyMaterializer for SessionDependencyMaterializer {
     fn plan(&self, req: &DependencyMaterializationRequest) -> Result<DependencyPlan> {
         let key = DepDerivationKeyV1::from_request(req);
+        let derivation_hash = key.derivation_hash()?;
+        let cache_lookup = match req.cache_strategy {
+            CacheStrategy::None => CacheLookupResult::Disabled,
+            CacheStrategy::DerivationCache => {
+                if dep_cache_enabled() {
+                    lookup_dep_cache(&req.ecosystem, &derivation_hash)
+                } else {
+                    CacheLookupResult::Disabled
+                }
+            }
+        };
         Ok(DependencyPlan {
-            derivation_hash: key.derivation_hash()?,
+            derivation_hash,
             reproducibility: ReproducibilityClass::BestEffort,
-            cache_lookup: if req.cache_strategy == CacheStrategy::None || !dep_cache_enabled() {
-                CacheLookupResult::Disabled
-            } else {
-                CacheLookupResult::Miss
-            },
+            cache_lookup,
             required_runtime_refs: req
                 .runtime
                 .version
@@ -434,6 +443,44 @@ fn dep_cache_enabled() -> bool {
         .ok()
         .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+/// Reads the weak ref for a derivation key and decides whether to call it a hit.
+///
+/// Pure, read-only: never writes to the file system. A "hit" requires the ref
+/// file to exist with a `blob_hash`, plus a manifest at the expected blob path
+/// claiming that same hash. Anything else (missing ref, missing manifest,
+/// blob_hash mismatch, IO/parse error) is reported as a miss so the caller
+/// can fall back to the install path.
+fn lookup_dep_cache(ecosystem: &str, derivation_hash: &str) -> CacheLookupResult {
+    let ref_path = ato_store_dep_ref_path(ecosystem, derivation_hash);
+    let bytes = match fs::read(&ref_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return CacheLookupResult::Miss,
+    };
+    let record: StoreRefRecord = match serde_json::from_slice(&bytes) {
+        Ok(record) => record,
+        Err(_) => return CacheLookupResult::Miss,
+    };
+    let Some(blob_hash) = record.blob_hash else {
+        return CacheLookupResult::Miss;
+    };
+    if record.derivation_hash != derivation_hash {
+        return CacheLookupResult::Miss;
+    }
+    let address = match BlobAddress::parse(&blob_hash) {
+        Ok(address) => address,
+        Err(_) => return CacheLookupResult::Miss,
+    };
+    if !address.payload_dir().is_dir() {
+        return CacheLookupResult::Miss;
+    }
+    match BlobManifest::read_from(&address.manifest_path()) {
+        Ok(manifest) if manifest.matches_blob_hash(&blob_hash) => {
+            CacheLookupResult::Hit { blob_hash }
+        }
+        _ => CacheLookupResult::Miss,
+    }
 }
 
 fn cache_status(cache_lookup: &CacheLookupResult) -> &'static str {

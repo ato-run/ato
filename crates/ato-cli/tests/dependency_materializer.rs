@@ -1,7 +1,20 @@
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use ato_cli::dependency_materializer::{
-    AttestationStrategy, CacheStrategy, DepDerivationKeyV1, DependencyMaterializationRequest,
-    InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection, SourceResolutionRecord,
+    AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
+    DependencyMaterializationRequest, DependencyMaterializer, InstallPolicies, ManifestInputs,
+    PlatformTriple, RuntimeSelection, SessionDependencyMaterializer, SourceResolutionRecord,
+    StoreRefRecord,
 };
+use capsule_core::blob::{BlobManifest, BLOB_MANIFEST_SCHEMA_VERSION, BLOB_TREE_ALGORITHM};
+use capsule_core::common::store::{ato_store_dep_ref_path, BlobAddress};
+use serial_test::serial;
+use tempfile::TempDir;
+
+const SAMPLE_BLOB_HASH: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn sample_request() -> DependencyMaterializationRequest {
     DependencyMaterializationRequest {
@@ -144,4 +157,215 @@ fn mutable_requested_ref_is_not_part_of_source_identity() {
     };
 
     assert_eq!(main.identity_hash().unwrap(), tag.identity_hash().unwrap());
+}
+
+/// Restores the previous value of an env var when dropped so concurrent tests
+/// (run serially via `#[serial]`) do not bleed state into each other.
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.key, value),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+fn cached_request() -> DependencyMaterializationRequest {
+    DependencyMaterializationRequest {
+        cache_strategy: CacheStrategy::DerivationCache,
+        ..sample_request()
+    }
+}
+
+fn write_ref(ato_home: &Path, ecosystem: &str, derivation_hash: &str, blob_hash: Option<&str>) {
+    let _ = std::env::set_var("ATO_HOME", ato_home);
+    let path = ato_store_dep_ref_path(ecosystem, derivation_hash);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let record = StoreRefRecord {
+        schema_version: "1".to_string(),
+        ecosystem: ecosystem.to_string(),
+        derivation_hash: derivation_hash.to_string(),
+        blob_hash: blob_hash.map(str::to_string),
+        cache_status: if blob_hash.is_some() { "hit".into() } else { "miss".into() },
+        created_at: "2026-05-03T00:00:00Z".to_string(),
+    };
+    fs::write(path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+}
+
+fn write_blob(ato_home: &Path, blob_hash: &str, derivation_hash: &str) -> PathBuf {
+    let _ = std::env::set_var("ATO_HOME", ato_home);
+    let address = BlobAddress::parse(blob_hash).expect("valid hash");
+    fs::create_dir_all(address.payload_dir()).unwrap();
+    fs::write(address.payload_dir().join("placeholder"), b"").unwrap();
+
+    let manifest = BlobManifest {
+        schema_version: BLOB_MANIFEST_SCHEMA_VERSION,
+        algorithm: BLOB_TREE_ALGORITHM.to_string(),
+        blob_hash: blob_hash.to_string(),
+        derivation_hash: derivation_hash.to_string(),
+        created_at: "2026-05-03T00:00:00Z".to_string(),
+        file_count: 1,
+        symlink_count: 0,
+        dir_count: 0,
+        total_bytes: 0,
+    };
+    manifest.write_to(&address.manifest_path()).unwrap();
+    address.dir()
+}
+
+fn snapshot_paths(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if !root.exists() {
+        return paths;
+    }
+    for entry in walkdir::WalkDir::new(root) {
+        if let Ok(entry) = entry {
+            paths.push(entry.path().to_path_buf());
+        }
+    }
+    paths.sort();
+    paths
+}
+
+#[test]
+#[serial]
+fn plan_returns_disabled_when_strategy_is_none() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+
+    let plan = SessionDependencyMaterializer::new()
+        .plan(&sample_request())
+        .unwrap();
+    assert!(matches!(plan.cache_lookup, CacheLookupResult::Disabled));
+}
+
+#[test]
+#[serial]
+fn plan_returns_disabled_when_safety_env_is_off() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    std::env::remove_var("ATO_DEP_CACHE");
+
+    let plan = SessionDependencyMaterializer::new()
+        .plan(&cached_request())
+        .unwrap();
+    assert!(matches!(plan.cache_lookup, CacheLookupResult::Disabled));
+}
+
+#[test]
+#[serial]
+fn plan_returns_miss_when_no_ref_exists() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+
+    let plan = SessionDependencyMaterializer::new()
+        .plan(&cached_request())
+        .unwrap();
+    assert!(matches!(plan.cache_lookup, CacheLookupResult::Miss));
+}
+
+#[test]
+#[serial]
+fn plan_returns_hit_when_ref_and_manifest_match() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+
+    let req = cached_request();
+    let derivation_hash = DepDerivationKeyV1::from_request(&req)
+        .derivation_hash()
+        .unwrap();
+    write_blob(tmp.path(), SAMPLE_BLOB_HASH, &derivation_hash);
+    write_ref(
+        tmp.path(),
+        &req.ecosystem,
+        &derivation_hash,
+        Some(SAMPLE_BLOB_HASH),
+    );
+
+    let plan = SessionDependencyMaterializer::new().plan(&req).unwrap();
+    match plan.cache_lookup {
+        CacheLookupResult::Hit { blob_hash } => assert_eq!(blob_hash, SAMPLE_BLOB_HASH),
+        other => panic!("expected hit, got {other:?}"),
+    }
+}
+
+#[test]
+#[serial]
+fn plan_falls_back_to_miss_when_manifest_blob_hash_disagrees() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+
+    let req = cached_request();
+    let derivation_hash = DepDerivationKeyV1::from_request(&req)
+        .derivation_hash()
+        .unwrap();
+    write_blob(tmp.path(), SAMPLE_BLOB_HASH, &derivation_hash);
+
+    let liar = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    write_ref(tmp.path(), &req.ecosystem, &derivation_hash, Some(liar));
+
+    let plan = SessionDependencyMaterializer::new().plan(&req).unwrap();
+    assert!(
+        matches!(plan.cache_lookup, CacheLookupResult::Miss),
+        "ref claiming a blob the manifest does not back must be a miss"
+    );
+}
+
+#[test]
+#[serial]
+fn plan_returns_miss_when_blob_payload_dir_is_absent() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+
+    let req = cached_request();
+    let derivation_hash = DepDerivationKeyV1::from_request(&req)
+        .derivation_hash()
+        .unwrap();
+    write_ref(
+        tmp.path(),
+        &req.ecosystem,
+        &derivation_hash,
+        Some(SAMPLE_BLOB_HASH),
+    );
+
+    let plan = SessionDependencyMaterializer::new().plan(&req).unwrap();
+    assert!(matches!(plan.cache_lookup, CacheLookupResult::Miss));
+}
+
+#[test]
+#[serial]
+fn plan_does_not_modify_the_filesystem() {
+    let tmp = TempDir::new().unwrap();
+    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+
+    let before = snapshot_paths(tmp.path());
+
+    let _ = SessionDependencyMaterializer::new()
+        .plan(&cached_request())
+        .unwrap();
+
+    let after = snapshot_paths(tmp.path());
+    assert_eq!(
+        before, after,
+        "plan() must be read-only; new fs entries appeared after the call"
+    );
 }
