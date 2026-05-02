@@ -20,13 +20,14 @@ use crate::runtime::overrides as runtime_overrides;
 
 pub(crate) fn observe_dependencies(
     launch_spec: &LaunchSpec,
+    launch_ctx: &RuntimeLaunchContext,
     build_observation: Option<&BuildObservation>,
 ) -> Result<DependencyIdentity> {
     Ok(DependencyIdentity {
         derivation_hash: build_observation
             .map(|observation| Tracked::known(observation.input_digest.clone()))
             .unwrap_or_else(|| Tracked::unknown("build materialization observation unavailable")),
-        output_hash: observe_dependency_output_hash(&launch_spec.working_dir)?,
+        output_hash: observe_dependency_output_hash(&launch_spec.working_dir, launch_ctx)?,
     })
 }
 
@@ -155,7 +156,23 @@ pub(crate) fn is_sensitive_env_key(key: &str) -> bool {
         || upper.contains("PRIVATE_KEY")
 }
 
-fn observe_dependency_output_hash(working_dir: &Path) -> Result<Tracked<String>> {
+fn observe_dependency_output_hash(
+    working_dir: &Path,
+    launch_ctx: &RuntimeLaunchContext,
+) -> Result<Tracked<String>> {
+    for mount in launch_ctx.injected_mounts() {
+        if mount.target.ends_with("/node_modules") || mount.target == "node_modules" {
+            return Ok(Tracked::known(hash_tree(&mount.source).with_context(
+                || {
+                    format!(
+                        "failed to hash materialized dependency output {}",
+                        mount.source.display()
+                    )
+                },
+            )?));
+        }
+    }
+
     for candidate in [working_dir.join("node_modules"), working_dir.join(".venv")] {
         if candidate.is_dir() {
             return Ok(Tracked::known(hash_tree(&candidate).with_context(
@@ -176,7 +193,7 @@ fn resolve_binary_path(command: &str) -> Option<PathBuf> {
     which::which(command).ok().filter(|path| path.is_file())
 }
 
-fn hash_tree(root: &Path) -> Result<String> {
+pub(crate) fn hash_tree(root: &Path) -> Result<String> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
@@ -288,7 +305,8 @@ mod tests {
         fs::create_dir(&node_modules).expect("mkdir");
         fs::write(node_modules.join("dep.js"), "module.exports = 1;").expect("write");
 
-        let observed = observe_dependency_output_hash(temp.path()).expect("observe");
+        let observed = observe_dependency_output_hash(temp.path(), &RuntimeLaunchContext::empty())
+            .expect("observe");
 
         assert_eq!(
             observed.status,
@@ -301,7 +319,8 @@ mod tests {
     fn dependency_output_observer_reports_unknown_when_missing() {
         let temp = tempdir().expect("tempdir");
 
-        let observed = observe_dependency_output_hash(temp.path()).expect("observe");
+        let observed = observe_dependency_output_hash(temp.path(), &RuntimeLaunchContext::empty())
+            .expect("observe");
 
         assert_eq!(
             observed.status,

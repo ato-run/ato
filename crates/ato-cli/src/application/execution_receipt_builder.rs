@@ -31,6 +31,7 @@ pub(crate) fn build_prelaunch_receipt(
     };
     let dependencies = crate::application::execution_observers::observe_dependencies(
         &launch_spec,
+        launch_ctx,
         build_observation,
     )?;
     let runtime =

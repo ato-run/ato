@@ -3,6 +3,7 @@ pub(crate) mod auth;
 pub(crate) mod build_materialization;
 pub(crate) mod compat_import;
 pub(crate) mod credential;
+pub(crate) mod dependency_materializer;
 pub(crate) mod engine;
 pub(crate) mod execution_observers;
 pub(crate) mod execution_receipt_builder;
