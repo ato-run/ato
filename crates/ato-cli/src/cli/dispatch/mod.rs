@@ -12,6 +12,7 @@ mod profile;
 mod project;
 pub(crate) mod publish;
 pub(crate) mod registry;
+mod replay;
 mod run;
 mod scaffold;
 mod secrets;
@@ -43,6 +44,7 @@ use self::package::execute_package_command;
 use self::profile::execute_profile_command;
 use self::project::{execute_project_command, execute_unproject_command};
 use self::publish::execute_publish_command;
+use self::replay::execute_replay_command;
 use self::scaffold::execute_scaffold_command;
 use self::source::execute_source_command;
 
@@ -296,6 +298,13 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Uninstall { keep_data, yes } => commands::uninstall::uninstall(keep_data, yes),
 
         Commands::Inspect { command } => execute_inspect_command(command, json),
+
+        Commands::Replay {
+            id,
+            strict,
+            best_effort,
+            json: command_json,
+        } => execute_replay_command(id, strict, best_effort, json || command_json, nacelle),
 
         Commands::Keygen {
             out,

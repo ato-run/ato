@@ -515,6 +515,21 @@ pub(crate) enum Commands {
         command: InspectCommands,
     },
 
+    #[command(about = "Replay a stored execution receipt on this host")]
+    Replay {
+        /// Execution ID, for example blake3:...
+        id: String,
+        /// Fail closed unless the receipt is classified as pure
+        #[arg(long, conflicts_with = "best_effort")]
+        strict: bool,
+        /// Re-run from the local source reference and report that the envelope is best-effort
+        #[arg(long = "best-effort", conflicts_with = "strict")]
+        best_effort: bool,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
     #[command(hide = true, about = "Search the store for packages")]
     Search {
         query: Option<String>,
