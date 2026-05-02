@@ -140,6 +140,32 @@ fn projection_returns_clonefile_or_copy_strategy() {
 }
 
 #[test]
+fn projection_refuses_to_merge_two_different_blobs_into_one_target() {
+    // A1 scope: one derivation per projection. Trying to layer a second
+    // payload on top of an existing one must be a hard error so the user
+    // explicitly rotates the projection or disables the cache.
+    let tmp = TempDir::new().unwrap();
+    let payload_a = tmp.path().join("blob-a/payload");
+    let payload_b = tmp.path().join("blob-b/payload");
+    let target = tmp.path().join("session/deps");
+    write_file(&payload_a, "version", b"a");
+    write_file(&payload_b, "version", b"b");
+
+    project_payload(&payload_a, &target).unwrap();
+
+    let err = project_payload(&payload_b, &target).unwrap_err();
+    let downcast = err
+        .downcast_ref::<ProjectionError>()
+        .expect("typed projection error");
+    assert!(matches!(downcast, ProjectionError::TargetExists(_)));
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("A1 forbids merging multiple derivations"),
+        "TargetExists message must reference the A1 scope rule, got: {rendered}"
+    );
+}
+
+#[test]
 fn projection_recreates_empty_directories() {
     let tmp = TempDir::new().unwrap();
     let payload = tmp.path().join("payload");

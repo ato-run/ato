@@ -58,7 +58,14 @@ pub struct ProjectionOutcome {
 /// Errors specific to projection that callers may want to inspect.
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
-    #[error("projection target already exists: {0}")]
+    /// The projection target already exists. A1 enforces a strict
+    /// "1 capsule = 1 derivation = 1 projection" rule, so callers must
+    /// remove or rotate the previous projection rather than merge two
+    /// derivations into the same workspace.
+    #[error(
+        "projection target {0} already exists; A1 forbids merging multiple derivations into one projection. \
+         Remove the existing target before re-projecting, or pass --cache=none to disable the cache."
+    )]
     TargetExists(PathBuf),
     #[error("blob payload is not a directory: {0}")]
     PayloadNotDirectory(PathBuf),
