@@ -11,12 +11,12 @@ use capsule_core::CapsuleReporter;
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
 use crate::application::ports::OutputPort;
 use crate::application::share;
+use crate::cli::shared::CacheStrategyArg;
 use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 #[cfg(test)]
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
 use crate::progressive_ui;
 use crate::reporters;
-use crate::cli::shared::CacheStrategyArg;
 use crate::{
     CompatibilityFallbackBackend, EnforcementMode, GitHubAutoFixMode, ProviderToolchain,
     RunAgentMode,

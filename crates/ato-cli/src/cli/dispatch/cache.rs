@@ -74,5 +74,8 @@ fn confirm(prompt: &str) -> Result<bool> {
     io::stderr().flush().ok();
     let mut buf = String::new();
     io::stdin().read_line(&mut buf)?;
-    Ok(matches!(buf.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+    Ok(matches!(
+        buf.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }

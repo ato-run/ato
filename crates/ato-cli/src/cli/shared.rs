@@ -147,9 +147,7 @@ const ENV_CACHE_STRATEGY: &str = "ATO_CACHE_STRATEGY";
 impl CacheStrategyArg {
     /// Resolves the user-facing flag against `ATO_CACHE_STRATEGY` and the
     /// hard default. Returns the concrete materializer cache strategy.
-    pub(crate) fn resolve(
-        self,
-    ) -> crate::application::dependency_materializer::CacheStrategy {
+    pub(crate) fn resolve(self) -> crate::application::dependency_materializer::CacheStrategy {
         use crate::application::dependency_materializer::CacheStrategy;
         match self {
             CacheStrategyArg::None => CacheStrategy::None,
