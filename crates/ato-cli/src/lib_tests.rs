@@ -860,6 +860,44 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
 }
 
 #[test]
+fn replay_command_parses_explicit_modes() {
+    let strict = Cli::try_parse_from(["ato", "replay", "blake3:abc", "--strict"])
+        .expect("parse strict replay");
+    match strict.command {
+        Commands::Replay {
+            id,
+            strict,
+            best_effort,
+            json,
+        } => {
+            assert_eq!(id, "blake3:abc");
+            assert!(strict);
+            assert!(!best_effort);
+            assert!(!json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
+    let best_effort =
+        Cli::try_parse_from(["ato", "replay", "blake3:def", "--best-effort", "--json"])
+            .expect("parse best-effort replay");
+    match best_effort.command {
+        Commands::Replay {
+            id,
+            strict,
+            best_effort,
+            json,
+        } => {
+            assert_eq!(id, "blake3:def");
+            assert!(!strict);
+            assert!(best_effort);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
 fn parse_sha256_for_artifact_supports_sha256sums_format() {
     let body = "\
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  nacelle-v1.2.3-darwin-arm64
