@@ -471,10 +471,7 @@ fn venv_python_binary(working_dir: &Path) -> Option<PathBuf> {
     // platform that ships an `ato` binary.
     let candidates = [
         working_dir.join(".venv").join("bin").join("python"),
-        working_dir
-            .join(".venv")
-            .join("Scripts")
-            .join("python.exe"),
+        working_dir.join(".venv").join("Scripts").join("python.exe"),
     ];
     candidates.into_iter().find(|path| path.is_file())
 }
