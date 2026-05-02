@@ -785,6 +785,23 @@ fn spawn_runtime_process(
             workload_pid: None,
             log_path: None,
         }),
+        // Native covers source/python and source/native. Always go
+        // through `source::execute_host`, which routes through nacelle
+        // and `uv run` so the venv built during the build phase is
+        // honoured. Falling through to `shell::execute` here strands
+        // run_command launches like `python -m uvicorn main:app` on
+        // the toolchain Python with no site-packages, producing
+        // `No module named uvicorn` for ato Desktop's session-start
+        // flow.
+        capsule_core::execution_plan::guard::ExecutorKind::Native => {
+            crate::executors::source::execute_host(
+                plan,
+                None,
+                Arc::new(CliReporter::new(false)),
+                ExecuteMode::Piped,
+                &prepared.launch_ctx,
+            )
+        }
         _ if plan.execution_run_command().is_some() => {
             crate::executors::shell::execute(plan, ExecuteMode::Piped, &prepared.launch_ctx)
         }
