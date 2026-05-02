@@ -25,6 +25,12 @@ pub mod dependency_materializer {
         ReproducibilityClass, ReproducibilityMeta, RuntimeSelection, SessionDependencyMaterializer,
         SourceResolutionRecord, StoreRefRecord, VerificationResult,
     };
+
+    pub mod freeze {
+        pub use crate::application::dependency_materializer::freeze::{
+            atomic_write_json, freeze_dep_tree, DerivationLock, FreezeOutcome,
+        };
+    }
 }
 
 /// Ensures the optional sidecar is stopped exactly once across normal exit,
