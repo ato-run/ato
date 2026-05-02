@@ -1352,6 +1352,7 @@ where
 
     match prepared.decision.action {
         bm::DecisionAction::Skip => {
+            maybe_apply_dependency_materialization(request, &mut state).await?;
             progress.ok(
                 HourglassPhase::Build,
                 "build materialization reused — executor skipped",
@@ -1416,11 +1417,38 @@ where
         );
     }
 
+    maybe_apply_dependency_materialization(request, &mut state).await?;
+
     state.build_decision_kind = Some(bm::BuildResultKind::Executed);
 
     progress.ok(HourglassPhase::Build, "build and lifecycle hooks completed");
 
     Ok(state)
+}
+
+async fn maybe_apply_dependency_materialization(
+    request: &ConsumerRunRequest,
+    state: &mut RunPipelineState,
+) -> Result<()> {
+    if let Some(materialization) = crate::application::dependency_materializer::materialize_for_run(
+        &state.decision.plan,
+        &state.launch_ctx,
+    )? {
+        if request.verbose {
+            request
+                .reporter
+                .notify(format!(
+                    "📦 Dependency materialization: {} -> {}",
+                    materialization.derivation_hash, materialization.output_hash
+                ))
+                .await?;
+        }
+        state.launch_ctx = state
+            .launch_ctx
+            .clone()
+            .with_injected_mounts(vec![materialization.mount]);
+    }
+    Ok(())
 }
 
 pub(crate) async fn run_verify_phase<P>(
