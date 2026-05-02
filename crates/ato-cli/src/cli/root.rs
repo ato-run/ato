@@ -255,6 +255,12 @@ pub(crate) enum Commands {
         command: super::cache::CacheCommands,
     },
 
+    #[command(about = "Manage A2 attestation keys, trust roots, and verification")]
+    Attest {
+        #[command(subcommand)]
+        command: super::attest::AttestCommands,
+    },
+
     #[command(
         next_help_heading = "Primary Commands",
         about = "Share your current workspace"

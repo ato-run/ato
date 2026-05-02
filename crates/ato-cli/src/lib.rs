@@ -23,6 +23,17 @@ pub mod projection {
     };
 }
 
+pub mod provider_cache {
+    pub use crate::application::provider_cache::{
+        cache_enabled, check_and_project, compute_derivation_hash, freeze_after_install,
+        ProviderCacheAction, ProviderCacheInputs, ProviderCachePlan,
+    };
+}
+
+pub mod attestation {
+    pub use crate::application::attestation::{issue_freeze_attestation, AttestationContext};
+}
+
 pub mod cache_admin {
     pub use crate::application::cache_admin::{
         clear_all, clear_derivation, collect_cache_stats, BlobSummary, CacheClearOutcome,
