@@ -191,7 +191,7 @@ fn cached_request() -> DependencyMaterializationRequest {
 }
 
 fn write_ref(ato_home: &Path, ecosystem: &str, derivation_hash: &str, blob_hash: Option<&str>) {
-    let _ = std::env::set_var("ATO_HOME", ato_home);
+    std::env::set_var("ATO_HOME", ato_home);
     let path = ato_store_dep_ref_path(ecosystem, derivation_hash);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let record = StoreRefRecord {
@@ -199,14 +199,18 @@ fn write_ref(ato_home: &Path, ecosystem: &str, derivation_hash: &str, blob_hash:
         ecosystem: ecosystem.to_string(),
         derivation_hash: derivation_hash.to_string(),
         blob_hash: blob_hash.map(str::to_string),
-        cache_status: if blob_hash.is_some() { "hit".into() } else { "miss".into() },
+        cache_status: if blob_hash.is_some() {
+            "hit".into()
+        } else {
+            "miss".into()
+        },
         created_at: "2026-05-03T00:00:00Z".to_string(),
     };
     fs::write(path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
 }
 
 fn write_blob(ato_home: &Path, blob_hash: &str, derivation_hash: &str) -> PathBuf {
-    let _ = std::env::set_var("ATO_HOME", ato_home);
+    std::env::set_var("ATO_HOME", ato_home);
     let address = BlobAddress::parse(blob_hash).expect("valid hash");
     fs::create_dir_all(address.payload_dir()).unwrap();
     fs::write(address.payload_dir().join("placeholder"), b"").unwrap();
@@ -231,10 +235,8 @@ fn snapshot_paths(root: &Path) -> Vec<PathBuf> {
     if !root.exists() {
         return paths;
     }
-    for entry in walkdir::WalkDir::new(root) {
-        if let Ok(entry) = entry {
-            paths.push(entry.path().to_path_buf());
-        }
+    for entry in walkdir::WalkDir::new(root).into_iter().flatten() {
+        paths.push(entry.path().to_path_buf());
     }
     paths.sort();
     paths

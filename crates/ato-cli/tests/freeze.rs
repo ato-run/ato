@@ -93,7 +93,11 @@ fn freeze_writes_payload_manifest_ref_and_meta() {
 
     let deps = tmp.path().join("session-deps");
     write_file(&deps, "node_modules/foo/index.js", b"console.log('foo');\n");
-    write_file(&deps, "node_modules/foo/package.json", b"{\"name\":\"foo\"}");
+    write_file(
+        &deps,
+        "node_modules/foo/package.json",
+        b"{\"name\":\"foo\"}",
+    );
 
     let derivation_hash = DepDerivationKeyV1::from_request(&sample_request())
         .derivation_hash()
@@ -119,15 +123,16 @@ fn freeze_writes_payload_manifest_ref_and_meta() {
     assert!(manifest.file_count >= 2);
 
     let ref_path = ato_store_dep_ref_path("npm", &derivation_hash);
-    let record: StoreRefRecord =
-        serde_json::from_slice(&fs::read(ref_path).unwrap()).unwrap();
-    assert_eq!(record.blob_hash.as_deref(), Some(outcome.blob_hash.as_str()));
+    let record: StoreRefRecord = serde_json::from_slice(&fs::read(ref_path).unwrap()).unwrap();
+    assert_eq!(
+        record.blob_hash.as_deref(),
+        Some(outcome.blob_hash.as_str())
+    );
     assert_eq!(record.cache_status, "frozen");
 
     let meta_path = address.meta_path();
     assert!(meta_path.is_file(), "meta record missing");
-    let meta: serde_json::Value =
-        serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
+    let meta: serde_json::Value = serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
     assert_eq!(meta["last_event"], "freeze");
 }
 
@@ -172,7 +177,9 @@ fn freeze_makes_plan_report_a_hit() {
     write_file(&deps, "package.json", b"{\"name\":\"shared\"}");
 
     let req = sample_request();
-    let derivation_hash = DepDerivationKeyV1::from_request(&req).derivation_hash().unwrap();
+    let derivation_hash = DepDerivationKeyV1::from_request(&req)
+        .derivation_hash()
+        .unwrap();
     let outcome = freeze_dep_tree(&deps, &derivation_hash, &req.ecosystem).unwrap();
 
     let plan = SessionDependencyMaterializer::new().plan(&req).unwrap();

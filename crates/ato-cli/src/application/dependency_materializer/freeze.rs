@@ -95,8 +95,8 @@ pub fn freeze_dep_tree(
     // derivation hash serialize through `flock(2)`.
     let _lock = DerivationLock::acquire(derivation_hash)?;
 
-    let tree = hash_tree(deps_path)
-        .with_context(|| format!("failed to hash {}", deps_path.display()))?;
+    let tree =
+        hash_tree(deps_path).with_context(|| format!("failed to hash {}", deps_path.display()))?;
     let blob_hash = tree.blob_hash.clone();
     let address = BlobAddress::parse(&blob_hash)
         .with_context(|| format!("blob hash {blob_hash} could not be parsed"))?;
@@ -137,9 +137,8 @@ fn write_blob_atomically(
     let staging = address.staging_dir(&suffix);
 
     if staging.exists() {
-        fs::remove_dir_all(&staging).with_context(|| {
-            format!("failed to clean staging directory {}", staging.display())
-        })?;
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("failed to clean staging directory {}", staging.display()))?;
     }
     if let Some(parent) = staging.parent() {
         fs::create_dir_all(parent)
@@ -195,8 +194,7 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("path {} has no parent", path.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let suffix = format!("{:016x}", rand::random::<u64>());
     let file_name = path
         .file_name()
@@ -284,8 +282,7 @@ fn now_rfc3339() -> String {
 /// Recursively copies the contents of `src` into `dst`. Files are copied byte
 /// for byte; symlinks have their target preserved.
 fn copy_tree_into(dst: &Path, src: &Path) -> Result<()> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("failed to create {}", dst.display()))?;
+    fs::create_dir_all(dst).with_context(|| format!("failed to create {}", dst.display()))?;
     for entry in walkdir::WalkDir::new(src).min_depth(1) {
         let entry = entry.with_context(|| format!("failed to walk {}", src.display()))?;
         let rel = entry

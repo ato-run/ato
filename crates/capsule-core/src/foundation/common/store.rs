@@ -28,9 +28,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use super::paths::{
-    ato_store_blobs_dir, ato_store_dir, ato_store_meta_dir, ato_store_refs_dir,
-};
+use super::paths::{ato_store_blobs_dir, ato_store_dir, ato_store_meta_dir, ato_store_refs_dir};
 
 /// Hex-encoded digest length for SHA-256.
 const SHA256_HEX_LEN: usize = 64;
@@ -127,7 +125,10 @@ impl BlobAddress {
     /// Returns `~/.ato/store/blobs/<alg>/<hex[0:2]>/<hex[2:]>/`.
     pub fn dir(&self) -> PathBuf {
         let (head, tail) = self.shard();
-        ato_store_blobs_dir().join(&self.algorithm).join(head).join(tail)
+        ato_store_blobs_dir()
+            .join(&self.algorithm)
+            .join(head)
+            .join(tail)
     }
 
     /// Returns the immutable payload directory inside the blob.
@@ -329,9 +330,7 @@ mod tests {
         let segments: Vec<String> = path
             .components()
             .filter_map(|c| match c {
-                std::path::Component::Normal(value) => {
-                    Some(value.to_string_lossy().into_owned())
-                }
+                std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
                 _ => None,
             })
             .collect();

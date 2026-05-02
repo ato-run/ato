@@ -185,7 +185,7 @@ fn hash_node(
         hasher.update(b"\0");
         hasher.update([mode_byte]);
         hasher.update(b"\0");
-        hasher.update(&content_hash);
+        hasher.update(content_hash);
         stats.files += 1;
         stats.total_bytes = stats.total_bytes.saturating_add(content.len() as u64);
         Ok(Some(hasher.finalize().into()))
