@@ -247,12 +247,69 @@ pub fn check_and_project(
 ///
 /// Idempotent: a second call with the same `derivation_hash` and an
 /// identical tree observes the existing blob without rewriting bytes.
+///
+/// When `ATO_ATTESTATION_KEY` is set, the freeze also issues a signed
+/// attestation against the resulting blob hash. Failure to attest is
+/// logged but does not fail the freeze (the blob is still useful even
+/// without an attestation; trust verification happens later).
 pub fn freeze_after_install(
     deps_path: &Path,
     derivation_hash: &str,
     ecosystem: &str,
 ) -> Result<FreezeOutcome> {
-    freeze_dep_tree(deps_path, derivation_hash, ecosystem)
+    let outcome = freeze_dep_tree(deps_path, derivation_hash, ecosystem)?;
+    maybe_issue_attestation(deps_path, derivation_hash, &outcome);
+    Ok(outcome)
+}
+
+fn maybe_issue_attestation(deps_path: &Path, derivation_hash: &str, outcome: &FreezeOutcome) {
+    let context = match crate::application::attestation::AttestationContext::from_env() {
+        Ok(Some(ctx)) => ctx,
+        Ok(None) => return,
+        Err(err) => {
+            tracing::warn!("attestation: failed to load key from env: {err}");
+            return;
+        }
+    };
+
+    let tree = match capsule_core::blob::hash_tree(deps_path) {
+        Ok(tree) => tree,
+        Err(err) => {
+            tracing::warn!("attestation: failed to re-hash deps tree: {err}");
+            return;
+        }
+    };
+    if tree.blob_hash != outcome.blob_hash {
+        tracing::warn!("attestation: deps tree hash drifted between freeze and attest, skipping");
+        return;
+    }
+
+    let policy = capsule_core::attestation::PolicySnapshot {
+        lifecycle_script_policy: "sandbox".to_string(),
+        registry_policy: "default".to_string(),
+        network_policy: "default".to_string(),
+        env_allowlist_digest: None,
+    };
+
+    match crate::application::attestation::issue_freeze_attestation(
+        &context,
+        &outcome.blob_hash,
+        derivation_hash,
+        &tree,
+        &policy,
+    ) {
+        Ok((_, path)) => {
+            tracing::info!(
+                blob_hash = %outcome.blob_hash,
+                derivation_hash = derivation_hash,
+                attestation_path = %path.display(),
+                "A2 attestation issued"
+            );
+        }
+        Err(err) => {
+            tracing::warn!("attestation: issuance failed: {err}");
+        }
+    }
 }
 
 /// Computes the derivation hash for a provider workspace without performing

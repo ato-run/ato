@@ -1,4 +1,5 @@
 mod app;
+pub(crate) mod attest;
 mod binding;
 pub(crate) mod cache;
 pub(crate) mod commands;
