@@ -21,8 +21,16 @@ fn projection_recreates_files_and_sizes() {
     let tmp = TempDir::new().unwrap();
     let payload = tmp.path().join("payload");
     let target = tmp.path().join("session/deps");
-    write_file(&payload, "node_modules/foo/index.js", b"console.log('foo');\n");
-    write_file(&payload, "node_modules/bar/lib.js", b"module.exports = {};\n");
+    write_file(
+        &payload,
+        "node_modules/foo/index.js",
+        b"console.log('foo');\n",
+    );
+    write_file(
+        &payload,
+        "node_modules/bar/lib.js",
+        b"module.exports = {};\n",
+    );
 
     let outcome = project_payload(&payload, &target).unwrap();
     assert!(outcome.file_count >= 2);
@@ -77,7 +85,10 @@ fn projection_recreates_symlinks_without_following() {
     let projected_link = target.join("link");
     let metadata = fs::symlink_metadata(&projected_link).unwrap();
     assert!(metadata.file_type().is_symlink());
-    assert_eq!(fs::read_link(&projected_link).unwrap(), Path::new("real.txt"));
+    assert_eq!(
+        fs::read_link(&projected_link).unwrap(),
+        Path::new("real.txt")
+    );
 }
 
 #[cfg(unix)]
