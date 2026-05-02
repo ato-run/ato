@@ -305,12 +305,55 @@ fn materialize_pypi_workspace(
         .with_context(|| format!("failed to write {}", requirements_path.display()))?;
 
         compile_provider_lockfile(&workspace_root)?;
+        let lockfile_path = workspace_root.join("uv.lock");
         let source_dir = workspace_root.join("source");
         fs::create_dir_all(&source_dir)
             .with_context(|| format!("failed to create {}", source_dir.display()))?;
-        fs::copy(workspace_root.join("uv.lock"), source_dir.join("uv.lock"))
+        fs::copy(&lockfile_path, source_dir.join("uv.lock"))
             .with_context(|| format!("failed to mirror lockfile into {}", source_dir.display()))?;
-        sync_provider_site_packages(&workspace_root, &site_packages_dir)?;
+
+        // A1 cache hook: with the lockfile pinned and requirements file
+        // written, attempt to project a previously-frozen blob into
+        // site-packages. On a cache hit, the uv pip sync below is skipped.
+        let cache_inputs = crate::application::provider_cache::ProviderCacheInputs {
+            ecosystem: "pypi",
+            package_manager: Some("uv"),
+            package_manager_version: None,
+            runtime: crate::application::dependency_materializer::RuntimeSelection {
+                name: "python".to_string(),
+                version: Some(PROVIDER_PYTHON_RUNTIME_VERSION.to_string()),
+            },
+            lockfile_path: Some(&lockfile_path),
+            manifest_path: Some(&requirements_path),
+            network_policy: "default",
+        };
+        let cache_plan = crate::application::provider_cache::check_and_project(
+            &workspace_root,
+            &site_packages_dir,
+            &cache_inputs,
+        )?;
+        match cache_plan.action {
+            crate::application::provider_cache::ProviderCacheAction::Hit { .. } => {
+                // Cache hit: site-packages already populated; skip install.
+            }
+            crate::application::provider_cache::ProviderCacheAction::Miss {
+                ref derivation_hash,
+            } => {
+                sync_provider_site_packages(&workspace_root, &site_packages_dir)?;
+                if let Err(err) = crate::application::provider_cache::freeze_after_install(
+                    &site_packages_dir,
+                    derivation_hash,
+                    "pypi",
+                ) {
+                    tracing::warn!(
+                        "provider_cache: pypi freeze failed (run still succeeds): {err}"
+                    );
+                }
+            }
+            crate::application::provider_cache::ProviderCacheAction::Disabled => {
+                sync_provider_site_packages(&workspace_root, &site_packages_dir)?;
+            }
+        }
 
         let resolved =
             resolve_console_script_metadata(&site_packages_dir, &package_ref.package_name)?;
@@ -460,6 +503,49 @@ fn materialize_npm_workspace(
                 source_dir.display()
             )
         })?;
+
+        // A1 cache hook (npm freeze-only).
+        //
+        // Hit-skip-install requires splitting `npm install` into
+        // lockfile-only resolution + sync, which is package-manager-specific
+        // and not yet implemented. For now we always run the install, then
+        // freeze the resulting node_modules so `ato cache stats` reflects
+        // reality and the next iteration can flip on the hit-check without
+        // a cold cache.
+        let node_modules_dir = workspace_root.join(PROVIDER_NODE_MODULES_DIR);
+        if node_modules_dir.is_dir() && crate::application::provider_cache::cache_enabled() {
+            let npm_cache_inputs = crate::application::provider_cache::ProviderCacheInputs {
+                ecosystem: "npm",
+                package_manager: Some(effective_toolchain.as_str()),
+                package_manager_version: None,
+                runtime: crate::application::dependency_materializer::RuntimeSelection {
+                    name: "node".to_string(),
+                    version: Some(PROVIDER_NODE_RUNTIME_VERSION.to_string()),
+                },
+                lockfile_path: Some(&lockfile_path),
+                manifest_path: Some(&package_json_path),
+                network_policy: "default",
+            };
+            match crate::application::provider_cache::compute_derivation_hash(
+                &workspace_root,
+                &npm_cache_inputs,
+            ) {
+                Ok(derivation_hash) => {
+                    if let Err(err) = crate::application::provider_cache::freeze_after_install(
+                        &node_modules_dir,
+                        &derivation_hash,
+                        "npm",
+                    ) {
+                        tracing::warn!(
+                            "provider_cache: npm freeze failed (run still succeeds): {err}"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("provider_cache: npm derivation hash failed: {err}");
+                }
+            }
+        }
 
         let installed_package_dir = workspace_root
             .join(PROVIDER_NODE_MODULES_DIR)
