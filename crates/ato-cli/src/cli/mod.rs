@@ -1,5 +1,6 @@
 mod app;
 mod binding;
+pub(crate) mod cache;
 pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;

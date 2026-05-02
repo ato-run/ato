@@ -23,6 +23,13 @@ pub mod projection {
     };
 }
 
+pub mod cache_admin {
+    pub use crate::application::cache_admin::{
+        clear_all, clear_derivation, collect_cache_stats, BlobSummary, CacheClearOutcome,
+        CacheStats,
+    };
+}
+
 pub mod dependency_materializer {
     pub use crate::application::dependency_materializer::{
         AttestationRef, AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
