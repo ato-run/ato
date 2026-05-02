@@ -210,6 +210,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) state_bindings: Vec<String>,
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) build_policy: crate::application::build_materialization::BuildPolicy,
+    pub(crate) cache_strategy: CacheStrategy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
 }
@@ -713,7 +714,7 @@ fn dependency_request_for_run(
             env_allowlist_digest: None,
         },
         platform: PlatformTriple::current(),
-        cache_strategy: CacheStrategy::None,
+        cache_strategy: request.cache_strategy,
         attestation_strategy: AttestationStrategy::None,
     })
 }
@@ -3037,6 +3038,7 @@ url = "http://127.0.0.1:8787/health"
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
         }

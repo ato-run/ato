@@ -286,11 +286,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
         let cache_lookup = match req.cache_strategy {
             CacheStrategy::None => CacheLookupResult::Disabled,
             CacheStrategy::DerivationCache => {
-                if dep_cache_enabled() {
-                    lookup_dep_cache(&req.ecosystem, &derivation_hash)
-                } else {
-                    CacheLookupResult::Disabled
-                }
+                lookup_dep_cache(&req.ecosystem, &derivation_hash)
             }
         };
         Ok(DependencyPlan {
@@ -438,13 +434,6 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).context("failed to serialize json")?;
     fs::write(path, [bytes, b"\n".to_vec()].concat())
         .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn dep_cache_enabled() -> bool {
-    std::env::var("ATO_DEP_CACHE")
-        .ok()
-        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
 }
 
 /// Reads the weak ref for a derivation key and decides whether to call it a hit.

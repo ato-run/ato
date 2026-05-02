@@ -257,15 +257,19 @@ fn plan_returns_disabled_when_strategy_is_none() {
 
 #[test]
 #[serial]
-fn plan_returns_disabled_when_safety_env_is_off() {
+fn plan_with_derivation_strategy_attempts_lookup_without_safety_env() {
+    // Removing the legacy ATO_DEP_CACHE safety net means the request's
+    // cache_strategy is the sole source of truth. With DerivationCache and
+    // an empty store the lookup must report Miss (not Disabled).
     let tmp = TempDir::new().unwrap();
     let _home = EnvGuard::set("ATO_HOME", tmp.path());
     std::env::remove_var("ATO_DEP_CACHE");
+    std::env::remove_var("ATO_CACHE_STRATEGY");
 
     let plan = SessionDependencyMaterializer::new()
         .plan(&cached_request())
         .unwrap();
-    assert!(matches!(plan.cache_lookup, CacheLookupResult::Disabled));
+    assert!(matches!(plan.cache_lookup, CacheLookupResult::Miss));
 }
 
 #[test]

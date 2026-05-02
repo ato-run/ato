@@ -13,8 +13,8 @@ use super::profile::ProfileCommands;
 use super::project::{ProjectCommands, ScaffoldCommands};
 use super::registry::RegistryCommands;
 use super::shared::{
-    cli_styles, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
-    RunAgentMode, ShareToolRuntime,
+    cli_styles, CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, GitMode,
+    ProviderToolchain, RunAgentMode, ShareToolRuntime,
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
@@ -141,6 +141,10 @@ pub(crate) enum Commands {
         /// Pin a GitHub run to an explicit commit SHA and skip mutable-ref resolution
         #[arg(long = "commit", value_name = "SHA")]
         commit: Option<String>,
+
+        /// Dependency cache strategy: auto (default, honors ATO_CACHE_STRATEGY), none, derivation
+        #[arg(long = "cache", value_enum, default_value_t = CacheStrategyArg::Auto)]
+        cache: CacheStrategyArg,
 
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]

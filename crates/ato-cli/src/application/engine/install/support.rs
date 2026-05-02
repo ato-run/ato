@@ -2257,6 +2257,7 @@ pub(crate) fn execute_run_command(
     state: Vec<String>,
     inject: Vec<String>,
     build_policy: crate::application::build_materialization::BuildPolicy,
+    cache_strategy_arg: crate::cli::shared::CacheStrategyArg,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2303,6 +2304,7 @@ pub(crate) fn execute_run_command(
         state_bindings: state,
         inject_bindings: inject,
         build_policy,
+        cache_strategy: cache_strategy_arg.resolve(),
         reporter,
         preview_mode: false,
     }))

@@ -14,7 +14,7 @@ mod root;
 pub(crate) mod scoped_id_prompt;
 mod secrets;
 mod session;
-mod shared;
+pub(crate) mod shared;
 mod source;
 mod state;
 
