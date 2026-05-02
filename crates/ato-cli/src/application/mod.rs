@@ -4,6 +4,7 @@ pub(crate) mod build_materialization;
 pub(crate) mod compat_import;
 pub(crate) mod credential;
 pub(crate) mod engine;
+pub(crate) mod execution_receipt_builder;
 pub(crate) mod execution_receipts;
 pub(crate) mod launch_materialization;
 pub(crate) mod pipeline;
