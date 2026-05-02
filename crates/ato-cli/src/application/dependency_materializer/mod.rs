@@ -325,7 +325,6 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
             },
         });
         write_json(&layout.session_json, &session)?;
-        write_store_ref(req, &plan)?;
         tracing::info!(
             capsule_id = %req.capsule_id,
             session_id = %req.session_id,
@@ -388,23 +387,6 @@ pub(crate) fn digest_file(path: &Path) -> Result<Option<String>> {
         "sha256:{}",
         hex::encode(Sha256::digest(bytes))
     )))
-}
-
-fn write_store_ref(req: &DependencyMaterializationRequest, plan: &DependencyPlan) -> Result<()> {
-    let path = ato_store_refs_dir()
-        .join("deps")
-        .join(&req.ecosystem)
-        .join(hash_path_component(&plan.derivation_hash))
-        .with_extension("json");
-    let record = StoreRefRecord {
-        schema_version: "1".to_string(),
-        ecosystem: req.ecosystem.clone(),
-        derivation_hash: plan.derivation_hash.clone(),
-        blob_hash: None,
-        cache_status: cache_status(&plan.cache_lookup).to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    write_json(&path, &record)
 }
 
 fn ensure_store_scaffold() -> Result<()> {
