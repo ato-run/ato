@@ -17,6 +17,12 @@ pub(crate) mod common;
 pub(crate) mod logging;
 pub(crate) mod utils;
 
+pub mod projection {
+    pub use crate::application::projection::{
+        project_payload, ProjectionError, ProjectionOutcome, ProjectionStrategy,
+    };
+}
+
 pub mod dependency_materializer {
     pub use crate::application::dependency_materializer::{
         AttestationRef, AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
