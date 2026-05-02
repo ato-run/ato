@@ -67,8 +67,7 @@ impl BlobManifest {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let bytes =
-            serde_json::to_vec_pretty(self).context("failed to serialize blob manifest")?;
+        let bytes = serde_json::to_vec_pretty(self).context("failed to serialize blob manifest")?;
         fs::write(path, [bytes, b"\n".to_vec()].concat())
             .with_context(|| format!("failed to write blob manifest at {}", path.display()))
     }
