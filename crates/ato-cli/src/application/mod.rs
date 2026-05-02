@@ -7,6 +7,7 @@ pub(crate) mod engine;
 pub(crate) mod execution_observers;
 pub(crate) mod execution_receipt_builder;
 pub(crate) mod execution_receipts;
+pub(crate) mod execution_reproducibility;
 pub(crate) mod launch_materialization;
 pub(crate) mod pipeline;
 pub(crate) mod ports;
