@@ -1681,7 +1681,7 @@ where
         derived_execution,
         compatibility_host_mode,
         native_nacelle,
-        build_observation: _,
+        build_observation,
         build_decision_kind: _,
     } = state;
 
@@ -1808,6 +1808,25 @@ where
     if execution_plan.target.runtime == capsule_core::execution_plan::model::ExecutionRuntime::Web {
         hooks
             .notify_web_endpoint(&decision.plan, &request.reporter)
+            .await?;
+    }
+
+    let execution_receipt = crate::application::execution_receipt_builder::build_prelaunch_receipt(
+        &decision.plan,
+        &execution_plan,
+        &launch_ctx,
+        build_observation.as_ref(),
+    )?;
+    let execution_receipt_path =
+        crate::application::execution_receipts::write_receipt_atomic(&execution_receipt)?;
+    if request.verbose {
+        request
+            .reporter
+            .notify(format!(
+                "🧾 Execution receipt: {} ({})",
+                execution_receipt.execution_id,
+                execution_receipt_path.display()
+            ))
             .await?;
     }
 
