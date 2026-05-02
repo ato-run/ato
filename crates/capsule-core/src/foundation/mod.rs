@@ -1,4 +1,5 @@
 //! Layer 1: Foundation — types, errors, and common utilities.
+pub mod blob;
 pub mod common;
 pub mod error;
 pub mod hardware;
