@@ -27,7 +27,9 @@ pub mod store;
 pub mod types;
 pub mod verify;
 
-pub use sign::{generate_keypair, sign_envelope, AttestationKey, AttestationKeyError};
+pub use sign::{
+    generate_keypair, sign_envelope, AttestationKey, AttestationKeyError, StoredAttestationKey,
+};
 pub use store::{
     blob_attestations_dir, payload_attestations_dir, read_envelope, store_envelope,
     trust_root_path, write_trust_root_pubkey,

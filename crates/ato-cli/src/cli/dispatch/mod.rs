@@ -1,4 +1,5 @@
 mod app;
+mod attest;
 mod binding;
 mod cache;
 mod config;
@@ -36,6 +37,7 @@ use crate::project as crate_project;
 use crate::reporters;
 
 use self::app::execute_app_command;
+use self::attest::execute_attest_command;
 use self::cache::execute_cache_command;
 use self::config::execute_config_command;
 use self::explain_hash::execute_explain_hash_command;
@@ -154,6 +156,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::ExplainHash { capsule } => execute_explain_hash_command(&capsule),
 
         Commands::Cache { command } => execute_cache_command(command),
+
+        Commands::Attest { command } => execute_attest_command(command),
 
         Commands::Encap {
             path,
