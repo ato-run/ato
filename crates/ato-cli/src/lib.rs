@@ -17,6 +17,16 @@ pub(crate) mod common;
 pub(crate) mod logging;
 pub(crate) mod utils;
 
+pub mod dependency_materializer {
+    pub use crate::application::dependency_materializer::{
+        AttestationRef, AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
+        DependencyMaterializationRequest, DependencyMaterializer, DependencyPlan,
+        DependencyProjection, InstallPolicies, ManifestInputs, PlatformTriple,
+        ReproducibilityClass, ReproducibilityMeta, RuntimeSelection, SessionDependencyMaterializer,
+        SourceResolutionRecord, StoreRefRecord, VerificationResult,
+    };
+}
+
 /// Ensures the optional sidecar is stopped exactly once across normal exit,
 /// explicit cleanup scopes, and panic-driven unwinding.
 pub(crate) struct SidecarCleanup {

@@ -9,27 +9,35 @@ use crate::preview::{
 
 use super::manifest::{required_env_from_preview_toml, summarize_preview_toml};
 use super::storage::persist_session_with_warning;
+use crate::application::dependency_materializer::{
+    write_source_resolution_record, SourceResolutionRecord,
+};
 
 pub async fn prepare_github_preview_session(
     repository: &str,
     invocation_dir: &Path,
+    explicit_commit: Option<&str>,
 ) -> Result<GitHubPreviewPreparation> {
-    let (install_draft, draft_fetch_warning) =
-        match install::fetch_github_install_draft(repository).await {
+    let (install_draft, draft_fetch_warning) = match explicit_commit {
+        Some(_) => (None, None),
+        None => match install::fetch_github_install_draft(repository).await {
             Ok(draft) => (Some(draft), None),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "Failed to fetch ato store install draft: {error}. Falling back to local zero-config inference."
-                )),
-            ),
-        };
+            Err(_) => {
+                anyhow::bail!(
+                    "network unavailable; cannot resolve <ref> for {}. Run online once, or pass --commit <sha> to skip resolver.",
+                    repository
+                );
+            }
+        },
+    };
 
     let checkout = install::download_github_repository_at_ref(
         repository,
-        install_draft
-            .as_ref()
-            .map(|draft| draft.resolved_ref.sha.as_str()),
+        explicit_commit.or_else(|| {
+            install_draft
+                .as_ref()
+                .map(|draft| draft.resolved_ref.sha.as_str())
+        }),
     )
     .await?;
     let install_draft = install_draft
@@ -42,6 +50,7 @@ pub async fn prepare_github_preview_session(
         invocation_dir,
         &checkout,
         install_draft.as_ref(),
+        explicit_commit,
     )?;
     let session_persist_warning = persist_session_with_warning(&preview_session);
 
@@ -159,6 +168,7 @@ fn build_github_preview_session(
     invocation_dir: &Path,
     checkout: &GitHubCheckout,
     install_draft: Option<&GitHubInstallDraftResponse>,
+    explicit_commit: Option<&str>,
 ) -> Result<PreviewSession> {
     let preview_toml = install_draft.and_then(|draft| draft.preview_toml.clone());
     let mut session = PreviewSession::new(
@@ -175,6 +185,43 @@ fn build_github_preview_session(
         session.resolved_ref = Some(draft.resolved_ref.clone());
         session.manifest_source = Some(draft.manifest_source.clone());
         session.inference_mode = draft.inference_mode.clone();
+        let record = SourceResolutionRecord {
+            authority: "github.com".to_string(),
+            repository: Some(checkout.repository.clone()),
+            requested_ref: Some(draft.resolved_ref.ref_name.clone()),
+            resolved_commit: draft.resolved_ref.sha.clone(),
+            resolved_at: chrono::Utc::now().to_rfc3339(),
+            commit_signature_verdict: None,
+        };
+        write_source_resolution_record(
+            &session.session_root.join("source-resolution.json"),
+            &record,
+        )?;
+        tracing::info!(
+            capsule_id = %checkout.repository,
+            requested_ref = %draft.resolved_ref.ref_name,
+            resolved_commit = %draft.resolved_ref.sha,
+            "resolved GitHub source reference"
+        );
+    } else if let Some(commit) = explicit_commit {
+        let record = SourceResolutionRecord {
+            authority: "github.com".to_string(),
+            repository: Some(checkout.repository.clone()),
+            requested_ref: Some(commit.to_string()),
+            resolved_commit: commit.to_string(),
+            resolved_at: chrono::Utc::now().to_rfc3339(),
+            commit_signature_verdict: None,
+        };
+        write_source_resolution_record(
+            &session.session_root.join("source-resolution.json"),
+            &record,
+        )?;
+        tracing::info!(
+            capsule_id = %checkout.repository,
+            requested_ref = %commit,
+            resolved_commit = %commit,
+            "resolved GitHub source reference from explicit commit"
+        );
     }
     Ok(session)
 }
