@@ -293,6 +293,3 @@ This repository uses per-component licensing:
 | `nacelle` | MPL-2.0 |
 | `ato-desktop` | MPL-2.0 |
 | Hosted registry/backend services | Private or separately commercial-licensed |
-
-The hosted registry/backend services are not licensed for use by this source
-repository unless a separate commercial agreement says otherwise.
