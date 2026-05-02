@@ -12,6 +12,7 @@ pub(crate) mod ports;
 pub(crate) mod preview;
 pub(crate) mod producer_input;
 pub(crate) mod projection;
+pub(crate) mod provider_cache;
 pub(crate) mod search;
 pub(crate) mod secrets;
 pub(crate) mod services;
