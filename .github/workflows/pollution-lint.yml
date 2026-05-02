@@ -1,0 +1,46 @@
+name: pollution-lint
+
+on:
+  pull_request:
+    paths:
+      - "crates/ato-cli/src/**"
+      - ".github/workflows/pollution-lint.yml"
+  push:
+    branches: [main, dev]
+    paths:
+      - "crates/ato-cli/src/**"
+      - ".github/workflows/pollution-lint.yml"
+
+jobs:
+  source-boundary:
+    name: Source pollution lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: reject source_root write construction
+        run: |
+          set -euo pipefail
+          patterns=(
+            'fs::write[[:space:]]*\([^;\n]*source_root'
+            'File::create[[:space:]]*\([^;\n]*source_root'
+            'tokio::fs::write[[:space:]]*\([^;\n]*source_root'
+            'source_root\.join[[:space:]]*\([[:space:]]*"(\.env|node_modules|\.venv|target|dist|build)"'
+          )
+          violations=""
+          for pattern in "${patterns[@]}"; do
+            matches="$(rg -n --pcre2 "$pattern" crates/ato-cli/src || true)"
+            if [ -n "$matches" ]; then
+              disallowed="$(printf '%s\n' "$matches" | grep -v 'pollution-lint: allow' || true)"
+              if [ -n "$disallowed" ]; then
+                violations="${violations}${disallowed}"$'\n'
+              fi
+            fi
+          done
+          if [ -n "$violations" ]; then
+            echo "::error::Potential source-tree write detected. Add // pollution-lint: allow only after review."
+            printf '%s' "$violations"
+            exit 1
+          fi
+          echo "OK: no unreviewed source_root write patterns found."
