@@ -23,11 +23,15 @@ fn main() {
         return;
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(logging::build_env_filter())
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+    let _log_guard = logging::init_tracing();
+
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        pid = std::process::id(),
+        "ato-desktop starting",
+    );
 
     app::run();
 }

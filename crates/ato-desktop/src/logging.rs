@@ -1,32 +1,92 @@
-//! Logging filter glue for `ato-desktop`.
+//! Logging setup for `ato-desktop`.
 //!
-//! Two env vars drive the active filter, in this precedence order:
+//! ## Output
+//!
+//! Every run writes to two sinks in parallel:
+//! - **stderr** — human-readable, ANSI colours, no target prefix.
+//! - **`~/.ato/logs/ato-desktop.YYYY-MM-DD.log`** — plain text, includes
+//!   target prefix and thread ID for post-mortem analysis. Rotated daily;
+//!   old files are left in place (prune manually or via a cron job).
+//!
+//! ## Filter precedence
 //!
 //! 1. **`RUST_LOG`** — raw `tracing-subscriber` directives. When set,
 //!    everything below is ignored. Reach for this when you need
 //!    per-module fine control.
-//! 2. **`ATO_DESKTOP_LOG`** — comma-separated feature names with a
-//!    friendlier vocabulary than the directive grammar:
-//!    - `favicon` — surface INFO output from icon / favicon plumbing
-//!      (fetch dispatch, HTML link parsing, ICO/SVG normalization).
-//!    - `all` — turn on every per-feature target plus app DEBUG.
+//! 2. **`ATO_DESKTOP_LOG`** — comma-separated feature names:
+//!    - `favicon` — icon / favicon fetch, HTML parsing, ICO/SVG normalization.
+//!    - `bridge` — guest<->host IPC message flow (requests, responses, denials).
+//!    - `webview` — WebView lifecycle: mount, unmount, navigation, script eval.
+//!    - `orchestrator` — capsule session lifecycle: spawn, stop, exit codes.
+//!    - `all` — promotes everything to DEBUG.
 //!    Unknown tokens are warned about on stderr and otherwise ignored.
-//! 3. **Default** — `ato_desktop=info` baseline plus `<feature>=warn`
-//!    for every per-feature target. Errors from the gated targets
-//!    still surface; routine INFO chatter stays silent until opted in.
+//! 3. **Default** — `ato_desktop=info`, all feature targets at `warn`.
+//!    Errors from gated targets still surface; routine chatter is silent.
 
-use tracing_subscriber::EnvFilter;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
-/// `target:` value for icon / favicon plumbing — fetch dispatch, HTML
-/// link parsing, ICO/SVG normalization, and the share-icon resolver.
+/// `target:` value for icon / favicon plumbing.
 pub const TARGET_FAVICON: &str = "favicon";
+/// `target:` value for guest<->host IPC messages in `bridge.rs`.
+pub const TARGET_BRIDGE: &str = "bridge";
+/// `target:` value for WebView lifecycle events in `webview.rs`.
+pub const TARGET_WEBVIEW: &str = "webview";
+/// `target:` value for capsule session lifecycle in `orchestrator.rs`.
+pub const TARGET_ORCHESTRATOR: &str = "orchestrator";
 
-/// Targets that `ATO_DESKTOP_LOG=<name>` knows by name. Adding a new
-/// per-feature flag is one line here plus tagging the relevant
-/// `tracing::*!` calls with `target: <YOUR_CONST>`.
-const FEATURE_TARGETS: &[&str] = &[TARGET_FAVICON];
+/// All targets that `ATO_DESKTOP_LOG=<name>` recognises.
+const FEATURE_TARGETS: &[&str] = &[
+    TARGET_FAVICON,
+    TARGET_BRIDGE,
+    TARGET_WEBVIEW,
+    TARGET_ORCHESTRATOR,
+];
 
-pub fn build_env_filter() -> EnvFilter {
+/// Initialise the global tracing subscriber.
+///
+/// Returns a [`WorkerGuard`] that **must be kept alive** until the process
+/// exits. Dropping it early stops the background log-writer thread and may
+/// lose buffered log lines.
+///
+/// Falls back to stderr-only logging when the log directory cannot be created.
+pub fn init_tracing() -> Option<WorkerGuard> {
+    let filter = build_env_filter();
+
+    let log_dir = dirs::home_dir().map(|h| h.join(".ato").join("logs"));
+
+    if let Some(ref dir) = log_dir {
+        if std::fs::create_dir_all(dir).is_ok() {
+            let file_appender = tracing_appender::rolling::daily(dir, "ato-desktop.log");
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+            Registry::default()
+                .with(filter)
+                .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
+                .with(
+                    fmt::layer()
+                        .with_target(true)
+                        .with_thread_ids(true)
+                        .with_ansi(false)
+                        .with_writer(non_blocking),
+                )
+                .init();
+
+            return Some(guard);
+        }
+    }
+
+    // Fallback: stderr only.
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
+
+    None
+}
+
+fn build_env_filter() -> EnvFilter {
     if let Ok(filter) = EnvFilter::try_from_default_env() {
         return filter;
     }
@@ -81,10 +141,13 @@ mod tests {
     use super::build_directives;
 
     #[test]
-    fn default_silences_favicon_info_but_keeps_app_info() {
+    fn default_silences_feature_info_but_keeps_app_info() {
         let directives = build_directives(None);
         assert!(directives.contains("ato_desktop=info"));
         assert!(directives.contains("favicon=warn"));
+        assert!(directives.contains("bridge=warn"));
+        assert!(directives.contains("webview=warn"));
+        assert!(directives.contains("orchestrator=warn"));
     }
 
     #[test]
@@ -93,6 +156,15 @@ mod tests {
         assert!(directives.contains("ato_desktop=info"));
         assert!(directives.contains("favicon=info"));
         assert!(!directives.contains("favicon=warn"));
+        assert!(directives.contains("bridge=warn"));
+    }
+
+    #[test]
+    fn bridge_token_promotes_only_bridge_to_info() {
+        let directives = build_directives(Some("bridge"));
+        assert!(directives.contains("bridge=info"));
+        assert!(!directives.contains("bridge=warn"));
+        assert!(directives.contains("favicon=warn"));
     }
 
     #[test]
@@ -100,17 +172,20 @@ mod tests {
         let directives = build_directives(Some("all"));
         assert!(directives.contains("ato_desktop=debug"));
         assert!(directives.contains("favicon=debug"));
+        assert!(directives.contains("bridge=debug"));
+        assert!(directives.contains("webview=debug"));
+        assert!(directives.contains("orchestrator=debug"));
         assert!(!directives.contains("ato_desktop=info"));
     }
 
     #[test]
     fn comma_separated_tokens_compose() {
-        // Currently only `favicon` exists, but the parser must still
-        // tolerate trailing/leading whitespace and ignore unknown
-        // tokens without dropping known ones.
-        let directives = build_directives(Some(" favicon , bogus "));
+        let directives = build_directives(Some(" favicon , bridge , bogus "));
         assert!(directives.contains("favicon=info"));
+        assert!(directives.contains("bridge=info"));
         assert!(directives.contains("ato_desktop=info"));
+        assert!(!directives.contains("favicon=warn"));
+        assert!(!directives.contains("bridge=warn"));
     }
 
     #[test]
