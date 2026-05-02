@@ -332,4 +332,3 @@ fn directory_size(path: &Path) -> Option<u64> {
     }
     Some(total)
 }
-

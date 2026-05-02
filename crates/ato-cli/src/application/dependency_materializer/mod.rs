@@ -285,9 +285,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
         let derivation_hash = key.derivation_hash()?;
         let cache_lookup = match req.cache_strategy {
             CacheStrategy::None => CacheLookupResult::Disabled,
-            CacheStrategy::DerivationCache => {
-                lookup_dep_cache(&req.ecosystem, &derivation_hash)
-            }
+            CacheStrategy::DerivationCache => lookup_dep_cache(&req.ecosystem, &derivation_hash),
         };
         Ok(DependencyPlan {
             derivation_hash,
@@ -307,6 +305,12 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
         ensure_store_scaffold()?;
         let layout = ato_run_layout(&req.session_id);
         create_run_layout(&layout)?;
+        let cache_status_str = cache_status(&plan.cache_lookup);
+        let cache_strategy_str = cache_strategy_label(req.cache_strategy);
+        let blob_hash_for_log = match &plan.cache_lookup {
+            CacheLookupResult::Hit { blob_hash } => Some(blob_hash.clone()),
+            _ => None,
+        };
         let session = serde_json::json!({
             "schema_version": "1",
             "session_id": req.session_id,
@@ -314,7 +318,11 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
             "source_root": req.source_root,
             "workspace_root": req.workspace_root,
             "derivation_hash": plan.derivation_hash,
-            "dependency_cache": { "status": cache_status(&plan.cache_lookup) },
+            "dependency_cache": {
+                "status": cache_status_str,
+                "strategy": cache_strategy_str,
+                "blob_hash": blob_hash_for_log,
+            },
         });
         write_json(&layout.session_json, &session)?;
         write_store_ref(req, &plan)?;
@@ -322,7 +330,9 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
             capsule_id = %req.capsule_id,
             session_id = %req.session_id,
             derivation_hash = %plan.derivation_hash,
-            dependency_cache_status = cache_status(&plan.cache_lookup),
+            cache_strategy = cache_strategy_str,
+            cache_result = cache_status_str,
+            blob_hash = blob_hash_for_log.as_deref().unwrap_or(""),
             "dependency materialization projected isolated run workspace"
         );
 
@@ -331,7 +341,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
 
         Ok(DependencyProjection {
             derivation_hash: Some(plan.derivation_hash),
-            blob_hash: None,
+            blob_hash: blob_hash_for_log,
             execution_deps_path: layout.deps,
             run_workspace: layout.root,
             env: BTreeMap::new(),
@@ -341,7 +351,7 @@ impl DependencyMaterializer for SessionDependencyMaterializer {
                 notes: vec!["A0 isolated session materialization; whole-tree cache disabled unless explicitly enabled".to_string()],
             },
             attestation_refs: Vec::new(),
-            dependency_cache_status: cache_status(&plan.cache_lookup).to_string(),
+            dependency_cache_status: cache_status_str.to_string(),
         })
     }
 
@@ -479,6 +489,13 @@ fn cache_status(cache_lookup: &CacheLookupResult) -> &'static str {
         CacheLookupResult::Disabled => "disabled",
         CacheLookupResult::Hit { .. } => "hit",
         CacheLookupResult::Miss => "miss",
+    }
+}
+
+fn cache_strategy_label(strategy: CacheStrategy) -> &'static str {
+    match strategy {
+        CacheStrategy::None => "none",
+        CacheStrategy::DerivationCache => "derivation",
     }
 }
 

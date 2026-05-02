@@ -91,6 +91,8 @@ pub fn freeze_dep_tree(
         anyhow::bail!("cannot freeze {}: not a directory", deps_path.display());
     }
 
+    let started = std::time::Instant::now();
+
     // Acquire the per-derivation lock so concurrent freezes for the same
     // derivation hash serialize through `flock(2)`.
     let _lock = DerivationLock::acquire(derivation_hash)?;
@@ -117,6 +119,20 @@ pub fn freeze_dep_tree(
 
     write_ref_atomically(ecosystem, derivation_hash, &blob_hash)?;
     write_blob_meta_atomically(&address, derivation_hash, did_freeze)?;
+
+    let freeze_duration_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(
+        derivation_hash = derivation_hash,
+        ecosystem = ecosystem,
+        blob_hash = %blob_hash,
+        cache_result = if did_freeze { "miss" } else { "observe" },
+        did_freeze,
+        freeze_duration_ms,
+        file_count = tree.file_count,
+        symlink_count = tree.symlink_count,
+        total_bytes = tree.total_bytes,
+        "A1 freeze complete"
+    );
 
     Ok(FreezeOutcome {
         blob_hash,

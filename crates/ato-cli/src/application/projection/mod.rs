@@ -91,6 +91,26 @@ pub fn project_payload(payload: &Path, target: &Path) -> Result<ProjectionOutcom
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
+    let started = std::time::Instant::now();
+    let outcome = project_inner(payload, target);
+    let projection_duration_ms = started.elapsed().as_millis() as u64;
+    if let Ok(outcome) = &outcome {
+        tracing::info!(
+            payload = %payload.display(),
+            target = %target.display(),
+            strategy = ?outcome.strategy,
+            file_count = outcome.file_count,
+            symlink_count = outcome.symlink_count,
+            dir_count = outcome.dir_count,
+            bytes_realized = outcome.bytes_realized,
+            projection_duration_ms,
+            "A1 projection complete"
+        );
+    }
+    outcome
+}
+
+fn project_inner(payload: &Path, target: &Path) -> Result<ProjectionOutcome> {
     #[cfg(target_os = "macos")]
     {
         match try_clonefile(payload, target) {
@@ -115,8 +135,6 @@ pub fn project_payload(payload: &Path, target: &Path) -> Result<ProjectionOutcom
                     target = %target.display(),
                     "clonefile failed, falling back to copy: {err}"
                 );
-                // If clonefile partially populated the target, scrub it so
-                // the copy fallback starts from a clean slate.
                 let _ = fs::remove_dir_all(target);
             }
         }

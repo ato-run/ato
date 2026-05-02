@@ -179,7 +179,9 @@ fn clear_derivation_keeps_blob_when_another_ref_still_points_at_it() {
     let deps = tmp.path().join("install");
     write_file(&deps, "lib.js", b"shared\n");
 
-    let dh_first = DepDerivationKeyV1::from_request(&req).derivation_hash().unwrap();
+    let dh_first = DepDerivationKeyV1::from_request(&req)
+        .derivation_hash()
+        .unwrap();
     let outcome = freeze_dep_tree(&deps, &dh_first, &req.ecosystem).unwrap();
 
     // Manually drop in a second ref from a different derivation hash that
