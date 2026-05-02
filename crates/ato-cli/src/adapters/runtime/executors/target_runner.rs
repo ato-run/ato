@@ -256,9 +256,14 @@ pub fn prepare_target_execution(
         });
     }
 
+    // Honour the target's `working_dir` here too — otherwise a flat
+    // probe at `manifest_dir` misses `backend/requirements.txt` and the
+    // guard rejects sessions that just provisioned successfully (issue
+    // hit by ato-desktop's `capsule://` flow when `defer_consent = true`).
+    let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
     let guard_result = guard::evaluate_for_mode_with_authority(
         &execution_plan,
-        &runtime_decision.plan.manifest_dir,
+        &guard_manifest_dir,
         &options.enforcement,
         options.sandbox_mode,
         options.dangerously_skip_permissions,
