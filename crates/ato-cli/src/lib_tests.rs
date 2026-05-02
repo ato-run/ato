@@ -836,6 +836,27 @@ fn inspect_command_parses_lock_preview_diagnostics_and_remediation() {
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
+
+    let execution = Cli::try_parse_from([
+        "ato",
+        "inspect",
+        "execution",
+        "blake3:abc",
+        "--compare",
+        "blake3:def",
+        "--json",
+    ])
+    .expect("parse inspect execution");
+    match execution.command {
+        Commands::Inspect {
+            command: InspectCommands::Execution { id, compare, json },
+        } => {
+            assert_eq!(id, "blake3:abc");
+            assert_eq!(compare.as_deref(), Some("blake3:def"));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
 }
 
 #[test]

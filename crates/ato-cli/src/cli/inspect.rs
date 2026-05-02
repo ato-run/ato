@@ -55,4 +55,16 @@ pub(crate) enum InspectCommands {
         #[arg(long)]
         json: bool,
     },
+
+    #[command(about = "Inspect a stored execution receipt")]
+    Execution {
+        /// Execution ID, for example blake3:...
+        id: String,
+        /// Compare this execution receipt with another execution ID
+        #[arg(long)]
+        compare: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
