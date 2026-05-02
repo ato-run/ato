@@ -249,6 +249,12 @@ pub(crate) enum Commands {
         capsule: String,
     },
 
+    #[command(about = "Inspect or prune the local A1 dependency cache")]
+    Cache {
+        #[command(subcommand)]
+        command: super::cache::CacheCommands,
+    },
+
     #[command(
         next_help_heading = "Primary Commands",
         about = "Share your current workspace"
