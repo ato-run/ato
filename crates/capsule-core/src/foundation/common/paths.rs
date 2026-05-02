@@ -101,6 +101,13 @@ pub fn ato_runs_dir() -> PathBuf {
     nacelle_home_dir_or_workspace_tmp().join("runs")
 }
 
+/// Returns the durable execution receipt directory.
+///
+/// Layout: `~/.ato/executions`
+pub fn ato_executions_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("executions")
+}
+
 /// Returns the workspace-local directory for generated compatibility artifacts.
 pub(crate) fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WORKSPACE_DERIVED_DIR)
