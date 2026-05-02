@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_identity::{
-    DependencyIdentity, ExecutionIdentityInput, ExecutionReceipt, LaunchIdentity, PolicyIdentity,
-    ReproducibilityCause, ReproducibilityClass, ReproducibilityIdentity, RuntimeIdentity,
-    SourceIdentity, Tracked,
+    ExecutionIdentityInput, ExecutionReceipt, LaunchIdentity, PolicyIdentity, SourceIdentity,
+    Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
@@ -58,7 +57,13 @@ pub(crate) fn build_prelaunch_receipt(
         },
         working_directory: launch_spec.working_dir.display().to_string(),
     };
-    let reproducibility = classify_reproducibility(execution_plan, &dependencies, &runtime);
+    let reproducibility = crate::application::execution_reproducibility::classify_execution(
+        execution_plan,
+        &dependencies,
+        &runtime,
+        &environment,
+        &filesystem,
+    );
 
     Ok(ExecutionReceipt::from_input(
         ExecutionIdentityInput::new(
@@ -73,46 +78,4 @@ pub(crate) fn build_prelaunch_receipt(
         ),
         chrono::Utc::now().to_rfc3339(),
     )?)
-}
-
-fn classify_reproducibility(
-    execution_plan: &ExecutionPlan,
-    dependencies: &DependencyIdentity,
-    runtime: &RuntimeIdentity,
-) -> ReproducibilityIdentity {
-    let mut causes = Vec::new();
-    if !execution_plan.runtime.policy.network.allow_hosts.is_empty() {
-        causes.push(ReproducibilityCause::NetworkBound);
-    }
-    if dependencies.output_hash.status != capsule_core::execution_identity::TrackingStatus::Known {
-        causes.push(ReproducibilityCause::UnknownDependencyOutput);
-    }
-    if runtime.binary_hash.status != capsule_core::execution_identity::TrackingStatus::Known {
-        causes.push(ReproducibilityCause::UnknownRuntimeIdentity);
-    }
-    if runtime.dynamic_linkage.status == capsule_core::execution_identity::TrackingStatus::Untracked
-    {
-        causes.push(ReproducibilityCause::HostBound);
-    }
-    causes.sort();
-    causes.dedup();
-
-    let class = if causes.is_empty() {
-        ReproducibilityClass::Pure
-    } else if causes.iter().any(|cause| {
-        matches!(
-            cause,
-            ReproducibilityCause::UnknownDependencyOutput
-                | ReproducibilityCause::UnknownRuntimeIdentity
-                | ReproducibilityCause::UntrackedEnvironment
-                | ReproducibilityCause::UntrackedFilesystemView
-                | ReproducibilityCause::LifecycleUnknown
-        )
-    }) {
-        ReproducibilityClass::BestEffort
-    } else {
-        ReproducibilityClass::Bounded
-    };
-
-    ReproducibilityIdentity { class, causes }
 }
