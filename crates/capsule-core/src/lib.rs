@@ -53,6 +53,7 @@ pub use routing::router;
 
 // ── Layer 4: Engine ───────────────────────────────────────────────────────
 pub mod engine;
+pub use engine::execution_identity;
 pub use engine::execution_plan;
 pub use engine::executors;
 pub use engine::lifecycle;
