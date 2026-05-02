@@ -301,15 +301,20 @@ pub(super) fn plan_v03_provision_command(
     }
 
     if matches!(driver.as_str(), "python") {
+        let runtime_version = plan.execution_runtime_version();
         debug!(
             phase = "run",
             runtime,
             driver,
             manifest_dir = %manifest_dir.display(),
             execution_working_directory = %execution_working_directory.display(),
+            runtime_version = ?runtime_version,
             "Provision command path diagnostics"
         );
-        return provision_command_from_python_importer(&execution_working_directory);
+        return provision_command_from_python_importer(
+            &execution_working_directory,
+            runtime_version.as_deref(),
+        );
     }
 
     debug!(
@@ -363,7 +368,14 @@ fn provision_command_from_node_importer(
 
 fn provision_command_from_python_importer(
     execution_working_directory: &Path,
+    runtime_version: Option<&str>,
 ) -> Result<Option<String>> {
+    let python_pin = runtime_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!(" --python {value}"))
+        .unwrap_or_default();
+
     if let Some(requirements_path) = resolve_python_requirements_path(execution_working_directory) {
         let requirements_arg = requirements_path
             .strip_prefix(execution_working_directory)
@@ -371,12 +383,18 @@ fn provision_command_from_python_importer(
             .to_string_lossy()
             .replace('\\', "/");
         return Ok(Some(format!(
-            "uv venv --clear && uv pip install -r {requirements_arg}"
+            "uv venv{python_pin} --clear && uv pip install -r {requirements_arg}"
         )));
     }
 
     match probe_required_python_lockfile(execution_working_directory)? {
-        ProbeResult::Found(_) => Ok(Some("uv sync --frozen".to_string())),
+        ProbeResult::Found(_) => {
+            // `uv sync --frozen` honours pyproject.toml's requires-python, so
+            // we don't inject --python here unless a pin is explicitly set.
+            // When the manifest pins a version, surface it via UV_PYTHON via
+            // the env, but for now lean on uv.lock metadata.
+            Ok(Some("uv sync --frozen".to_string()))
+        }
         ProbeResult::Missing(missing) => {
             Err(AtoExecutionError::lock_incomplete(missing.message, Some("uv.lock")).into())
         }
@@ -1161,6 +1179,35 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
+            "uv venv --python 3.11.10 --clear && uv pip install -r requirements.txt"
+        );
+    }
+
+    #[test]
+    fn provision_command_omits_python_pin_when_runtime_version_unset() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.6\n")
+            .expect("write requirements");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+run_command = "main.py"
+"#,
+        );
+
+        let command = plan_v03_provision_command(&plan)
+            .expect("provision command")
+            .expect("python requirements should provision");
+
+        assert_eq!(
+            command,
             "uv venv --clear && uv pip install -r requirements.txt"
         );
     }
@@ -1190,7 +1237,7 @@ run_command = "main.py"
             .expect("python requirements should provision");
 
         assert!(
-            command.starts_with("uv venv --clear &&"),
+            command.starts_with("uv venv --python 3.11.10 --clear &&"),
             "command={command}"
         );
     }
