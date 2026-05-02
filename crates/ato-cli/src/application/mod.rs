@@ -1,4 +1,5 @@
 pub(crate) mod agent;
+pub(crate) mod attestation;
 pub(crate) mod auth;
 pub(crate) mod build_materialization;
 pub(crate) mod cache_admin;
