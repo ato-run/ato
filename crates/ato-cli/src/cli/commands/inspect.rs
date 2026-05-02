@@ -5,6 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Error as AnyhowError, Result};
 use capsule_core::ato_lock::{closure_info, AtoLock, UnresolvedValue};
 use capsule_core::common::paths::ato_runs_dir;
+use capsule_core::execution_identity::{
+    ExecutionReceipt, ReproducibilityCause, ReproducibilityClass, Tracked, TrackingStatus,
+};
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
@@ -19,6 +22,7 @@ use thiserror::Error;
 use crate::application::compat_import::{
     CompatibilityCompileResult, CompatibilityDiagnosticSeverity,
 };
+use crate::application::execution_receipts;
 use crate::application::source_inference::{
     self, CanonicalLockInput, MaterializationMode, SourceEvidenceInput, SourceInferenceDiagnostic,
     SourceInferenceDiagnosticSeverity, SourceInferenceInput, SourceInferenceInputKind,
@@ -52,6 +56,42 @@ pub struct InspectTarget {
 pub enum ResolvedTarget {
     Local { path: String },
     Remote { publisher: String, slug: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ExecutionInspectView {
+    Receipt {
+        receipt: Box<ExecutionReceipt>,
+        gaps: Vec<ExecutionTrackingGap>,
+    },
+    Comparison {
+        comparison: ExecutionReceiptComparison,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionReceiptComparison {
+    pub left_execution_id: String,
+    pub right_execution_id: String,
+    pub differences: Vec<ExecutionReceiptDiff>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ExecutionReceiptDiff {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExecutionTrackingGap {
+    pub path: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -557,6 +597,32 @@ pub fn execute_remediation_view(path: PathBuf, json_output: bool) -> Result<Reme
         println!("{}", serde_json::to_string_pretty(&view)?);
     } else {
         print_remediation_view(&view);
+    }
+    Ok(view)
+}
+
+pub fn execute_execution_view(
+    execution_id: String,
+    compare: Option<String>,
+    json_output: bool,
+) -> Result<ExecutionInspectView> {
+    let left = execution_receipts::read_receipt(&execution_id)?;
+    let view = if let Some(right_id) = compare {
+        let right = execution_receipts::read_receipt(&right_id)?;
+        ExecutionInspectView::Comparison {
+            comparison: compare_execution_receipts(&left, &right)?,
+        }
+    } else {
+        ExecutionInspectView::Receipt {
+            gaps: collect_tracking_gaps(&left)?,
+            receipt: Box::new(left),
+        }
+    };
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_execution_view(&view);
     }
     Ok(view)
 }
@@ -1628,6 +1694,300 @@ fn print_lock_view(view: &InspectLockView) {
                     .unwrap_or_default()
             );
         }
+    }
+}
+
+fn print_execution_view(view: &ExecutionInspectView) {
+    match view {
+        ExecutionInspectView::Receipt { receipt, gaps } => {
+            print_execution_receipt(receipt, gaps);
+        }
+        ExecutionInspectView::Comparison { comparison } => {
+            println!(
+                "Execution comparison: {} -> {}",
+                comparison.left_execution_id, comparison.right_execution_id
+            );
+            if comparison.differences.is_empty() {
+                println!("  No differences");
+                return;
+            }
+            println!("Differences:");
+            for diff in &comparison.differences {
+                println!(
+                    "  - {}: {} -> {}",
+                    diff.path,
+                    summarize_json_value(diff.left.as_ref()),
+                    summarize_json_value(diff.right.as_ref())
+                );
+            }
+        }
+    }
+}
+
+fn print_execution_receipt(receipt: &ExecutionReceipt, gaps: &[ExecutionTrackingGap]) {
+    println!("Execution: {}", receipt.execution_id);
+    println!("  Computed at: {}", receipt.computed_at);
+    println!(
+        "  Identity: {} {}",
+        receipt.identity.hash_algorithm, receipt.identity.input_hash
+    );
+    println!(
+        "  Class: {}",
+        reproducibility_class_label(receipt.reproducibility.class)
+    );
+    if !receipt.reproducibility.causes.is_empty() {
+        println!("Causes:");
+        for cause in &receipt.reproducibility.causes {
+            println!("  - {}", reproducibility_cause_label(*cause));
+        }
+    }
+
+    println!("Source:");
+    print_tracked_string("  source_ref", &receipt.source.source_ref);
+    print_tracked_string("  source_tree_hash", &receipt.source.source_tree_hash);
+
+    println!("Dependencies:");
+    print_tracked_string("  derivation_hash", &receipt.dependencies.derivation_hash);
+    print_tracked_string("  output_hash", &receipt.dependencies.output_hash);
+
+    println!("Runtime:");
+    if let Some(declared) = receipt.runtime.declared.as_deref() {
+        println!("  declared: {declared}");
+    }
+    if let Some(resolved) = receipt.runtime.resolved.as_deref() {
+        println!("  resolved: {resolved}");
+    }
+    print_tracked_string("  binary_hash", &receipt.runtime.binary_hash);
+    print_tracked_string("  dynamic_linkage", &receipt.runtime.dynamic_linkage);
+    println!(
+        "  platform: {}/{}/{}",
+        receipt.runtime.platform.os, receipt.runtime.platform.arch, receipt.runtime.platform.libc
+    );
+
+    println!("Environment:");
+    print_tracked_string("  closure_hash", &receipt.environment.closure_hash);
+    println!("  mode: {:?}", receipt.environment.mode);
+    if !receipt.environment.tracked_keys.is_empty() {
+        println!(
+            "  tracked_keys: {}",
+            receipt.environment.tracked_keys.join(", ")
+        );
+    }
+    if !receipt.environment.redacted_keys.is_empty() {
+        println!(
+            "  redacted_keys: {}",
+            receipt.environment.redacted_keys.join(", ")
+        );
+    }
+
+    println!("Filesystem:");
+    print_tracked_string("  view_hash", &receipt.filesystem.view_hash);
+    println!(
+        "  projection_strategy: {}",
+        receipt.filesystem.projection_strategy
+    );
+    if !receipt.filesystem.writable_dirs.is_empty() {
+        println!(
+            "  writable_dirs: {}",
+            receipt.filesystem.writable_dirs.join(", ")
+        );
+    }
+    if !receipt.filesystem.persistent_state.is_empty() {
+        println!(
+            "  persistent_state: {}",
+            receipt.filesystem.persistent_state.join(", ")
+        );
+    }
+
+    println!("Policy:");
+    print_tracked_string("  network_policy_hash", &receipt.policy.network_policy_hash);
+    print_tracked_string(
+        "  capability_policy_hash",
+        &receipt.policy.capability_policy_hash,
+    );
+
+    println!("Launch:");
+    println!("  entry_point: {}", receipt.launch.entry_point);
+    println!("  argv: {}", receipt.launch.argv.join(" "));
+    println!("  working_directory: {}", receipt.launch.working_directory);
+
+    if !gaps.is_empty() {
+        println!("Unknown/untracked:");
+        for gap in gaps {
+            match gap.reason.as_deref() {
+                Some(reason) => println!("  - {}: {} ({})", gap.path, gap.status, reason),
+                None => println!("  - {}: {}", gap.path, gap.status),
+            }
+        }
+    }
+}
+
+fn print_tracked_string(label: &str, tracked: &Tracked<String>) {
+    match tracked.status {
+        TrackingStatus::Known => {
+            println!(
+                "{label}: {}",
+                tracked.value.as_deref().unwrap_or("<missing-known-value>")
+            );
+        }
+        TrackingStatus::Unknown | TrackingStatus::Untracked | TrackingStatus::NotApplicable => {
+            let status = tracking_status_label(tracked.status);
+            match tracked.reason.as_deref() {
+                Some(reason) => println!("{label}: {status} ({reason})"),
+                None => println!("{label}: {status}"),
+            }
+        }
+    }
+}
+
+fn compare_execution_receipts(
+    left: &ExecutionReceipt,
+    right: &ExecutionReceipt,
+) -> Result<ExecutionReceiptComparison> {
+    let left_value = serde_json::to_value(left)?;
+    let right_value = serde_json::to_value(right)?;
+    let mut differences = Vec::new();
+    diff_json_values("", &left_value, &right_value, &mut differences);
+    Ok(ExecutionReceiptComparison {
+        left_execution_id: left.execution_id.clone(),
+        right_execution_id: right.execution_id.clone(),
+        differences,
+    })
+}
+
+fn diff_json_values(
+    path: &str,
+    left: &Value,
+    right: &Value,
+    differences: &mut Vec<ExecutionReceiptDiff>,
+) {
+    match (left, right) {
+        (Value::Object(left_map), Value::Object(right_map)) => {
+            let keys = left_map
+                .keys()
+                .chain(right_map.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for key in keys {
+                let child_path = join_json_path(path, &key);
+                match (left_map.get(&key), right_map.get(&key)) {
+                    (Some(left_child), Some(right_child)) => {
+                        diff_json_values(&child_path, left_child, right_child, differences);
+                    }
+                    (left_child, right_child) => differences.push(ExecutionReceiptDiff {
+                        path: child_path,
+                        left: left_child.cloned(),
+                        right: right_child.cloned(),
+                    }),
+                }
+            }
+        }
+        _ if left == right => {}
+        _ => differences.push(ExecutionReceiptDiff {
+            path: if path.is_empty() {
+                "$".to_string()
+            } else {
+                path.to_string()
+            },
+            left: Some(left.clone()),
+            right: Some(right.clone()),
+        }),
+    }
+}
+
+fn collect_tracking_gaps(receipt: &ExecutionReceipt) -> Result<Vec<ExecutionTrackingGap>> {
+    let value = serde_json::to_value(receipt)?;
+    let mut gaps = Vec::new();
+    collect_tracking_gaps_from_value("", &value, &mut gaps);
+    Ok(gaps)
+}
+
+fn collect_tracking_gaps_from_value(
+    path: &str,
+    value: &Value,
+    gaps: &mut Vec<ExecutionTrackingGap>,
+) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(status)) = map.get("status") {
+                if status == "unknown" || status == "untracked" {
+                    gaps.push(ExecutionTrackingGap {
+                        path: if path.is_empty() {
+                            "$".to_string()
+                        } else {
+                            path.to_string()
+                        },
+                        status: status.clone(),
+                        reason: map
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                    });
+                }
+            }
+            for (key, child) in map {
+                collect_tracking_gaps_from_value(&join_json_path(path, key), child, gaps);
+            }
+        }
+        Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                collect_tracking_gaps_from_value(&format!("{path}[{index}]"), child, gaps);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn join_json_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
+fn summarize_json_value(value: Option<&Value>) -> String {
+    match value {
+        Some(value) => {
+            let raw = serde_json::to_string(value).unwrap_or_else(|_| "<unprintable>".to_string());
+            if raw.len() > 96 {
+                format!("{}...", &raw[..96])
+            } else {
+                raw
+            }
+        }
+        None => "<missing>".to_string(),
+    }
+}
+
+fn tracking_status_label(status: TrackingStatus) -> &'static str {
+    match status {
+        TrackingStatus::Known => "known",
+        TrackingStatus::Unknown => "unknown",
+        TrackingStatus::Untracked => "untracked",
+        TrackingStatus::NotApplicable => "not-applicable",
+    }
+}
+
+fn reproducibility_class_label(class: ReproducibilityClass) -> &'static str {
+    match class {
+        ReproducibilityClass::Pure => "pure",
+        ReproducibilityClass::Bounded => "bounded",
+        ReproducibilityClass::BestEffort => "best-effort",
+    }
+}
+
+fn reproducibility_cause_label(cause: ReproducibilityCause) -> &'static str {
+    match cause {
+        ReproducibilityCause::HostBound => "host-bound",
+        ReproducibilityCause::StateBound => "state-bound",
+        ReproducibilityCause::TimeBound => "time-bound",
+        ReproducibilityCause::NetworkBound => "network-bound",
+        ReproducibilityCause::UnknownDependencyOutput => "unknown-dependency-output",
+        ReproducibilityCause::UnknownRuntimeIdentity => "unknown-runtime-identity",
+        ReproducibilityCause::UntrackedEnvironment => "untracked-environment",
+        ReproducibilityCause::UntrackedFilesystemView => "untracked-filesystem-view",
+        ReproducibilityCause::LifecycleUnknown => "lifecycle-unknown",
     }
 }
 
