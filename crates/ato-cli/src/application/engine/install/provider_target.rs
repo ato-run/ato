@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
-use rand::RngCore;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1359,7 +1358,7 @@ fn unique_provider_workspace_root(provider: ProviderKind) -> Result<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let random = rand::thread_rng().next_u64();
+    let random = rand::random::<u64>();
     Ok(base.join(format!("{}-{millis:x}-{random:x}", provider.as_str())))
 }
 

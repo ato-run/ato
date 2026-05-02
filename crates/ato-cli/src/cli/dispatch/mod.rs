@@ -2,6 +2,7 @@ mod app;
 mod binding;
 mod config;
 mod engine;
+mod explain_hash;
 mod fetch;
 mod inspect;
 mod install;
@@ -35,6 +36,7 @@ use crate::reporters;
 
 use self::app::execute_app_command;
 use self::config::execute_config_command;
+use self::explain_hash::execute_explain_hash_command;
 use self::fetch::{execute_fetch_command, execute_finalize_command};
 use self::inspect::execute_inspect_command;
 use self::ipc::execute_ipc_command;
@@ -75,6 +77,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             via,
+            commit,
             yes,
             verbose,
             agent,
@@ -110,6 +113,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             provider_toolchain: via,
+            explicit_commit: commit,
             yes,
             verbose,
             agent_mode: agent,
@@ -142,6 +146,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             registry.as_deref(),
             json || command_json,
         ),
+
+        Commands::ExplainHash { capsule } => execute_explain_hash_command(&capsule),
 
         Commands::Encap {
             path,

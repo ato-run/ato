@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{CapsuleError, Result};
 
@@ -101,6 +102,114 @@ pub fn ato_runs_dir() -> PathBuf {
     nacelle_home_dir_or_workspace_tmp().join("runs")
 }
 
+/// Returns the durable local user state directory.
+///
+/// Layout: `~/.ato/state`
+pub fn ato_state_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("state")
+}
+
+/// Returns the immutable artifact store root.
+///
+/// Layout: `~/.ato/store`
+pub fn ato_store_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("store")
+}
+
+/// Returns the local trust metadata root.
+///
+/// Layout: `~/.ato/trust`
+pub fn ato_trust_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("trust")
+}
+
+pub fn ato_store_blobs_dir() -> PathBuf {
+    ato_store_dir().join("blobs")
+}
+
+pub fn ato_store_refs_dir() -> PathBuf {
+    ato_store_dir().join("refs")
+}
+
+pub fn ato_store_meta_dir() -> PathBuf {
+    ato_store_dir().join("meta")
+}
+
+pub fn ato_store_attestations_dir() -> PathBuf {
+    ato_store_dir().join("attestations")
+}
+
+pub fn ato_trust_roots_dir() -> PathBuf {
+    ato_trust_dir().join("roots")
+}
+
+pub fn ato_trust_policies_dir() -> PathBuf {
+    ato_trust_dir().join("policies")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtoRunLayout {
+    pub root: PathBuf,
+    pub session_json: PathBuf,
+    pub workspace: PathBuf,
+    pub workspace_source: PathBuf,
+    pub workspace_build: PathBuf,
+    pub deps: PathBuf,
+    pub cache: PathBuf,
+    pub tmp: PathBuf,
+    pub log: PathBuf,
+}
+
+impl AtoRunLayout {
+    pub fn for_root(root: PathBuf) -> Self {
+        let workspace = root.join("workspace");
+        Self {
+            session_json: root.join("session.json"),
+            workspace_source: workspace.join("source"),
+            workspace_build: workspace.join("build"),
+            workspace,
+            deps: root.join("deps"),
+            cache: root.join("cache"),
+            tmp: root.join("tmp"),
+            log: root.join("log"),
+            root,
+        }
+    }
+}
+
+/// Returns the path layout for one isolated A0 run session.
+///
+/// The token is for filesystem uniqueness only and does not participate in
+/// artifact identity.
+pub fn ato_run_layout(kind: &str) -> AtoRunLayout {
+    let kind = sanitize_run_kind(kind);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let random = rand::random::<u64>();
+    AtoRunLayout::for_root(ato_runs_dir().join(format!("{kind}-{millis:x}-{random:x}")))
+}
+
+fn sanitize_run_kind(kind: &str) -> String {
+    let sanitized = kind
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches('-');
+    if sanitized.is_empty() {
+        "run".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
 /// Returns the workspace-local directory for generated compatibility artifacts.
 pub(crate) fn workspace_derived_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(WORKSPACE_DERIVED_DIR)
@@ -201,5 +310,42 @@ mod tests {
         assert!(path_contains_workspace_internal_subtree(Path::new(
             "project/.ato/fallback-home/.ato/cache"
         )));
+    }
+
+    #[test]
+    fn ato_layout_helpers_never_use_system_tmp_fallbacks() {
+        for path in [
+            super::ato_runs_dir(),
+            super::ato_state_dir(),
+            super::ato_store_dir(),
+            super::ato_trust_dir(),
+            super::ato_store_blobs_dir(),
+            super::ato_store_refs_dir(),
+            super::ato_store_attestations_dir(),
+            super::ato_trust_roots_dir(),
+            super::ato_trust_policies_dir(),
+        ] {
+            let rendered = path.to_string_lossy();
+            assert!(
+                !rendered.starts_with("/tmp") && !rendered.starts_with("/var/tmp"),
+                "{rendered} must stay out of system tmp"
+            );
+        }
+    }
+
+    #[test]
+    fn run_layout_uses_kind_prefixed_root() {
+        let layout = super::ato_run_layout("provider/npm");
+        let file_name = layout
+            .root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        assert!(file_name.starts_with("provider-npm-"));
+        assert_eq!(
+            layout.workspace_source,
+            layout.root.join("workspace/source")
+        );
+        assert_eq!(layout.deps, layout.root.join("deps"));
     }
 }

@@ -765,6 +765,7 @@ pub(crate) async fn resolve_run_target_or_install(
     path: PathBuf,
     yes: bool,
     provider_toolchain: ProviderToolchain,
+    explicit_commit: Option<String>,
     keep_failed_artifacts: bool,
     auto_fix_mode: Option<GitHubAutoFixMode>,
     allow_unverified: bool,
@@ -826,7 +827,21 @@ pub(crate) async fn resolve_run_target_or_install(
                 );
             }
 
-            let checkout = install::download_github_repository_at_ref(&repository, None).await?;
+            let resolved_commit = match explicit_commit.clone() {
+                Some(commit) => commit,
+                None => install::fetch_github_install_draft(&repository)
+                    .await
+                    .map(|draft| draft.resolved_ref.sha)
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "network unavailable; cannot resolve <ref> for {}. Run online once, or pass --commit <sha> to skip resolver.",
+                            repository
+                        )
+                    })?,
+            };
+            let checkout =
+                install::download_github_repository_at_ref(&repository, Some(&resolved_commit))
+                    .await?;
             let checkout_root = checkout.checkout_dir.clone();
             maybe_copy_env_example(&checkout_root, json_mode);
             if checkout_root.join("capsule.toml").exists() {
@@ -854,6 +869,7 @@ pub(crate) async fn resolve_run_target_or_install(
                     ),
                 keep_failed_artifacts,
                 auto_fix_mode,
+                explicit_commit.clone(),
             )
             .await?;
             let desktop_open_path = launchable_desktop_open_path(&install_result);
@@ -1630,6 +1646,7 @@ pub(crate) async fn install_github_repository(
     can_prompt: bool,
     keep_failed_artifacts: bool,
     auto_fix_mode: Option<GitHubAutoFixMode>,
+    explicit_commit: Option<String>,
 ) -> Result<install::InstallResult> {
     const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
     ensure_supported_github_auto_fix_mode(auto_fix_mode)?;
@@ -1644,21 +1661,26 @@ pub(crate) async fn install_github_repository(
         None
     };
 
-    let preview_preparation =
-        match crate::preview::prepare_github_preview_session(repository, &invocation_dir).await {
-            Ok(result) => {
-                if let Some(progress) = prepare_spinner {
-                    progress.stop("GitHub source prepared.");
-                }
-                result
+    let preview_preparation = match crate::preview::prepare_github_preview_session(
+        repository,
+        &invocation_dir,
+        explicit_commit.as_deref(),
+    )
+    .await
+    {
+        Ok(result) => {
+            if let Some(progress) = prepare_spinner {
+                progress.stop("GitHub source prepared.");
             }
-            Err(error) => {
-                if let Some(progress) = prepare_spinner {
-                    progress.stop("GitHub source preparation failed.");
-                }
-                return Err(error);
+            result
+        }
+        Err(error) => {
+            if let Some(progress) = prepare_spinner {
+                progress.stop("GitHub source preparation failed.");
             }
-        };
+            return Err(error);
+        }
+    };
     if let Some(warning) = preview_preparation.draft_fetch_warning.as_deref() {
         if !json {
             eprintln!("⚠️  {warning}");
@@ -1736,6 +1758,10 @@ pub(crate) async fn install_github_repository(
             );
         }
         if let Some(draft) = install_draft.as_ref() {
+            eprintln!(
+                "Resolved {}@{} -> {}",
+                draft.repo_ref, draft.resolved_ref.ref_name, draft.resolved_ref.sha
+            );
             if crate::progressive_ui::can_use_progressive_ui(false) {
                 crate::progressive_ui::show_note(
                     "Inference Draft",
@@ -2216,6 +2242,7 @@ pub(crate) fn execute_run_command(
     dangerously_skip_permissions: bool,
     compatibility_fallback: Option<String>,
     provider_toolchain: ProviderToolchain,
+    explicit_commit: Option<String>,
     assume_yes: bool,
     verbose: bool,
     agent_mode: crate::RunAgentMode,
@@ -2248,6 +2275,7 @@ pub(crate) fn execute_run_command(
         dangerously_skip_permissions,
         compatibility_fallback,
         provider_toolchain_requested: provider_toolchain,
+        explicit_commit,
         assume_yes,
         verbose,
         agent_mode,
@@ -2635,6 +2663,7 @@ mod tests {
             PathBuf::from("@team/tool"),
             true,
             ProviderToolchain::Auto,
+            None,
             false,
             None,
             false,

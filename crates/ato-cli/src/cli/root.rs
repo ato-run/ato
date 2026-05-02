@@ -138,6 +138,10 @@ pub(crate) enum Commands {
         #[arg(long = "via", value_enum, default_value_t = ProviderToolchain::Auto)]
         via: ProviderToolchain,
 
+        /// Pin a GitHub run to an explicit commit SHA and skip mutable-ref resolution
+        #[arg(long = "commit", value_name = "SHA")]
+        commit: Option<String>,
+
         /// Skip prompt and auto-install when app-id is not installed
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
@@ -232,6 +236,13 @@ pub(crate) enum Commands {
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,
+    },
+
+    #[command(about = "Explain dependency hash inputs for a capsule")]
+    ExplainHash {
+        /// Capsule id or run target string to explain
+        #[arg(long = "capsule")]
+        capsule: String,
     },
 
     #[command(

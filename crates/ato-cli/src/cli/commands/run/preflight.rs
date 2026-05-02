@@ -445,17 +445,6 @@ fn run_lifecycle_shell_command(
     phase: &str,
     working_dir: &Path,
 ) -> Result<()> {
-    // Some packages have preinstall scripts that call `lefthook install` or similar
-    // git-hook managers. These fail with exit 128 because the source checkout has no
-    // .git directory. Creating a minimal stub allows git-root detection to succeed.
-    // We remove the stub after the command so it does not persist in the capsule.
-    let fake_git = working_dir.join(".git");
-    let created_fake_git = if !fake_git.exists() {
-        std::fs::create_dir_all(&fake_git).is_ok()
-    } else {
-        false
-    };
-
     // Prepend the ato-managed Node bin dir to PATH inside the command string itself
     // (#294). We cannot rely on setting PATH in the subprocess env because `sh -l`
     // sources login profile scripts (e.g. /etc/profile) which unconditionally reset
@@ -510,10 +499,6 @@ fn run_lifecycle_shell_command(
     let status = cmd
         .status()
         .with_context(|| format!("Failed to execute {} command", phase));
-
-    if created_fake_git {
-        let _ = std::fs::remove_dir_all(&fake_git);
-    }
 
     let status = status?;
     if status.success() {
