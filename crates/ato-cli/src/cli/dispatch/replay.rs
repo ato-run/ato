@@ -20,6 +20,10 @@ struct ReplayStartedView {
     execution_id: String,
     mode: &'static str,
     source: String,
+    entry: Option<String>,
+    argv: Vec<String>,
+    cwd: Option<String>,
+    warnings: Vec<String>,
     note: &'static str,
 }
 
@@ -39,10 +43,16 @@ pub(super) fn execute_replay_command(
             ReplayMode::BestEffort => "best-effort",
         },
         source: plan.run_path.display().to_string(),
+        entry: plan.entry.clone(),
+        argv: plan.args.clone(),
+        cwd: plan.cwd.as_ref().map(|path| path.display().to_string()),
+        warnings: plan.warnings.clone(),
         note: match plan.mode {
-            ReplayMode::Strict => "strict same-host replay delegated to normal ato run",
+            ReplayMode::Strict => {
+                "strict same-host replay reconstructed from receipt launch envelope"
+            }
             ReplayMode::BestEffort => {
-                "best-effort same-host replay; this does not claim an identical launch envelope"
+                "best-effort same-host replay reconstructed from known receipt launch fields"
             }
         },
     };
@@ -53,16 +63,28 @@ pub(super) fn execute_replay_command(
         eprintln!("Replaying execution {}", view.execution_id);
         eprintln!("  Mode: {}", view.mode);
         eprintln!("  Source: {}", view.source);
+        if let Some(entry) = view.entry.as_deref() {
+            eprintln!("  Entry: {entry}");
+        }
+        if !view.argv.is_empty() {
+            eprintln!("  Args: {}", view.argv.join(" "));
+        }
+        if let Some(cwd) = view.cwd.as_deref() {
+            eprintln!("  Cwd: {cwd}");
+        }
+        for warning in &view.warnings {
+            eprintln!("  Warning: {warning}");
+        }
         eprintln!("  Note: {}", view.note);
     }
 
     run::execute_run_like_command(RunLikeCommandArgs {
         path: plan.run_path,
-        target: None,
-        entry: None,
+        target: plan.target,
+        entry: plan.entry,
         env_file: None,
         prompt_env: false,
-        args: Vec::new(),
+        args: plan.args,
         watch: false,
         background: false,
         nacelle,
@@ -87,7 +109,7 @@ pub(super) fn execute_replay_command(
         read: Vec::new(),
         write: Vec::new(),
         read_write: Vec::new(),
-        cwd: None,
+        cwd: plan.cwd,
         cache_strategy: CacheStrategyArg::Auto,
         deprecation_warning: None,
         reporter: Arc::new(reporters::CliReporter::new_run(json)),
