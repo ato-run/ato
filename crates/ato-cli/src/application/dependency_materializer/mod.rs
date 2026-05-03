@@ -19,6 +19,8 @@ use sha2::{Digest, Sha256};
 
 use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
 
+use self::freeze::freeze_dep_tree;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheStrategy {
@@ -281,7 +283,24 @@ fn materialize_node_dependencies(
         return Ok(None);
     }
 
-    let derivation_hash = node_run_derivation_hash(working_dir)?;
+    let request = node_run_materialization_request(working_dir)?;
+    let materializer = SessionDependencyMaterializer::new();
+    let plan = materializer.plan(&request)?;
+    let derivation_hash = plan.derivation_hash;
+    if let CacheLookupResult::Hit { blob_hash } = plan.cache_lookup {
+        let address = BlobAddress::parse(&blob_hash)
+            .with_context(|| format!("blob hash {blob_hash} could not be parsed"))?;
+        return Ok(Some(RunDependencyMaterialization {
+            derivation_hash,
+            output_hash: blob_hash,
+            mount: InjectedMount {
+                source: address.payload_dir(),
+                target: working_dir.join("node_modules").display().to_string(),
+                readonly: true,
+            },
+        }));
+    }
+
     let materialization_dir = capsule_core::common::paths::ato_cache_dir()
         .join("dependency-materializations")
         .join("node")
@@ -310,36 +329,65 @@ fn materialize_node_dependencies(
         run_npm_ci(&work_dir)?;
     }
 
-    let output_hash = capsule_core::blob::hash_tree(&node_modules)
-        .with_context(|| format!("failed to hash {}", node_modules.display()))?
-        .blob_hash;
+    let outcome = freeze_dep_tree(&node_modules, &derivation_hash, "npm")
+        .with_context(|| format!("failed to freeze {}", node_modules.display()))?;
+    let address = BlobAddress::parse(&outcome.blob_hash)
+        .with_context(|| format!("blob hash {} could not be parsed", outcome.blob_hash))?;
     Ok(Some(RunDependencyMaterialization {
         derivation_hash,
-        output_hash,
+        output_hash: outcome.blob_hash,
         mount: InjectedMount {
-            source: node_modules,
+            source: address.payload_dir(),
             target: working_dir.join("node_modules").display().to_string(),
             readonly: true,
         },
     }))
 }
 
-fn node_run_derivation_hash(working_dir: &Path) -> Result<String> {
-    let mut hasher = Sha256::new();
-    update_hash_text(&mut hasher, "ato-node-run-deps-v1");
-    update_hash_file(&mut hasher, &working_dir.join("package.json"))?;
-    update_hash_file(&mut hasher, &working_dir.join("package-lock.json"))?;
-    let npm_version = std::process::Command::new("npm")
-        .arg("--version")
+fn node_run_materialization_request(
+    working_dir: &Path,
+) -> Result<DependencyMaterializationRequest> {
+    Ok(DependencyMaterializationRequest {
+        session_id: "run-node-deps".to_string(),
+        capsule_id: working_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("local-node-app")
+            .to_string(),
+        source_root: working_dir.to_path_buf(),
+        workspace_root: working_dir.to_path_buf(),
+        ecosystem: "npm".to_string(),
+        package_manager: Some("npm".to_string()),
+        package_manager_version: command_version("npm", "--version"),
+        runtime: RuntimeSelection {
+            name: "node".to_string(),
+            version: command_version("node", "--version"),
+        },
+        manifests: ManifestInputs {
+            lockfile_digest: digest_file(&working_dir.join("package-lock.json"))?,
+            package_manifest_digest: digest_file(&working_dir.join("package.json"))?,
+            workspace_manifest_digest: None,
+            path_dependency_digest: None,
+        },
+        policies: InstallPolicies {
+            lifecycle_script_policy: "ignore-scripts".to_string(),
+            registry_policy: "default".to_string(),
+            network_policy: "default".to_string(),
+            env_allowlist_digest: None,
+        },
+        platform: PlatformTriple::current(),
+        cache_strategy: CacheStrategy::DerivationCache,
+        attestation_strategy: AttestationStrategy::None,
+    })
+}
+
+fn command_version(command: &str, version_arg: &str) -> Option<String> {
+    std::process::Command::new(command)
+        .arg(version_arg)
         .output()
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    update_hash_text(&mut hasher, &npm_version);
-    update_hash_text(&mut hasher, std::env::consts::OS);
-    update_hash_text(&mut hasher, std::env::consts::ARCH);
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn run_npm_ci(work_dir: &Path) -> Result<()> {
@@ -359,22 +407,6 @@ fn run_npm_ci(work_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn update_hash_file(hasher: &mut Sha256, path: &Path) -> Result<()> {
-    update_hash_text(
-        hasher,
-        &path.file_name().unwrap_or_default().to_string_lossy(),
-    );
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    hasher.update((bytes.len() as u64).to_le_bytes());
-    hasher.update(&bytes);
-    Ok(())
-}
-
-fn update_hash_text(hasher: &mut Sha256, value: &str) {
-    hasher.update((value.len() as u64).to_le_bytes());
-    hasher.update(value.as_bytes());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -680,6 +712,10 @@ fn install_policy_digest(policies: &InstallPolicies) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     fn sample_request(
@@ -764,5 +800,61 @@ mod tests {
             .unwrap();
 
         assert_ne!(first_hash, second_hash);
+    }
+
+    #[test]
+    fn node_run_request_uses_a1_derivation_key() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#).expect("package");
+        fs::write(
+            dir.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3}"#,
+        )
+        .expect("lock");
+
+        let request = node_run_materialization_request(dir.path()).expect("request");
+        let key = DepDerivationKeyV1::from_request(&request);
+
+        assert_eq!(request.ecosystem, "npm");
+        assert_eq!(request.package_manager.as_deref(), Some("npm"));
+        assert_eq!(request.cache_strategy, CacheStrategy::DerivationCache);
+        assert_eq!(
+            key.derivation_hash().expect("key hash"),
+            SessionDependencyMaterializer::new()
+                .plan(&request)
+                .expect("plan")
+                .derivation_hash
+        );
+    }
+
+    #[test]
+    fn node_run_derivation_changes_when_lockfile_changes() {
+        let first_dir = tempdir().expect("first tempdir");
+        let second_dir = tempdir().expect("second tempdir");
+        for dir in [first_dir.path(), second_dir.path()] {
+            fs::write(dir.join("package.json"), r#"{"name":"demo"}"#).expect("package");
+        }
+        fs::write(
+            first_dir.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3,"packages":{"":{"version":"1.0.0"}}}"#,
+        )
+        .expect("first lock");
+        fs::write(
+            second_dir.path().join("package-lock.json"),
+            r#"{"name":"demo","lockfileVersion":3,"packages":{"":{"version":"2.0.0"}}}"#,
+        )
+        .expect("second lock");
+
+        let first = node_run_materialization_request(first_dir.path()).expect("first request");
+        let second = node_run_materialization_request(second_dir.path()).expect("second request");
+
+        assert_ne!(
+            DepDerivationKeyV1::from_request(&first)
+                .derivation_hash()
+                .expect("first hash"),
+            DepDerivationKeyV1::from_request(&second)
+                .derivation_hash()
+                .expect("second hash")
+        );
     }
 }
