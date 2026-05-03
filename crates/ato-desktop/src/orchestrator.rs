@@ -442,6 +442,14 @@ pub fn resolve_and_start_capsule(
                 handle,
                 "capsule session reused via session-record fast path"
             );
+            // Best-effort: refresh the v2 execution receipt in the background.
+            // The fast path bypasses `ato app session start` entirely, so the
+            // receipt would otherwise stay stale. The CLI's own reuse path
+            // detects the cached session and emits/refreshes the receipt
+            // quickly (~150ms subprocess overhead, no fresh spawn). Failures
+            // are logged at debug — they only weaken later inspect/replay,
+            // not the running session.
+            spawn_background_receipt_refresh(handle);
             return Ok(session);
         }
         Ok(None) => {
@@ -755,6 +763,43 @@ fn extract_json_error_message(stdout: &str) -> Option<String> {
         (true, true) => return None,
     };
     Some(combined)
+}
+
+/// Fire-and-forget: spawn `ato app session start <handle> --json` in the
+/// background so the CLI's reuse path can refresh / emit the v2 execution
+/// receipt for a launch we just served via the desktop's session-record
+/// fast path. The fast path bypasses the CLI entirely; without this, the
+/// receipt under `~/.ato/executions/<execution_id>/` would not reflect
+/// that the launch happened.
+///
+/// Returns immediately. Stdout/stderr are routed to /dev/null so the
+/// background subprocess does not leak descriptors back into the desktop.
+/// Errors (binary not found, spawn failure, etc.) are logged at debug.
+fn spawn_background_receipt_refresh(handle: &str) {
+    let ato_bin = match resolve_ato_binary() {
+        Ok(path) => path,
+        Err(err) => {
+            debug!(error = %err, handle, "background receipt refresh skipped: ato binary not resolvable");
+            return;
+        }
+    };
+    let mut cmd = Command::new(&ato_bin);
+    cmd.arg("app")
+        .arg("session")
+        .arg("start")
+        .arg(handle)
+        .arg("--json")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match cmd.spawn() {
+        Ok(_child) => {
+            debug!(handle, "spawned background receipt refresh");
+        }
+        Err(err) => {
+            debug!(error = %err, handle, "failed to spawn background receipt refresh");
+        }
+    }
 }
 
 pub fn resolve_ato_binary() -> Result<PathBuf> {
