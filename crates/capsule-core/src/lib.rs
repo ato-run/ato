@@ -27,6 +27,8 @@
 
 // ── Layer 1: Foundation ───────────────────────────────────────────────────
 pub mod foundation;
+pub use foundation::attestation;
+pub use foundation::blob;
 pub use foundation::common;
 pub use foundation::error;
 pub use foundation::hardware;
