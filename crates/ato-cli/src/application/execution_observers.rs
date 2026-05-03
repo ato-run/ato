@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::execution_identity::{
     DependencyIdentity, EnvironmentIdentity, EnvironmentMode, FilesystemIdentity, PlatformIdentity,
-    RuntimeIdentity, Tracked,
+    RuntimeIdentity, SourceIdentity, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::LaunchSpec;
@@ -15,8 +15,19 @@ use serde::Serialize;
 use walkdir::WalkDir;
 
 use crate::application::build_materialization::BuildObservation;
+use crate::application::source_inventory::collect_source_files;
 use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::runtime::overrides as runtime_overrides;
+
+pub(crate) fn observe_source(
+    plan: &ManifestData,
+    launch_spec: &LaunchSpec,
+) -> Result<SourceIdentity> {
+    Ok(SourceIdentity {
+        source_ref: Tracked::known(format!("local:{}", plan.manifest_path.display())),
+        source_tree_hash: observe_source_tree_hash(&launch_spec.working_dir)?,
+    })
+}
 
 pub(crate) fn observe_dependencies(
     launch_spec: &LaunchSpec,
@@ -185,6 +196,26 @@ fn observe_dependency_output_hash(
     ))
 }
 
+fn observe_source_tree_hash(working_dir: &Path) -> Result<Tracked<String>> {
+    if !working_dir.is_dir() {
+        return Ok(Tracked::unknown(format!(
+            "launch working directory is not available for source observation: {}",
+            working_dir.display()
+        )));
+    }
+    Ok(Tracked::known(hash_source_tree(working_dir)?))
+}
+
+fn hash_source_tree(working_dir: &Path) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    update_hash_text(&mut hasher, "ato-source-tree-v1");
+    for relative_path in collect_source_files(working_dir, &[])? {
+        update_hash_text(&mut hasher, &relative_path.display().to_string());
+        hash_file_into(&mut hasher, &working_dir.join(relative_path))?;
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
 fn resolve_binary_path(command: &str) -> Option<PathBuf> {
     let path = PathBuf::from(command);
     if path.is_absolute() && path.is_file() {
@@ -327,5 +358,27 @@ mod tests {
             capsule_core::execution_identity::TrackingStatus::Unknown
         );
         assert!(observed.reason.expect("reason").contains("no existing"));
+    }
+
+    #[test]
+    fn source_tree_hash_ignores_dependency_directories() {
+        let temp = tempdir().expect("tempdir");
+        fs::write(temp.path().join("main.js"), "console.log(1);\n").expect("write source");
+        fs::create_dir(temp.path().join("node_modules")).expect("mkdir node_modules");
+        fs::write(
+            temp.path().join("node_modules/dep.js"),
+            "module.exports = 1;\n",
+        )
+        .expect("write dep");
+
+        let before = hash_source_tree(temp.path()).expect("before hash");
+        fs::write(
+            temp.path().join("node_modules/dep.js"),
+            "module.exports = 2;\n",
+        )
+        .expect("mutate dep");
+        let after = hash_source_tree(temp.path()).expect("after hash");
+
+        assert_eq!(before, after);
     }
 }
