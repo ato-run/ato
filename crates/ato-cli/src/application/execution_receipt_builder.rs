@@ -5,6 +5,7 @@ use capsule_core::execution_identity::{
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::router::ManifestData;
+use serde::Serialize;
 
 use crate::application::build_materialization::BuildObservation;
 use crate::executors::launch_context::RuntimeLaunchContext;
@@ -42,6 +43,7 @@ pub(crate) fn build_prelaunch_receipt(
             execution_plan.consent.provisioning_policy_hash.clone(),
         ),
         capability_policy_hash: Tracked::known(execution_plan.consent.policy_segment_hash.clone()),
+        sandbox_policy_hash: Tracked::known(sandbox_policy_hash(execution_plan)?),
     };
     let launch = LaunchIdentity {
         entry_point: launch_spec.command,
@@ -73,4 +75,26 @@ pub(crate) fn build_prelaunch_receipt(
         ),
         chrono::Utc::now().to_rfc3339(),
     )?)
+}
+
+#[derive(Serialize)]
+struct SandboxPolicyHashInput<'a> {
+    target_runtime: &'a str,
+    target_driver: &'a str,
+    fail_closed: bool,
+    mount_set_algo_id: &'a str,
+    mount_set_algo_version: u32,
+}
+
+fn sandbox_policy_hash(execution_plan: &ExecutionPlan) -> Result<String> {
+    let input = SandboxPolicyHashInput {
+        target_runtime: execution_plan.target.runtime.as_str(),
+        target_driver: execution_plan.target.driver.as_str(),
+        fail_closed: execution_plan.runtime.fail_closed,
+        mount_set_algo_id: execution_plan.consent.mount_set_algo_id.as_str(),
+        mount_set_algo_version: execution_plan.consent.mount_set_algo_version,
+    };
+    let canonical =
+        serde_jcs::to_vec(&input).context("failed to canonicalize sandbox policy identity")?;
+    Ok(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
 }
