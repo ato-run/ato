@@ -79,7 +79,9 @@ pub struct ExecutionReceiptComparison {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ExecutionReceiptDiff {
+    pub component: String,
     pub path: String,
+    pub drift_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub left: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1714,7 +1716,9 @@ fn print_execution_view(view: &ExecutionInspectView) {
             println!("Differences:");
             for diff in &comparison.differences {
                 println!(
-                    "  - {}: {} -> {}",
+                    "  - [{}:{}] {}: {} -> {}",
+                    diff.component,
+                    diff.drift_kind,
                     diff.path,
                     summarize_json_value(diff.left.as_ref()),
                     summarize_json_value(diff.right.as_ref())
@@ -1875,6 +1879,8 @@ fn diff_json_values(
                         diff_json_values(&child_path, left_child, right_child, differences);
                     }
                     (left_child, right_child) => differences.push(ExecutionReceiptDiff {
+                        component: diff_component(&child_path),
+                        drift_kind: diff_kind(&child_path).to_string(),
                         path: child_path,
                         left: left_child.cloned(),
                         right: right_child.cloned(),
@@ -1889,9 +1895,147 @@ fn diff_json_values(
             } else {
                 path.to_string()
             },
+            component: diff_component(path),
+            drift_kind: diff_kind(path).to_string(),
             left: Some(left.clone()),
             right: Some(right.clone()),
         }),
+    }
+}
+
+fn diff_component(path: &str) -> String {
+    path.split('.')
+        .next()
+        .filter(|component| !component.is_empty())
+        .unwrap_or("$")
+        .to_string()
+}
+
+fn diff_kind(path: &str) -> &'static str {
+    if path == "computed_at" {
+        "receipt-metadata"
+    } else if path == "execution_id" || path.starts_with("identity.") {
+        "identity-derived"
+    } else if path.starts_with("reproducibility.") {
+        "classification"
+    } else {
+        "observed-component"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use capsule_core::execution_identity::{
+        DependencyIdentity, EnvironmentIdentity, EnvironmentMode, ExecutionIdentityInput,
+        FilesystemIdentity, LaunchIdentity, PlatformIdentity, PolicyIdentity,
+        ReproducibilityIdentity, RuntimeIdentity, SourceIdentity,
+    };
+
+    use super::*;
+
+    #[test]
+    fn execution_compare_reports_component_level_drift() {
+        let left = receipt_with_source_hash("blake3:source-a");
+        let right = receipt_with_source_hash("blake3:source-b");
+
+        let comparison = compare_execution_receipts(&left, &right).expect("compare");
+
+        assert!(comparison.differences.iter().any(|diff| {
+            diff.component == "source"
+                && diff.path == "source.source_tree_hash.value"
+                && diff.drift_kind == "observed-component"
+        }));
+        assert!(comparison.differences.iter().any(|diff| {
+            diff.component == "execution_id" && diff.drift_kind == "identity-derived"
+        }));
+    }
+
+    #[test]
+    fn execution_compare_separates_classification_from_identity() {
+        let left = receipt_with_reproducibility(ReproducibilityIdentity {
+            class: ReproducibilityClass::BestEffort,
+            causes: vec![ReproducibilityCause::UnknownDependencyOutput],
+        });
+        let right = receipt_with_reproducibility(ReproducibilityIdentity {
+            class: ReproducibilityClass::Pure,
+            causes: Vec::new(),
+        });
+
+        assert_eq!(left.execution_id, right.execution_id);
+        let comparison = compare_execution_receipts(&left, &right).expect("compare");
+
+        assert!(comparison.differences.iter().any(|diff| {
+            diff.component == "reproducibility"
+                && diff.path == "reproducibility.class"
+                && diff.drift_kind == "classification"
+        }));
+        assert!(!comparison
+            .differences
+            .iter()
+            .any(|diff| diff.component == "execution_id"));
+    }
+
+    fn receipt_with_source_hash(source_hash: &str) -> ExecutionReceipt {
+        let mut input = sample_execution_input();
+        input.source.source_tree_hash = Tracked::known(source_hash.to_string());
+        ExecutionReceipt::from_input(input, "2026-05-03T00:00:00Z".to_string()).expect("receipt")
+    }
+
+    fn receipt_with_reproducibility(reproducibility: ReproducibilityIdentity) -> ExecutionReceipt {
+        let mut input = sample_execution_input();
+        input.reproducibility = reproducibility;
+        ExecutionReceipt::from_input(input, "2026-05-03T00:00:00Z".to_string()).expect("receipt")
+    }
+
+    fn sample_execution_input() -> ExecutionIdentityInput {
+        ExecutionIdentityInput::new(
+            SourceIdentity {
+                source_ref: Tracked::known("local:/workspace/app/capsule.toml".to_string()),
+                source_tree_hash: Tracked::known("blake3:source".to_string()),
+            },
+            DependencyIdentity {
+                derivation_hash: Tracked::known("blake3:derivation".to_string()),
+                output_hash: Tracked::known("blake3:deps".to_string()),
+            },
+            RuntimeIdentity {
+                declared: Some("node@20".to_string()),
+                resolved: Some("/usr/bin/node".to_string()),
+                binary_hash: Tracked::known("blake3:runtime".to_string()),
+                dynamic_linkage: Tracked::known("darwin".to_string()),
+                platform: PlatformIdentity {
+                    os: "macos".to_string(),
+                    arch: "arm64".to_string(),
+                    libc: "darwin".to_string(),
+                },
+            },
+            EnvironmentIdentity {
+                closure_hash: Tracked::known("blake3:env".to_string()),
+                mode: EnvironmentMode::Closed,
+                tracked_keys: vec!["PATH".to_string()],
+                redacted_keys: Vec::new(),
+                unknown_keys: Vec::new(),
+            },
+            FilesystemIdentity {
+                view_hash: Tracked::known("blake3:fs".to_string()),
+                projection_strategy: "direct".to_string(),
+                writable_dirs: Vec::new(),
+                persistent_state: Vec::new(),
+                known_readonly_layers: Vec::new(),
+            },
+            PolicyIdentity {
+                network_policy_hash: Tracked::known("blake3:network".to_string()),
+                capability_policy_hash: Tracked::known("blake3:capability".to_string()),
+            },
+            LaunchIdentity {
+                entry_point: "node".to_string(),
+                argv: vec!["server.js".to_string()],
+                working_directory: "/workspace/app".to_string(),
+            },
+            ReproducibilityIdentity {
+                class: ReproducibilityClass::BestEffort,
+                causes: vec![ReproducibilityCause::UnknownDependencyOutput],
+            },
+        )
     }
 }
 
