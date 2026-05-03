@@ -783,8 +783,20 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
         manifest.insert("language".to_string(), toml::Value::Table(language));
     }
 
-    let path = plan.manifest_dir.join(format!(
-        ".ato-nacelle-{}.toml",
+    // Phase A0 source non-pollution: write the synthetic nacelle manifest into
+    // ~/.ato/runs/nacelle-manifests/ instead of plan.manifest_dir so it cannot
+    // perturb the source_tree_hash observation. The file lifetime is still
+    // managed via cleanup_paths.
+    let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+    fs::create_dir_all(&nacelle_dir).with_context(|| {
+        format!(
+            "Failed to create nacelle manifest dir {}",
+            nacelle_dir.display()
+        )
+    })?;
+    let path = nacelle_dir.join(format!(
+        "nacelle-{}-{}.toml",
+        std::process::id(),
         rand::thread_rng().gen::<u64>()
     ));
     fs::write(&path, toml::to_string(&toml::Value::Table(manifest))?)
