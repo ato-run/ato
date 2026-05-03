@@ -1,5 +1,7 @@
 mod app;
+pub(crate) mod attest;
 mod binding;
+pub(crate) mod cache;
 pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;
@@ -14,7 +16,7 @@ mod root;
 pub(crate) mod scoped_id_prompt;
 mod secrets;
 mod session;
-mod shared;
+pub(crate) mod shared;
 mod source;
 mod state;
 

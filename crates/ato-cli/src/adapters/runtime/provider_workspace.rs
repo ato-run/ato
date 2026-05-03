@@ -6,7 +6,13 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use capsule_core::ato_lock::AtoLock;
 use capsule_core::router::ManifestData;
+use sha2::Digest;
 
+use crate::application::dependency_materializer::{
+    digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
+    DependencyMaterializer, InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection,
+    SessionDependencyMaterializer,
+};
 use crate::runtime::manager;
 
 const PROVIDER_RESOLUTION_FILE: &str = "resolution.json";
@@ -46,6 +52,7 @@ pub(crate) fn ensure_provider_node_execution_inputs(
             package_json.display()
         );
     }
+    materialize_provider_dependency_boundary(plan, "npm", "node", Some(authoritative_lock))?;
 
     let node_bin = manager::ensure_node_binary_with_authority(plan, Some(authoritative_lock))?;
     let npm_invocation = resolve_npm_invocation(&node_bin)?;
@@ -103,6 +110,7 @@ pub(crate) fn ensure_provider_python_execution_inputs(
             requirements.display()
         );
     }
+    materialize_provider_dependency_boundary(plan, "pypi", "python", Some(authoritative_lock))?;
 
     let python_bin = manager::ensure_python_binary_with_authority(plan, Some(authoritative_lock))?;
     let uv_bin = manager::ensure_uv_binary_with_authority(plan, Some(authoritative_lock))?;
@@ -141,6 +149,83 @@ pub(crate) fn ensure_provider_python_execution_inputs(
     }
 
     Ok(())
+}
+
+fn materialize_provider_dependency_boundary(
+    plan: &ManifestData,
+    ecosystem: &str,
+    runtime_name: &str,
+    authoritative_lock: Option<&AtoLock>,
+) -> Result<()> {
+    let lockfile_digest = first_digest(
+        &plan.manifest_dir,
+        &[
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "bun.lock",
+            "bun.lockb",
+            "uv.lock",
+            "requirements.txt",
+        ],
+    )?;
+    let lock_digest = authoritative_lock
+        .map(serde_jcs::to_vec)
+        .transpose()
+        .context("failed to canonicalize provider authoritative lock")?
+        .map(|bytes| format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes))));
+    let materializer = SessionDependencyMaterializer::new();
+    let request = DependencyMaterializationRequest {
+        session_id: format!("provider-{ecosystem}"),
+        capsule_id: plan
+            .manifest
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("provider-workspace")
+            .to_string(),
+        source_root: plan.manifest_dir.clone(),
+        workspace_root: plan.workspace_root.clone(),
+        ecosystem: ecosystem.to_string(),
+        package_manager: Some(if ecosystem == "npm" { "npm" } else { "uv" }.to_string()),
+        package_manager_version: None,
+        runtime: RuntimeSelection {
+            name: runtime_name.to_string(),
+            version: None,
+        },
+        manifests: ManifestInputs {
+            lockfile_digest: lockfile_digest.or(lock_digest),
+            package_manifest_digest: first_digest(
+                &plan.manifest_dir,
+                &["package.json", "pyproject.toml", "requirements.txt"],
+            )?,
+            workspace_manifest_digest: digest_file(&plan.manifest_dir.join("capsule.toml"))?,
+            path_dependency_digest: None,
+        },
+        policies: InstallPolicies {
+            lifecycle_script_policy: "sandbox".to_string(),
+            registry_policy: "default".to_string(),
+            network_policy: "default".to_string(),
+            env_allowlist_digest: None,
+        },
+        platform: PlatformTriple::current(),
+        cache_strategy: CacheStrategy::None,
+        attestation_strategy: AttestationStrategy::None,
+    };
+    let projection = materializer.materialize(&request)?;
+    let verification = materializer.verify(&projection)?;
+    if !verification.ok {
+        bail!("{}", verification.messages.join("; "));
+    }
+    Ok(())
+}
+
+fn first_digest(root: &Path, names: &[&str]) -> Result<Option<String>> {
+    for name in names {
+        if let Some(digest) = digest_file(&root.join(name))? {
+            return Ok(Some(digest));
+        }
+    }
+    Ok(None)
 }
 
 enum NpmInvocation {
