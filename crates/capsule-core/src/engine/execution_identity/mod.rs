@@ -273,7 +273,6 @@ struct IdentityProjection<'a> {
     filesystem: FilesystemProjection<'a>,
     policy: PolicyProjection<'a>,
     launch: &'a LaunchIdentity,
-    reproducibility: &'a ReproducibilityIdentity,
 }
 
 #[derive(Serialize)]
@@ -413,7 +412,6 @@ fn identity_projection(input: &ExecutionIdentityInput) -> IdentityProjection<'_>
             capability_policy_hash: (&input.policy.capability_policy_hash).into(),
         },
         launch: &input.launch,
-        reproducibility: &input.reproducibility,
     }
 }
 
@@ -507,6 +505,18 @@ mod tests {
         let mut input = sample_input();
         input.dependencies.output_hash =
             Tracked::unknown("different wording for the same missing observation");
+        let after = input.compute_id().expect("after id").execution_id;
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn execution_id_ignores_reproducibility_classification_metadata() {
+        let before = sample_input().compute_id().expect("before id").execution_id;
+        let mut input = sample_input();
+        input.reproducibility = ReproducibilityIdentity {
+            class: ReproducibilityClass::Pure,
+            causes: Vec::new(),
+        };
         let after = input.compute_id().expect("after id").execution_id;
         assert_eq!(before, after);
     }
