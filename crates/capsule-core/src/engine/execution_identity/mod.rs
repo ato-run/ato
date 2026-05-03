@@ -494,6 +494,66 @@ mod tests {
     }
 
     #[test]
+    fn execution_identity_drift_matrix_covers_launch_envelope_components() {
+        let baseline = sample_input().compute_id().expect("baseline").execution_id;
+        let mut perturbations: Vec<(&str, Box<dyn Fn(&mut ExecutionIdentityInput)>)> = vec![
+            (
+                "source",
+                Box::new(|input| {
+                    input.source.source_tree_hash = Tracked::known("blake3:source2".to_string());
+                }),
+            ),
+            (
+                "dependencies",
+                Box::new(|input| {
+                    input.dependencies.output_hash = Tracked::known("blake3:deps2".to_string());
+                }),
+            ),
+            (
+                "runtime",
+                Box::new(|input| {
+                    input.runtime.binary_hash = Tracked::known("blake3:runtime2".to_string());
+                }),
+            ),
+            (
+                "environment",
+                Box::new(|input| {
+                    input.environment.closure_hash = Tracked::known("blake3:env2".to_string());
+                }),
+            ),
+            (
+                "filesystem",
+                Box::new(|input| {
+                    input.filesystem.view_hash = Tracked::known("blake3:fs2".to_string());
+                }),
+            ),
+            (
+                "policy",
+                Box::new(|input| {
+                    input.policy.network_policy_hash =
+                        Tracked::known("blake3:network2".to_string());
+                }),
+            ),
+            (
+                "launch",
+                Box::new(|input| {
+                    input.launch.working_directory = "/different".to_string();
+                }),
+            ),
+        ];
+
+        for (component, perturb) in perturbations.drain(..) {
+            let mut input = sample_input();
+            perturb(&mut input);
+            let changed = input.compute_id().expect(component).execution_id;
+            assert_ne!(
+                baseline, changed,
+                "{component} drift must change execution_id"
+            );
+        }
+    }
+
+    #[test]
     fn execution_id_changes_when_tracking_status_changes() {
         let before = sample_input().compute_id().expect("before id").execution_id;
         let mut input = sample_input();
