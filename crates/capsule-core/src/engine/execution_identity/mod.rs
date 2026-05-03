@@ -243,7 +243,10 @@ pub struct ReproducibilityIdentity {
 #[serde(rename_all = "kebab-case")]
 pub enum ReproducibilityClass {
     Pure,
-    Bounded,
+    HostBound,
+    StateBound,
+    TimeBound,
+    NetworkBound,
     BestEffort,
 }
 

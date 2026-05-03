@@ -55,15 +55,31 @@ fn classify_observations(
     causes.sort();
     causes.dedup();
 
-    let class = if causes.is_empty() {
-        ReproducibilityClass::Pure
-    } else if causes.iter().any(is_best_effort_cause) {
-        ReproducibilityClass::BestEffort
-    } else {
-        ReproducibilityClass::Bounded
-    };
+    let class = classify_causes(&causes);
 
     ReproducibilityIdentity { class, causes }
+}
+
+fn classify_causes(causes: &[ReproducibilityCause]) -> ReproducibilityClass {
+    if causes.is_empty() {
+        return ReproducibilityClass::Pure;
+    }
+    if causes.iter().any(is_best_effort_cause) {
+        return ReproducibilityClass::BestEffort;
+    }
+    if causes.contains(&ReproducibilityCause::StateBound) {
+        return ReproducibilityClass::StateBound;
+    }
+    if causes.contains(&ReproducibilityCause::TimeBound) {
+        return ReproducibilityClass::TimeBound;
+    }
+    if causes.contains(&ReproducibilityCause::NetworkBound) {
+        return ReproducibilityClass::NetworkBound;
+    }
+    if causes.contains(&ReproducibilityCause::HostBound) {
+        return ReproducibilityClass::HostBound;
+    }
+    ReproducibilityClass::BestEffort
 }
 
 fn is_best_effort_cause(cause: &ReproducibilityCause) -> bool {
@@ -121,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn host_network_and_state_bounds_without_unknowns_are_bounded() {
+    fn state_bound_takes_precedence_over_host_and_network_bounds() {
         let result = classify_observations(
             true,
             &known_dependencies(),
@@ -132,7 +148,7 @@ mod tests {
             &known_filesystem(vec!["state".to_string()]),
         );
 
-        assert_eq!(result.class, ReproducibilityClass::Bounded);
+        assert_eq!(result.class, ReproducibilityClass::StateBound);
         assert_eq!(
             result.causes,
             vec![
@@ -141,6 +157,20 @@ mod tests {
                 ReproducibilityCause::NetworkBound
             ]
         );
+    }
+
+    #[test]
+    fn network_bound_without_unknowns_is_network_bound() {
+        let result = classify_observations(
+            true,
+            &known_dependencies(),
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+
+        assert_eq!(result.class, ReproducibilityClass::NetworkBound);
+        assert_eq!(result.causes, vec![ReproducibilityCause::NetworkBound]);
     }
 
     #[test]

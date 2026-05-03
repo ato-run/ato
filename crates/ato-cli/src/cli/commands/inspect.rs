@@ -1972,7 +1972,10 @@ fn tracking_status_label(status: TrackingStatus) -> &'static str {
 fn reproducibility_class_label(class: ReproducibilityClass) -> &'static str {
     match class {
         ReproducibilityClass::Pure => "pure",
-        ReproducibilityClass::Bounded => "bounded",
+        ReproducibilityClass::HostBound => "host-bound",
+        ReproducibilityClass::StateBound => "state-bound",
+        ReproducibilityClass::TimeBound => "time-bound",
+        ReproducibilityClass::NetworkBound => "network-bound",
         ReproducibilityClass::BestEffort => "best-effort",
     }
 }
