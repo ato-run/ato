@@ -26,6 +26,8 @@ use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::router::ManifestData;
 
 use crate::application::build_materialization as bm;
+use crate::application::execution_receipt_builder;
+use crate::application::execution_receipts;
 use crate::application::launch_materialization as lm;
 use crate::application::pipeline::cleanup::PipelineAttemptContext;
 use crate::application::pipeline::executor::{
@@ -289,8 +291,59 @@ impl<'a> SessionStartPhaseRunner<'a> {
             );
         }
 
+        // 4. Emit an execution receipt so `ato app session start` (and the
+        //    desktop UI that wraps it) participates in the same identity
+        //    journal as `ato run`. Honors `ATO_RECEIPT_SCHEMA` (default v1,
+        //    `v2` / `v2-experimental` selects the portable v2 schema).
+        //    Best-effort: a receipt write failure must not fail an otherwise-
+        //    successful session start.
+        let mut info = info;
+        match self.emit_execution_receipt() {
+            Ok((execution_id, schema_version)) => {
+                info.attach_execution_receipt(execution_id, schema_version);
+            }
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN session start failed to emit execution receipt: {}",
+                    err
+                );
+            }
+        }
+
         self.session_info = Some(info);
         Ok(())
+    }
+
+    fn emit_execution_receipt(&self) -> Result<(String, u32)> {
+        use capsule_core::engine::execution_plan::derive::compile_execution_plan;
+        use capsule_core::execution_identity::ExecutionReceiptDocument;
+        use capsule_core::router::ExecutionProfile;
+
+        let manifest_path = self
+            .manifest_path
+            .as_ref()
+            .context("emit_execution_receipt: manifest_path missing")?;
+        let plan = self
+            .plan
+            .as_ref()
+            .context("emit_execution_receipt: plan missing")?;
+
+        let compiled =
+            compile_execution_plan(manifest_path, ExecutionProfile::Dev, self.target_label)
+                .map_err(|err| anyhow::anyhow!("failed to compile execution plan: {err}"))?;
+
+        let document = execution_receipt_builder::build_prelaunch_receipt_document(
+            plan,
+            &compiled.execution_plan,
+            &self.launch_ctx,
+            self.build_observation.as_ref(),
+        )?;
+        let _path = execution_receipts::write_receipt_document_atomic(&document)?;
+        let (execution_id, schema_version) = match document {
+            ExecutionReceiptDocument::V1(receipt) => (receipt.execution_id, receipt.schema_version),
+            ExecutionReceiptDocument::V2(receipt) => (receipt.execution_id, receipt.schema_version),
+        };
+        Ok((execution_id, schema_version))
     }
 }
 

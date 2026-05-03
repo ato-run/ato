@@ -111,6 +111,16 @@ pub struct SessionInfo {
     web: Option<WebSessionDisplay>,
     terminal: Option<TerminalSessionDisplay>,
     service: Option<ServiceBackgroundDisplay>,
+    /// `execution_id` of the v1 or v2 execution receipt emitted alongside the
+    /// session start. Lets the desktop UI cross-reference the session with the
+    /// portable launch identity stored under `~/.ato/executions/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_id: Option<String>,
+    /// `schema_version` of the emitted execution receipt (1 or 2). Surfaced so
+    /// the desktop UI can label which identity model the session is currently
+    /// running under during the v2 migration window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_receipt_schema_version: Option<u32>,
 }
 
 impl SessionInfo {
@@ -118,6 +128,14 @@ impl SessionInfo {
     /// layer to enrich the freshly-written record with its process_start_time.
     pub(crate) fn pid(&self) -> i32 {
         self.pid
+    }
+
+    /// Attach the execution receipt identity emitted for this session. Called
+    /// by the session start runner after `build_prelaunch_receipt_document`
+    /// writes the receipt to `~/.ato/executions/`.
+    pub(crate) fn attach_execution_receipt(&mut self, execution_id: String, schema_version: u32) {
+        self.execution_id = Some(execution_id);
+        self.execution_receipt_schema_version = Some(schema_version);
     }
 }
 
@@ -559,6 +577,8 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         web: session.web,
         terminal: session.terminal,
         service: session.service,
+        execution_id: None,
+        execution_receipt_schema_version: None,
     }
 }
 
@@ -1174,6 +1194,8 @@ mod tests {
                 web: None,
                 terminal: None,
                 service: None,
+                execution_id: None,
+                execution_receipt_schema_version: None,
             },
         };
 
