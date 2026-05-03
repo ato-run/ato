@@ -42,14 +42,28 @@ fn classify_observations(
     {
         causes.push(ReproducibilityCause::TimeBound);
     }
-    if dependencies.output_hash.status != TrackingStatus::Known {
+    if matches!(
+        dependencies.derivation_hash.status,
+        TrackingStatus::Unknown | TrackingStatus::Untracked
+    ) || matches!(
+        dependencies.output_hash.status,
+        TrackingStatus::Unknown | TrackingStatus::Untracked
+    ) {
         causes.push(ReproducibilityCause::UnknownDependencyOutput);
     }
     if runtime.binary_hash.status != TrackingStatus::Known {
         causes.push(ReproducibilityCause::UnknownRuntimeIdentity);
     }
-    if runtime.dynamic_linkage.status == TrackingStatus::Untracked {
+    if runtime
+        .dynamic_linkage
+        .value
+        .as_deref()
+        .is_some_and(|value| value.starts_with("host:"))
+    {
         causes.push(ReproducibilityCause::HostBound);
+    }
+    if runtime.dynamic_linkage.status == TrackingStatus::Untracked {
+        causes.push(ReproducibilityCause::UntrackedDynamicDependency);
     }
     if environment.mode != EnvironmentMode::Closed
         || environment.closure_hash.status != TrackingStatus::Known
@@ -96,6 +110,7 @@ fn is_best_effort_cause(cause: &ReproducibilityCause) -> bool {
             | ReproducibilityCause::UnknownRuntimeIdentity
             | ReproducibilityCause::UntrackedEnvironment
             | ReproducibilityCause::UntrackedFilesystemView
+            | ReproducibilityCause::UntrackedDynamicDependency
             | ReproducibilityCause::LifecycleUnknown
     )
 }
@@ -148,9 +163,7 @@ mod tests {
         let result = classify_observations(
             true,
             &known_dependencies(),
-            &known_runtime(Tracked::untracked(
-                "dynamic linkage observer not implemented",
-            )),
+            &known_runtime(Tracked::known("host:libcuda.so.1".to_string())),
             &known_environment(),
             &known_filesystem(vec!["state".to_string()]),
         );
@@ -164,6 +177,42 @@ mod tests {
                 ReproducibilityCause::NetworkBound
             ]
         );
+    }
+
+    #[test]
+    fn untracked_dynamic_linkage_is_best_effort_not_host_bound() {
+        let result = classify_observations(
+            false,
+            &known_dependencies(),
+            &known_runtime(Tracked::untracked(
+                "dynamic linkage observer not implemented",
+            )),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+
+        assert_eq!(result.class, ReproducibilityClass::BestEffort);
+        assert_eq!(
+            result.causes,
+            vec![ReproducibilityCause::UntrackedDynamicDependency]
+        );
+    }
+
+    #[test]
+    fn dependency_not_applicable_does_not_prevent_pure() {
+        let result = classify_observations(
+            false,
+            &DependencyIdentity {
+                derivation_hash: Tracked::not_applicable(),
+                output_hash: Tracked::not_applicable(),
+            },
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &known_environment(),
+            &known_filesystem(Vec::new()),
+        );
+
+        assert_eq!(result.class, ReproducibilityClass::Pure);
+        assert!(result.causes.is_empty());
     }
 
     #[test]

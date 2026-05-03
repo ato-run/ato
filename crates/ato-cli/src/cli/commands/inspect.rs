@@ -2025,6 +2025,7 @@ mod tests {
             PolicyIdentity {
                 network_policy_hash: Tracked::known("blake3:network".to_string()),
                 capability_policy_hash: Tracked::known("blake3:capability".to_string()),
+                sandbox_policy_hash: Tracked::known("blake3:sandbox".to_string()),
             },
             LaunchIdentity {
                 entry_point: "node".to_string(),
@@ -2134,6 +2135,7 @@ fn reproducibility_cause_label(cause: ReproducibilityCause) -> &'static str {
         ReproducibilityCause::UnknownRuntimeIdentity => "unknown-runtime-identity",
         ReproducibilityCause::UntrackedEnvironment => "untracked-environment",
         ReproducibilityCause::UntrackedFilesystemView => "untracked-filesystem-view",
+        ReproducibilityCause::UntrackedDynamicDependency => "untracked-dynamic-dependency",
         ReproducibilityCause::LifecycleUnknown => "lifecycle-unknown",
     }
 }
