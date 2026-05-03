@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use capsule_core::execution_identity::{
-    ExecutionIdentityInput, ExecutionReceipt, LaunchIdentity, PolicyIdentity, SourceIdentity,
-    Tracked,
+    ExecutionIdentityInput, ExecutionReceipt, LaunchIdentity, PolicyIdentity, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
@@ -23,12 +22,7 @@ pub(crate) fn build_prelaunch_receipt(
         )
     })?;
 
-    let source = SourceIdentity {
-        source_ref: Tracked::known(format!("local:{}", plan.manifest_path.display())),
-        source_tree_hash: Tracked::unknown(
-            "source tree observer not enabled; build input digest is tracked separately",
-        ),
-    };
+    let source = crate::application::execution_observers::observe_source(plan, &launch_spec)?;
     let dependencies = crate::application::execution_observers::observe_dependencies(
         &launch_spec,
         launch_ctx,
