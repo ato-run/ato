@@ -23,12 +23,20 @@ pub(crate) fn receipt_path(root: &Path, execution_id: &str) -> Result<PathBuf> {
     Ok(receipt_dir(root, execution_id)?.join(RECEIPT_FILE_NAME))
 }
 
+#[allow(dead_code)] // retained for v1 callers and tests during the v2 migration.
 pub(crate) fn write_receipt_atomic(receipt: &ExecutionReceipt) -> Result<PathBuf> {
     write_receipt_atomic_at(&default_receipt_root(), receipt)
 }
 
+#[allow(dead_code)] // retained for v1 tests during the v2 migration.
 pub(crate) fn write_receipt_atomic_at(root: &Path, receipt: &ExecutionReceipt) -> Result<PathBuf> {
     write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V1(receipt.clone()))
+}
+
+pub(crate) fn write_receipt_document_atomic(
+    document: &ExecutionReceiptDocument,
+) -> Result<PathBuf> {
+    write_receipt_document_atomic_at(&default_receipt_root(), document)
 }
 
 pub(crate) fn write_receipt_document_atomic_at(
