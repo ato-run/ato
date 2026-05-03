@@ -27,5 +27,6 @@ pub(crate) mod services;
 pub(crate) mod share;
 pub(crate) mod source_inference;
 pub(crate) mod source_inventory;
+pub(crate) mod source_projection;
 pub(crate) mod types;
 pub(crate) mod workspace;

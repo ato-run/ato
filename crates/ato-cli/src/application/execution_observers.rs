@@ -244,7 +244,7 @@ fn observe_source_tree_hash(working_dir: &Path) -> Result<Tracked<String>> {
     Ok(Tracked::known(hash_source_tree(working_dir)?))
 }
 
-fn hash_source_tree(working_dir: &Path) -> Result<String> {
+pub(crate) fn hash_source_tree(working_dir: &Path) -> Result<String> {
     let mut hasher = blake3::Hasher::new();
     update_hash_text(&mut hasher, "ato-source-tree-v1");
     for relative_path in collect_source_files(working_dir, &[])? {
