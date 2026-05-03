@@ -6,7 +6,8 @@ use anyhow::{Context, Error as AnyhowError, Result};
 use capsule_core::ato_lock::{closure_info, AtoLock, UnresolvedValue};
 use capsule_core::common::paths::ato_runs_dir;
 use capsule_core::execution_identity::{
-    ExecutionReceipt, ReproducibilityCause, ReproducibilityClass, Tracked, TrackingStatus,
+    ExecutionReceipt, ExecutionReceiptDocument, ReproducibilityCause, ReproducibilityClass,
+    Tracked, TrackingStatus,
 };
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
@@ -62,7 +63,7 @@ pub enum ResolvedTarget {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ExecutionInspectView {
     Receipt {
-        receipt: Box<ExecutionReceipt>,
+        receipt: Box<ExecutionReceiptDocument>,
         gaps: Vec<ExecutionTrackingGap>,
     },
     Comparison {
@@ -608,15 +609,19 @@ pub fn execute_execution_view(
     compare: Option<String>,
     json_output: bool,
 ) -> Result<ExecutionInspectView> {
-    let left = execution_receipts::read_receipt(&execution_id)?;
+    let left = execution_receipts::read_receipt_document(&execution_id)?;
     let view = if let Some(right_id) = compare {
-        let right = execution_receipts::read_receipt(&right_id)?;
+        let right = execution_receipts::read_receipt_document(&right_id)?;
         ExecutionInspectView::Comparison {
             comparison: compare_execution_receipts(&left, &right)?,
         }
     } else {
+        let gaps = match &left {
+            ExecutionReceiptDocument::V1(receipt) => collect_tracking_gaps(receipt)?,
+            ExecutionReceiptDocument::V2(_) => Vec::new(),
+        };
         ExecutionInspectView::Receipt {
-            gaps: collect_tracking_gaps(&left)?,
+            gaps,
             receipt: Box::new(left),
         }
     };
@@ -1728,7 +1733,26 @@ fn print_execution_view(view: &ExecutionInspectView) {
     }
 }
 
-fn print_execution_receipt(receipt: &ExecutionReceipt, gaps: &[ExecutionTrackingGap]) {
+fn print_execution_receipt(document: &ExecutionReceiptDocument, gaps: &[ExecutionTrackingGap]) {
+    let ExecutionReceiptDocument::V1(receipt) = document else {
+        if let ExecutionReceiptDocument::V2(receipt) = document {
+            println!("Execution: {}", receipt.execution_id);
+            println!("  Schema: v2-experimental");
+            println!("  Computed at: {}", receipt.computed_at);
+            println!(
+                "  Identity: {} {}",
+                receipt.identity.hash_algorithm, receipt.identity.input_hash
+            );
+            println!(
+                "  Class: {}",
+                reproducibility_class_label(receipt.reproducibility.class)
+            );
+            if receipt.local.is_some() {
+                println!("  Local locator: present (excluded from execution_id)");
+            }
+        }
+        return;
+    };
     println!("Execution: {}", receipt.execution_id);
     println!("  Computed at: {}", receipt.computed_at);
     println!(
@@ -1845,18 +1869,32 @@ fn print_tracked_string(label: &str, tracked: &Tracked<String>) {
 }
 
 fn compare_execution_receipts(
-    left: &ExecutionReceipt,
-    right: &ExecutionReceipt,
+    left: &ExecutionReceiptDocument,
+    right: &ExecutionReceiptDocument,
 ) -> Result<ExecutionReceiptComparison> {
-    let left_value = serde_json::to_value(left)?;
-    let right_value = serde_json::to_value(right)?;
+    let left_value = receipt_document_value(left)?;
+    let right_value = receipt_document_value(right)?;
     let mut differences = Vec::new();
     diff_json_values("", &left_value, &right_value, &mut differences);
     Ok(ExecutionReceiptComparison {
-        left_execution_id: left.execution_id.clone(),
-        right_execution_id: right.execution_id.clone(),
+        left_execution_id: receipt_document_id(left).to_string(),
+        right_execution_id: receipt_document_id(right).to_string(),
         differences,
     })
+}
+
+fn receipt_document_id(document: &ExecutionReceiptDocument) -> &str {
+    match document {
+        ExecutionReceiptDocument::V1(receipt) => receipt.execution_id.as_str(),
+        ExecutionReceiptDocument::V2(receipt) => receipt.execution_id.as_str(),
+    }
+}
+
+fn receipt_document_value(document: &ExecutionReceiptDocument) -> Result<Value> {
+    match document {
+        ExecutionReceiptDocument::V1(receipt) => Ok(serde_json::to_value(receipt)?),
+        ExecutionReceiptDocument::V2(receipt) => Ok(serde_json::to_value(receipt)?),
+    }
 }
 
 fn diff_json_values(
@@ -1912,7 +1950,9 @@ fn diff_component(path: &str) -> String {
 }
 
 fn diff_kind(path: &str) -> &'static str {
-    if path == "computed_at" {
+    if path.starts_with("local.") {
+        "local-locator-drift"
+    } else if path == "computed_at" {
         "receipt-metadata"
     } else if path == "execution_id" || path.starts_with("identity.") {
         "identity-derived"
@@ -1938,7 +1978,11 @@ mod tests {
         let left = receipt_with_source_hash("blake3:source-a");
         let right = receipt_with_source_hash("blake3:source-b");
 
-        let comparison = compare_execution_receipts(&left, &right).expect("compare");
+        let comparison = compare_execution_receipts(
+            &ExecutionReceiptDocument::V1(left),
+            &ExecutionReceiptDocument::V1(right),
+        )
+        .expect("compare");
 
         assert!(comparison.differences.iter().any(|diff| {
             diff.component == "source"
@@ -1962,7 +2006,11 @@ mod tests {
         });
 
         assert_eq!(left.execution_id, right.execution_id);
-        let comparison = compare_execution_receipts(&left, &right).expect("compare");
+        let comparison = compare_execution_receipts(
+            &ExecutionReceiptDocument::V1(left),
+            &ExecutionReceiptDocument::V1(right),
+        )
+        .expect("compare");
 
         assert!(comparison.differences.iter().any(|diff| {
             diff.component == "reproducibility"
@@ -1973,6 +2021,11 @@ mod tests {
             .differences
             .iter()
             .any(|diff| diff.component == "execution_id"));
+    }
+
+    #[test]
+    fn execution_compare_labels_local_locator_drift_separately() {
+        assert_eq!(diff_kind("local.workspace_root"), "local-locator-drift");
     }
 
     fn receipt_with_source_hash(source_hash: &str) -> ExecutionReceipt {
