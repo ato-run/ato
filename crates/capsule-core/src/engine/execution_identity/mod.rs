@@ -539,6 +539,7 @@ pub enum TmpPolicy {
 pub struct PolicyIdentity {
     pub network_policy_hash: Tracked<String>,
     pub capability_policy_hash: Tracked<String>,
+    pub sandbox_policy_hash: Tracked<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -727,6 +728,7 @@ pub enum ReproducibilityCause {
     UnknownRuntimeIdentity,
     UntrackedEnvironment,
     UntrackedFilesystemView,
+    UntrackedDynamicDependency,
     LifecycleUnknown,
 }
 
@@ -787,6 +789,7 @@ struct FilesystemProjection<'a> {
 struct PolicyProjection<'a> {
     network_policy_hash: TrackedProjection<'a, String>,
     capability_policy_hash: TrackedProjection<'a, String>,
+    sandbox_policy_hash: TrackedProjection<'a, String>,
 }
 
 #[derive(Serialize)]
@@ -1005,6 +1008,7 @@ fn identity_projection(input: &ExecutionIdentityInput) -> IdentityProjection<'_>
         policy: PolicyProjection {
             network_policy_hash: (&input.policy.network_policy_hash).into(),
             capability_policy_hash: (&input.policy.capability_policy_hash).into(),
+            sandbox_policy_hash: (&input.policy.sandbox_policy_hash).into(),
         },
         launch: &input.launch,
     }
@@ -1150,6 +1154,7 @@ mod tests {
             PolicyIdentity {
                 network_policy_hash: Tracked::known("blake3:network".to_string()),
                 capability_policy_hash: Tracked::known("blake3:capability".to_string()),
+                sandbox_policy_hash: Tracked::known("blake3:sandbox".to_string()),
             },
             LaunchIdentity {
                 entry_point: "npm".to_string(),
