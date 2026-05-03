@@ -35,6 +35,13 @@ fn classify_observations(
     if !filesystem.persistent_state.is_empty() {
         causes.push(ReproducibilityCause::StateBound);
     }
+    if environment
+        .unknown_keys
+        .iter()
+        .any(|key| matches!(key.as_str(), "clock" | "time" | "timezone"))
+    {
+        causes.push(ReproducibilityCause::TimeBound);
+    }
     if dependencies.output_hash.status != TrackingStatus::Known {
         causes.push(ReproducibilityCause::UnknownDependencyOutput);
     }
@@ -216,7 +223,7 @@ mod tests {
                 mode: EnvironmentMode::Partial,
                 tracked_keys: vec!["PATH".to_string()],
                 redacted_keys: Vec::new(),
-                unknown_keys: vec!["umask".to_string()],
+                unknown_keys: vec!["timezone".to_string(), "umask".to_string()],
             },
             &known_filesystem(Vec::new()),
         );
@@ -224,8 +231,31 @@ mod tests {
         assert_eq!(result.class, ReproducibilityClass::BestEffort);
         assert_eq!(
             result.causes,
-            vec![ReproducibilityCause::UntrackedEnvironment]
+            vec![
+                ReproducibilityCause::TimeBound,
+                ReproducibilityCause::UntrackedEnvironment
+            ]
         );
+    }
+
+    #[test]
+    fn temporal_unknowns_are_time_bound_when_other_inputs_are_known() {
+        let result = classify_observations(
+            false,
+            &known_dependencies(),
+            &known_runtime(Tracked::known("glibc:stable".to_string())),
+            &EnvironmentIdentity {
+                closure_hash: Tracked::known("blake3:env".to_string()),
+                mode: EnvironmentMode::Closed,
+                tracked_keys: vec!["PATH".to_string()],
+                redacted_keys: Vec::new(),
+                unknown_keys: vec!["timezone".to_string()],
+            },
+            &known_filesystem(Vec::new()),
+        );
+
+        assert_eq!(result.class, ReproducibilityClass::TimeBound);
+        assert_eq!(result.causes, vec![ReproducibilityCause::TimeBound]);
     }
 
     fn known_dependencies() -> DependencyIdentity {

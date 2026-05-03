@@ -102,6 +102,7 @@ pub(crate) fn observe_environment(
 
     let mut unknown_keys = vec![
         "fd-layout".to_string(),
+        "timezone".to_string(),
         "umask".to_string(),
         "ulimits".to_string(),
     ];
@@ -149,7 +150,12 @@ pub(crate) fn observe_filesystem(
     .to_string();
     let source_root = plan.workspace_root.display().to_string();
     let working_directory = launch_spec.working_dir.display().to_string();
-    let persistent_state = Vec::<String>::new();
+    let mut persistent_state = plan
+        .state_source_overrides
+        .iter()
+        .map(|(name, locator)| format!("{name}={locator}"))
+        .collect::<Vec<_>>();
+    persistent_state.sort();
 
     let view_hash = canonical_hash(&FilesystemHashInput {
         source_root: &source_root,
@@ -421,6 +427,7 @@ run = "main.py"
         let observed = observe_environment(&plan, &RuntimeLaunchContext::empty()).expect("env");
 
         assert_eq!(observed.mode, EnvironmentMode::Partial);
+        assert!(observed.unknown_keys.contains(&"timezone".to_string()));
         assert!(observed.unknown_keys.contains(&"umask".to_string()));
         assert!(observed.unknown_keys.contains(&"ulimits".to_string()));
     }
@@ -454,6 +461,31 @@ run = "main.py"
             .value
             .expect("hash")
             .starts_with("blake3:"));
+    }
+
+    #[test]
+    fn filesystem_observer_records_persistent_state_overrides() {
+        let temp = tempdir().expect("tempdir");
+        let mut plan = test_plan(temp.path(), TEST_MANIFEST);
+        plan.state_source_overrides
+            .insert("db".to_string(), "state-abc123".to_string());
+        let launch_spec = capsule_core::launch_spec::LaunchSpec {
+            working_dir: temp.path().to_path_buf(),
+            command: "true".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            runtime: None,
+            driver: None,
+            language: None,
+            required_lockfile: None,
+            port: None,
+            source: capsule_core::launch_spec::LaunchSpecSource::RunCommand,
+        };
+
+        let observed =
+            observe_filesystem(&plan, &RuntimeLaunchContext::empty(), &launch_spec).expect("fs");
+
+        assert_eq!(observed.persistent_state, vec!["db=state-abc123"]);
     }
 
     #[test]
