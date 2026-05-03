@@ -64,7 +64,9 @@ pub(crate) fn observe_runtime(
             ),
             None => Tracked::unknown("runtime binary path not resolved"),
         },
-        dynamic_linkage: Tracked::untracked("dynamic linkage observer not implemented"),
+        dynamic_linkage: Tracked::untracked(
+            "dynamic library closure fingerprint is not implemented",
+        ),
         platform: PlatformIdentity {
             os: execution_plan.reproducibility.platform.os.clone(),
             arch: execution_plan.reproducibility.platform.arch.clone(),
@@ -98,14 +100,21 @@ pub(crate) fn observe_environment(
     tracked_keys.sort();
     redacted_keys.sort();
 
+    let mut unknown_keys = vec![
+        "fd-layout".to_string(),
+        "umask".to_string(),
+        "ulimits".to_string(),
+    ];
+    unknown_keys.sort();
+
     Ok(EnvironmentIdentity {
         closure_hash: Tracked::known(canonical_hash(&EnvironmentHashInput {
             values: hashed_values,
         })?),
-        mode: EnvironmentMode::Closed,
+        mode: EnvironmentMode::Partial,
         tracked_keys,
         redacted_keys,
-        unknown_keys: Vec::new(),
+        unknown_keys,
     })
 }
 
@@ -142,15 +151,23 @@ pub(crate) fn observe_filesystem(
     let working_directory = launch_spec.working_dir.display().to_string();
     let persistent_state = Vec::<String>::new();
 
+    let view_hash = canonical_hash(&FilesystemHashInput {
+        source_root: &source_root,
+        working_directory: &working_directory,
+        projection_strategy: projection_strategy.as_str(),
+        writable_dirs: &writable_dirs,
+        persistent_state: &persistent_state,
+        known_readonly_layers: &known_readonly_layers,
+    })?;
+
     Ok(FilesystemIdentity {
-        view_hash: Tracked::known(canonical_hash(&FilesystemHashInput {
-            source_root: &source_root,
-            working_directory: &working_directory,
-            projection_strategy: projection_strategy.as_str(),
-            writable_dirs: &writable_dirs,
-            persistent_state: &persistent_state,
-            known_readonly_layers: &known_readonly_layers,
-        })?),
+        view_hash: Tracked {
+            status: capsule_core::execution_identity::TrackingStatus::Untracked,
+            value: Some(view_hash),
+            reason: Some(
+                "filesystem view hash is partial: mount source identities, case sensitivity, symlink policy, tmp policy, and state bindings are not fully observed".to_string(),
+            ),
+        },
         projection_strategy,
         writable_dirs,
         persistent_state,
@@ -301,11 +318,47 @@ struct FilesystemHashInput<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
 
+    use capsule_core::router::ExecutionProfile;
     use tempfile::tempdir;
 
     use super::*;
+
+    const TEST_MANIFEST: &str = r#"
+schema_version = "0.3"
+name = "observer-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run = "main.py"
+"#;
+
+    fn test_plan(dir: &Path, manifest: &str) -> ManifestData {
+        let manifest_path = dir.join("capsule.toml");
+        fs::write(&manifest_path, manifest).expect("manifest");
+        let mut parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
+        parsed
+            .as_table_mut()
+            .expect("manifest table")
+            .entry("type".to_string())
+            .or_insert_with(|| toml::Value::String("app".to_string()));
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            parsed,
+            manifest_path,
+            dir.to_path_buf(),
+            ExecutionProfile::Dev,
+            Some("app"),
+            HashMap::new(),
+        )
+        .expect("execution descriptor")
+    }
 
     #[test]
     fn sensitive_env_keys_are_redacted_by_name() {
@@ -358,6 +411,49 @@ mod tests {
             capsule_core::execution_identity::TrackingStatus::Unknown
         );
         assert!(observed.reason.expect("reason").contains("no existing"));
+    }
+
+    #[test]
+    fn environment_observer_marks_non_env_process_state_partial() {
+        let temp = tempdir().expect("tempdir");
+        let plan = test_plan(temp.path(), TEST_MANIFEST);
+
+        let observed = observe_environment(&plan, &RuntimeLaunchContext::empty()).expect("env");
+
+        assert_eq!(observed.mode, EnvironmentMode::Partial);
+        assert!(observed.unknown_keys.contains(&"umask".to_string()));
+        assert!(observed.unknown_keys.contains(&"ulimits".to_string()));
+    }
+
+    #[test]
+    fn filesystem_observer_marks_view_hash_partial() {
+        let temp = tempdir().expect("tempdir");
+        let plan = test_plan(temp.path(), TEST_MANIFEST);
+        let launch_spec = capsule_core::launch_spec::LaunchSpec {
+            working_dir: temp.path().to_path_buf(),
+            command: "true".to_string(),
+            args: Vec::new(),
+            env_vars: HashMap::new(),
+            runtime: None,
+            driver: None,
+            language: None,
+            required_lockfile: None,
+            port: None,
+            source: capsule_core::launch_spec::LaunchSpecSource::RunCommand,
+        };
+
+        let observed =
+            observe_filesystem(&plan, &RuntimeLaunchContext::empty(), &launch_spec).expect("fs");
+
+        assert_eq!(
+            observed.view_hash.status,
+            capsule_core::execution_identity::TrackingStatus::Untracked
+        );
+        assert!(observed
+            .view_hash
+            .value
+            .expect("hash")
+            .starts_with("blake3:"));
     }
 
     #[test]
