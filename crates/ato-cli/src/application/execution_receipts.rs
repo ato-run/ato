@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_executions_dir;
-use capsule_core::execution_identity::ExecutionReceipt;
+use capsule_core::execution_identity::{
+    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2,
+    EXECUTION_IDENTITY_SCHEMA_VERSION, EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+};
 
 const RECEIPT_FILE_NAME: &str = "receipt.json";
 
@@ -25,17 +28,35 @@ pub(crate) fn write_receipt_atomic(receipt: &ExecutionReceipt) -> Result<PathBuf
 }
 
 pub(crate) fn write_receipt_atomic_at(root: &Path, receipt: &ExecutionReceipt) -> Result<PathBuf> {
-    let dir = receipt_dir(root, &receipt.execution_id)?;
+    write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V1(receipt.clone()))
+}
+
+pub(crate) fn write_receipt_document_atomic_at(
+    root: &Path,
+    document: &ExecutionReceiptDocument,
+) -> Result<PathBuf> {
+    match document {
+        ExecutionReceiptDocument::V1(receipt) => {
+            write_receipt_payload_atomic_at(root, &receipt.execution_id, receipt)
+        }
+        ExecutionReceiptDocument::V2(receipt) => {
+            write_receipt_payload_atomic_at(root, &receipt.execution_id, receipt)
+        }
+    }
+}
+
+fn write_receipt_payload_atomic_at<T: serde::Serialize>(
+    root: &Path,
+    execution_id: &str,
+    receipt: &T,
+) -> Result<PathBuf> {
+    let dir = receipt_dir(root, execution_id)?;
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create execution receipt dir {}", dir.display()))?;
     let final_path = dir.join(RECEIPT_FILE_NAME);
     let tmp_path = dir.join(format!(".receipt.json.tmp.{}", std::process::id()));
-    let payload = serde_json::to_vec_pretty(receipt).with_context(|| {
-        format!(
-            "failed to encode execution receipt {}",
-            receipt.execution_id
-        )
-    })?;
+    let payload = serde_json::to_vec_pretty(receipt)
+        .with_context(|| format!("failed to encode execution receipt {execution_id}"))?;
 
     {
         let mut tmp = OpenOptions::new()
@@ -68,11 +89,54 @@ pub(crate) fn read_receipt(execution_id: &str) -> Result<ExecutionReceipt> {
 }
 
 pub(crate) fn read_receipt_at(root: &Path, execution_id: &str) -> Result<ExecutionReceipt> {
+    match read_receipt_document_at(root, execution_id)? {
+        ExecutionReceiptDocument::V1(receipt) => Ok(receipt),
+        ExecutionReceiptDocument::V2(_) => anyhow::bail!(
+            "execution receipt {execution_id} uses v2 experimental schema; use document-aware APIs"
+        ),
+    }
+}
+
+pub(crate) fn read_receipt_document(execution_id: &str) -> Result<ExecutionReceiptDocument> {
+    read_receipt_document_at(&default_receipt_root(), execution_id)
+}
+
+pub(crate) fn read_receipt_document_at(
+    root: &Path,
+    execution_id: &str,
+) -> Result<ExecutionReceiptDocument> {
     let path = receipt_path(root, execution_id)?;
     let raw = fs::read(&path)
         .with_context(|| format!("failed to read execution receipt {}", path.display()))?;
-    serde_json::from_slice(&raw)
-        .with_context(|| format!("failed to parse execution receipt {}", path.display()))
+    let value: serde_json::Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("failed to parse execution receipt {}", path.display()))?;
+    let schema_version = value
+        .get("schema_version")
+        .and_then(|value| value.as_u64())
+        .with_context(|| {
+            format!(
+                "execution receipt {} is missing numeric schema_version",
+                path.display()
+            )
+        })? as u32;
+    match schema_version {
+        EXECUTION_IDENTITY_SCHEMA_VERSION => {
+            let receipt: ExecutionReceipt = serde_json::from_value(value).with_context(|| {
+                format!("failed to parse v1 execution receipt {}", path.display())
+            })?;
+            Ok(ExecutionReceiptDocument::V1(receipt))
+        }
+        EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL => {
+            let receipt: ExecutionReceiptV2 = serde_json::from_value(value).with_context(|| {
+                format!("failed to parse v2 execution receipt {}", path.display())
+            })?;
+            Ok(ExecutionReceiptDocument::V2(receipt))
+        }
+        other => anyhow::bail!(
+            "unsupported execution receipt schema_version {other} in {}",
+            path.display()
+        ),
+    }
 }
 
 fn execution_dir_name(execution_id: &str) -> Result<String> {
@@ -171,6 +235,26 @@ mod tests {
             read.dependencies.output_hash.reason,
             receipt.dependencies.output_hash.reason
         );
+    }
+
+    #[test]
+    fn read_receipt_document_keeps_v1_inspectable() {
+        let temp = tempdir().expect("tempdir");
+        let receipt = sample_receipt();
+        write_receipt_document_atomic_at(
+            temp.path(),
+            &ExecutionReceiptDocument::V1(receipt.clone()),
+        )
+        .expect("write document");
+
+        let document =
+            read_receipt_document_at(temp.path(), &receipt.execution_id).expect("read document");
+        match document {
+            ExecutionReceiptDocument::V1(read) => {
+                assert_eq!(read.execution_id, receipt.execution_id);
+            }
+            ExecutionReceiptDocument::V2(_) => panic!("expected v1 receipt"),
+        }
     }
 
     #[test]
