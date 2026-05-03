@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use capsule_core::execution_identity::{ExecutionReceipt, ReproducibilityClass};
+use capsule_core::execution_identity::{ExecutionReceipt, ReproducibilityClass, TrackingStatus};
 
 use crate::application::execution_receipts;
 
@@ -16,6 +16,11 @@ pub(crate) struct ReplayPlan {
     pub(crate) receipt: ExecutionReceipt,
     pub(crate) mode: ReplayMode,
     pub(crate) run_path: PathBuf,
+    pub(crate) target: Option<String>,
+    pub(crate) entry: Option<String>,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) args: Vec<String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) fn plan_replay(execution_id: &str, mode: ReplayMode) -> Result<ReplayPlan> {
@@ -25,10 +30,24 @@ pub(crate) fn plan_replay(execution_id: &str, mode: ReplayMode) -> Result<Replay
         validate_strict_receipt(&receipt)?;
     }
     let run_path = source_run_path(&receipt)?;
+    let cwd = replay_cwd(&receipt)?;
+    validate_same_host_cwd(&run_path, cwd.as_ref())?;
+    let warnings = replay_warnings(&receipt);
+    let args = receipt.launch.argv.clone();
+    let entry = if receipt.launch.entry_point.trim().is_empty() {
+        None
+    } else {
+        Some(receipt.launch.entry_point.clone())
+    };
     Ok(ReplayPlan {
         receipt,
         mode,
         run_path,
+        target: None,
+        entry,
+        cwd,
+        args,
+        warnings,
     })
 }
 
@@ -96,6 +115,60 @@ fn source_run_path(receipt: &ExecutionReceipt) -> Result<PathBuf> {
     }
 }
 
+fn replay_cwd(receipt: &ExecutionReceipt) -> Result<Option<PathBuf>> {
+    if receipt.launch.working_directory.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(&receipt.launch.working_directory)))
+}
+
+fn validate_same_host_cwd(run_path: &PathBuf, cwd: Option<&PathBuf>) -> Result<()> {
+    let Some(cwd) = cwd else {
+        return Ok(());
+    };
+    if cwd.exists() {
+        return Ok(());
+    }
+    if cwd.is_absolute() {
+        bail!(
+            "receipt working directory does not exist on this host: {}",
+            cwd.display()
+        );
+    }
+    let candidate = run_path.join(cwd);
+    if candidate.exists() {
+        return Ok(());
+    }
+    bail!(
+        "receipt working directory does not exist on this host: {}",
+        candidate.display()
+    );
+}
+
+fn replay_warnings(receipt: &ExecutionReceipt) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if receipt.source.source_tree_hash.status != TrackingStatus::Known {
+        warnings.push("source tree hash was not known in the original receipt".to_string());
+    }
+    if receipt.dependencies.derivation_hash.status != TrackingStatus::Known {
+        warnings
+            .push("dependency derivation hash was not known in the original receipt".to_string());
+    }
+    if receipt.dependencies.output_hash.status != TrackingStatus::Known {
+        warnings.push("dependency output hash was not known in the original receipt".to_string());
+    }
+    if receipt.runtime.binary_hash.status != TrackingStatus::Known {
+        warnings.push("runtime binary hash was not known in the original receipt".to_string());
+    }
+    if receipt.environment.closure_hash.status != TrackingStatus::Known {
+        warnings.push("environment closure hash was not known in the original receipt".to_string());
+    }
+    if receipt.filesystem.view_hash.status != TrackingStatus::Known {
+        warnings.push("filesystem view hash was not known in the original receipt".to_string());
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use capsule_core::execution_identity::{
@@ -113,6 +186,37 @@ mod tests {
         let path = source_run_path(&receipt).expect("source path");
 
         assert_eq!(path, PathBuf::from("/workspace/app"));
+    }
+
+    #[test]
+    fn plan_replay_extracts_launch_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let receipt = receipt_with_source(&format!(
+            "local:{}",
+            temp.path().join("capsule.toml").display()
+        ));
+
+        let cwd = replay_cwd(&receipt).expect("cwd");
+
+        assert_eq!(cwd, Some(PathBuf::from("/workspace/app")));
+        assert_eq!(receipt.launch.entry_point, "node");
+        assert_eq!(receipt.launch.argv, vec!["server.js".to_string()]);
+    }
+
+    #[test]
+    fn replay_warns_when_components_are_not_known() {
+        let mut receipt = receipt_with_source("local:/workspace/app/capsule.toml");
+        receipt.dependencies.output_hash = Tracked::unknown("missing");
+        receipt.filesystem.view_hash = Tracked::untracked("partial");
+
+        let warnings = replay_warnings(&receipt);
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("dependency output hash")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("filesystem view hash")));
     }
 
     #[test]
