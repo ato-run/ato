@@ -17,7 +17,7 @@ use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::router::ManifestData;
 
 use crate::application::build_materialization::BuildObservation;
-use crate::application::execution_observers::{hash_tree, is_sensitive_env_key};
+use crate::application::execution_observers::{hash_source_tree, hash_tree, is_sensitive_env_key};
 use crate::executors::launch_context::RuntimeLaunchContext;
 use crate::runtime::overrides as runtime_overrides;
 
@@ -85,8 +85,16 @@ pub(crate) fn observe_source_v2(
     plan: &ManifestData,
     ctx: &ObserverContextV2,
 ) -> Result<SourceIdentityV2> {
+    // Use hash_source_tree (NOT hash_tree) so the v2 observer respects the
+    // same DEFAULT_IGNORED_DIRS list as the v1 observer (skips
+    // `.git`, `.venv`, `node_modules`, `target`, `__pycache__`, `.ato`,
+    // `.tmp`). hash_tree has no ignore list and would otherwise pull
+    // build-tool byproducts (uv-created `.venv`, npm-created
+    // `node_modules`, Python `__pycache__`) into the launch envelope
+    // identity, causing source_tree_hash to drift across runs even when
+    // the user-authored source bytes are identical.
     let source_tree_hash = if plan.workspace_root.is_dir() {
-        let hash = hash_tree(&plan.workspace_root).with_context(|| {
+        let hash = hash_source_tree(&plan.workspace_root).with_context(|| {
             format!(
                 "failed to hash workspace source tree at {}",
                 plan.workspace_root.display()
