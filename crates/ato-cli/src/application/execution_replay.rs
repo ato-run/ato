@@ -280,6 +280,7 @@ mod tests {
                 PolicyIdentity {
                     network_policy_hash: Tracked::known("blake3:network".to_string()),
                     capability_policy_hash: Tracked::known("blake3:capability".to_string()),
+                    sandbox_policy_hash: Tracked::known("blake3:sandbox".to_string()),
                 },
                 LaunchIdentity {
                     entry_point: "node".to_string(),

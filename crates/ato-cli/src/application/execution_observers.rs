@@ -21,11 +21,11 @@ use crate::runtime::overrides as runtime_overrides;
 
 pub(crate) fn observe_source(
     plan: &ManifestData,
-    launch_spec: &LaunchSpec,
+    _launch_spec: &LaunchSpec,
 ) -> Result<SourceIdentity> {
     Ok(SourceIdentity {
         source_ref: Tracked::known(format!("local:{}", plan.manifest_path.display())),
-        source_tree_hash: observe_source_tree_hash(&launch_spec.working_dir)?,
+        source_tree_hash: observe_source_tree_hash(&plan.workspace_root)?,
     })
 }
 
@@ -34,11 +34,22 @@ pub(crate) fn observe_dependencies(
     launch_ctx: &RuntimeLaunchContext,
     build_observation: Option<&BuildObservation>,
 ) -> Result<DependencyIdentity> {
+    let output_hash = observe_dependency_output_hash(&launch_spec.working_dir, launch_ctx)?;
+    let derivation_hash = build_observation
+        .map(|observation| Tracked::known(observation.input_digest.clone()))
+        .unwrap_or_else(|| {
+            if launch_spec.required_lockfile.is_none()
+                && output_hash.status
+                    == capsule_core::execution_identity::TrackingStatus::NotApplicable
+            {
+                Tracked::not_applicable()
+            } else {
+                Tracked::unknown("build materialization observation unavailable")
+            }
+        });
     Ok(DependencyIdentity {
-        derivation_hash: build_observation
-            .map(|observation| Tracked::known(observation.input_digest.clone()))
-            .unwrap_or_else(|| Tracked::unknown("build materialization observation unavailable")),
-        output_hash: observe_dependency_output_hash(&launch_spec.working_dir, launch_ctx)?,
+        derivation_hash,
+        output_hash,
     })
 }
 
@@ -214,8 +225,12 @@ fn observe_dependency_output_hash(
             )?));
         }
     }
+    if launch_ctx.injected_mounts().is_empty() {
+        return Ok(Tracked::not_applicable());
+    }
+
     Ok(Tracked::unknown(
-        "no existing node_modules or .venv dependency output observed",
+        "dependency output expected but no existing node_modules or .venv output observed",
     ))
 }
 
@@ -406,7 +421,7 @@ run = "main.py"
     }
 
     #[test]
-    fn dependency_output_observer_reports_unknown_when_missing() {
+    fn dependency_output_observer_reports_not_applicable_when_missing_and_no_mounts() {
         let temp = tempdir().expect("tempdir");
 
         let observed = observe_dependency_output_hash(temp.path(), &RuntimeLaunchContext::empty())
@@ -414,9 +429,8 @@ run = "main.py"
 
         assert_eq!(
             observed.status,
-            capsule_core::execution_identity::TrackingStatus::Unknown
+            capsule_core::execution_identity::TrackingStatus::NotApplicable
         );
-        assert!(observed.reason.expect("reason").contains("no existing"));
     }
 
     #[test]
