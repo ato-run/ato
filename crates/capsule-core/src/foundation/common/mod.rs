@@ -3,3 +3,4 @@
 pub mod hash;
 pub mod paths;
 pub mod platform;
+pub mod store;

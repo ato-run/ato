@@ -12,7 +12,7 @@
 //!      executor (assembled Deno command lines, etc.). Useful for
 //!      diagnosing permission denials and stale-binary issues.
 //!    - `all` — turn on every per-feature target plus app DEBUG.
-//!    Unknown tokens are warned about on stderr and otherwise ignored.
+//!      Unknown tokens are warned about on stderr and otherwise ignored.
 //! 3. **Default** — `ato_cli=info` baseline plus `<feature>=warn` for
 //!    every per-feature target. Errors stay visible; routine INFO
 //!    chatter from the gated targets is silent until opted in.

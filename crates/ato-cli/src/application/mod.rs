@@ -1,6 +1,8 @@
 pub(crate) mod agent;
+pub(crate) mod attestation;
 pub(crate) mod auth;
 pub(crate) mod build_materialization;
+pub(crate) mod cache_admin;
 pub(crate) mod compat_import;
 pub(crate) mod credential;
 pub(crate) mod dependency_materializer;
@@ -15,6 +17,8 @@ pub(crate) mod pipeline;
 pub(crate) mod ports;
 pub(crate) mod preview;
 pub(crate) mod producer_input;
+pub(crate) mod projection;
+pub(crate) mod provider_cache;
 pub(crate) mod search;
 pub(crate) mod secrets;
 pub(crate) mod services;

@@ -11,6 +11,7 @@ use capsule_core::CapsuleReporter;
 pub(crate) use crate::application::pipeline::hourglass::HourglassPhase as RunPhaseBoundary;
 use crate::application::ports::OutputPort;
 use crate::application::share;
+use crate::cli::shared::CacheStrategyArg;
 use crate::install::support::{enforce_sandbox_mode_flags, execute_run_command};
 #[cfg(test)]
 pub(crate) use crate::install::support::{LocalRunManifestPreparationOutcome, ResolvedRunTarget};
@@ -41,6 +42,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<CompatibilityFallbackBackend>,
     pub(crate) provider_toolchain: ProviderToolchain,
+    pub(crate) explicit_commit: Option<String>,
     pub(crate) yes: bool,
     pub(crate) verbose: bool,
     pub(crate) agent_mode: RunAgentMode,
@@ -52,6 +54,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) write: Vec<String>,
     pub(crate) read_write: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) cache_strategy: CacheStrategyArg,
     pub(crate) deprecation_warning: Option<&'static str>,
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
@@ -149,6 +152,7 @@ fn execute_standard_run_with_env_assistance(
                 .map(CompatibilityFallbackBackend::as_str)
                 .map(str::to_string),
             args.provider_toolchain,
+            args.explicit_commit.clone(),
             args.yes,
             resolve_run_verbose(args.verbose),
             args.agent_mode,
@@ -163,6 +167,7 @@ fn execute_standard_run_with_env_assistance(
             args.state.clone(),
             args.inject.clone(),
             args.build_policy,
+            args.cache_strategy,
             args.reporter.clone(),
         )
     };
@@ -561,6 +566,7 @@ mod tests {
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
             yes: false,
             verbose: false,
             agent_mode: crate::RunAgentMode::Auto,
@@ -572,6 +578,7 @@ mod tests {
             write: Vec::new(),
             read_write: Vec::new(),
             cwd: None,
+            cache_strategy: crate::cli::shared::CacheStrategyArg::Auto,
             deprecation_warning: None,
             reporter,
         })

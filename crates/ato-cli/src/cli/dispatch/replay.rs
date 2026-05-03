@@ -7,7 +7,8 @@ use serde::Serialize;
 use crate::application::build_materialization::BuildPolicy;
 use crate::application::execution_replay::{self, ReplayMode};
 use crate::cli::shared::{
-    CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain, RunAgentMode,
+    CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain,
+    RunAgentMode,
 };
 use crate::reporters;
 
@@ -75,6 +76,7 @@ pub(super) fn execute_replay_command(
         dangerously_skip_permissions: false,
         compatibility_fallback: None::<CompatibilityFallbackBackend>,
         provider_toolchain: ProviderToolchain::Auto,
+        explicit_commit: None,
         yes: true,
         verbose: false,
         agent_mode: RunAgentMode::Auto,
@@ -86,6 +88,7 @@ pub(super) fn execute_replay_command(
         write: Vec::new(),
         read_write: Vec::new(),
         cwd: None,
+        cache_strategy: CacheStrategyArg::Auto,
         deprecation_warning: None,
         reporter: Arc::new(reporters::CliReporter::new_run(json)),
     })

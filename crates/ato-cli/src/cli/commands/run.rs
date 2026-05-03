@@ -74,6 +74,7 @@ pub struct RunArgs {
     pub dangerously_skip_permissions: bool,
     pub compatibility_fallback: Option<String>,
     pub provider_toolchain_requested: crate::ProviderToolchain,
+    pub explicit_commit: Option<String>,
     pub assume_yes: bool,
     pub verbose: bool,
     pub agent_mode: crate::RunAgentMode,
@@ -90,6 +91,7 @@ pub struct RunArgs {
     pub state_bindings: Vec<String>,
     pub inject_bindings: Vec<String>,
     pub build_policy: crate::application::build_materialization::BuildPolicy,
+    pub cache_strategy: crate::application::dependency_materializer::CacheStrategy,
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
 }
@@ -104,6 +106,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
 async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
     let install = run_install_phase(&args).await?;
+    report_dependency_projection(&args, &install.dependency_projection)?;
     if matches!(
         install.manifest_outcome,
         crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
@@ -401,6 +404,7 @@ fn build_consumer_run_request(
         dangerously_skip_permissions: args.dangerously_skip_permissions,
         compatibility_fallback: args.compatibility_fallback.clone(),
         provider_toolchain_requested: args.provider_toolchain_requested,
+        explicit_commit: args.explicit_commit.clone(),
         assume_yes: args.assume_yes,
         verbose: args.verbose,
         agent_mode: args.agent_mode,
@@ -413,6 +417,7 @@ fn build_consumer_run_request(
         state_bindings: args.state_bindings.clone(),
         inject_bindings: args.inject_bindings.clone(),
         build_policy: args.build_policy,
+        cache_strategy: args.cache_strategy,
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
     }
@@ -714,6 +719,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 let install = run_install_phase(self.args).await.inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Install, err);
                 })?;
+                report_dependency_projection(self.args, &install.dependency_projection)?;
                 let normalized = normalize_run_target_after_install(
                     self.args,
                     &install.resolved_target,
@@ -737,10 +743,23 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                     install.manifest_outcome,
                     crate::install::support::LocalRunManifestPreparationOutcome::CreatedManualManifest
                 );
-                self.record_phase_annotation(
-                    HourglassPhase::Install,
-                    PhaseAnnotation::with_result_kind("executed"),
+                let mut annotation = PhaseAnnotation::with_result_kind("executed");
+                annotation.add_extra(
+                    "run_workspace",
+                    install
+                        .dependency_projection
+                        .run_workspace
+                        .display()
+                        .to_string(),
                 );
+                annotation.add_extra(
+                    "dependency_cache.status",
+                    install.dependency_projection.dependency_cache_status,
+                );
+                if let Some(hash) = install.dependency_projection.derivation_hash {
+                    annotation.add_extra("derivation_hash", hash);
+                }
+                self.record_phase_annotation(HourglassPhase::Install, annotation);
                 Ok(())
             }
             HourglassPhase::Prepare => {
@@ -908,6 +927,25 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
             ),
         }
     }
+}
+
+fn report_dependency_projection(
+    args: &RunArgs,
+    projection: &crate::application::dependency_materializer::DependencyProjection,
+) -> Result<()> {
+    if args.reporter.is_json() {
+        return Ok(());
+    }
+
+    futures::executor::block_on(args.reporter.notify(format!(
+        "Using isolated run workspace: {}",
+        projection.run_workspace.display()
+    )))?;
+    futures::executor::block_on(args.reporter.notify(format!(
+        "Dependency cache: {}",
+        projection.dependency_cache_status
+    )))?;
+    Ok(())
 }
 
 async fn execute_normal_mode(args: RunArgs) -> Result<()> {
@@ -1832,6 +1870,7 @@ run = "node server.js""#,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
             assume_yes: true,
             verbose: false,
             agent_mode: crate::RunAgentMode::Off,
@@ -1848,6 +1887,7 @@ run = "node server.js""#,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
         };
@@ -1933,6 +1973,7 @@ run = "main.py""#,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
             assume_yes: true,
             verbose: false,
             agent_mode: crate::RunAgentMode::Off,
@@ -1949,6 +1990,7 @@ run = "main.py""#,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
         };
@@ -2031,6 +2073,7 @@ run = "main.py""#,
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
             assume_yes: true,
             verbose: false,
             agent_mode: crate::RunAgentMode::Off,
@@ -2047,6 +2090,7 @@ run = "main.py""#,
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
         };
