@@ -222,7 +222,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let decision = lm::prepare_reuse_decision(&launch_spec, &launch_digest);
         lookup_timer.finish_ok();
 
-        match decision {
+        let (mut info, fresh_spawn) = match decision {
             Ok(lm::ReuseDecision::Reuse { record }) => {
                 let validate_timer =
                     PhaseStageTimer::start(HourglassPhase::Execute, "session_validate");
@@ -232,11 +232,20 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 validate_timer.finish_ok();
 
                 self.execute_reused = true;
-                self.session_info = Some(super::session::session_info_from_stored(*record));
-                return Ok(());
+                (super::session::session_info_from_stored(*record), false)
             }
             Ok(lm::ReuseDecision::Spawn { prior_kind }) => {
                 self.execute_prior_kind = prior_kind;
+                (
+                    self.spawn_fresh_session(
+                        resolution,
+                        manifest_path,
+                        plan,
+                        raw_manifest,
+                        launch,
+                    )?,
+                    true,
+                )
             }
             Err(err) => {
                 // Lookup failure (e.g. session_root unreadable) — fall
@@ -245,59 +254,48 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 // misleading, so we leave prior_kind unset and let the
                 // user inspect logs.
                 eprintln!("ATO-WARN session reuse lookup failed: {}", err);
+                (
+                    self.spawn_fresh_session(
+                        resolution,
+                        manifest_path,
+                        plan,
+                        raw_manifest,
+                        launch,
+                    )?,
+                    true,
+                )
             }
-        }
-
-        // 2. Spawn fresh session.
-        let manifest_value: toml::Value = toml::from_str(raw_manifest)
-            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-        let guest = parse_guest_contract(
-            &manifest_value,
-            manifest_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        );
-
-        let info = if let Some(guest) = guest {
-            start_guest_session(
-                self.handle,
-                resolution,
-                manifest_path,
-                plan,
-                guest,
-                self.notes.clone(),
-            )?
-        } else {
-            start_runtime_session(
-                self.handle,
-                resolution,
-                manifest_path,
-                plan,
-                raw_manifest,
-                launch,
-                self.notes.clone(),
-            )?
         };
 
         // 3. Enrich the freshly-written record with schema=2 fields. Best-
         // effort: failures here only weaken future reuse, not the current
-        // launch.
-        let pid = info.pid() as u32;
-        let process_start_time = lm::process_start_time_unix_ms(pid);
-        if let Err(err) = lm::persist_after_spawn(pid, &launch_digest, process_start_time) {
-            eprintln!(
-                "ATO-WARN failed to enrich session record with reuse metadata: {}",
-                err
-            );
+        // launch. Skipped for the reuse path because the existing record
+        // already carries its enrichment from the original spawn.
+        if fresh_spawn {
+            let pid = info.pid() as u32;
+            let process_start_time = lm::process_start_time_unix_ms(pid);
+            if let Err(err) = lm::persist_after_spawn(pid, &launch_digest, process_start_time) {
+                eprintln!(
+                    "ATO-WARN failed to enrich session record with reuse metadata: {}",
+                    err
+                );
+            }
         }
 
         // 4. Emit an execution receipt so `ato app session start` (and the
         //    desktop UI that wraps it) participates in the same identity
         //    journal as `ato run`. Honors `ATO_RECEIPT_SCHEMA` (default v1,
         //    `v2` / `v2-experimental` selects the portable v2 schema).
+        //
+        //    Runs for both the spawn and reuse paths because the launch
+        //    envelope identity is independent of whether a fresh process was
+        //    started: re-emitting on reuse refreshes computed_at and surfaces
+        //    the execution_id back into SessionInfo so cached launches still
+        //    carry portable identity. The v2 portability invariant means the
+        //    receipt overwrites the same `~/.ato/executions/<id>/` directory.
+        //
         //    Best-effort: a receipt write failure must not fail an otherwise-
         //    successful session start.
-        let mut info = info;
         match self.emit_execution_receipt() {
             Ok((execution_id, schema_version)) => {
                 info.attach_execution_receipt(execution_id, schema_version);
@@ -344,6 +342,49 @@ impl<'a> SessionStartPhaseRunner<'a> {
             ExecutionReceiptDocument::V2(receipt) => (receipt.execution_id, receipt.schema_version),
         };
         Ok((execution_id, schema_version))
+    }
+
+    /// Spawn a fresh guest or runtime session. Extracted from `run_execute`
+    /// so the spawn path can be invoked from both the reuse-decision-spawn
+    /// branch and the reuse-lookup-failure fallback without duplicating the
+    /// guest-vs-runtime dispatch.
+    fn spawn_fresh_session(
+        &self,
+        resolution: &HandleResolution,
+        manifest_path: &std::path::Path,
+        plan: &ManifestData,
+        raw_manifest: &str,
+        launch: &LaunchSpec,
+    ) -> Result<SessionInfo> {
+        let manifest_value: toml::Value = toml::from_str(raw_manifest)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+        let guest = parse_guest_contract(
+            &manifest_value,
+            manifest_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
+
+        if let Some(guest) = guest {
+            start_guest_session(
+                self.handle,
+                resolution,
+                manifest_path,
+                plan,
+                guest,
+                self.notes.clone(),
+            )
+        } else {
+            start_runtime_session(
+                self.handle,
+                resolution,
+                manifest_path,
+                plan,
+                raw_manifest,
+                launch,
+                self.notes.clone(),
+            )
+        }
     }
 }
 
