@@ -1963,20 +1963,32 @@ where
             .await?;
     }
 
-    let execution_receipt = crate::application::execution_receipt_builder::build_prelaunch_receipt(
-        &decision.plan,
-        &execution_plan,
-        &launch_ctx,
-        build_observation.as_ref(),
-    )?;
+    let execution_receipt_document =
+        crate::application::execution_receipt_builder::build_prelaunch_receipt_document(
+            &decision.plan,
+            &execution_plan,
+            &launch_ctx,
+            build_observation.as_ref(),
+        )?;
     let execution_receipt_path =
-        crate::application::execution_receipts::write_receipt_atomic(&execution_receipt)?;
+        crate::application::execution_receipts::write_receipt_document_atomic(
+            &execution_receipt_document,
+        )?;
     if request.verbose {
+        let (execution_id, schema_label) = match &execution_receipt_document {
+            capsule_core::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
+                (receipt.execution_id.clone(), "v1")
+            }
+            capsule_core::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
+                (receipt.execution_id.clone(), "v2-experimental")
+            }
+        };
         request
             .reporter
             .notify(format!(
-                "🧾 Execution receipt: {} ({})",
-                execution_receipt.execution_id,
+                "🧾 Execution receipt ({}): {} ({})",
+                schema_label,
+                execution_id,
                 execution_receipt_path.display()
             ))
             .await?;
