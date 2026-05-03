@@ -100,8 +100,22 @@ impl<'a> SessionStartPhaseRunner<'a> {
 
     async fn run_install(&mut self) -> Result<()> {
         let resolution = build_resolution(self.handle, self.target_label, None)?;
-        let (manifest_path, plan, launch, mut notes) =
+        let (manifest_path, mut plan, mut launch, mut notes) =
             resolve_session_launch_plan(self.handle, self.target_label)?;
+
+        // Phase Y option 2: re-anchor the registry-installed capsule onto a
+        // session-local hardlink projection so the launch cannot mutate the
+        // shared install dir at `~/.ato/runtimes/<scoped>/<version>/`.
+        // Local capsules (manifest path outside the runtimes tree) keep
+        // their original workspace_root so user edits stay live.
+        let manifest_path = match maybe_project_to_session(&manifest_path, &mut plan, &mut launch) {
+            Ok(maybe_path) => maybe_path.unwrap_or(manifest_path),
+            Err(err) => {
+                eprintln!("ATO-WARN source projection failed; falling back to install dir: {err}");
+                manifest_path
+            }
+        };
+
         notes.extend(resolution.notes.clone());
         let raw_manifest = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
@@ -222,6 +236,24 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let decision = lm::prepare_reuse_decision(&launch_spec, &launch_digest);
         lookup_timer.finish_ok();
 
+        // 1b. Emit the execution receipt BEFORE we spawn the workload. The
+        // launch envelope identity (source/deps/runtime/env/fs/policy/launch)
+        // is fully determined at this point, and capsules that write into
+        // their own working dir at startup would otherwise pollute
+        // source_tree_hash before the observer reads it. Reuse path also
+        // re-emits here so its computed_at refreshes against the same clean
+        // workspace state.
+        let prelaunch_receipt = match self.emit_execution_receipt() {
+            Ok(pair) => Some(pair),
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN session start failed to emit execution receipt: {}",
+                    err
+                );
+                None
+            }
+        };
+
         let (mut info, fresh_spawn) = match decision {
             Ok(lm::ReuseDecision::Reuse { record }) => {
                 let validate_timer =
@@ -282,30 +314,12 @@ impl<'a> SessionStartPhaseRunner<'a> {
             }
         }
 
-        // 4. Emit an execution receipt so `ato app session start` (and the
-        //    desktop UI that wraps it) participates in the same identity
-        //    journal as `ato run`. Honors `ATO_RECEIPT_SCHEMA` (default v1,
-        //    `v2` / `v2-experimental` selects the portable v2 schema).
-        //
-        //    Runs for both the spawn and reuse paths because the launch
-        //    envelope identity is independent of whether a fresh process was
-        //    started: re-emitting on reuse refreshes computed_at and surfaces
-        //    the execution_id back into SessionInfo so cached launches still
-        //    carry portable identity. The v2 portability invariant means the
-        //    receipt overwrites the same `~/.ato/executions/<id>/` directory.
-        //
-        //    Best-effort: a receipt write failure must not fail an otherwise-
-        //    successful session start.
-        match self.emit_execution_receipt() {
-            Ok((execution_id, schema_version)) => {
-                info.attach_execution_receipt(execution_id, schema_version);
-            }
-            Err(err) => {
-                eprintln!(
-                    "ATO-WARN session start failed to emit execution receipt: {}",
-                    err
-                );
-            }
+        // 4. Surface the prelaunch receipt identity onto the SessionInfo so
+        //    the JSON envelope returned to the desktop carries it. The
+        //    receipt itself was already emitted in step 1b above (before
+        //    spawn) so observers see a clean workspace.
+        if let Some((execution_id, schema_version)) = prelaunch_receipt {
+            info.attach_execution_receipt(execution_id, schema_version);
         }
 
         self.session_info = Some(info);
@@ -343,6 +357,10 @@ impl<'a> SessionStartPhaseRunner<'a> {
         };
         Ok((execution_id, schema_version))
     }
+
+    // Note: `maybe_project_to_session` is a free function below the impl
+    // because it does not borrow `self` and must run before `self.plan` /
+    // `self.launch` are stored.
 
     /// Spawn a fresh guest or runtime session. Extracted from `run_execute`
     /// so the spawn path can be invoked from both the reuse-decision-spawn
@@ -386,6 +404,83 @@ impl<'a> SessionStartPhaseRunner<'a> {
             )
         }
     }
+}
+
+/// Phase Y option 2 helper: when the resolved manifest lives under the
+/// shared `~/.ato/runtimes/` install tree, project the install source into
+/// a per-session workspace via hardlinks (see
+/// `application::source_projection`) and re-anchor `plan` and `launch` at
+/// the projected path. Returns the new manifest path on success.
+///
+/// Returns `Ok(None)` for non-registry capsules (local user projects),
+/// where we keep the original workspace pointing at the user's editable
+/// source. Returns `Err` only on filesystem failures during projection;
+/// the caller treats those as best-effort and falls back to the install
+/// dir.
+fn maybe_project_to_session(
+    manifest_path: &std::path::Path,
+    plan: &mut ManifestData,
+    launch: &mut LaunchSpec,
+) -> Result<Option<PathBuf>> {
+    use capsule_core::common::paths::{ato_runs_dir, runtime_cache_dir};
+
+    let runtime_cache = runtime_cache_dir().ok();
+    let install_workspace = plan.workspace_root.clone();
+    let is_under_runtimes = runtime_cache
+        .as_ref()
+        .is_some_and(|cache| install_workspace.starts_with(cache));
+    if !is_under_runtimes {
+        return Ok(None);
+    }
+
+    // Determine the launch's relative working dir before we mutate `launch`.
+    let workdir_relative = launch
+        .working_dir
+        .strip_prefix(&install_workspace)
+        .map(|rel| rel.to_path_buf())
+        .unwrap_or_else(|_| std::path::PathBuf::new());
+
+    // Allocate a fresh session-scoped projection target. The path embeds a
+    // monotonic + random suffix per `ato_run_layout`, so concurrent session
+    // starts of the same capsule do not race on the same projection dir.
+    let session_dir = ato_runs_dir().join(format!(
+        "session-y-{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        rand::random::<u64>()
+    ));
+    let projection_target = session_dir.join("workspace").join("source");
+
+    crate::application::source_projection::project_install_source(
+        &install_workspace,
+        &projection_target,
+    )
+    .with_context(|| {
+        format!(
+            "failed to project install source {} -> {}",
+            install_workspace.display(),
+            projection_target.display()
+        )
+    })?;
+
+    let new_manifest_path = projection_target.join(
+        manifest_path
+            .strip_prefix(&install_workspace)
+            .map(|rel| rel.to_path_buf())
+            .unwrap_or_else(|_| std::path::PathBuf::from("capsule.toml")),
+    );
+
+    plan.workspace_root = projection_target.clone();
+    plan.manifest_dir = new_manifest_path
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| projection_target.clone());
+    plan.manifest_path = new_manifest_path.clone();
+    launch.working_dir = projection_target.join(&workdir_relative);
+
+    Ok(Some(new_manifest_path))
 }
 
 #[async_trait(?Send)]
