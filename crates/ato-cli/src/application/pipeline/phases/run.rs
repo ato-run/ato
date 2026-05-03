@@ -20,6 +20,11 @@ use capsule_core::CapsuleReporter;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
+use crate::application::dependency_materializer::{
+    digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
+    DependencyMaterializer, DependencyProjection, InstallPolicies, ManifestInputs, PlatformTriple,
+    RuntimeSelection, SessionDependencyMaterializer,
+};
 use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedCliExportRequest, ResolvedRunTarget,
 };
@@ -192,6 +197,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) dangerously_skip_permissions: bool,
     pub(crate) compatibility_fallback: Option<String>,
     pub(crate) provider_toolchain_requested: ProviderToolchain,
+    pub(crate) explicit_commit: Option<String>,
     pub(crate) assume_yes: bool,
     pub(crate) verbose: bool,
     pub(crate) agent_mode: RunAgentMode,
@@ -204,6 +210,7 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) state_bindings: Vec<String>,
     pub(crate) inject_bindings: Vec<String>,
     pub(crate) build_policy: crate::application::build_materialization::BuildPolicy,
+    pub(crate) cache_strategy: CacheStrategy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
 }
@@ -219,6 +226,7 @@ impl ConsumerRunRequest {
 pub(crate) struct RunInstallPhaseResult {
     pub(crate) resolved_target: ResolvedRunTarget,
     pub(crate) manifest_outcome: LocalRunManifestPreparationOutcome,
+    pub(crate) dependency_projection: DependencyProjection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,6 +599,7 @@ where
         request.target.clone(),
         request.assume_yes,
         request.provider_toolchain_requested,
+        request.explicit_commit.clone(),
         request.keep_failed_artifacts,
         request.auto_fix_mode,
         request.allow_unverified,
@@ -603,9 +612,18 @@ where
         request.assume_yes,
         request.reporter.clone(),
     )?;
+    let dependency_request = dependency_request_for_run(request, &resolved_target)?;
+    let materializer = SessionDependencyMaterializer::new();
+    let dependency_projection = materializer.materialize(&dependency_request)?;
+    let verification = materializer.verify(&dependency_projection)?;
+    if !verification.ok {
+        anyhow::bail!("{}", verification.messages.join("; "));
+    }
 
     let detail = match manifest_outcome {
-        LocalRunManifestPreparationOutcome::Ready => "target resolved and manifest ready",
+        LocalRunManifestPreparationOutcome::Ready => {
+            "target resolved and manifest ready; using isolated run workspace"
+        }
         LocalRunManifestPreparationOutcome::CreatedManualManifest => {
             "manifest created; stopping before prepare"
         }
@@ -615,7 +633,113 @@ where
     Ok(RunInstallPhaseResult {
         resolved_target,
         manifest_outcome,
+        dependency_projection,
     })
+}
+
+fn dependency_request_for_run(
+    request: &ConsumerRunRequest,
+    resolved_target: &ResolvedRunTarget,
+) -> Result<DependencyMaterializationRequest> {
+    let source_root = resolved_target
+        .provider_workspace
+        .as_ref()
+        .map(|workspace| workspace.workspace_root.clone())
+        .unwrap_or_else(|| resolved_target.path.clone());
+    let workspace_root = source_root
+        .parent()
+        .map(Path::to_path_buf)
+        .filter(|_| source_root.is_file())
+        .unwrap_or_else(|| source_root.clone());
+    let ecosystem = resolved_target
+        .provider_workspace
+        .as_ref()
+        .map(|workspace| workspace.target.provider.as_str().to_string())
+        .unwrap_or_else(|| "source".to_string());
+    let package_manager = infer_package_manager(&workspace_root);
+    let runtime = RuntimeSelection {
+        name: if ecosystem == "pypi" {
+            "python".to_string()
+        } else if ecosystem == "npm" {
+            "node".to_string()
+        } else {
+            "source".to_string()
+        },
+        version: None,
+    };
+    let manifests = ManifestInputs {
+        lockfile_digest: first_digest(
+            &workspace_root,
+            &[
+                "package-lock.json",
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "bun.lock",
+                "bun.lockb",
+                "uv.lock",
+                "requirements.txt",
+            ],
+        )?,
+        package_manifest_digest: first_digest(
+            &workspace_root,
+            &[
+                "package.json",
+                "pyproject.toml",
+                "requirements.txt",
+                "Cargo.toml",
+            ],
+        )?,
+        workspace_manifest_digest: digest_file(&workspace_root.join("capsule.toml"))?,
+        path_dependency_digest: None,
+    };
+
+    Ok(DependencyMaterializationRequest {
+        session_id: if ecosystem == "source" {
+            "run".to_string()
+        } else {
+            format!("provider-{ecosystem}")
+        },
+        capsule_id: request.target.to_string_lossy().to_string(),
+        source_root,
+        workspace_root,
+        ecosystem,
+        package_manager,
+        package_manager_version: None,
+        runtime,
+        manifests,
+        policies: InstallPolicies {
+            lifecycle_script_policy: "sandbox".to_string(),
+            registry_policy: "default".to_string(),
+            network_policy: request.enforcement.clone(),
+            env_allowlist_digest: None,
+        },
+        platform: PlatformTriple::current(),
+        cache_strategy: request.cache_strategy,
+        attestation_strategy: AttestationStrategy::None,
+    })
+}
+
+fn first_digest(root: &Path, names: &[&str]) -> Result<Option<String>> {
+    for name in names {
+        if let Some(digest) = digest_file(&root.join(name))? {
+            return Ok(Some(digest));
+        }
+    }
+    Ok(None)
+}
+
+fn infer_package_manager(root: &Path) -> Option<String> {
+    [
+        ("pnpm-lock.yaml", "pnpm"),
+        ("package-lock.json", "npm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lock", "bun"),
+        ("bun.lockb", "bun"),
+        ("uv.lock", "uv"),
+        ("requirements.txt", "pip"),
+    ]
+    .into_iter()
+    .find_map(|(file, manager)| root.join(file).exists().then(|| manager.to_string()))
 }
 
 fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMode {
@@ -2948,6 +3072,7 @@ url = "http://127.0.0.1:8787/health"
             dangerously_skip_permissions: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
             assume_yes: true,
             verbose: false,
             agent_mode: crate::RunAgentMode::Off,
@@ -2960,6 +3085,7 @@ url = "http://127.0.0.1:8787/health"
             state_bindings: Vec::new(),
             inject_bindings: Vec::new(),
             build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
         }

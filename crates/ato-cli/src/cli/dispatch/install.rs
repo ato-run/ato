@@ -65,6 +65,7 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
             can_prompt,
             args.keep_failed_artifacts,
             args.auto_fix_mode,
+            None,
         ))?;
         render_install_result(&result, args.json, args.no_project)?;
         return Ok(());

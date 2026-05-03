@@ -17,6 +17,46 @@ pub(crate) mod common;
 pub(crate) mod logging;
 pub(crate) mod utils;
 
+pub mod projection {
+    pub use crate::application::projection::{
+        project_payload, ProjectionError, ProjectionOutcome, ProjectionStrategy,
+    };
+}
+
+pub mod provider_cache {
+    pub use crate::application::provider_cache::{
+        cache_enabled, check_and_project, compute_derivation_hash, freeze_after_install,
+        ProviderCacheAction, ProviderCacheInputs, ProviderCachePlan,
+    };
+}
+
+pub mod attestation {
+    pub use crate::application::attestation::{issue_freeze_attestation, AttestationContext};
+}
+
+pub mod cache_admin {
+    pub use crate::application::cache_admin::{
+        clear_all, clear_derivation, collect_cache_stats, BlobSummary, CacheClearOutcome,
+        CacheStats,
+    };
+}
+
+pub mod dependency_materializer {
+    pub use crate::application::dependency_materializer::{
+        AttestationRef, AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
+        DependencyMaterializationRequest, DependencyMaterializer, DependencyPlan,
+        DependencyPortabilityClass, DependencyProjection, InstallPolicies, ManifestInputs,
+        PlatformTriple, ReproducibilityMeta, RuntimeSelection, SessionDependencyMaterializer,
+        SourceResolutionRecord, StoreRefRecord, VerificationResult,
+    };
+
+    pub mod freeze {
+        pub use crate::application::dependency_materializer::freeze::{
+            atomic_write_json, freeze_dep_tree, DerivationLock, FreezeOutcome,
+        };
+    }
+}
+
 /// Ensures the optional sidecar is stopped exactly once across normal exit,
 /// explicit cleanup scopes, and panic-driven unwinding.
 pub(crate) struct SidecarCleanup {

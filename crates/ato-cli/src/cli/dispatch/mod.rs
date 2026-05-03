@@ -1,7 +1,10 @@
 mod app;
+mod attest;
 mod binding;
+mod cache;
 mod config;
 mod engine;
+mod explain_hash;
 mod fetch;
 mod inspect;
 mod install;
@@ -35,7 +38,10 @@ use crate::project as crate_project;
 use crate::reporters;
 
 use self::app::execute_app_command;
+use self::attest::execute_attest_command;
+use self::cache::execute_cache_command;
 use self::config::execute_config_command;
+use self::explain_hash::execute_explain_hash_command;
 use self::fetch::{execute_fetch_command, execute_finalize_command};
 use self::inspect::execute_inspect_command;
 use self::ipc::execute_ipc_command;
@@ -77,6 +83,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             via,
+            commit,
+            cache,
             yes,
             verbose,
             agent,
@@ -112,6 +120,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             dangerously_skip_permissions,
             compatibility_fallback,
             provider_toolchain: via,
+            explicit_commit: commit,
             yes,
             verbose,
             agent_mode: agent,
@@ -129,6 +138,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             write,
             read_write,
             cwd,
+            cache_strategy: cache,
             deprecation_warning: None,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
@@ -144,6 +154,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             registry.as_deref(),
             json || command_json,
         ),
+
+        Commands::ExplainHash { capsule } => execute_explain_hash_command(&capsule),
+
+        Commands::Cache { command } => execute_cache_command(command),
+
+        Commands::Attest { command } => execute_attest_command(command),
 
         Commands::Encap {
             path,

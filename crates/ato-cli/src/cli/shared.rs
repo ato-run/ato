@@ -128,6 +128,54 @@ impl ShareToolRuntime {
     }
 }
 
+/// Cache strategy selector for `ato run`. Maps onto
+/// `dependency_materializer::CacheStrategy` once the per-call resolution
+/// (CLI flag → env var → built-in default) has run.
+///
+/// As of A1's promotion to default, `Auto` resolves to the derivation
+/// cache. Set `--cache=none` or `ATO_CACHE_STRATEGY=none` to opt out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CacheStrategyArg {
+    /// Honor `ATO_CACHE_STRATEGY` if set, otherwise default to `derivation`.
+    #[default]
+    Auto,
+    /// Disable the dependency cache for this run.
+    None,
+    /// Use the A1 derivation cache: hit/miss on `derivation_hash`.
+    Derivation,
+}
+
+const ENV_CACHE_STRATEGY: &str = "ATO_CACHE_STRATEGY";
+
+impl CacheStrategyArg {
+    /// Resolves the user-facing flag against `ATO_CACHE_STRATEGY` and the
+    /// hard default. Returns the concrete materializer cache strategy.
+    pub(crate) fn resolve(self) -> crate::application::dependency_materializer::CacheStrategy {
+        use crate::application::dependency_materializer::CacheStrategy;
+        match self {
+            CacheStrategyArg::None => CacheStrategy::None,
+            CacheStrategyArg::Derivation => CacheStrategy::DerivationCache,
+            CacheStrategyArg::Auto => match std::env::var(ENV_CACHE_STRATEGY) {
+                Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                    // Empty string and unset are both treated as "no
+                    // explicit preference" → use the built-in default.
+                    "" => CacheStrategy::DerivationCache,
+                    "derivation" | "derivation_cache" => CacheStrategy::DerivationCache,
+                    "none" | "off" | "disabled" => CacheStrategy::None,
+                    other => {
+                        tracing::warn!(
+                            value = %other,
+                            "ATO_CACHE_STRATEGY set to an unrecognized value, falling back to derivation"
+                        );
+                        CacheStrategy::DerivationCache
+                    }
+                },
+                Err(_) => CacheStrategy::DerivationCache,
+            },
+        }
+    }
+}
+
 /// Visibility scope for `ato encap` uploads.
 ///
 /// `Public` maps to the API string `"unlisted"` — the share URL is accessible to anyone with
@@ -166,4 +214,83 @@ pub(super) fn cli_styles() -> clap::builder::Styles {
         .usage(AnsiColor::Green.on_default() | Effects::BOLD)
         .literal(AnsiColor::Blue.on_default() | Effects::BOLD)
         .placeholder(AnsiColor::Yellow.on_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CacheStrategyArg;
+    use crate::application::dependency_materializer::CacheStrategy;
+    use serial_test::serial;
+
+    fn clear_env() {
+        std::env::remove_var("ATO_CACHE_STRATEGY");
+    }
+
+    #[test]
+    #[serial]
+    fn explicit_none_resolves_to_none() {
+        clear_env();
+        assert_eq!(CacheStrategyArg::None.resolve(), CacheStrategy::None);
+    }
+
+    #[test]
+    #[serial]
+    fn explicit_derivation_resolves_to_derivation_cache() {
+        clear_env();
+        assert_eq!(
+            CacheStrategyArg::Derivation.resolve(),
+            CacheStrategy::DerivationCache
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn auto_without_env_defaults_to_derivation() {
+        clear_env();
+        assert_eq!(
+            CacheStrategyArg::Auto.resolve(),
+            CacheStrategy::DerivationCache,
+            "A1 is promoted to default; Auto must resolve to DerivationCache when no env var is set"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn auto_honors_env_var_for_derivation() {
+        clear_env();
+        std::env::set_var("ATO_CACHE_STRATEGY", "derivation");
+        let resolved = CacheStrategyArg::Auto.resolve();
+        clear_env();
+        assert_eq!(resolved, CacheStrategy::DerivationCache);
+    }
+
+    #[test]
+    #[serial]
+    fn auto_honors_env_var_for_none() {
+        clear_env();
+        std::env::set_var("ATO_CACHE_STRATEGY", "none");
+        let resolved = CacheStrategyArg::Auto.resolve();
+        clear_env();
+        assert_eq!(resolved, CacheStrategy::None);
+    }
+
+    #[test]
+    #[serial]
+    fn unrecognized_env_value_falls_back_to_default() {
+        clear_env();
+        std::env::set_var("ATO_CACHE_STRATEGY", "yolo");
+        let resolved = CacheStrategyArg::Auto.resolve();
+        clear_env();
+        assert_eq!(resolved, CacheStrategy::DerivationCache);
+    }
+
+    #[test]
+    #[serial]
+    fn explicit_flag_overrides_env_var() {
+        clear_env();
+        std::env::set_var("ATO_CACHE_STRATEGY", "derivation");
+        let resolved = CacheStrategyArg::None.resolve();
+        clear_env();
+        assert_eq!(resolved, CacheStrategy::None);
+    }
 }
