@@ -1833,6 +1833,7 @@ fn print_execution_receipt(document: &ExecutionReceiptDocument, gaps: &[Executio
         "  capability_policy_hash",
         &receipt.policy.capability_policy_hash,
     );
+    print_tracked_string("  sandbox_policy_hash", &receipt.policy.sandbox_policy_hash);
 
     println!("Launch:");
     println!("  entry_point: {}", receipt.launch.entry_point);
@@ -1952,6 +1953,8 @@ fn diff_component(path: &str) -> String {
 fn diff_kind(path: &str) -> &'static str {
     if path.starts_with("local.") {
         "local-locator-drift"
+    } else if path == "partial_view_hash" || path.ends_with(".partial_view_hash") {
+        "diagnostic-drift"
     } else if path == "computed_at" {
         "receipt-metadata"
     } else if path == "execution_id" || path.starts_with("identity.") {
@@ -2026,6 +2029,20 @@ mod tests {
     #[test]
     fn execution_compare_labels_local_locator_drift_separately() {
         assert_eq!(diff_kind("local.workspace_root"), "local-locator-drift");
+    }
+
+    #[test]
+    fn execution_compare_labels_partial_view_hash_as_diagnostic_drift() {
+        assert_eq!(
+            diff_kind("filesystem.partial_view_hash"),
+            "diagnostic-drift"
+        );
+        assert_eq!(diff_kind("partial_view_hash"), "diagnostic-drift");
+        assert_ne!(
+            diff_kind("filesystem.view_hash"),
+            "diagnostic-drift",
+            "view_hash itself is identity-affecting and must not be diagnostic"
+        );
     }
 
     fn receipt_with_source_hash(source_hash: &str) -> ExecutionReceipt {
