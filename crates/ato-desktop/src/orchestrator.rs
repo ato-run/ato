@@ -133,6 +133,12 @@ pub struct CapsuleLaunchSession {
     pub served_by: Option<String>,
     pub log_path: Option<PathBuf>,
     pub notes: Vec<String>,
+    /// Portable execution-receipt identity for the launched session. `None`
+    /// when the CLI was invoked without v2 schema enabled or pre-dates the
+    /// receipt-emitting session start path.
+    pub execution_id: Option<String>,
+    /// Schema version of the receipt referenced by `execution_id`.
+    pub execution_receipt_schema_version: Option<u32>,
     /// Wall-clock anchor for SURFACE-TIMING (RFC v0.3 §5.1). Set by
     /// `resolve_and_start_capsule` from the click handler entry; read
     /// by `webview.rs` to emit the `total` line once the user-visible
@@ -319,6 +325,16 @@ struct SessionStartInfo {
     web: Option<WebSessionDisplay>,
     terminal: Option<TerminalSessionDisplay>,
     service: Option<ServiceBackgroundDisplay>,
+    /// Portable execution-receipt identity emitted by `ato app session start`
+    /// when the v2 receipt path is enabled (cf. `SessionStartPhaseRunner::
+    /// emit_execution_receipt`). Surfaces the launch envelope identity into
+    /// the desktop orchestrator so the UI can cross-reference the session
+    /// with `~/.ato/executions/<execution_id>/receipt.json`.
+    #[serde(default)]
+    execution_id: Option<String>,
+    /// Schema version (1 or 2) of the execution receipt above.
+    #[serde(default)]
+    execution_receipt_schema_version: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -946,6 +962,8 @@ fn build_launch_session(
             .or_else(|| service.as_ref().map(|item| PathBuf::from(&item.log_path)))
             .or_else(|| Some(PathBuf::from(&started.log_path))),
         notes,
+        execution_id: started.execution_id,
+        execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
     })
 }
@@ -1186,6 +1204,11 @@ fn build_launch_session_from_stored(
         served_by: stored.web.as_ref().map(|w| w.served_by.clone()),
         log_path: Some(PathBuf::from(&stored.log_path)),
         notes: stored.notes,
+        // Pre-receipt-aware records (cached before the receipt-emitting
+        // session start landed) have no execution_id. New launches will
+        // populate it via the SessionStartInfo path.
+        execution_id: None,
+        execution_receipt_schema_version: None,
         click_origin: None,
     })
 }
@@ -1590,6 +1613,11 @@ fn start_web_service_from_workspace(
         notes: vec![format!(
             "Web dev server started via `{pm} run dev` (pid {pid})."
         )],
+        // Web dev-server launches bypass the receipt-emitting session start
+        // path (they wrap a host npm/pnpm/yarn dev process directly), so no
+        // execution_id is available.
+        execution_id: None,
+        execution_receipt_schema_version: None,
         click_origin: None,
     })
 }
@@ -1805,6 +1833,10 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
                 served_by: Some("nacelle".to_string()),
                 log_path: None,
                 notes: vec!["Share URL executed via nacelle sandbox.".to_string()],
+                // Share-URL terminal launches go straight through nacelle and
+                // do not pass the receipt-emitting session start path.
+                execution_id: None,
+                execution_receipt_schema_version: None,
                 click_origin: None,
             })
         }
@@ -1891,6 +1923,8 @@ mod tests {
             web: None,
             terminal: None,
             service: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
         }
     }
 
