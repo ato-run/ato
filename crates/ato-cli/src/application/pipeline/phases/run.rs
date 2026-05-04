@@ -1233,6 +1233,19 @@ where
             )
             .await?,
         );
+        // Surface a secret-free summary of started deps before the
+        // consumer launches. Helps `ato run` users (especially via
+        // ato-desktop) see which provider was fetched, where its
+        // process is logging, and which port the orchestrator
+        // allocated. runtime_exports values are intentionally omitted
+        // — only export key names are listed — because values may
+        // contain credentials that the redaction filter is also
+        // scrubbing from logs.
+        if let Some(graph) = dep_contracts.as_ref().and_then(|guard| guard.graph()) {
+            for line in graph.summary_lines() {
+                eprintln!("{line}");
+            }
+        }
     }
 
     let injected_data =
