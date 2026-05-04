@@ -9,7 +9,7 @@ use crate::runtime::tree as runtime_tree;
 
 use super::EXTERNAL_CAPSULE_CACHE_DIR_ENV;
 
-pub(super) async fn ensure_runtime_tree_for_dependency(
+pub(crate) async fn ensure_runtime_tree_for_dependency(
     locked: &LockedCapsuleDependency,
 ) -> Result<PathBuf> {
     if locked.source_type != "store" {

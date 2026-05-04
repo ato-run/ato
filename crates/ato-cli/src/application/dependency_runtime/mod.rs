@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! Runtime orchestration for dependency contracts (RFC §10).
 //!
 //! This module is the runtime counterpart to the lock-time verifier in

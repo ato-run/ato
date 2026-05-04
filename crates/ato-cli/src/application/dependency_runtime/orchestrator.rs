@@ -37,6 +37,8 @@
 //! socket ready probes (lock-fail-closed in capsule-core).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -511,10 +513,17 @@ fn start_one(
     for (k, v) in &target_block.env {
         cmd.env(k, v);
     }
-    let child = cmd.spawn().map_err(|err| OrchestratorError::SpawnFailed {
+    let mut child = cmd.spawn().map_err(|err| OrchestratorError::SpawnFailed {
         alias: alias.to_string(),
         detail: format!("spawn {}: {}", argv[0], err),
     })?;
+    attach_redacted_provider_logs(
+        &mut child,
+        &input.ato_home,
+        &input.parent_package_id,
+        alias,
+        input.redaction.clone(),
+    );
     let provider_pid = child.id() as i32;
 
     // Sentinel write (RFC §10.4).
@@ -585,6 +594,81 @@ fn derive_state_dir(
         .join(instance_hash)
         .join(state_version)
         .join(state_name)
+}
+
+fn attach_redacted_provider_logs(
+    child: &mut Child,
+    ato_home: &Path,
+    parent_package_id: &str,
+    alias: &str,
+    redaction: Arc<RedactionRegistry>,
+) {
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let log_dir = ato_home
+        .join("logs")
+        .join("deps")
+        .join(sanitize_path_component(parent_package_id))
+        .join(sanitize_path_component(alias));
+    let log_path = log_dir.join(format!("{timestamp}.log"));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    if stdout.is_none() && stderr.is_none() {
+        return;
+    }
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let Ok(writer) = OpenOptions::new().create(true).append(true).open(&log_path) else {
+        return;
+    };
+    let stderr_writer = writer.try_clone().ok();
+
+    if let Some(stdout) = stdout {
+        let redaction = redaction.clone();
+        let mut writer = writer;
+        std::thread::spawn(move || {
+            write_redacted_lines(stdout, &mut writer, "stdout", redaction);
+        });
+    }
+    if let (Some(stderr), Some(mut writer)) = (stderr, stderr_writer) {
+        std::thread::spawn(move || {
+            write_redacted_lines(stderr, &mut writer, "stderr", redaction);
+        });
+    }
+}
+
+fn write_redacted_lines<R: std::io::Read>(
+    reader: R,
+    writer: &mut std::fs::File,
+    stream: &str,
+    redaction: Arc<RedactionRegistry>,
+) {
+    let reader = BufReader::new(reader);
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        let scrubbed = redaction.redact(&line);
+        let _ = writeln!(writer, "[{stream}] {scrubbed}");
+    }
+}
+
+fn sanitize_path_component(raw: &str) -> String {
+    let sanitized = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Re-resolve credentials specifically for runtime_exports template
