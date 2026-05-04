@@ -312,6 +312,166 @@ readiness_probe = { http_get = "/healthz", port = "PORT" }
 }
 
 #[test]
+fn test_from_toml_parses_dependency_contract_manifest_blocks() {
+    let toml = r#"
+schema_version = "0.3"
+name = "consumer-app"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "uv run app.py"
+
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+
+  [dependencies.db.parameters]
+  database = "appdb"
+  pool_size = 8
+
+  [dependencies.db.credentials]
+  password = "{{env.PG_PASSWORD}}"
+
+  [dependencies.db.state]
+  name = "primary"
+  ownership = "parent"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse dependency contract manifest");
+    let dependency = manifest.dependencies.get("db").expect("db dependency");
+
+    assert_eq!(dependency.capsule.0, "capsule://ato/postgres@16");
+    assert_eq!(dependency.contract.to_string(), "service@1");
+    assert_eq!(
+        dependency.parameters.get("database"),
+        Some(&super::ParamValue::String("appdb".to_string()))
+    );
+    assert_eq!(
+        dependency.parameters.get("pool_size"),
+        Some(&super::ParamValue::Int(8))
+    );
+    assert_eq!(
+        dependency
+            .credentials
+            .get("password")
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("{{env.PG_PASSWORD}}")
+    );
+    assert_eq!(
+        dependency.state.as_ref().map(|state| state.name.as_str()),
+        Some("primary")
+    );
+}
+
+#[test]
+fn test_from_toml_round_trips_provider_contract_manifest_blocks() {
+    let toml = r#"
+schema_version = "0.3"
+name = "postgres-provider"
+version = "0.1.0"
+type = "app"
+default_target = "server"
+
+[targets.server]
+runtime = "source"
+driver = "native"
+run = "postgres -D {{state.dir}} -p {{port}}"
+port = 5432
+
+[contracts."service@1"]
+target = "server"
+ready = { type = "probe", run = "pg_isready -h {{host}} -p {{port}}", timeout = "15s" }
+
+  [contracts."service@1".parameters.database]
+  type = "string"
+  required = true
+
+  [contracts."service@1".credentials.password]
+  type = "string"
+  required = true
+
+  [contracts."service@1".identity_exports]
+  service_name = "{{params.database}}"
+
+  [contracts."service@1".runtime_exports]
+  PGHOST = "{{host}}"
+
+  [contracts."service@1".runtime_exports.DATABASE_URL]
+  value = "postgresql://postgres:{{credentials.password}}@{{host}}:{{port}}/{{params.database}}"
+  secret = true
+
+  [contracts."service@1".state]
+  required = true
+  version = "16"
+  mount = "/var/lib/postgresql/data"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse provider contract manifest");
+    let contract = manifest
+        .contracts
+        .get("service@1")
+        .expect("service contract");
+
+    assert_eq!(contract.target, "server");
+    assert_eq!(
+        contract.identity_exports["service_name"].to_string(),
+        "{{params.database}}"
+    );
+    assert_eq!(
+        contract.runtime_exports["PGHOST"],
+        super::RuntimeExportSpec::Shorthand(super::TemplatedString {
+            segments: vec![super::TemplateSegment::Expr(super::TemplateExpr::Host)],
+        })
+    );
+    assert_eq!(
+        contract
+            .state
+            .as_ref()
+            .and_then(|state| state.mount.as_deref()),
+        Some("/var/lib/postgresql/data")
+    );
+
+    let rendered = manifest
+        .to_toml()
+        .expect("serialize provider contract manifest");
+    let reparsed =
+        CapsuleManifest::from_toml(&rendered).expect("reparse serialized provider contract");
+    assert_eq!(
+        reparsed.contracts["service@1"].identity_exports["service_name"].to_string(),
+        "{{params.database}}"
+    );
+    assert_eq!(
+        reparsed.contracts["service@1"].runtime_exports["PGHOST"],
+        contract.runtime_exports["PGHOST"]
+    );
+}
+
+#[test]
+fn test_from_toml_rejects_unknown_contract_template_expression() {
+    let toml = r#"
+schema_version = "0.3"
+name = "bad-contract"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "uv run app.py"
+
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+
+  [dependencies.db.credentials]
+  password = "{{unknown.token}}"
+"#;
+
+    let error = CapsuleManifest::from_toml(toml).expect_err("unknown template must fail");
+    assert!(error
+        .to_string()
+        .contains("unsupported template expression"));
+}
+
+#[test]
 fn test_validate_v03_library_without_run_is_ok() {
     let toml = r#"
 schema_version = "0.3"
