@@ -1,5 +1,5 @@
 mod bindings;
-mod cache;
+pub(crate) mod cache;
 mod probe;
 mod spawn;
 
@@ -60,7 +60,10 @@ pub async fn start_external_capsules(
     reporter: std::sync::Arc<CliReporter>,
     options: &ExternalCapsuleOptions,
 ) -> Result<ExternalCapsuleGuard> {
-    let dependencies = manifest_external_capsule_dependencies(&plan.manifest)?;
+    let dependencies = manifest_external_capsule_dependencies(&plan.manifest)?
+        .into_iter()
+        .filter(|dependency| dependency.contract.is_none())
+        .collect::<Vec<_>>();
     if dependencies.is_empty() {
         return Ok(ExternalCapsuleGuard {
             caller_env: HashMap::new(),

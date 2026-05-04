@@ -92,6 +92,7 @@ fn write_receipt_payload_atomic_at<T: serde::Serialize>(
     Ok(final_path)
 }
 
+#[allow(dead_code)]
 pub(crate) fn read_receipt(execution_id: &str) -> Result<ExecutionReceipt> {
     read_receipt_at(&default_receipt_root(), execution_id)
 }

@@ -49,6 +49,12 @@ pub fn wait_for_ready(
     let mut attempts: u32 = 0;
     let mut last_failure = String::from("not attempted");
     loop {
+        if started.elapsed() >= timeout {
+            return Err(ReadyError::Timeout {
+                elapsed: started.elapsed(),
+                detail: format!("last failure: {last_failure}"),
+            });
+        }
         attempts += 1;
         let outcome = attempt(kind);
         match outcome {
