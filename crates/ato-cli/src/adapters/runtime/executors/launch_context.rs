@@ -21,7 +21,20 @@ pub struct RuntimeLaunchContext {
     injected_env_origins: HashMap<String, EnvOrigin>,
     injected_mounts: Vec<InjectedMount>,
     command_args: Vec<String>,
+    /// Caller's cwd when `ato run` was invoked. Used for relative-path
+    /// argument resolution, grant inference, and IO candidate detection.
+    /// **Not** automatically used as the spawned process cwd — see
+    /// `executors::source::resolve_host_execution_cwd` for the rule:
+    /// effective_cwd becomes the execution cwd only when it lives
+    /// inside the materialized capsule's workspace_root (= the user is
+    /// invoking from within the project tree).
     effective_cwd: Option<PathBuf>,
+    /// Filesystem root of the materialized capsule. When `effective_cwd`
+    /// is outside this root (e.g. `ato run github.com/...` invoked from
+    /// somewhere unrelated), the spawned process cwd defaults to
+    /// `LaunchSpec.working_dir` instead so module imports / relative
+    /// scripts resolve against the capsule's source tree.
+    workspace_root: Option<PathBuf>,
 }
 
 impl RuntimeLaunchContext {
@@ -38,6 +51,7 @@ impl RuntimeLaunchContext {
                 injected_mounts: Vec::new(),
                 command_args: Vec::new(),
                 effective_cwd: None,
+                workspace_root: None,
             }
         } else {
             Self::empty()
@@ -86,6 +100,15 @@ impl RuntimeLaunchContext {
 
     pub fn effective_cwd(&self) -> Option<&PathBuf> {
         self.effective_cwd.as_ref()
+    }
+
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
+        self
+    }
+
+    pub fn workspace_root(&self) -> Option<&PathBuf> {
+        self.workspace_root.as_ref()
     }
 
     pub fn ipc(&self) -> Option<&IpcContext> {
