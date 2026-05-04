@@ -557,6 +557,22 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    #[command(
+        about = "Diagnose whether a v2 execution receipt has the portability inputs needed for cross-host reconstruction",
+        long_about = "Phase 1 skeleton: inspects the receipt's source provenance, dependency identity, runtime resolved_ref, and policy hashes to determine whether enough information is present to reconstruct the launch envelope on a different host. Does NOT fetch source / deps / runtimes today — that is Phase 2 follow-up work tracked under `ato reconstruct --execute` (rejected for now)."
+    )]
+    Reconstruct {
+        /// Execution ID, for example blake3:...
+        id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+        /// (Reserved) actually attempt cross-host reconstruction. Not yet implemented; the
+        /// command will return a `not-implemented` error when this flag is passed.
+        #[arg(long, hide = true)]
+        execute: bool,
+    },
+
     #[command(hide = true, about = "Search the store for packages")]
     Search {
         query: Option<String>,

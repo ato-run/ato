@@ -14,6 +14,7 @@ mod package;
 mod profile;
 mod project;
 pub(crate) mod publish;
+mod reconstruct;
 pub(crate) mod registry;
 mod replay;
 mod run;
@@ -321,6 +322,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             best_effort,
             json: command_json,
         } => execute_replay_command(id, strict, best_effort, json || command_json, nacelle),
+
+        Commands::Reconstruct {
+            id,
+            json: command_json,
+            execute,
+        } => reconstruct::execute_reconstruct_command(id, json || command_json, execute),
 
         Commands::Keygen {
             out,
