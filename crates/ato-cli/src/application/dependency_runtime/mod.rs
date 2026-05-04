@@ -17,6 +17,7 @@
 //! existing `app_control` desktop bootstrap) is added incrementally.
 
 pub mod endpoint;
+pub mod orchestrator;
 pub mod orphan;
 pub mod ready;
 pub mod teardown;
