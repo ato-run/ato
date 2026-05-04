@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use super::{verify_and_lock, DependencyLockInput, ResolvedProviderManifest};
-use crate::foundation::dependency_contracts::LockError;
+use crate::foundation::dependency_contracts::{verify_consumer_only, LockError};
 use crate::foundation::types::CapsuleManifest;
 
 // Use explicit `[targets.<X>]` block form so v0.3 normalizer does not
@@ -469,4 +469,90 @@ fn parameter_default_filled_when_consumer_omits() {
         other => panic!("unexpected: {other:?}"),
     };
     assert_eq!(database_value, "defaultdb");
+}
+
+// ---------- verify_consumer_only (P3 bridge subset) ----------
+
+#[test]
+fn consumer_only_passes_on_happy_manifest() {
+    let consumer = parse(HAPPY_CONSUMER);
+    verify_consumer_only(&consumer).expect("happy consumer-only");
+}
+
+#[test]
+fn consumer_only_rejects_credential_literal() {
+    let consumer = parse(&HAPPY_CONSUMER.replace("\"{{env.PG_PASSWORD}}\"", "\"plaintext\""));
+    let err = verify_consumer_only(&consumer).unwrap_err();
+    assert!(
+        matches!(err, LockError::CredentialLiteralForbidden { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn consumer_only_rejects_credential_env_out_of_scope() {
+    let consumer = parse(&HAPPY_CONSUMER.replace("[\"PG_PASSWORD\"]", "[]"));
+    let err = verify_consumer_only(&consumer).unwrap_err();
+    assert!(
+        matches!(err, LockError::CredentialEnvKeyOutOfScope { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn consumer_only_rejects_needs_not_in_dependencies() {
+    let consumer = parse(&HAPPY_CONSUMER.replace("needs = [\"db\"]", "needs = [\"phantom\"]"));
+    let err = verify_consumer_only(&consumer).unwrap_err();
+    assert!(
+        matches!(err, LockError::NeedsNotInDependencies { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn consumer_only_rejects_major_version_conflict() {
+    let consumer_text = format!(
+        r#"{}
+
+[dependencies.db_old]
+capsule = "capsule://ato/postgres@15"
+contract = "service@1"
+
+[dependencies.db_old.parameters]
+database = "old"
+
+[dependencies.db_old.credentials]
+password = "{{{{env.PG_PASSWORD}}}}"
+
+[dependencies.db_old.state]
+name = "old"
+"#,
+        HAPPY_CONSUMER
+    );
+    let consumer = parse(&consumer_text);
+    let err = verify_consumer_only(&consumer).unwrap_err();
+    assert!(
+        matches!(err, LockError::MajorVersionConflict { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn consumer_only_is_noop_for_manifest_with_no_dependency_contracts() {
+    // A v0.3 manifest with no [dependencies.*] block must pass.
+    let bare = r#"
+schema_version = "0.3"
+name = "bare"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run = "main.py"
+"#;
+    let consumer = parse(bare);
+    verify_consumer_only(&consumer).expect("bare manifest must pass");
 }

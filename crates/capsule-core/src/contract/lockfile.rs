@@ -1366,6 +1366,21 @@ async fn finalize_lockfile_from_draft(
     let runtime_platforms = runtime_platforms_from_draft(&draft)?;
     let required_runtime_version = required_runtime_version_from_draft(&draft)?;
     let runtime_tools = runtime_tools_from_draft(&draft);
+
+    // P3 bridge (consumer-only). Run the subset of dependency-contract
+    // lock-time verifications (RFC §9.1) that do not require provider
+    // manifests to be fetched: needs ⊆ dependencies, cycle detection,
+    // major-version uniqueness, credential literal-ban + env scope. The
+    // full verifier (provider-aware checks: contract presence, target
+    // binding, parameter schema, identity_exports purity, state.version,
+    // reserved variants) runs at orchestration time once provider
+    // manifests are materialized — that is P5's responsibility.
+    if let Ok(consumer_manifest) = CapsuleManifest::from_toml(manifest_text) {
+        crate::foundation::dependency_contracts::verify_consumer_only(&consumer_manifest).map_err(
+            |err| CapsuleError::Pack(format!("dependency-contract lock failure: {err}")),
+        )?;
+    }
+
     let capsule_dependencies = resolve_external_capsule_dependencies(manifest_raw).await?;
 
     let mut targets: HashMap<String, TargetEntry> = HashMap::new();
