@@ -1169,17 +1169,58 @@ where
         );
     }
     let mut dep_contracts = None;
+    let mut auto_generated_lock: Option<CompatibilityLegacyLockContext> = None;
     if has_dependency_contracts {
         if request.background {
             anyhow::bail!("dependency-contract services do not support --background yet");
         }
-        let compatibility_legacy_lock =
-            prepared.compatibility_legacy_lock.as_ref().ok_or_else(|| {
-                AtoExecutionError::lock_incomplete(
-                    "dependency contracts require capsule.lock.json",
-                    Some(CAPSULE_LOCK_FILE_NAME),
+        // Auto-lock: if the consumer was fetched without a pre-existing
+        // capsule.lock.json (typical for `ato run github.com/...`), the
+        // dep-contract path needs derived lock entries. Generate them on
+        // the fly here so the user does not have to run `ato lock` by
+        // hand. The canonical `ato.lock.json` is left untouched — this
+        // path only produces the compat-legacy derived lock that
+        // verify_lockfile_external_dependencies + start_dependency_contracts_for_run
+        // consume. RFC §13 Open Question "Local override" is a
+        // follow-on; this auto-lock is the minimum needed for github
+        // capsule provider sources.
+        let compatibility_legacy_lock = match prepared.compatibility_legacy_lock.as_ref() {
+            Some(ctx) => ctx,
+            None => {
+                let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
+                    prepared.bridge_manifest.as_toml(),
                 )
-            })?;
+                .context("failed to build compatibility bridge for auto-lock")?;
+                let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
+                    prepared.workspace_root.clone(),
+                    bridge,
+                )
+                .context("failed to build CompatProjectInput for auto-lock")?;
+                let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
+                    &compat_input,
+                    request.reporter.clone(),
+                    false,
+                )
+                .await
+                .context("auto-lock for dependency contracts failed")?;
+                let bytes = std::fs::read(&lock_path).with_context(|| {
+                    format!("failed to read auto-generated lock {}", lock_path.display())
+                })?;
+                let lock: capsule_core::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+                    .with_context(|| {
+                        format!(
+                            "failed to parse auto-generated lock {}",
+                            lock_path.display()
+                        )
+                    })?;
+                auto_generated_lock = Some(CompatibilityLegacyLockContext {
+                    manifest_path: compat_input.workspace_root().join("capsule.toml"),
+                    path: lock_path,
+                    lock,
+                });
+                auto_generated_lock.as_ref().expect("set above")
+            }
+        };
         verify_lockfile_external_dependencies(
             &decision.plan.manifest,
             &compatibility_legacy_lock.lock,

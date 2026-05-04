@@ -1140,9 +1140,33 @@ async fn resolve_external_capsule_dependencies(
     let base_url = resolve_store_api_base_url();
     let mut locked = Vec::new();
     for dependency in dependencies {
+        if dependency.source_type == "github" {
+            // GitHub-sourced dep: no registry round-trip. The URL itself is
+            // the resolution (the commit SHA pin from
+            // parse_github_capsule_source IS the immutable identity). We
+            // record source_type=github + resolved_version=<sha> + no
+            // artifact_url, and the cache layer in ato-cli fetches the
+            // tarball at provider-materialization time.
+            let parsed = parse_github_capsule_source(&dependency.source)?;
+            locked.push(LockedCapsuleDependency {
+                name: dependency.alias,
+                source: dependency.source,
+                source_type: "github".to_string(),
+                contract: dependency.contract,
+                injection_bindings: dependency.injection_bindings,
+                parameters: dependency.parameters,
+                credentials: dependency.credentials,
+                identity_exports: BTreeMap::new(),
+                resolved_version: Some(parsed.commit.clone()),
+                digest: Some(format!("git-commit:{}", parsed.commit)),
+                sha256: None,
+                artifact_url: None,
+            });
+            continue;
+        }
         if dependency.source_type != "store" {
             return Err(CapsuleError::Pack(format!(
-                "capsule dependency '{}' uses source_type '{}' but only store dependencies are supported in lockfile generation",
+                "capsule dependency '{}' uses source_type '{}' but only store and github dependencies are supported in lockfile generation",
                 dependency.alias, dependency.source_type
             )));
         }
@@ -1242,10 +1266,69 @@ pub fn verify_lockfile_external_dependencies(
 
 fn infer_contract_dependency_source_type(source: &str) -> Option<String> {
     let raw = source.trim();
-    (raw.starts_with("capsule://store/")
+    if raw.starts_with("capsule://store/")
         || raw.starts_with("capsule://ato.run/")
-        || raw.starts_with("capsule://ato/"))
-    .then(|| "store".to_string())
+        || raw.starts_with("capsule://ato/")
+    {
+        Some("store".to_string())
+    } else if raw.starts_with("capsule://github.com/") {
+        Some("github".to_string())
+    } else {
+        None
+    }
+}
+
+/// GitHub-source dependency reference parsed from a `capsule://github.com/<owner>/<repo>@<commit>` URL.
+///
+/// v1 invariant: `<commit>` MUST be a 40-character SHA. Branch / tag / `latest`
+/// mutable refs are rejected here so the lock identity is reproducible — RFC
+/// `HASH_AND_PROVENANCE_POLICY.md` already establishes the same rule for the
+/// consumer-side handle, and dep-contract sources reuse that policy.
+#[derive(Debug, Clone)]
+pub struct GitHubCapsuleSource {
+    pub owner: String,
+    pub repo: String,
+    pub commit: String,
+}
+
+pub fn parse_github_capsule_source(source: &str) -> Result<GitHubCapsuleSource> {
+    let raw = source.trim();
+    let stripped = raw.strip_prefix("capsule://github.com/").ok_or_else(|| {
+        CapsuleError::Pack(format!("Unsupported capsule dependency source: {}", source))
+    })?;
+    let (path_part, ref_part) = stripped.rsplit_once('@').ok_or_else(|| {
+        CapsuleError::Pack(format!(
+            "GitHub capsule dependency source must be commit-pinned: {} (use capsule://github.com/<owner>/<repo>@<sha>)",
+            source
+        ))
+    })?;
+    let commit = ref_part.trim();
+    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CapsuleError::Pack(format!(
+            "GitHub capsule dependency '{}' must pin a 40-char commit SHA (got '{}'). Branch and tag refs are not allowed in dep-contract URLs in v1.",
+            source, commit
+        )));
+    }
+    let mut segments = path_part
+        .split('/')
+        .filter(|segment| !segment.trim().is_empty());
+    let owner = segments
+        .next()
+        .ok_or_else(|| CapsuleError::Pack(format!("Invalid GitHub source '{}'", source)))?;
+    let repo = segments
+        .next()
+        .ok_or_else(|| CapsuleError::Pack(format!("Invalid GitHub source '{}'", source)))?;
+    if segments.next().is_some() {
+        return Err(CapsuleError::Pack(format!(
+            "Invalid GitHub source '{}': only <owner>/<repo> path segments are supported",
+            source
+        )));
+    }
+    Ok(GitHubCapsuleSource {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        commit: commit.to_lowercase(),
+    })
 }
 
 fn lockfile_input_state(
