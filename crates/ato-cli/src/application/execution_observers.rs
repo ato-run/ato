@@ -205,6 +205,8 @@ fn observe_dependency_output_hash(
     working_dir: &Path,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<Tracked<String>> {
+    // Materialized node_modules (mounted from a content-addressed blob by
+    // the dependency_materializer) is the most authoritative output identity.
     for mount in launch_ctx.injected_mounts() {
         if mount.target.ends_with("/node_modules") || mount.target == "node_modules" {
             return Ok(Tracked::known(hash_tree(&mount.source).with_context(
@@ -218,13 +220,41 @@ fn observe_dependency_output_hash(
         }
     }
 
-    for candidate in [working_dir.join("node_modules"), working_dir.join(".venv")] {
-        if candidate.is_dir() {
-            return Ok(Tracked::known(hash_tree(&candidate).with_context(
-                || format!("failed to hash dependency output {}", candidate.display()),
-            )?));
-        }
+    // node_modules in working_dir: hash the tree. Most npm installs are
+    // deterministic given a frozen package-lock.json so the tree itself is
+    // a stable output identity.
+    let node_modules = working_dir.join("node_modules");
+    if node_modules.is_dir() {
+        return Ok(Tracked::known(hash_tree(&node_modules).with_context(
+            || {
+                format!(
+                    "failed to hash dependency output {}",
+                    node_modules.display()
+                )
+            },
+        )?));
     }
+
+    // Python virtualenv: avoid hashing the tree because uv / virtualenv
+    // embed the session-specific venv path into bin/activate* and
+    // bin/<entry-points>, and write Python bytecode caches with mtime
+    // metadata. None of these reflect a real change in installed packages.
+    // Use the canonical lockfile (uv.lock, Pipfile.lock, requirements*.txt)
+    // as a content-addressed proxy for "what packages got resolved".
+    let venv = working_dir.join(".venv");
+    if venv.is_dir() {
+        if let Some((label, lockfile_hash)) = python_lockfile_identity(working_dir)? {
+            return Ok(Tracked::known(format!(
+                "blake3:venv-from-{label}:{lockfile_hash}"
+            )));
+        }
+        // No lockfile available — fall back to tree hash (drifts) rather
+        // than mark Unknown so dep-bound classification still has a value.
+        return Ok(Tracked::known(hash_tree(&venv).with_context(|| {
+            format!("failed to hash dependency output {}", venv.display())
+        })?));
+    }
+
     if launch_ctx.injected_mounts().is_empty() {
         return Ok(Tracked::not_applicable());
     }
@@ -242,6 +272,34 @@ fn observe_source_tree_hash(working_dir: &Path) -> Result<Tracked<String>> {
         )));
     }
     Ok(Tracked::known(hash_source_tree(working_dir)?))
+}
+
+/// Look up the canonical Python lockfile for a workspace and return its
+/// content hash + a label describing which file we used. Order:
+///   1. `uv.lock` — uv's resolved dependency snapshot.
+///   2. `Pipfile.lock` — Pipenv's resolution.
+///   3. `requirements.txt` (or `requirements/*.txt`) — pip pinning.
+///   4. `pyproject.toml` — last-resort fallback when no lockfile is present
+///      but the project does declare its dependencies inline.
+///
+/// Returns `Ok(None)` only when none of the above exist; in that case the
+/// caller falls back to tree hashing (with the known drift caveat).
+fn python_lockfile_identity(working_dir: &Path) -> Result<Option<(&'static str, String)>> {
+    const CANDIDATES: &[(&str, &str)] = &[
+        ("uv-lock", "uv.lock"),
+        ("pipfile-lock", "Pipfile.lock"),
+        ("requirements-txt", "requirements.txt"),
+        ("pyproject-toml", "pyproject.toml"),
+    ];
+    for (label, name) in CANDIDATES {
+        let path = working_dir.join(name);
+        if path.is_file() {
+            let hash = hash_file(&path)
+                .with_context(|| format!("failed to hash python lockfile {}", path.display()))?;
+            return Ok(Some((label, hash)));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn hash_source_tree(working_dir: &Path) -> Result<String> {
