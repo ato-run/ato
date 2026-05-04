@@ -24,6 +24,13 @@ struct V03PackageSurface {
     port: Option<u16>,
     #[serde(default)]
     required_env: Vec<String>,
+    /// Phase 8 follow-up: identity-relevant env-key allowlist that the
+    /// v2 environment observer treats as the SOLE identity-relevant set.
+    /// Carried through v0.3 normalization so the resulting
+    /// `[targets.<label>]` table re-emits the field for the v2 receipt
+    /// builder. See `router::execution_env_allowlist`.
+    #[serde(default)]
+    env_allowlist: Vec<String>,
     /// Rich config schema (Feature 2 — schema-driven dynamic config UI).
     /// Carried through normalization unchanged so the desktop and CLI
     /// preflight see the original `[[config_schema]]` entries on the
@@ -364,6 +371,7 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         run,
         port,
         required_env,
+        env_allowlist,
         config_schema,
         runtime_version,
         runtime_tools,
@@ -484,6 +492,12 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         target_table.insert(
             "required_env".to_string(),
             toml::Value::Array(required_env.into_iter().map(toml::Value::String).collect()),
+        );
+    }
+    if !env_allowlist.is_empty() {
+        target_table.insert(
+            "env_allowlist".to_string(),
+            toml::Value::Array(env_allowlist.into_iter().map(toml::Value::String).collect()),
         );
     }
     if !config_schema.is_empty() {
