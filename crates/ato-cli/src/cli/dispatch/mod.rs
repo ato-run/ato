@@ -312,7 +312,19 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             Ok(())
         }
 
-        Commands::Uninstall { keep_data, yes } => commands::uninstall::uninstall(keep_data, yes),
+        Commands::Uninstall {
+            purge,
+            include_config,
+            include_keys,
+            dry_run,
+            yes,
+        } => commands::uninstall::uninstall(commands::uninstall::UninstallOptions {
+            purge,
+            include_config,
+            include_keys,
+            dry_run,
+            yes,
+        }),
 
         Commands::Inspect { command } => execute_inspect_command(command, json),
 

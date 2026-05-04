@@ -62,6 +62,8 @@ To uninstall an `install.sh` deployment:
 
 ```bash
 ato uninstall
+ato uninstall --purge
+ato uninstall --purge --include-config --include-keys --yes
 ```
 
 ## Quick Start
