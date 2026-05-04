@@ -21,6 +21,8 @@ use toml::value::Table;
 use url::form_urlencoded;
 use walkdir::{DirEntry, WalkDir};
 
+#[path = "dependency_grammar.rs"]
+mod dependency_grammar;
 #[path = "manifest_v03.rs"]
 mod manifest_v03;
 #[path = "manifest_validation.rs"]
@@ -31,6 +33,12 @@ use super::utils::parse_memory_string;
 use crate::orchestration::startup_order_from_dependencies;
 use crate::schema_registry::SchemaRegistry;
 
+pub use dependency_grammar::{
+    CapsuleUrl, ContractRef, ContractSpec, ContractStateSpec, CredentialSchema, DependencySpec,
+    DependencyStateOwnership, DependencyStateSpec, EndpointSpec, ParamSchema, ParamValue,
+    ReadyProbe, RuntimeExportSpec, RuntimeExportValue, TemplateExpr, TemplateSegment,
+    TemplatedString, ValueType,
+};
 use manifest_v03::*;
 pub(crate) use manifest_validation::is_valid_mount_path;
 pub use manifest_validation::ValidationError;
@@ -527,6 +535,14 @@ pub struct CapsuleManifest {
     /// Optional and dev-first: absence means single-process execution via `execution`.
     #[serde(default)]
     pub services: Option<HashMap<String, ServiceSpec>>,
+
+    /// Capsule dependency contracts consumed by this capsule.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, DependencySpec>,
+
+    /// Contracts exported by this capsule for downstream consumers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contracts: BTreeMap<String, ContractSpec>,
 
     /// Workspace-scoped setup authoring surface used by `ato setup`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
