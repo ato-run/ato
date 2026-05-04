@@ -1257,6 +1257,16 @@ pub struct NamedTarget {
     /// v0.3 external data injection contracts.
     #[serde(default)]
     pub external_injection: HashMap<String, ExternalInjectionSpec>,
+
+    /// Phase 8 follow-up: identity-relevant env-key allowlist. When
+    /// populated, the v2 environment observer treats this list as the
+    /// SOLE identity-relevant set, replacing the intrinsic
+    /// PATH/LANG/LC_*/TZ default. Keys outside the list are ignored
+    /// for identity (not even surfaced as `ambient_untracked_keys`),
+    /// so a Pure-eligible capsule can drop noisy host PATH and reach
+    /// `EnvironmentMode::Closed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_allowlist: Vec<String>,
 }
 
 impl NamedTarget {

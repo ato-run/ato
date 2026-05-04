@@ -579,6 +579,33 @@ impl ExecutionDescriptor {
             })
     }
 
+    /// Phase 8 follow-up: identity-relevant env-key allowlist declared by
+    /// the capsule manifest (`[targets.<target>.env_allowlist]` or the
+    /// compat root-level `env_allowlist`). When set, the v2 environment
+    /// observer treats this list as the SOLE identity-relevant set —
+    /// replacing the intrinsic PATH/LANG/LC_*/TZ default — so a Pure-
+    /// eligible capsule can drop noisy host PATH that would otherwise
+    /// pin EnvironmentMode at Partial.
+    ///
+    /// Returns an empty Vec when the manifest does not declare the
+    /// allowlist; observers fall back to the intrinsic default.
+    pub fn execution_env_allowlist(&self) -> Vec<String> {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(allow) = self.compat_array(&["targets", &self.selected_target, "env_allowlist"])
+        {
+            for value in &allow {
+                if let Some(name) = value.as_str() {
+                    let trimmed = name.trim();
+                    if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                        ordered.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        ordered
+    }
+
     pub fn execution_required_envs(&self) -> Vec<String> {
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
