@@ -288,7 +288,7 @@ fn read_direct_capsule_dependency_inputs(
             resolved_version: dependency.resolved_version,
             contract: dependency.contract,
             parameters: dependency.parameters,
-            identity_exports: BTreeMap::new(),
+            identity_exports: dependency.identity_exports,
         })
         .collect::<Vec<_>>();
     dependencies.sort_by(|a, b| a.alias.cmp(&b.alias));
@@ -1250,6 +1250,96 @@ env_allowlist = ["DATABASE_URL"]
         assert_eq!(first.derivation_hash.value, second.derivation_hash.value);
     }
 
+    #[test]
+    fn dependency_derivation_hash_includes_identity_exports() {
+        // RFC §9.5: dep hash input tuple is (resolved, contract, parameters,
+        // identity_exports). Without identity_exports in the hash input, a
+        // provider's minor-version bump that adds a new identity_export would
+        // not change the receipt's identity, breaking reproducibility on the
+        // consumer side.
+        let workspace = tempfile::tempdir().expect("workspace");
+        let lock_a = workspace.path().join("a.lock.json");
+        let lock_b = workspace.path().join("b.lock.json");
+
+        write_capsule_lock_with_identity_exports(
+            &lock_a,
+            BTreeMap::from([("major".to_string(), "16".to_string())]),
+        );
+        write_capsule_lock_with_identity_exports(
+            &lock_b,
+            BTreeMap::from([
+                ("major".to_string(), "16".to_string()),
+                ("encoding".to_string(), "utf8".to_string()),
+            ]),
+        );
+
+        let mut plan_a = sample_plan(workspace.path().to_path_buf());
+        plan_a.lock_path = lock_a;
+        let mut plan_b = sample_plan(workspace.path().to_path_buf());
+        plan_b.lock_path = lock_b;
+
+        let launch_spec =
+            capsule_core::launch_spec::derive_launch_spec(&plan_a).expect("derive launch spec");
+        let first = observe_dependencies_v2(
+            &plan_a,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe first");
+        let second = observe_dependencies_v2(
+            &plan_b,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe second");
+
+        assert_ne!(
+            first.derivation_hash.value, second.derivation_hash.value,
+            "adding an identity_export to a dep should change derivation hash"
+        );
+    }
+
+    fn write_capsule_lock_with_identity_exports(
+        path: &Path,
+        identity_exports: BTreeMap<String, String>,
+    ) {
+        let lock = capsule_core::lockfile::CapsuleLock {
+            version: "1".to_string(),
+            meta: capsule_core::lockfile::LockMeta {
+                created_at: "2026-05-04T00:00:00Z".to_string(),
+                manifest_hash: "sha256:deadbeef".to_string(),
+            },
+            allowlist: None,
+            capsule_dependencies: vec![capsule_core::lockfile::LockedCapsuleDependency {
+                name: "db".to_string(),
+                source: "capsule://ato/acme-postgres@16".to_string(),
+                source_type: "store".to_string(),
+                contract: Some("service@1".to_string()),
+                injection_bindings: BTreeMap::new(),
+                parameters: BTreeMap::from([(
+                    "database".to_string(),
+                    capsule_core::types::ParamValue::String("appdb".to_string()),
+                )]),
+                credentials: BTreeMap::new(),
+                identity_exports,
+                resolved_version: Some("16.0.0".to_string()),
+                digest: Some("blake3:deadbeef".to_string()),
+                sha256: Some("sha256:beadfeed".to_string()),
+                artifact_url: Some("https://example.test/postgres.capsule".to_string()),
+            }],
+            injected_data: std::collections::HashMap::new(),
+            tools: None,
+            runtimes: None,
+            targets: std::collections::HashMap::new(),
+        };
+        std::fs::write(path, serde_json::to_vec(&lock).expect("serialize lock"))
+            .expect("write lock");
+    }
+
     fn sample_plan(workspace_root: PathBuf) -> ManifestData {
         sample_plan_from_manifest(
             workspace_root,
@@ -1321,6 +1411,7 @@ run = "main.py"
                     serde_json::from_str(&format!("\"{{{{env.{password}}}}}\""))
                         .expect("credential template"),
                 )]),
+                identity_exports: BTreeMap::new(),
                 resolved_version: Some("16.0.0".to_string()),
                 digest: Some("blake3:deadbeef".to_string()),
                 sha256: Some("sha256:beadfeed".to_string()),
