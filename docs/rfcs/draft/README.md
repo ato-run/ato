@@ -6,8 +6,6 @@
 
 ## 現在のドラフト
 
-- [DRAFT_LIFECYCLE.md](DRAFT_LIFECYCLE.md) — Task/Service ライフサイクル
-- [DRAFT_CAPSULE_IPC.md](DRAFT_CAPSULE_IPC.md) — Capsule IPC プロトコル
 - [DRAFT_ID.md](DRAFT_ID.md) — ID 仕様
 - [AGENT_INTERFACE_SPEC.md](AGENT_INTERFACE_SPEC.md) — Agent インターフェース
 - [ASSOCIATION_SPEC.md](ASSOCIATION_SPEC.md) — Dynamic Binding / Association Registry

@@ -619,7 +619,7 @@ v0 は `ato.lock.json` を**触らない**。理由:
 
 ## 13. 関連仕様 / 実装参照
 
-- [DRAFT_LIFECYCLE.md](DRAFT_LIFECYCLE.md) — Task/Service lifecycle。本 RFC は build を artifact に再定義するため、lifecycle の `setup` とは別軸。
+- [LIFECYCLE_SPEC.md](../accepted/LIFECYCLE_SPEC.md) — Task/Service lifecycle。本 RFC は build を artifact に再定義するため、lifecycle の `setup` とは別軸。
 - [PURE_TRANSFORMS_AND_LOCK_LAYERS.md](PURE_TRANSFORMS_AND_LOCK_LAYERS.md) — Pure transform / lock layer モデル。本 RFC の v1 (CAS-of-output) はここに接続する。
 - `apps/ato/crates/ato-cli/src/cli/commands/run/preflight.rs` — `run_v03_lifecycle_steps` の現行実装。本 RFC v0 はここに判定を挿入する。
 - `apps/ato/crates/ato-cli/src/cli/commands/build.rs` — 既存 v0.3 build cache。`prepare_v03_build_cache` (line 1097), `normalize_build_cache_outputs` (1132), `compute_v03_build_cache_key` (1179), `BUILD_CACHE_IGNORED_DIRS` (26), `collect_build_cache_source_files` (1245) を helper として共有 module に extract して reuse する。
