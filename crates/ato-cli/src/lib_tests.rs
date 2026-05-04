@@ -900,6 +900,43 @@ fn replay_command_parses_explicit_modes() {
 }
 
 #[test]
+fn uninstall_command_parses_purge_flags() {
+    let cli = Cli::try_parse_from([
+        "ato",
+        "uninstall",
+        "--purge",
+        "--include-config",
+        "--include-keys",
+        "--dry-run",
+        "--yes",
+    ])
+    .expect("parse uninstall");
+
+    match cli.command {
+        Commands::Uninstall {
+            purge,
+            include_config,
+            include_keys,
+            dry_run,
+            yes,
+        } => {
+            assert!(purge);
+            assert!(include_config);
+            assert!(include_keys);
+            assert!(dry_run);
+            assert!(yes);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn uninstall_command_requires_purge_for_sensitive_flags() {
+    assert!(Cli::try_parse_from(["ato", "uninstall", "--include-config"]).is_err());
+    assert!(Cli::try_parse_from(["ato", "uninstall", "--include-keys"]).is_err());
+}
+
+#[test]
 fn parse_sha256_for_artifact_supports_sha256sums_format() {
     let body = "\
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  nacelle-v1.2.3-darwin-arm64

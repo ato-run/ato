@@ -524,12 +524,24 @@ pub(crate) enum Commands {
         about = "Uninstall ato (install.sh deployments only — Homebrew users should run `brew uninstall ato-cli`)"
     )]
     Uninstall {
-        /// Keep user data under ~/.ato/desktop and macOS Library paths
-        #[arg(long = "keep-data")]
-        keep_data: bool,
+        /// Remove regeneratable local Ato data under ~/.ato
+        #[arg(long = "purge", default_value_t = false)]
+        purge: bool,
+
+        /// Also remove ~/.ato/config.toml (requires --purge)
+        #[arg(long = "include-config", requires = "purge", default_value_t = false)]
+        include_config: bool,
+
+        /// Also remove ~/.ato/keys/ (requires --purge)
+        #[arg(long = "include-keys", requires = "purge", default_value_t = false)]
+        include_keys: bool,
+
+        /// Show what would be removed without deleting
+        #[arg(long = "dry-run", default_value_t = false)]
+        dry_run: bool,
 
         /// Skip the confirmation prompt
-        #[arg(short = 'y', long = "yes")]
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
     },
 
