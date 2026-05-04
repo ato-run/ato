@@ -164,6 +164,10 @@ pub enum OrchestratorError {
 /// One started provider process and its associated runtime state.
 pub struct RunningDep {
     pub alias: String,
+    /// Immutable provider reference (`capsule://...@sha256:...` or
+    /// `capsule://github.com/...@<commit>`) recorded for run-summary
+    /// surfacing. Mirrors `OrchestratorProvider::resolved`.
+    pub resolved: String,
     pub state_dir: PathBuf,
     pub child: Child,
     pub allocated_port: Option<u16>,
@@ -173,6 +177,10 @@ pub struct RunningDep {
     /// expanded — these values are also registered with the redaction
     /// registry if the provider marked them `secret = true`).
     pub runtime_exports: BTreeMap<String, String>,
+    /// Filesystem path where this dep's redacted stdout/stderr is being
+    /// captured. `None` if the orchestrator could not open the log file
+    /// (e.g. permissions, missing parent).
+    pub log_path: Option<PathBuf>,
     /// Materialized credentials kept alive for the duration of the
     /// running dep. Drop unlinks the temp files (Rule M1).
     credential_refs: Vec<MaterializedRef>,
@@ -214,6 +222,39 @@ impl RunningGraph {
             .iter()
             .find(|d| d.alias == alias)
             .map(|d| &d.runtime_exports)
+    }
+
+    /// Render a human-readable, secret-free summary of every started
+    /// dep for surfacing post-launch in the run command. Each line
+    /// covers one dep's provider source, allocated port, state dir, and
+    /// log path. `runtime_exports` **values** are deliberately omitted
+    /// — they may contain credentials that the redaction filter would
+    /// otherwise have to scrub. Only the export key names are printed.
+    pub fn summary_lines(&self) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.deps.len() * 4 + 1);
+        if self.deps.is_empty() {
+            return lines;
+        }
+        lines.push(format!("Dependencies started ({}):", self.deps.len()));
+        for dep in &self.deps {
+            lines.push(format!("  {} ({})", dep.alias, dep.resolved));
+            if let Some(port) = dep.allocated_port {
+                lines.push(format!("    port:  127.0.0.1:{port}"));
+            }
+            lines.push(format!("    state: {}", dep.state_dir.display()));
+            if let Some(log_path) = dep.log_path.as_ref() {
+                lines.push(format!("    log:   {}", log_path.display()));
+            }
+            if !dep.runtime_exports.is_empty() {
+                let mut keys: Vec<&str> = dep.runtime_exports.keys().map(String::as_str).collect();
+                keys.sort();
+                lines.push(format!("    exports: {}", keys.join(", ")));
+            }
+            for warning in &dep.warnings {
+                lines.push(format!("    warn:  {warning}"));
+            }
+        }
+        lines
     }
 
     /// Stop all started deps in reverse-topological order. Consumes the
@@ -517,7 +558,7 @@ fn start_one(
         alias: alias.to_string(),
         detail: format!("spawn {}: {}", argv[0], err),
     })?;
-    attach_redacted_provider_logs(
+    let log_path = attach_redacted_provider_logs(
         &mut child,
         &input.ato_home,
         &input.parent_package_id,
@@ -572,10 +613,12 @@ fn start_one(
     let _ = was_auto; // currently informational; could be exposed later
     Ok(RunningDep {
         alias: alias.to_string(),
+        resolved: provider.resolved.clone(),
         state_dir,
         child,
         allocated_port: Some(allocated_port),
         runtime_exports,
+        log_path,
         credential_refs,
         warnings,
     })
@@ -596,13 +639,18 @@ fn derive_state_dir(
         .join(state_name)
 }
 
+/// Wire the child's stdout/stderr through the redaction registry and into
+/// a per-run log file. Returns the log path so the orchestrator can
+/// surface it in the run summary; returns `None` if the log could not be
+/// opened (the caller treats this as "no log available" rather than an
+/// orchestration-blocking error — provider startup itself is unaffected).
 fn attach_redacted_provider_logs(
     child: &mut Child,
     ato_home: &Path,
     parent_package_id: &str,
     alias: &str,
     redaction: Arc<RedactionRegistry>,
-) {
+) -> Option<PathBuf> {
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let log_dir = ato_home
         .join("logs")
@@ -613,13 +661,13 @@ fn attach_redacted_provider_logs(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     if stdout.is_none() && stderr.is_none() {
-        return;
+        return None;
     }
     if std::fs::create_dir_all(&log_dir).is_err() {
-        return;
+        return None;
     }
     let Ok(writer) = OpenOptions::new().create(true).append(true).open(&log_path) else {
-        return;
+        return None;
     };
     let stderr_writer = writer.try_clone().ok();
 
@@ -635,6 +683,7 @@ fn attach_redacted_provider_logs(
             write_redacted_lines(stderr, &mut writer, "stderr", redaction);
         });
     }
+    Some(log_path)
 }
 
 fn write_redacted_lines<R: std::io::Read>(
