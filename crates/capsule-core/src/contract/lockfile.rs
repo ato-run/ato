@@ -188,6 +188,13 @@ pub struct LockedCapsuleDependency {
     pub parameters: BTreeMap<String, ParamValue>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, TemplatedString>,
+    /// Resolved `identity_exports` from the provider's contract block, with
+    /// `{{params.X}}` substituted against this dependency's `parameters`.
+    /// Per RFC §9.5, these enter `dependency_derivation_hash`. Currently the
+    /// lockfile builder leaves this empty; the P3 lock-time verifier (which
+    /// fetches the provider manifest) is responsible for populating it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub identity_exports: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1184,6 +1191,7 @@ async fn resolve_external_capsule_dependencies(
             injection_bindings: dependency.injection_bindings,
             parameters: dependency.parameters,
             credentials: dependency.credentials,
+            identity_exports: BTreeMap::new(),
             resolved_version: Some(resolved.version),
             digest,
             sha256: resolved.sha256,
