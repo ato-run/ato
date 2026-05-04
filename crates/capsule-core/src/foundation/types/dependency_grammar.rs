@@ -15,7 +15,7 @@ pub struct ContractRef {
 }
 
 impl ContractRef {
-    fn parse(raw: &str) -> Result<Self, String> {
+    pub fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
         let (name, major) = trimmed.rsplit_once('@').ok_or_else(|| {
             format!("contract reference must use <name>@<major>, got '{trimmed}'")

@@ -531,6 +531,8 @@ impl CapsuleManifest {
             }
         }
 
+        validate_dependency_contracts(self, &named_targets, &mut errors);
+
         if has_target_services {
             let services = self.services.as_ref().cloned().unwrap_or_default();
             if services.is_empty() {
@@ -1121,6 +1123,92 @@ impl CapsuleManifest {
                 let name = self.name.trim();
                 (!name.is_empty()).then(|| name.to_string())
             })
+    }
+}
+
+fn validate_dependency_contracts(
+    manifest: &CapsuleManifest,
+    named_targets: &HashMap<String, NamedTarget>,
+    errors: &mut Vec<ValidationError>,
+) {
+    for (alias, dependency) in &manifest.dependencies {
+        if alias.trim().is_empty() {
+            errors.push(ValidationError::InvalidTarget(
+                "dependencies keys must not be empty".to_string(),
+            ));
+        }
+        if dependency.capsule.0.trim().is_empty() {
+            errors.push(ValidationError::InvalidTarget(format!(
+                "dependencies.{} capsule is required",
+                alias
+            )));
+        }
+        if let Some(state) = dependency.state.as_ref() {
+            if state.name.trim().is_empty() {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "dependencies.{}.state.name is required",
+                    alias
+                )));
+            } else if !is_kebab_case(state.name.trim()) {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "dependencies.{}.state.name must be kebab-case",
+                    alias
+                )));
+            }
+        }
+    }
+
+    for (contract_id, contract) in &manifest.contracts {
+        if let Err(err) = ContractRef::parse(contract_id) {
+            errors.push(ValidationError::InvalidTarget(format!(
+                "contracts.{} is invalid: {}",
+                contract_id, err
+            )));
+        }
+
+        let target = contract.target.trim();
+        if target.is_empty() {
+            errors.push(ValidationError::InvalidTarget(format!(
+                "contracts.{} target is required",
+                contract_id
+            )));
+        } else if !named_targets.contains_key(target) {
+            errors.push(ValidationError::InvalidTarget(format!(
+                "contracts.{} references missing target '{}'",
+                contract_id, target
+            )));
+        }
+
+        for (credential, schema) in &contract.credentials {
+            if schema.default.is_some() {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "contracts.{}.credentials.{} must not declare a default",
+                    contract_id, credential
+                )));
+            }
+        }
+
+        for key in contract.identity_exports.keys() {
+            if contract.runtime_exports.contains_key(key) {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "contracts.{} export '{}' cannot be declared in both identity_exports and runtime_exports",
+                    contract_id, key
+                )));
+            }
+        }
+
+        if let Some(state) = contract
+            .state
+            .as_ref()
+            .and_then(|state| state.mount.as_deref())
+        {
+            if !is_valid_mount_path(state) {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "contracts.{}.state.mount must be an absolute mount path",
+                    contract_id
+                )));
+            }
+        }
     }
 }
 

@@ -472,6 +472,99 @@ contract = "service@1"
 }
 
 #[test]
+fn test_validate_dependency_contracts_reject_missing_contract_target() {
+    let toml = r#"
+schema_version = "0.3"
+name = "postgres-provider"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "postgres -D ./data"
+
+[contracts."service@1"]
+target = "missing"
+ready = { type = "probe", run = "pg_isready -h {{host}} -p {{port}}" }
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse contract manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("missing contract target must fail");
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("contracts.service@1 references missing target 'missing'")
+        )
+    }));
+}
+
+#[test]
+fn test_validate_dependency_contracts_reject_export_collisions() {
+    let toml = r#"
+schema_version = "0.3"
+name = "postgres-provider"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "postgres -D ./data"
+
+[contracts."service@1"]
+target = "app"
+ready = { type = "probe", run = "pg_isready -h {{host}} -p {{port}}" }
+
+  [contracts."service@1".identity_exports]
+  host = "{{host}}"
+
+  [contracts."service@1".runtime_exports]
+  host = "{{host}}"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse contract manifest");
+    let errors = manifest.validate().expect_err("export collision must fail");
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("cannot be declared in both identity_exports and runtime_exports")
+        )
+    }));
+}
+
+#[test]
+fn test_validate_dependency_contracts_reject_credential_defaults() {
+    let toml = r#"
+schema_version = "0.3"
+name = "postgres-provider"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "postgres -D ./data"
+
+[contracts."service@1"]
+target = "app"
+ready = { type = "probe", run = "pg_isready -h {{host}} -p {{port}}" }
+
+  [contracts."service@1".credentials.password]
+  type = "string"
+  required = true
+  default = "secret"
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse contract manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("credential defaults must fail validation");
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("contracts.service@1.credentials.password must not declare a default")
+        )
+    }));
+}
+
+#[test]
 fn test_validate_v03_library_without_run_is_ok() {
     let toml = r#"
 schema_version = "0.3"
