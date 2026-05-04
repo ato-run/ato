@@ -31,12 +31,13 @@ pub struct ExternalCapsuleOptions {
 
 pub struct ExternalCapsuleGuard {
     caller_env: HashMap<String, String>,
+    caller_envs: Vec<(String, HashMap<String, String>)>,
     children: Vec<ExternalCapsuleChild>,
 }
 
 impl ExternalCapsuleGuard {
-    pub fn caller_env(&self) -> &HashMap<String, String> {
-        &self.caller_env
+    pub fn caller_envs(&self) -> Vec<(String, HashMap<String, String>)> {
+        self.caller_envs.clone()
     }
 
     pub fn shutdown_now(&mut self) {
@@ -63,6 +64,7 @@ pub async fn start_external_capsules(
     if dependencies.is_empty() {
         return Ok(ExternalCapsuleGuard {
             caller_env: HashMap::new(),
+            caller_envs: Vec::new(),
             children: Vec::new(),
         });
     }
@@ -70,6 +72,7 @@ pub async fn start_external_capsules(
     let cli_bindings = parse_cli_bindings(cli_inject_bindings)?;
     let mut guard = ExternalCapsuleGuard {
         caller_env: HashMap::new(),
+        caller_envs: Vec::new(),
         children: Vec::new(),
     };
 
@@ -107,9 +110,9 @@ pub async fn start_external_capsules(
         wait_for_dependency_readiness(&dependency.alias, &mut child, port, readiness_probe)?;
 
         if let Some(port) = port {
-            guard
-                .caller_env
-                .extend(connection_env_vars(&dependency.alias, port));
+            let env = connection_env_vars(&dependency.alias, port);
+            guard.caller_env.extend(env.clone());
+            guard.caller_envs.push((dependency.alias.clone(), env));
         }
         guard.children.push(child);
     }

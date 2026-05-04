@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use capsule_core::ato_lock::AtoLock;
+use capsule_core::execution_identity::EnvOrigin;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
 use capsule_core::lockfile::{
@@ -935,16 +936,20 @@ where
 
     let injected_data =
         crate::data_injection::resolve_and_record(&decision.plan, &request.inject_bindings).await?;
-    let mut merged_injected_env = injected_data.env;
-    if let Some(external_capsules) = external_capsules.as_ref() {
-        merged_injected_env.extend(external_capsules.caller_env().clone());
-    }
     let mut launch_ctx =
         target_runner::resolve_launch_context(&decision.plan, &prepared, &request.reporter)
             .await?
             .with_effective_cwd(request.effective_cwd().to_path_buf())
-            .with_injected_env(merged_injected_env)
+            .with_injected_env(injected_data.env)
             .with_injected_mounts(injected_data.mounts);
+    if let Some(external_capsules) = external_capsules.as_ref() {
+        for (dependency, env) in external_capsules.caller_envs() {
+            launch_ctx = launch_ctx.with_injected_env_with_origin(
+                env.clone(),
+                EnvOrigin::DepRuntimeExport(dependency),
+            );
+        }
+    }
 
     if request.sandbox_mode && !request.dangerously_skip_permissions {
         let sandbox_grants = resolve_sandbox_grants(request, &decision.plan.manifest_dir)?;
