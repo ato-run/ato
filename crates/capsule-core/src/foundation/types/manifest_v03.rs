@@ -1234,6 +1234,25 @@ fn normalize_v03_package_dependencies(
     Ok(dependencies)
 }
 
+fn uses_dependency_contract_surface(table: &Table) -> bool {
+    table
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .map(|dependencies| {
+            !dependencies.is_empty()
+                && dependencies.values().all(|value| {
+                    value
+                        .as_table()
+                        .map(|dependency| {
+                            dependency.contains_key("capsule")
+                                || dependency.contains_key("contract")
+                        })
+                        .unwrap_or(false)
+                })
+        })
+        .unwrap_or(false)
+}
+
 fn manifest_path_for_capsule_path(
     base_manifest_path: &Path,
     capsule_path: &str,
@@ -1755,34 +1774,36 @@ pub(super) fn normalize_v03_manifest_value_with_path(
                 toml::Value::Table(normalized_table),
             );
         }
-        let dependencies = normalize_v03_package_dependencies(
-            &default_target,
-            &table,
-            &V03WorkspaceContext::default(),
-        )?;
-        if !dependencies.workspace_dependencies.is_empty() {
-            target_table.insert(
-                "package_dependencies".to_string(),
-                toml::Value::Array(
-                    dependencies
-                        .workspace_dependencies
-                        .into_iter()
-                        .map(toml::Value::String)
-                        .collect(),
-                ),
-            );
-        }
-        if !dependencies.external_dependencies.is_empty() {
-            target_table.insert(
-                "external_dependencies".to_string(),
-                toml::Value::Array(
-                    dependencies
-                        .external_dependencies
-                        .into_iter()
-                        .map(|dependency| toml::Value::try_from(dependency).unwrap())
-                        .collect(),
-                ),
-            );
+        if !uses_dependency_contract_surface(&table) {
+            let dependencies = normalize_v03_package_dependencies(
+                &default_target,
+                &table,
+                &V03WorkspaceContext::default(),
+            )?;
+            if !dependencies.workspace_dependencies.is_empty() {
+                target_table.insert(
+                    "package_dependencies".to_string(),
+                    toml::Value::Array(
+                        dependencies
+                            .workspace_dependencies
+                            .into_iter()
+                            .map(toml::Value::String)
+                            .collect(),
+                    ),
+                );
+            }
+            if !dependencies.external_dependencies.is_empty() {
+                target_table.insert(
+                    "external_dependencies".to_string(),
+                    toml::Value::Array(
+                        dependencies
+                            .external_dependencies
+                            .into_iter()
+                            .map(|dependency| toml::Value::try_from(dependency).unwrap())
+                            .collect(),
+                    ),
+                );
+            }
         }
 
         targets_table.insert(default_target.clone(), toml::Value::Table(target_table));
