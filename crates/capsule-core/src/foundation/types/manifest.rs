@@ -695,8 +695,14 @@ pub struct ExternalCapsuleDependency {
     pub alias: String,
     pub source: String,
     pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub injection_bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, ParamValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, TemplatedString>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

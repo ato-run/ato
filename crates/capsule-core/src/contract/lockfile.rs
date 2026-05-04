@@ -23,8 +23,8 @@ use crate::error::{CapsuleError, Result};
 use crate::packers::payload;
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
-use crate::router::CompatProjectInput;
-use crate::types::{CapsuleManifest, ExternalCapsuleDependency};
+use crate::router::{CompatManifestBridge, CompatProjectInput};
+use crate::types::{CapsuleManifest, ExternalCapsuleDependency, ParamValue, TemplatedString};
 
 #[path = "lockfile_runtime.rs"]
 mod lockfile_runtime;
@@ -180,8 +180,14 @@ pub struct LockedCapsuleDependency {
     pub name: String,
     pub source: String,
     pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub injection_bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, ParamValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<String, TemplatedString>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1005,16 +1011,49 @@ pub fn manifest_external_capsule_dependencies(
     manifest_raw: &toml::Value,
 ) -> Result<Vec<ExternalCapsuleDependency>> {
     let draft = evaluate_lock_draft_with_minimal_host(manifest_raw)?;
-    Ok(draft
+    let mut dependencies = draft
         .external_capsule_dependencies
         .into_iter()
         .map(|dependency| ExternalCapsuleDependency {
             alias: dependency.name,
             source: dependency.source,
             source_type: dependency.source_type,
+            contract: None,
             injection_bindings: dependency.injection_bindings,
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
         })
-        .collect())
+        .collect::<Vec<_>>();
+
+    if let Ok(bridge) = CompatManifestBridge::from_manifest_value(manifest_raw) {
+        for (alias, dependency) in &bridge.manifest_model().dependencies {
+            if dependencies.iter().any(|item| item.alias == *alias) {
+                return Err(CapsuleError::Pack(format!(
+                    "capsule dependency '{}' is declared by both legacy external_dependencies and top-level [dependencies]",
+                    alias
+                )));
+            }
+            let source_type = infer_contract_dependency_source_type(&dependency.capsule.0)
+                .ok_or_else(|| {
+                    CapsuleError::Pack(format!(
+                        "unsupported dependency capsule source '{}' for '{}'",
+                        dependency.capsule.0, alias
+                    ))
+                })?;
+            dependencies.push(ExternalCapsuleDependency {
+                alias: alias.clone(),
+                source: dependency.capsule.0.clone(),
+                source_type,
+                contract: Some(dependency.contract.to_string()),
+                injection_bindings: BTreeMap::new(),
+                parameters: dependency.parameters.clone(),
+                credentials: dependency.credentials.clone(),
+            });
+        }
+    }
+
+    dependencies.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(dependencies)
 }
 
 #[derive(Debug, Clone)]
@@ -1041,6 +1080,7 @@ fn parse_store_capsule_source(source: &str) -> Result<StoreCapsuleSource> {
     let raw = raw
         .strip_prefix("capsule://store/")
         .or_else(|| raw.strip_prefix("capsule://ato.run/"))
+        .or_else(|| raw.strip_prefix("capsule://ato/"))
         .ok_or_else(|| {
             CapsuleError::Pack(format!("Unsupported capsule dependency source: {}", source))
         })?;
@@ -1140,7 +1180,10 @@ async fn resolve_external_capsule_dependencies(
             name: dependency.alias,
             source: dependency.source,
             source_type: dependency.source_type,
+            contract: dependency.contract,
             injection_bindings: dependency.injection_bindings,
+            parameters: dependency.parameters,
+            credentials: dependency.credentials,
             resolved_version: Some(resolved.version),
             digest,
             sha256: resolved.sha256,
@@ -1174,7 +1217,10 @@ pub fn verify_lockfile_external_dependencies(
         };
         if locked.source != dependency.source
             || locked.source_type != dependency.source_type
+            || locked.contract != dependency.contract
             || locked.injection_bindings != dependency.injection_bindings
+            || locked.parameters != dependency.parameters
+            || locked.credentials != dependency.credentials
         {
             return Err(CapsuleError::Config(format!(
                 "{} capsule dependency '{}' does not match manifest source '{}'",
@@ -1184,6 +1230,14 @@ pub fn verify_lockfile_external_dependencies(
     }
 
     Ok(())
+}
+
+fn infer_contract_dependency_source_type(source: &str) -> Option<String> {
+    let raw = source.trim();
+    (raw.starts_with("capsule://store/")
+        || raw.starts_with("capsule://ato.run/")
+        || raw.starts_with("capsule://ato/"))
+    .then(|| "store".to_string())
 }
 
 fn lockfile_input_state(
