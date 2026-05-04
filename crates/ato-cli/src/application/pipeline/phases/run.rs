@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Component;
@@ -9,6 +9,9 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use capsule_core::ato_lock::AtoLock;
+use capsule_core::dependency_contracts::{
+    verify_and_lock, DependencyLock, DependencyLockInput, ResolvedProviderManifest,
+};
 use capsule_core::execution_identity::EnvOrigin;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::guard::ExecutorKind;
@@ -21,10 +24,14 @@ use capsule_core::CapsuleReporter;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
+use crate::application::dependency_credentials::{ProcessHostEnv, RedactionRegistry};
 use crate::application::dependency_materializer::{
     digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
     DependencyMaterializer, DependencyProjection, InstallPolicies, ManifestInputs, PlatformTriple,
     RuntimeSelection, SessionDependencyMaterializer,
+};
+use crate::application::dependency_runtime::orchestrator::{
+    start_all as start_dependency_graph, OrchestratorInput, OrchestratorProvider, RunningGraph,
 };
 use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedCliExportRequest, ResolvedRunTarget,
@@ -566,6 +573,7 @@ pub(crate) struct RunPipelineState {
     pub(crate) decision: capsule_core::router::RuntimeDecision,
     pub(crate) launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     pub(crate) external_capsules: Option<crate::external_capsule::ExternalCapsuleGuard>,
+    pub(crate) dep_contracts: Option<DependencyContractGuard>,
     pub(crate) agent_attempted: bool,
     pub(crate) derived_execution: Option<PreparedDerivedExecution>,
     pub(crate) compatibility_host_mode: Option<CompatibilityHostMode>,
@@ -579,6 +587,227 @@ pub(crate) struct RunPipelineState {
     /// PHASE-TIMING. None until run_build_phase populates it.
     pub(crate) build_decision_kind:
         Option<crate::application::build_materialization::BuildResultKind>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DependencyContractGuard {
+    graph: Option<RunningGraph>,
+    lock: DependencyLock,
+}
+
+impl DependencyContractGuard {
+    fn new(graph: RunningGraph, lock: DependencyLock) -> Self {
+        Self {
+            graph: Some(graph),
+            lock,
+        }
+    }
+
+    fn graph(&self) -> Option<&RunningGraph> {
+        self.graph.as_ref()
+    }
+
+    fn lock(&self) -> &DependencyLock {
+        &self.lock
+    }
+
+    pub(crate) fn shutdown_now(&mut self) {
+        if let Some(graph) = self.graph.take() {
+            let _ = graph.teardown(Duration::from_secs(10));
+        }
+    }
+}
+
+impl Drop for DependencyContractGuard {
+    fn drop(&mut self) {
+        self.shutdown_now();
+    }
+}
+
+async fn start_dependency_contracts_for_run(
+    prepared: &PreparedRunContext,
+    plan: &capsule_core::router::ManifestData,
+    lockfile: &CapsuleLock,
+) -> Result<DependencyContractGuard> {
+    let consumer =
+        router::CompatManifestBridge::from_manifest_value(prepared.bridge_manifest.as_toml())
+            .context("failed to parse consumer manifest for dependency contracts")?
+            .manifest_model()
+            .clone();
+    let mut providers_for_lock = BTreeMap::new();
+    let mut providers_for_run = BTreeMap::new();
+
+    for locked in lockfile
+        .capsule_dependencies
+        .iter()
+        .filter(|dependency| dependency.contract.is_some())
+    {
+        let manifest_path =
+            crate::external_capsule::cache::ensure_runtime_tree_for_dependency(locked)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to materialize dependency-contract provider '{}'",
+                        locked.name
+                    )
+                })?;
+        let loaded = capsule_core::manifest::load_manifest_with_validation_mode(
+            &manifest_path,
+            prepared.validation_mode,
+        )
+        .with_context(|| {
+            format!(
+                "failed to parse provider manifest for dependency '{}'",
+                locked.name
+            )
+        })?;
+        let provider_root = manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .context("provider manifest path has no parent")?;
+        let resolved = locked_dependency_resolved_ref(locked);
+        providers_for_lock.insert(
+            locked.name.clone(),
+            ResolvedProviderManifest {
+                requested: locked.source.clone(),
+                resolved: resolved.clone(),
+                manifest: loaded.model.clone(),
+            },
+        );
+        providers_for_run.insert(
+            locked.name.clone(),
+            OrchestratorProvider {
+                manifest: loaded.model,
+                provider_root,
+                resolved,
+            },
+        );
+    }
+
+    let dependency_lock = verify_and_lock(DependencyLockInput {
+        consumer: &consumer,
+        providers: providers_for_lock,
+    })
+    .context("dependency-contract verification failed")?;
+    let host_env = ProcessHostEnv;
+    let redaction = Arc::new(RedactionRegistry::new());
+    let graph = start_dependency_graph(OrchestratorInput {
+        lock: &dependency_lock,
+        providers: providers_for_run,
+        consumer: &consumer,
+        ato_home: capsule_core::common::paths::nacelle_home_dir_or_workspace_tmp(),
+        parent_package_id: parent_package_id(&consumer),
+        host_env: &host_env,
+        redaction,
+        session_pid: std::process::id() as i32,
+        default_ready_timeout: Duration::from_secs(30),
+        ready_probe_interval: Duration::from_millis(200),
+    })
+    .with_context(|| {
+        format!(
+            "failed to start dependency contracts for target '{}'",
+            plan.selected_target_label()
+        )
+    })?;
+
+    Ok(DependencyContractGuard::new(graph, dependency_lock))
+}
+
+fn locked_dependency_resolved_ref(
+    locked: &capsule_core::lockfile::LockedCapsuleDependency,
+) -> String {
+    if let Some(digest) = locked.digest.as_deref().or(locked.sha256.as_deref()) {
+        return format!("{}#{}", locked.source, digest);
+    }
+    if let Some(version) = locked.resolved_version.as_deref() {
+        return format!("{}#version:{}", locked.source, version);
+    }
+    locked.source.clone()
+}
+
+fn parent_package_id(consumer: &CapsuleManifest) -> String {
+    let name = consumer.name.trim();
+    let version = consumer.version.trim();
+    if name.is_empty() {
+        "unknown".to_string()
+    } else if version.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}@{version}")
+    }
+}
+
+fn inject_dependency_contract_env(
+    mut launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
+    plan: &capsule_core::router::ManifestData,
+    lock: &DependencyLock,
+    graph: &RunningGraph,
+) -> Result<crate::executors::launch_context::RuntimeLaunchContext> {
+    for (key, value) in plan.execution_env() {
+        if !value.contains("{{deps.") {
+            continue;
+        }
+        let (resolved, origin) = render_consumer_dependency_template(&value, lock, graph)
+            .with_context(|| format!("failed to resolve dependency env '{}'", key))?;
+        launch_ctx = launch_ctx.with_injected_env_with_origin(
+            HashMap::from([(key, resolved)]),
+            origin.unwrap_or(EnvOrigin::ManifestStatic),
+        );
+    }
+    Ok(launch_ctx)
+}
+
+fn render_consumer_dependency_template(
+    raw: &str,
+    lock: &DependencyLock,
+    graph: &RunningGraph,
+) -> Result<(String, Option<EnvOrigin>)> {
+    use capsule_core::types::{TemplateExpr, TemplateSegment, TemplatedString};
+
+    let template = TemplatedString::parse(raw)
+        .map_err(|err| anyhow::anyhow!("invalid dependency template '{raw}': {err}"))?;
+    let mut out = String::new();
+    let mut origin = None;
+    for segment in template.segments {
+        match segment {
+            TemplateSegment::Literal(text) => out.push_str(&text),
+            TemplateSegment::Expr(TemplateExpr::DepRuntimeExport { dep, key }) => {
+                let value = graph
+                    .runtime_exports(&dep)
+                    .and_then(|exports| exports.get(&key))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "dependency '{}' did not provide runtime_exports.{}",
+                            dep,
+                            key
+                        )
+                    })?;
+                out.push_str(value);
+                origin = Some(EnvOrigin::DepRuntimeExport(dep));
+            }
+            TemplateSegment::Expr(TemplateExpr::DepIdentityExport { dep, key }) => {
+                let value = lock
+                    .entries
+                    .get(&dep)
+                    .and_then(|entry| entry.identity_exports.get(&key))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "dependency '{}' did not provide identity_exports.{}",
+                            dep,
+                            key
+                        )
+                    })?;
+                out.push_str(value);
+                if origin.is_none() {
+                    origin = Some(EnvOrigin::DepIdentityExport(dep));
+                }
+            }
+            TemplateSegment::Expr(expr) => {
+                out.push_str(&format!("{{{{{expr}}}}}"));
+            }
+        }
+    }
+    Ok((out, origin))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -890,7 +1119,7 @@ where
     )
     .await?;
 
-    let external_dependencies = if prepared
+    let capsule_dependencies = if prepared
         .bridge_manifest
         .as_toml()
         .get("targets")
@@ -901,8 +1130,14 @@ where
     } else {
         Vec::new()
     };
+    let has_legacy_external_dependencies = capsule_dependencies
+        .iter()
+        .any(|dependency| dependency.contract.is_none());
+    let has_dependency_contracts = capsule_dependencies
+        .iter()
+        .any(|dependency| dependency.contract.is_some());
     let mut external_capsules = None;
-    if !external_dependencies.is_empty() {
+    if has_legacy_external_dependencies {
         if request.background {
             anyhow::bail!("external capsule dependencies do not support --background yet");
         }
@@ -933,6 +1168,31 @@ where
             .await?,
         );
     }
+    let mut dep_contracts = None;
+    if has_dependency_contracts {
+        if request.background {
+            anyhow::bail!("dependency-contract services do not support --background yet");
+        }
+        let compatibility_legacy_lock =
+            prepared.compatibility_legacy_lock.as_ref().ok_or_else(|| {
+                AtoExecutionError::lock_incomplete(
+                    "dependency contracts require capsule.lock.json",
+                    Some(CAPSULE_LOCK_FILE_NAME),
+                )
+            })?;
+        verify_lockfile_external_dependencies(
+            &decision.plan.manifest,
+            &compatibility_legacy_lock.lock,
+        )?;
+        dep_contracts = Some(
+            start_dependency_contracts_for_run(
+                &prepared,
+                &decision.plan,
+                &compatibility_legacy_lock.lock,
+            )
+            .await?,
+        );
+    }
 
     let injected_data =
         crate::data_injection::resolve_and_record(&decision.plan, &request.inject_bindings).await?;
@@ -949,6 +1209,16 @@ where
                 EnvOrigin::DepRuntimeExport(dependency),
             );
         }
+    }
+    if let Some(dep_contracts) = dep_contracts.as_ref() {
+        launch_ctx = inject_dependency_contract_env(
+            launch_ctx,
+            &decision.plan,
+            dep_contracts.lock(),
+            dep_contracts
+                .graph()
+                .context("dependency contract graph missing after startup")?,
+        )?;
     }
 
     if request.sandbox_mode && !request.dangerously_skip_permissions {
@@ -1076,6 +1346,7 @@ where
         decision,
         launch_ctx,
         external_capsules,
+        dep_contracts,
         agent_attempted,
         derived_execution: None,
         compatibility_host_mode: None,
@@ -1834,6 +2105,7 @@ where
         decision,
         launch_ctx,
         mut external_capsules,
+        mut dep_contracts,
         agent_attempted: _,
         derived_execution,
         compatibility_host_mode,
@@ -1866,6 +2138,9 @@ where
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
             }
+            if let Some(dep_contracts) = dep_contracts.as_mut() {
+                dep_contracts.shutdown_now();
+            }
             maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
             std::process::exit(exit);
         }
@@ -1886,6 +2161,9 @@ where
         if exit != 0 {
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
+            }
+            if let Some(dep_contracts) = dep_contracts.as_mut() {
+                dep_contracts.shutdown_now();
             }
             maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
             std::process::exit(exit);
@@ -2066,6 +2344,9 @@ where
         if exit_code != 0 {
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
+            }
+            if let Some(dep_contracts) = dep_contracts.as_mut() {
+                dep_contracts.shutdown_now();
             }
             maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
             std::process::exit(exit_code);
@@ -2253,6 +2534,9 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
+                }
                 maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit_code);
             }
@@ -2311,6 +2595,9 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
+                }
                 maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit_code);
             }
@@ -2325,6 +2612,9 @@ where
             if exit != 0 {
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
+                }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
                 }
                 std::process::exit(exit);
             }
@@ -2394,6 +2684,9 @@ where
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
                 }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
+                }
                 maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit);
             }
@@ -2441,6 +2734,9 @@ where
             if exit != 0 {
                 if let Some(external_capsules) = external_capsules.as_mut() {
                     external_capsules.shutdown_now();
+                }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
                 }
                 maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
                 std::process::exit(exit);
@@ -2827,14 +3123,16 @@ fn build_port_identity(
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_existing_path, normalize_write_path, parse_external_service_contracts,
-        parse_reuse_if_present_service_preflights, resolve_sandbox_grants,
-        unavailable_service_message, validate_sandbox_grants_best_effort, ConsumerRunRequest,
-        DerivedBridgeManifest, ExternalServiceContract, ExternalServiceHealthcheck,
-        ExternalServiceHealthcheckKind, ExternalServiceMode, PreparedRunContext,
-        ServiceRequiredAsset,
+        normalize_existing_path, normalize_write_path, parent_package_id,
+        parse_external_service_contracts, parse_reuse_if_present_service_preflights,
+        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
+        ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
+        ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
+        PreparedRunContext, ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
+    use capsule_core::types::{CapsuleManifest, ParamValue};
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
@@ -2851,6 +3149,53 @@ mod tests {
             .prefix(name)
             .tempdir_in(root)
             .expect("workspace tempdir")
+    }
+
+    #[test]
+    fn parent_package_id_uses_manifest_name_and_version() {
+        let manifest = CapsuleManifest::from_toml(
+            r#"
+schema_version = "0.3"
+name = "demo"
+version = "1.2.3"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "native"
+run = "/usr/bin/true"
+"#,
+        )
+        .expect("manifest");
+
+        assert_eq!(parent_package_id(&manifest), "demo@1.2.3");
+    }
+
+    #[test]
+    fn locked_dependency_resolved_ref_prefers_content_digest() {
+        let locked = capsule_core::lockfile::LockedCapsuleDependency {
+            name: "db".to_string(),
+            source: "capsule://ato/postgres@16".to_string(),
+            source_type: "store".to_string(),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::from([(
+                "database".to_string(),
+                ParamValue::String("app".to_string()),
+            )]),
+            credentials: BTreeMap::new(),
+            identity_exports: BTreeMap::new(),
+            resolved_version: Some("16.1.0".to_string()),
+            digest: Some("blake3:abc".to_string()),
+            sha256: Some("sha256:def".to_string()),
+            artifact_url: Some("https://example.test/postgres.capsule".to_string()),
+        };
+
+        assert_eq!(
+            super::locked_dependency_resolved_ref(&locked),
+            "capsule://ato/postgres@16#blake3:abc"
+        );
     }
 
     #[test]

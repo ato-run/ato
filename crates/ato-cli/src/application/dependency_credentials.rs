@@ -19,7 +19,7 @@
 //!   command lines / env / stdin via the appropriate channel.
 
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions, Permissions};
+use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -67,10 +67,12 @@ impl ResolvedSecret {
         self.inner.as_str()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -373,6 +375,7 @@ impl Default for RedactionRegistry {
 
 /// Process-global redaction registry. Log writers and receipt builders
 /// pass output through `global_redaction().redact(text)` before write.
+#[allow(dead_code)]
 pub fn global_redaction() -> &'static RedactionRegistry {
     static GLOBAL: Mutex<Option<&'static RedactionRegistry>> = Mutex::new(None);
     let mut guard = GLOBAL.lock().expect("redaction global poisoned");
