@@ -29,9 +29,9 @@ gpui-inspector = ["gpui-component/inspector"]
 
 [dependencies]
 anyhow = "1.0"
-ato-session-core = { path = "../ato-session-core" }
+ato-session-core = { path = "../ato-session-core", version = "0.1.0" }
 base64 = "0.22"
-capsule-core = { path = "../capsule-core" }
+capsule-core = { path = "../capsule-core", version = "0.11.0" }
 capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
 cookie = "0.18"
 dirs = "5.0"
