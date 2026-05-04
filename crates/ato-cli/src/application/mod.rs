@@ -7,6 +7,7 @@ pub(crate) mod compat_import;
 pub(crate) mod credential;
 pub(crate) mod dependency_credentials;
 pub(crate) mod dependency_materializer;
+pub(crate) mod dependency_runtime;
 pub(crate) mod engine;
 pub(crate) mod execution_observers;
 pub(crate) mod execution_observers_v2;
