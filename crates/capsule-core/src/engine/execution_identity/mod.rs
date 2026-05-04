@@ -1,7 +1,11 @@
+#[path = "env_origin.rs"]
+mod env_origin;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::error::{CapsuleError, Result};
+pub use env_origin::{default_env_origin, EnvOrigin};
 
 pub const EXECUTION_IDENTITY_SCHEMA_VERSION: u32 = 1;
 pub const EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL: u32 = 2;
@@ -411,6 +415,8 @@ pub struct EnvironmentEntry {
     pub key: String,
     pub value_hash: Tracked<String>,
     pub normalization: ValueNormalizationStatus,
+    #[serde(default = "default_env_origin", skip_serializing, skip_deserializing)]
+    pub origin: EnvOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1212,6 +1218,7 @@ mod tests {
                     key: "CONFIG".to_string(),
                     value_hash: path_hash,
                     normalization: path_status,
+                    origin: EnvOrigin::ManifestStatic,
                 }],
                 fd_layout: Tracked::known(FdLayoutIdentity {
                     stdin: "inherited".to_string(),
