@@ -57,7 +57,13 @@ pub(crate) fn observe_runtime(
     execution_plan: &ExecutionPlan,
     launch_spec: &LaunchSpec,
 ) -> Result<RuntimeIdentity> {
-    let resolved_binary = resolve_binary_path(&launch_spec.command);
+    // Phase Y follow-up: when the entry point is a script-style file
+    // (run.sh, main.py, etc.) that is not on PATH, the runtime binary
+    // we actually exec is the shebang interpreter, not the script
+    // itself. Resolve via the shebang so binary_hash + dynamic_linkage
+    // can land Known for script entrypoints.
+    let resolved_binary = resolve_binary_path(&launch_spec.command)
+        .or_else(|| resolve_script_interpreter(&launch_spec.working_dir, &launch_spec.command));
     let dynamic_linkage = match resolved_binary.as_deref() {
         Some(path) => observe_dynamic_linkage(path),
         None => Tracked::untracked("dynamic linkage requires a resolved runtime binary path"),
@@ -427,6 +433,62 @@ fn resolve_binary_path(command: &str) -> Option<PathBuf> {
         return Some(path);
     }
     which::which(command).ok().filter(|path| path.is_file())
+}
+
+/// Resolve a script-style entrypoint to its shebang interpreter so the
+/// runtime observer can hash a real binary and enumerate its dynamic
+/// linkage. Returns `None` when:
+///   - the command does not point at an existing file under
+///     `working_dir`
+///   - the file has no `#!` shebang
+///   - the shebang interpreter cannot be located on PATH
+///
+/// `/usr/bin/env <interp>` shebangs are unwrapped (we resolve `<interp>`
+/// instead of `env` so the captured runtime binary is the actual
+/// language runtime, not the env shim).
+fn resolve_script_interpreter(working_dir: &Path, command: &str) -> Option<PathBuf> {
+    let script_path = if command.is_empty() {
+        return None;
+    } else {
+        let candidate = PathBuf::from(command);
+        if candidate.is_absolute() {
+            candidate
+        } else {
+            working_dir.join(command)
+        }
+    };
+    if !script_path.is_file() {
+        return None;
+    }
+
+    let mut file = File::open(&script_path).ok()?;
+    let mut header = [0_u8; 256];
+    let read = file.read(&mut header).ok()?;
+    if read < 2 || &header[..2] != b"#!" {
+        return None;
+    }
+    let line_end = header[..read]
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(read);
+    let shebang = std::str::from_utf8(&header[2..line_end]).ok()?.trim();
+    if shebang.is_empty() {
+        return None;
+    }
+
+    let mut tokens = shebang.split_whitespace();
+    let head = tokens.next()?;
+    // /usr/bin/env <interp> [args...] — resolve <interp> directly.
+    let interpreter = if head.ends_with("/env") {
+        tokens.next().unwrap_or(head)
+    } else {
+        head
+    };
+    let interp_path = PathBuf::from(interpreter);
+    if interp_path.is_absolute() && interp_path.is_file() {
+        return Some(interp_path);
+    }
+    which::which(interpreter).ok().filter(|path| path.is_file())
 }
 
 pub(crate) fn hash_tree(root: &Path) -> Result<String> {

@@ -278,15 +278,34 @@ pub(crate) fn observe_environment_v2(
         env.insert("PORT".to_string(), port.to_string());
         port_was_injected = true;
     }
-    // Phase 8c: pull intrinsic identity-relevant env values from the host
-    // process environment (PATH/LANG/LC_ALL/LC_CTYPE/TZ) so the receipt
-    // captures the env the launched workload will actually see — without
-    // these, EnvironmentMode can never reach Closed because the entries
-    // list is missing the keys that drive locale and time semantics.
-    for key in INTRINSIC_IDENTITY_ENV_KEYS {
-        if !env.contains_key(*key) {
+
+    // Phase 8 follow-up: when the manifest declares
+    // `[targets.<target>.env_allowlist]`, that list REPLACES the
+    // intrinsic identity-relevant default. The capsule author asserts
+    // these keys are the full set the launch envelope depends on, so
+    // any inherited host noise (e.g., the user's full PATH) is
+    // explicitly out-of-scope and must not block EnvironmentMode from
+    // reaching Closed.
+    let manifest_allowlist = plan.execution_env_allowlist();
+    let allowlist_active = !manifest_allowlist.is_empty();
+    let intrinsic_keys: Vec<String> = if allowlist_active {
+        manifest_allowlist
+    } else {
+        INTRINSIC_IDENTITY_ENV_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .collect()
+    };
+
+    // Pull intrinsic identity-relevant env values from the host process
+    // environment so the receipt captures the env the launched workload
+    // will actually see. Without this the entries list is missing the
+    // keys that drive locale/time/runtime semantics and EnvironmentMode
+    // cannot reach Closed.
+    for key in &intrinsic_keys {
+        if !env.contains_key(key) {
             if let Ok(value) = std::env::var(key) {
-                env.insert((*key).to_string(), value);
+                env.insert(key.clone(), value);
             }
         }
     }
@@ -294,9 +313,9 @@ pub(crate) fn observe_environment_v2(
     let manifest_keys: Vec<String> = plan.execution_env().keys().cloned().collect();
     let injected_keys: Vec<String> = launch_ctx.injected_env().keys().cloned().collect();
 
-    let mut identity_relevant: std::collections::HashSet<String> = INTRINSIC_IDENTITY_ENV_KEYS
+    let mut identity_relevant: std::collections::HashSet<String> = intrinsic_keys
         .iter()
-        .map(|key| key.to_string())
+        .cloned()
         .chain(manifest_keys)
         .chain(injected_keys)
         .collect();
@@ -314,6 +333,14 @@ pub(crate) fn observe_environment_v2(
         if identity_relevant.contains(&key) {
             let entry = build_env_entry(&key, &value, &ctx.normalizer);
             entries.push(entry);
+        } else if allowlist_active {
+            // When the manifest declares its env allowlist, anything
+            // outside that list is an explicit "ato — please ignore
+            // this for identity" signal from the capsule author. Drop
+            // it from the receipt entirely (do not even surface in
+            // ambient_untracked_keys) so EnvironmentMode can reach
+            // Closed without inherited host env leaking through.
+            continue;
         } else {
             ambient.push(key);
         }
