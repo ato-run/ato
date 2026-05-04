@@ -791,6 +791,7 @@ dependencies = [
  "wat",
  "which 6.0.3",
  "xz2",
+ "zeroize",
  "zip",
  "zstd 0.13.3",
 ]
