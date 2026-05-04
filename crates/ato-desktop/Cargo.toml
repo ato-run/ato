@@ -6,6 +6,14 @@ authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
 license = "MPL-2.0"
 build = "build.rs"
+# Not published to crates.io. ato-desktop pulls in non-published git deps
+# (gpui, wry, gpui-component, ...) that crates.io packaging cannot resolve,
+# and the desktop bundle ships via DMG/MSI/AppImage rather than `cargo install`.
+# Note: publish = false alone is NOT enough — `cargo package --workspace`
+# (which release-plz invokes) ignores the publish flag. The crate is also
+# kept out of the workspace `members` list (see root Cargo.toml `exclude`)
+# so workspace-wide cargo operations skip it entirely.
+publish = false
 
 # Opt out of cargo-dist (the CLI release pipeline). Desktop bundles
 # are produced by `crates/ato-desktop/xtask` and shipped via

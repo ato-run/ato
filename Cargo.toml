@@ -5,15 +5,20 @@ members = [
     "crates/capsule-core",
     "crates/capsule-wire",
     "crates/ato-cli/lock-draft-engine",
-    "crates/ato-desktop",
-    "crates/ato-desktop/xtask",
     "crates/ato-session-core",
     "crates/nacelle",
 ]
 
-# Vendored path deps that must NOT be inherited as workspace members.
-# (Reserved for M3 — when gpui-component vendor checkout lands.)
+# `ato-desktop` (and its xtask) are kept OUT of the workspace because their
+# git-only deps (`gpui`, `gpui-component`, `wry`, ...) lack crates.io versions
+# and cause `cargo package --workspace` to fail. release-plz invokes
+# `cargo package` to compute version diffs even for crates marked
+# `release = false`, so excluding them entirely is the only reliable fix.
+# Builds inside `crates/ato-desktop/` still work — the directory just has its
+# own Cargo.lock instead of sharing the workspace lockfile.
 exclude = [
+    "crates/ato-desktop",
+    "crates/ato-desktop/xtask",
     "crates/ato-desktop/.tmp",
     "crates/ato-desktop/vendor",
     "sidecars/ato-tsnetd",

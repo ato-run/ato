@@ -27,14 +27,9 @@ release = false
 name = "lock-draft-engine"
 release = false
 
-[[package]]
-name = "ato-desktop"
-release = false
-
-[[package]]
-name = "ato-desktop-xtask"
-release = false
-
+# ato-desktop and ato-desktop-xtask are intentionally NOT workspace members
+# (see workspace `exclude` in the root Cargo.toml). They live in the same
+# repo but ship through `crates/ato-desktop/xtask` + desktop-release.yml.
 [[package]]
 name = "nacelle"
 release = false
