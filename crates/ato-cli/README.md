@@ -17,11 +17,19 @@ Point `ato` at a Python script, a Node app, a Rust binary, or a GitHub repo — 
 
 ## Install
 
+macOS / Linux:
+
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
 ```
 
-This installs the `ato` CLI plus the optional `ato-desktop` host (skip with `sh -s -- --cli-only`).
+Windows PowerShell:
+
+```powershell
+irm https://ato.run/install.ps1 | iex
+```
+
+This installs the `ato` CLI. On Windows, the PowerShell installer downloads the ZIP asset into a user-scoped directory and removes Mark-of-the-Web with `Unblock-File`; unsigned MSI distribution is deferred until Windows code signing is in place.
 
 Other channels:
 
