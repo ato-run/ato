@@ -14,7 +14,7 @@ related:
   - "CROSS_PLATFORM_DISTRIBUTION_SPEC.md"
   - "DESKTOP_AUTOMATION_SPEC.md"
   - "UNIFIED_EXECUTION_MODEL.md"
-  - "DRAFT_CAPSULE_IPC.md"
+  - "CAPSULE_IPC_SPEC.md"
 ---
 
 # Platform Architecture Spec — The Web App OS

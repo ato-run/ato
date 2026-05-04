@@ -639,7 +639,7 @@ nacelle は nono を crate 依存として追加しない。コードパター�
 - [DESKTOP_SPEC.md](DESKTOP_SPEC.md) — ato-desktop 仕様
 - [ADR-005: Secrets Management](../../specs/ADR-005-secrets-management-architecture.md) — シークレット管理
 - [CAPSULE_SPEC.md](CAPSULE_SPEC.md) — Capsule 仕様（capsule.toml）
-- [DRAFT_CAPSULE_IPC.md](DRAFT_CAPSULE_IPC.md) — IPC 仕様
+- [CAPSULE_IPC_SPEC.md](CAPSULE_IPC_SPEC.md) — IPC 仕様
 
 ### 外部参考資料
 
