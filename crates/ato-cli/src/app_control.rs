@@ -1009,6 +1009,17 @@ impl ServicePhaseRuntime for ManagedServiceRuntime {
                 record.last_stopped_at = None;
                 record.checked_at = now_iso();
                 write_materialized_service_record(&self.service_root, &record)?;
+                // Phase Z: synthesize a v2 execution receipt for the
+                // managed-service spawn so it lands in
+                // `~/.ato/executions/<id>/` next to `ato run` receipts.
+                // Best-effort — failures here only weaken the audit trail.
+                if let Err(err) = emit_managed_service_receipt(&record, &service_dir, &helper_path)
+                {
+                    eprintln!(
+                        "ATO-WARN failed to emit managed-service receipt for {}: {err}",
+                        service_name
+                    );
+                }
                 Ok(())
             }
             Err(err) => {
@@ -1048,6 +1059,34 @@ impl ServicePhaseRuntime for ManagedServiceRuntime {
 
         anyhow::bail!("service {} did not reach readiness", service_name)
     }
+}
+
+/// Phase Z helper: emit a v2 execution receipt for a managed-service spawn
+/// using `application::managed_service_receipt::synthesize_managed_service_receipt`
+/// and the standard `execution_receipts::write_receipt_document_atomic`
+/// store. Returns Ok on a successful write so the caller can log only on
+/// genuine failure.
+fn emit_managed_service_receipt(
+    record: &MaterializedServiceRecord,
+    service_dir: &std::path::Path,
+    helper_path: &std::path::Path,
+) -> Result<()> {
+    use crate::application::execution_receipts;
+    use crate::application::managed_service_receipt::{
+        synthesize_managed_service_receipt, ManagedServiceReceiptInput,
+    };
+
+    let input = ManagedServiceReceiptInput {
+        name: record.name.as_str(),
+        service_dir,
+        helper_path,
+        depends_on: &record.depends_on,
+        lifecycle: record.lifecycle.as_str(),
+        source_label: record.source.as_str(),
+    };
+    let (document, _execution_id) = synthesize_managed_service_receipt(&input)?;
+    let _path = execution_receipts::write_receipt_document_atomic(&document)?;
+    Ok(())
 }
 
 fn known_service_binary_exists(name: &str) -> bool {
