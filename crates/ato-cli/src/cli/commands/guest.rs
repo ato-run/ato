@@ -274,7 +274,7 @@ fn ensure_permissions(
 /// `SYNC_PATH`, `GUEST_WIDGET_BOUNDS`) are no longer recognised. The
 /// rename is internal-only — grep across the workspace confirmed there
 /// are no source-level writers of the old names. See
-/// `claudedocs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` §2.
+/// `docs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` §2.
 ///
 /// Note: protocol-version validation is now handled by the wire-format
 /// layer (`execute()` selects the dispatcher based on envelope shape),
