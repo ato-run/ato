@@ -5,6 +5,7 @@ pub(crate) mod build_materialization;
 pub(crate) mod cache_admin;
 pub(crate) mod compat_import;
 pub(crate) mod credential;
+pub(crate) mod dependency_credentials;
 pub(crate) mod dependency_materializer;
 pub(crate) mod engine;
 pub(crate) mod execution_observers;
