@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::common::paths::{ato_runs_dir, ato_store_dir, nacelle_home_dir_or_workspace_tmp};
 use capsule_core::execution_identity::{
-    CanonicalPath, CaseSensitivity, DependencyIdentityV2, EnvironmentEntry, EnvironmentIdentityV2,
-    EnvironmentMode, FdLayoutIdentity, FilesystemIdentityV2, FilesystemSemantics, LaunchArg,
-    LaunchEntryPoint, LaunchIdentityV2, LocalExecutionLocator, PathRoleNormalizer,
-    PolicyIdentityV2, ReadonlyLayerIdentity, RuntimeCompleteness, RuntimeIdentityV2,
-    SourceIdentityV2, SourceProvenance, SourceProvenanceKind, StateBindingIdentity,
-    StateBindingKind, SymlinkPolicy, TmpPolicy, Tracked, UlimitIdentity, ValueNormalizationStatus,
-    WorkspacePathCanonicalizer, WritableDirIdentity, WritableDirLifecycle,
+    CanonicalPath, CaseSensitivity, DependencyIdentityV2, EnvOrigin, EnvironmentEntry,
+    EnvironmentIdentityV2, EnvironmentMode, FdLayoutIdentity, FilesystemIdentityV2,
+    FilesystemSemantics, LaunchArg, LaunchEntryPoint, LaunchIdentityV2, LocalExecutionLocator,
+    PathRoleNormalizer, PolicyIdentityV2, ReadonlyLayerIdentity, RuntimeCompleteness,
+    RuntimeIdentityV2, SourceIdentityV2, SourceProvenance, SourceProvenanceKind,
+    StateBindingIdentity, StateBindingKind, SymlinkPolicy, TmpPolicy, Tracked, UlimitIdentity,
+    ValueNormalizationStatus, WorkspacePathCanonicalizer, WritableDirIdentity,
+    WritableDirLifecycle,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::LaunchSpec;
@@ -270,12 +271,28 @@ pub(crate) fn observe_environment_v2(
     launch_ctx: &RuntimeLaunchContext,
     ctx: &ObserverContextV2,
 ) -> Result<EnvironmentIdentityV2> {
-    let mut env: BTreeMap<String, String> = BTreeMap::new();
-    env.extend(plan.execution_env());
-    env.extend(launch_ctx.merged_env());
+    let mut env: BTreeMap<String, ObservedEnvValue> = BTreeMap::new();
+    for (key, value) in plan.execution_env() {
+        env.insert(
+            key,
+            ObservedEnvValue {
+                value,
+                origin: EnvOrigin::ManifestStatic,
+            },
+        );
+    }
+    for (key, (value, origin)) in launch_ctx.merged_env_with_origins() {
+        env.insert(key, ObservedEnvValue { value, origin });
+    }
     let mut port_was_injected = false;
     if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
-        env.insert("PORT".to_string(), port.to_string());
+        env.insert(
+            "PORT".to_string(),
+            ObservedEnvValue {
+                value: port.to_string(),
+                origin: EnvOrigin::ManifestStatic,
+            },
+        );
         port_was_injected = true;
     }
 
@@ -305,12 +322,31 @@ pub(crate) fn observe_environment_v2(
     for key in &intrinsic_keys {
         if !env.contains_key(key) {
             if let Ok(value) = std::env::var(key) {
-                env.insert(key.clone(), value);
+                env.insert(
+                    key.clone(),
+                    ObservedEnvValue {
+                        value,
+                        origin: EnvOrigin::Host,
+                    },
+                );
             }
         }
     }
 
     let manifest_keys: Vec<String> = plan.execution_env().keys().cloned().collect();
+    for key in plan.execution_required_envs() {
+        if !env.contains_key(&key) {
+            if let Ok(value) = std::env::var(&key) {
+                env.insert(
+                    key,
+                    ObservedEnvValue {
+                        value,
+                        origin: EnvOrigin::ManifestRequiredEnv,
+                    },
+                );
+            }
+        }
+    }
     let injected_keys: Vec<String> = launch_ctx.injected_env().keys().cloned().collect();
 
     let mut identity_relevant: std::collections::HashSet<String> = intrinsic_keys
@@ -329,9 +365,9 @@ pub(crate) fn observe_environment_v2(
     let mut entries = Vec::new();
     let mut ambient = Vec::new();
 
-    for (key, value) in env {
-        if identity_relevant.contains(&key) {
-            let entry = build_env_entry(&key, &value, &ctx.normalizer);
+    for (key, observed) in env {
+        if identity_relevant.contains(&key) && observed.origin.is_identity_trackable() {
+            let entry = build_env_entry(&key, &observed.value, observed.origin, &ctx.normalizer);
             entries.push(entry);
         } else if allowlist_active {
             // When the manifest declares its env allowlist, anything
@@ -447,7 +483,17 @@ fn format_rlim(value: libc::rlim_t) -> String {
     }
 }
 
-fn build_env_entry(key: &str, value: &str, normalizer: &PathRoleNormalizer) -> EnvironmentEntry {
+struct ObservedEnvValue {
+    value: String,
+    origin: EnvOrigin,
+}
+
+fn build_env_entry(
+    key: &str,
+    value: &str,
+    origin: EnvOrigin,
+    normalizer: &PathRoleNormalizer,
+) -> EnvironmentEntry {
     if is_sensitive_env_key(key) {
         return EnvironmentEntry {
             key: key.to_string(),
@@ -455,6 +501,7 @@ fn build_env_entry(key: &str, value: &str, normalizer: &PathRoleNormalizer) -> E
                 "secret reference identity not implemented; raw value never hashed",
             ),
             normalization: ValueNormalizationStatus::SecretReferenceRequired,
+            origin,
         };
     }
     let (value_hash, normalization) = normalizer.tracked_hash(value);
@@ -462,6 +509,7 @@ fn build_env_entry(key: &str, value: &str, normalizer: &PathRoleNormalizer) -> E
         key: key.to_string(),
         value_hash,
         normalization,
+        origin,
     }
 }
 
@@ -965,13 +1013,69 @@ mod tests {
         assert_eq!(alice_role.value, bob_role.value);
     }
 
+    #[test]
+    fn env_origin_runtime_exports_are_never_tracked() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let plan = sample_plan(workspace.path().to_path_buf());
+        let ctx = ObserverContextV2::for_plan(&plan);
+        let launch_ctx = RuntimeLaunchContext::empty().with_injected_env_with_origin(
+            std::collections::HashMap::from([(
+                "DATABASE_URL".to_string(),
+                "postgres://127.0.0.1:5432/app".to_string(),
+            )]),
+            EnvOrigin::DepRuntimeExport("db".to_string()),
+        );
+
+        let environment = observe_environment_v2(&plan, &launch_ctx, &ctx).expect("observe env");
+        assert!(environment
+            .entries
+            .iter()
+            .all(|entry| entry.key != "DATABASE_URL"));
+        assert!(environment
+            .ambient_untracked_keys
+            .contains(&"DATABASE_URL".to_string()));
+    }
+
+    #[test]
+    fn env_allowlist_cannot_reintroduce_runtime_exports() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let plan = sample_plan_from_manifest(
+            workspace.path().to_path_buf(),
+            r#"
+schema_version = "0.3"
+name = "test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run = "main.py"
+env_allowlist = ["DATABASE_URL"]
+"#,
+        );
+        let ctx = ObserverContextV2::for_plan(&plan);
+        let launch_ctx = RuntimeLaunchContext::empty().with_injected_env_with_origin(
+            std::collections::HashMap::from([(
+                "DATABASE_URL".to_string(),
+                "postgres://127.0.0.1:5432/app".to_string(),
+            )]),
+            EnvOrigin::DepRuntimeExport("db".to_string()),
+        );
+
+        let environment = observe_environment_v2(&plan, &launch_ctx, &ctx).expect("observe env");
+        assert!(environment
+            .entries
+            .iter()
+            .all(|entry| entry.key != "DATABASE_URL"));
+        assert!(environment.ambient_untracked_keys.is_empty());
+    }
+
     fn sample_plan(workspace_root: PathBuf) -> ManifestData {
-        // Construct a minimal ExecutionDescriptor by repurposing
-        // execution_observers test plumbing would be heavyweight here. The
-        // detect_registry_ref function only inspects workspace_root, so build a
-        // ManifestData via the public constructor used in execution_observers
-        // tests.
-        let manifest = format!(
+        sample_plan_from_manifest(
+            workspace_root,
             r#"
 schema_version = "0.3"
 name = "test"
@@ -985,9 +1089,12 @@ driver = "python"
 runtime_version = "3.11"
 run = "main.py"
 "#,
-        );
+        )
+    }
+
+    fn sample_plan_from_manifest(workspace_root: PathBuf, manifest: &str) -> ManifestData {
         let manifest_path = workspace_root.join("capsule.toml");
-        let parsed: toml::Value = toml::from_str(&manifest).expect("parse manifest");
+        let parsed: toml::Value = toml::from_str(manifest).expect("parse manifest");
         capsule_core::router::execution_descriptor_from_manifest_parts(
             parsed,
             manifest_path,

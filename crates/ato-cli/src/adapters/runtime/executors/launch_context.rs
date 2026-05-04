@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::Result;
+use capsule_core::execution_identity::EnvOrigin;
 
 use crate::ipc::inject::IpcContext;
 
@@ -17,6 +18,7 @@ pub struct InjectedMount {
 pub struct RuntimeLaunchContext {
     ipc: Option<IpcContext>,
     injected_env: HashMap<String, String>,
+    injected_env_origins: HashMap<String, EnvOrigin>,
     injected_mounts: Vec<InjectedMount>,
     command_args: Vec<String>,
     effective_cwd: Option<PathBuf>,
@@ -32,6 +34,7 @@ impl RuntimeLaunchContext {
             Self {
                 ipc: Some(ipc),
                 injected_env: HashMap::new(),
+                injected_env_origins: HashMap::new(),
                 injected_mounts: Vec::new(),
                 command_args: Vec::new(),
                 effective_cwd: None,
@@ -42,6 +45,22 @@ impl RuntimeLaunchContext {
     }
 
     pub fn with_injected_env(mut self, env: HashMap<String, String>) -> Self {
+        self.injected_env_origins.extend(
+            env.keys()
+                .cloned()
+                .map(|key| (key, EnvOrigin::ManifestStatic)),
+        );
+        self.injected_env.extend(env);
+        self
+    }
+
+    pub fn with_injected_env_with_origin(
+        mut self,
+        env: HashMap<String, String>,
+        origin: EnvOrigin,
+    ) -> Self {
+        self.injected_env_origins
+            .extend(env.keys().cloned().map(|key| (key, origin.clone())));
         self.injected_env.extend(env);
         self
     }
@@ -92,6 +111,25 @@ impl RuntimeLaunchContext {
     pub fn merged_env(&self) -> HashMap<String, String> {
         let mut env = self.ipc_env_vars().cloned().unwrap_or_else(HashMap::new);
         env.extend(self.injected_env.clone());
+        env
+    }
+
+    pub fn merged_env_with_origins(&self) -> HashMap<String, (String, EnvOrigin)> {
+        let mut env = self
+            .ipc_env_vars()
+            .cloned()
+            .unwrap_or_else(HashMap::new)
+            .into_iter()
+            .map(|(key, value)| (key, (value, EnvOrigin::Host)))
+            .collect::<HashMap<_, _>>();
+        for (key, value) in &self.injected_env {
+            let origin = self
+                .injected_env_origins
+                .get(key)
+                .cloned()
+                .unwrap_or(EnvOrigin::ManifestStatic);
+            env.insert(key.clone(), (value.clone(), origin));
+        }
         env
     }
 
