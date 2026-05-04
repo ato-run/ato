@@ -540,6 +540,14 @@ pub struct CapsuleManifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, DependencySpec>,
 
+    /// Manifest top-level required environment variable names. Per
+    /// `CAPSULE_DEPENDENCY_CONTRACTS.md` §5.2, this is the resolution scope for
+    /// `{{env.X}}` template expressions appearing inside `[dependencies.*]`
+    /// blocks. Per-target `required_env` is for the target's own env and does
+    /// not participate in dependency parameter / credential resolution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_env: Vec<String>,
+
     /// Contracts exported by this capsule for downstream consumers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub contracts: BTreeMap<String, ContractSpec>,
@@ -1216,6 +1224,13 @@ pub struct NamedTarget {
     /// Required environment variable names.
     #[serde(default)]
     pub required_env: Vec<String>,
+
+    /// Service dependencies that must be ready before this target is started.
+    /// Each entry must be a key in the manifest top-level `[dependencies.*]`
+    /// table (`CAPSULE_DEPENDENCY_CONTRACTS.md` §8). `dependencies` ⊇ `needs`
+    /// is enforced at lock time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
 
     /// Optional rich schema for user-facing config inputs. When populated,
     /// consumers (desktop dynamic form, `ato run` preflight error details)
