@@ -1727,6 +1727,17 @@ pub(super) fn normalize_v03_manifest_value_with_path(
         .filter(|value| !value.is_empty())
         .is_some();
 
+    // RFC `CAPSULE_DEPENDENCY_CONTRACTS.md` §5.2 introduces a manifest
+    // top-level `required_env` whose meaning is **dependency env scope**, not
+    // a per-target field. The legacy v0.3 inline-target normalizer used to
+    // treat top-level `required_env` as a fold trigger and move the array
+    // into the implicit target. That fold conflicts with the new top-level
+    // semantic. Detection is now structural: only `runtime` / `run` / `build`
+    // / `runtime_version` / `port` etc. (target-shape signals) trigger the
+    // inline-target fold. `required_env` and `runtime_tools` do **not** by
+    // themselves cause normalization — they may appear at top level for
+    // their RFC-specified meaning. If a target also requires them they go in
+    // `[targets.<X>]` explicitly.
     if table
         .get("runtime")
         .and_then(toml::Value::as_str)
@@ -1740,9 +1751,7 @@ pub(super) fn normalize_v03_manifest_value_with_path(
             .filter(|value| !value.is_empty())
             .is_some()
         || has_top_level_build_command
-        || table.contains_key("required_env")
         || table.contains_key("runtime_version")
-        || table.contains_key("runtime_tools")
         || table.contains_key("port")
         || table.contains_key("readiness_probe")
         || table.contains_key("outputs")
