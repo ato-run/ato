@@ -1253,4 +1253,204 @@ version = "1"
             "got {err:?}"
         );
     }
+
+    // ---------- P7: real-Postgres end-to-end (host-bound) ----------
+    //
+    // Exercises ato/postgres provider + minimal consumer fixture against
+    // the real /opt/homebrew/bin/postgres binary on the host. The
+    // fixtures live in `crates/ato-cli/tests/fixtures/p7/`. Skipped if
+    // the host is missing Postgres binaries.
+
+    fn p7_fixture_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p7")
+    }
+
+    fn p7_skip_if_unavailable() -> Option<()> {
+        let pg = std::path::Path::new("/opt/homebrew/bin/postgres");
+        let initdb = std::path::Path::new("/opt/homebrew/bin/initdb");
+        let root = p7_fixture_root();
+        let provider = root.join("ato-postgres/capsule.toml");
+        let consumer = root.join("wasedap2p/capsule.toml");
+        if pg.exists() && initdb.exists() && provider.exists() && consumer.exists() {
+            Some(())
+        } else {
+            eprintln!("[P7] skipping: missing Postgres or fixtures");
+            None
+        }
+    }
+
+    fn p7_parse_fixture(rel: &str) -> CapsuleManifest {
+        let path = p7_fixture_root().join(rel);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("read fixture {}", path.display()));
+        CapsuleManifest::from_toml(&text).expect("parse fixture")
+    }
+
+    /// P7 host-bound E2E. Marked `#[ignore]` because it spawns the real
+    /// Postgres binary, sets process-global env vars (`PG_PASSWORD`),
+    /// and writes to a fixed `/tmp/ato-p7/.ato-home`. Run explicitly:
+    ///
+    ///     cargo test -p ato-cli --lib p7_postgres -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn p7_postgres_provider_boots_via_orchestrator_and_passes_ready_probe() {
+        if p7_skip_if_unavailable().is_none() {
+            return;
+        }
+
+        let consumer = p7_parse_fixture("wasedap2p/capsule.toml");
+        let provider_manifest = p7_parse_fixture("ato-postgres/capsule.toml");
+        let provider_root = p7_fixture_root().join("ato-postgres");
+
+        // Stage 1: real verifier produces the lock.
+        let mut providers_for_lock = BTreeMap::new();
+        providers_for_lock.insert(
+            "db".to_string(),
+            capsule_core::dependency_contracts::ResolvedProviderManifest {
+                requested: "capsule://ato/postgres@16".to_string(),
+                resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
+                manifest: provider_manifest.clone(),
+            },
+        );
+        let lock = capsule_core::dependency_contracts::verify_and_lock(
+            capsule_core::dependency_contracts::DependencyLockInput {
+                consumer: &consumer,
+                providers: providers_for_lock,
+            },
+        )
+        .expect("verify_and_lock");
+
+        let pre_rotation_hash = lock.entries.get("db").unwrap().instance_hash.clone();
+        eprintln!("[P7] instance_hash = {}", pre_rotation_hash);
+        assert_eq!(
+            lock.entries
+                .get("db")
+                .unwrap()
+                .identity_exports
+                .get("database")
+                .map(String::as_str),
+            Some("wasedap2p")
+        );
+
+        // Stage 2: orchestrate against real Postgres.
+        if std::env::var("PG_PASSWORD").is_err() {
+            std::env::set_var("PG_PASSWORD", "p7-test-password-change-me");
+        }
+
+        // Use a fixed ato_home under /tmp so logs survive failure for
+        // inspection. Wipe it first so each run starts clean.
+        let ato_home_path = PathBuf::from("/tmp/ato-p7/.ato-home");
+        let _ = std::fs::remove_dir_all(&ato_home_path);
+        std::fs::create_dir_all(&ato_home_path).expect("create ato_home");
+        eprintln!("[P7] ato_home = {}", ato_home_path.display());
+
+        let host_env = crate::application::dependency_credentials::ProcessHostEnv;
+        let redaction = Arc::new(RedactionRegistry::new());
+
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "db".to_string(),
+            OrchestratorProvider {
+                manifest: provider_manifest,
+                provider_root,
+                resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
+            },
+        );
+
+        let input = OrchestratorInput {
+            lock: &lock,
+            providers,
+            consumer: &consumer,
+            ato_home: ato_home_path.clone(),
+            parent_package_id: "wasedap2p-backend@0.1.0".to_string(),
+            host_env: &host_env,
+            redaction: redaction.clone(),
+            session_pid: std::process::id() as i32,
+            default_ready_timeout: Duration::from_secs(120),
+            ready_probe_interval: Duration::from_millis(500),
+        };
+
+        let graph = start_all(input).unwrap_or_else(|err| {
+            // Dump any captured log so we can diagnose.
+            let logs_root = ato_home_path.join("logs/deps");
+            if logs_root.exists() {
+                eprintln!("[P7] dumping captured dep logs:");
+                for entry in walkdir::WalkDir::new(&logs_root)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                {
+                    eprintln!("--- {} ---", entry.path().display());
+                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                        eprintln!("{text}");
+                    }
+                }
+            }
+            panic!("start_all: {err:?}");
+        });
+        assert_eq!(graph.deps().len(), 1);
+
+        let runtime_exports = graph.runtime_exports("db").expect("db exports").clone();
+        eprintln!(
+            "[P7] runtime_exports keys = {:?}",
+            runtime_exports.keys().collect::<Vec<_>>()
+        );
+        let database_url = runtime_exports.get("DATABASE_URL").expect("DATABASE_URL");
+        assert!(
+            database_url.contains("postgresql+psycopg://postgres:"),
+            "got: {database_url}"
+        );
+        assert!(database_url.contains("/wasedap2p"), "got: {database_url}");
+
+        // Redaction must scrub the credential value.
+        let pw = std::env::var("PG_PASSWORD").unwrap();
+        let scrubbed = redaction.redact(&format!("debug: pw = {pw}"));
+        assert!(!scrubbed.contains(&pw), "PG_PASSWORD must be redacted");
+
+        // Confirm postgres really listens via pg_isready against allocated port.
+        let allocated = graph.deps()[0].allocated_port.expect("allocated_port");
+        eprintln!("[P7] allocated port = {}", allocated);
+        let pg_isready = std::process::Command::new("/opt/homebrew/bin/pg_isready")
+            .args(["-h", "127.0.0.1", "-p", &allocated.to_string()])
+            .output()
+            .expect("pg_isready");
+        assert!(
+            pg_isready.status.success(),
+            "pg_isready failed: {}",
+            String::from_utf8_lossy(&pg_isready.stderr)
+        );
+
+        graph
+            .teardown(Duration::from_secs(10))
+            .expect("teardown postgres");
+
+        // Stage 3: rotation invariant. Re-build the lock with a different
+        // PG_PASSWORD; instance_hash must NOT change (RFC §7.3.1 hard
+        // invariant 1 + §9.5).
+        std::env::set_var("PG_PASSWORD", "p7-rotated-different-value");
+        let consumer2 = p7_parse_fixture("wasedap2p/capsule.toml");
+        let provider2 = p7_parse_fixture("ato-postgres/capsule.toml");
+        let mut providers2 = BTreeMap::new();
+        providers2.insert(
+            "db".to_string(),
+            capsule_core::dependency_contracts::ResolvedProviderManifest {
+                requested: "capsule://ato/postgres@16".to_string(),
+                resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
+                manifest: provider2,
+            },
+        );
+        let lock2 = capsule_core::dependency_contracts::verify_and_lock(
+            capsule_core::dependency_contracts::DependencyLockInput {
+                consumer: &consumer2,
+                providers: providers2,
+            },
+        )
+        .expect("verify_and_lock rotated");
+        assert_eq!(
+            pre_rotation_hash,
+            lock2.entries.get("db").unwrap().instance_hash,
+            "instance_hash MUST be stable across PG_PASSWORD rotation"
+        );
+        eprintln!("[P7] rotation invariant holds");
+    }
 }
