@@ -71,7 +71,7 @@ impl TemplatedString {
         }
     }
 
-    fn parse(raw: &str) -> Result<Self, String> {
+    pub fn parse(raw: &str) -> Result<Self, String> {
         let mut segments = Vec::new();
         let mut cursor = raw;
 
