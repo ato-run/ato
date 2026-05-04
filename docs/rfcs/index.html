@@ -31,9 +31,13 @@
   <script>
     window.$docsify = {
       name: '📦 Ato RFCs',
-      nameLink: '/',
-      repo: '',
+      nameLink: '#/',
+      repo: 'https://github.com/ato-run/ato',
+      homepage: 'README.md',
       loadSidebar: true,
+      alias: {
+        '/.*/_sidebar.md': '/_sidebar.md',
+      },
       subMaxLevel: 2,
       auto2top: true,
       search: {

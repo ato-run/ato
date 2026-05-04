@@ -287,7 +287,8 @@ cargo xtask bundle linux-x86_64
 
 - [Known limitations](crates/ato-cli/docs/known-limitations.md)
 - [Core architecture](docs/core-architecture.md)
-- [Design RFCs](docs/rfcs/)
+- [Design RFCs](https://ato-run.github.io/ato/)
+- [RFC sources](docs/rfcs/)
 - [Glossary](docs/GLOSSARY.md)
 - [Contributing guidelines](AGENTS.md)
 
