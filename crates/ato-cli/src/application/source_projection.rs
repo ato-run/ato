@@ -23,11 +23,15 @@
 //!   `.ato`)
 //! - any subdirectory of the install whose name appears in that list
 
-use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
 use std::path::Path;
+
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
@@ -105,6 +109,7 @@ pub(crate) fn project_install_source(install_root: &Path, target_root: &Path) ->
                 fs::create_dir_all(parent)
                     .with_context(|| format!("failed to mkdir {}", parent.display()))?;
             }
+            #[cfg(unix)]
             symlink(&link_target, &target).with_context(|| {
                 format!(
                     "failed to recreate symlink {} -> {}",
@@ -112,6 +117,10 @@ pub(crate) fn project_install_source(install_root: &Path, target_root: &Path) ->
                     link_target.display()
                 )
             })?;
+            // Windows: symlinks require elevated privileges; skip them.
+            // Source projection is primarily a Unix feature.
+            #[cfg(not(unix))]
+            let _ = &link_target;
         } else if file_type.is_file() {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)
@@ -179,10 +188,6 @@ fn try_clonefile(src: &Path, dst: &Path) -> Result<Option<ProjectionStrategy>> {
 /// back to hardlink (which has the documented O_TRUNC caveat).
 #[cfg(not(target_os = "macos"))]
 fn try_clonefile(_src: &Path, _dst: &Path) -> Result<Option<ProjectionStrategy>> {
-    let _ = (
-        CString::new(""),
-        <std::path::Path as AsRef<Path>>::as_ref(_src),
-    );
     Ok(None)
 }
 
