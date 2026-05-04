@@ -28,8 +28,16 @@ ato run https://ato.run/s/demo # open a shared ato app
 
 ## Install
 
+macOS / Linux:
+
 ```bash
 curl -fsSL https://ato.run/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://ato.run/install.ps1 | iex
 ```
 
 Homebrew:

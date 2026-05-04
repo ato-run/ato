@@ -160,7 +160,7 @@ nacelle internal --input - pack
   `ipc_socket_paths` の有無に関わらず常に deny される。capsule は env 経由で
   注入されたシークレットのみを使う設計。
 
-詳細は `claudedocs/research_phase13a_sandbox_best_practices_20260429.md` と
+詳細は `docs/research_phase13a_sandbox_best_practices_20260429.md` と
 `docs/rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md`。
 
 ### stdout contract

@@ -10,7 +10,7 @@ related:
   - crates/ato-cli/src/adapters/ipc/jsonrpc.rs (441 行, Phase 13b.8 成果)
   - crates/ato-cli/tests/guest_e2e.rs (418 行)
   - crates/ato-desktop/src/bridge.rs (capsule/invoke を別 shape で送信中)
-  - claudedocs/research_phase13a_sandbox_best_practices_20260429.md
+    - docs/research_phase13a_sandbox_best_practices_20260429.md
 revision_notes: |
   v1 → v2: 外部レビューにより 6 ブロッカー + 4 中程度懸念を特定。
   実コード読み直しで env 名・JsonRpcResponse API・InvokeParams shape・

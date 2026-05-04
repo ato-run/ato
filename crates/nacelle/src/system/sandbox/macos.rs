@@ -14,7 +14,7 @@
 //! `always-further/nono` (v0.36+) and is functional through macOS 15.
 //!
 //! See:
-//! - `claudedocs/research_phase13a_sandbox_best_practices_20260429.md`
+//! - `docs/research_phase13a_sandbox_best_practices_20260429.md`
 //! - `docs/rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md`
 //! - `docs/rfcs/accepted/NACELLE_TERMINAL_SPEC.md` §4.1
 

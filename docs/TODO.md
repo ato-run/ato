@@ -128,7 +128,7 @@ CI foundation (`health.toml` schema + matrix builder + per-layer runner),
 and the v0.5+ backwards-compatibility lint (`lint-min-ato-version`).
 
 Plan and research artifacts:
-`claudedocs/research_orchestrated_samples_onboarding_20260420/PLAN.md`
+`docs/research_orchestrated_samples_onboarding_20260420/PLAN.md`
 
 - [x] P0: bootstrap repo + tier skeleton + CI foundation
 - [x] P0: delete 4 stubs (iphone-3d, react-dnd-kanban, shadcn-admin, openclaw-agent)
@@ -577,7 +577,7 @@ pnpm -C apps/ato-store-web exec astro check
 > nacelle は IPC の「内容」には関与せず、ato-cli が注入する IPC Transport パスの
 > Sandbox 許可と環境変数の透過のみを担当する (Smart Build, Dumb Runtime)。
 >
-> **設計決定**: `claudedocs/research_phase13a_sandbox_best_practices_20260429.md`
+> **設計決定**: `docs/research_phase13a_sandbox_best_practices_20260429.md`
 > および `docs/rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md` を参照。
 > macOS は `sandbox_init(flags=0)` 経由の動的 SBPL を採用 (nono 参照実装)。
 
@@ -723,7 +723,7 @@ pnpm -C apps/ato-store-web exec astro check
 
 #### 13b.9 Guest Protocol JSON-RPC 2.0 移行 ✅ (完了 2026-04-29)
 
-> **設計**: `claudedocs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` (v2.1)
+> **設計**: `docs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` (v2.1)
 >
 > **WASM/OCI 関連は defer**: `capsule/wasm.execute` メソッドおよび OCI/WASM
 > executor の env 注入は本 PR スコープ外 (ランタイム整備待ち)。`ExecuteWasm`
