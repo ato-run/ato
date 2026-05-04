@@ -58,6 +58,10 @@ pub(crate) fn observe_runtime(
     launch_spec: &LaunchSpec,
 ) -> Result<RuntimeIdentity> {
     let resolved_binary = resolve_binary_path(&launch_spec.command);
+    let dynamic_linkage = match resolved_binary.as_deref() {
+        Some(path) => observe_dynamic_linkage(path),
+        None => Tracked::untracked("dynamic linkage requires a resolved runtime binary path"),
+    };
     Ok(RuntimeIdentity {
         declared: launch_spec
             .runtime
@@ -75,15 +79,120 @@ pub(crate) fn observe_runtime(
             ),
             None => Tracked::unknown("runtime binary path not resolved"),
         },
-        dynamic_linkage: Tracked::untracked(
-            "dynamic library closure fingerprint is not implemented",
-        ),
+        dynamic_linkage,
         platform: PlatformIdentity {
             os: execution_plan.reproducibility.platform.os.clone(),
             arch: execution_plan.reproducibility.platform.arch.clone(),
             libc: execution_plan.reproducibility.platform.libc.clone(),
         },
     })
+}
+
+/// Phase 8a: enumerate the dynamic library closure of `binary` and return
+/// a content hash over the canonical sorted list. macOS uses
+/// `otool -L <binary>`, Linux uses `ldd <binary>`. Each line is filtered
+/// to its `lib path` token (versioning suffix stripped where stable) and
+/// the resulting list is sorted, joined with newlines, and blake3'd.
+///
+/// Returns:
+/// - `Tracked::known("blake3:host:<hash>")` when the platform tool ran
+///   successfully and produced parseable output. The `host:` prefix
+///   marks the linkage as host-bound (driver / system library closure
+///   captured in the host's perspective).
+/// - `Tracked::untracked` when the platform tool is missing or returned
+///   unparseable output. The classifier still routes Untracked to
+///   `BestEffort`, matching the prior behavior.
+pub(crate) fn observe_dynamic_linkage(binary: &Path) -> Tracked<String> {
+    let entries = match collect_dynamic_linkage_entries(binary) {
+        Ok(list) if !list.is_empty() => list,
+        Ok(_) => {
+            return Tracked::untracked(
+                "dynamic linkage tool returned no entries; treating as untracked",
+            );
+        }
+        Err(reason) => {
+            return Tracked::untracked(format!("dynamic linkage observer failed: {reason}"));
+        }
+    };
+    let canonical = entries.join("\n");
+    let digest = blake3::hash(canonical.as_bytes()).to_hex();
+    Tracked::known(format!("host:blake3:{digest}"))
+}
+
+#[cfg(target_os = "macos")]
+fn collect_dynamic_linkage_entries(binary: &Path) -> std::result::Result<Vec<String>, String> {
+    let output = std::process::Command::new("otool")
+        .arg("-L")
+        .arg(binary)
+        .output()
+        .map_err(|err| format!("failed to spawn otool: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "otool exited with status {} for {}",
+            output.status,
+            binary.display()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // otool -L output:
+    //   <binary>:
+    //   \t/path/to/dylib (compatibility version X.Y.Z, current version A.B.C)
+    let mut entries = Vec::new();
+    for line in text.lines().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Trim version suffix in parens; the linkage identity is the
+        // path + the canonicalized version range, but for hash stability
+        // we keep the full line as emitted by otool — versions ARE part
+        // of the linkage identity (a libcurl 7.x vs 8.x swap should
+        // change the hash).
+        entries.push(trimmed.to_string());
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+#[cfg(target_os = "linux")]
+fn collect_dynamic_linkage_entries(binary: &Path) -> std::result::Result<Vec<String>, String> {
+    let output = std::process::Command::new("ldd")
+        .arg(binary)
+        .output()
+        .map_err(|err| format!("failed to spawn ldd: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ldd exited with status {} for {}",
+            output.status,
+            binary.display()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // ldd output:
+    //   libssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x00007f...)
+    //   /lib64/ld-linux-x86-64.so.2 (0x00007f...)
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Strip the trailing `(0x...)` address — it is the runtime load
+        // address and changes per process invocation. The path before
+        // it is the stable identity.
+        let stable = match trimmed.rsplit_once(" (") {
+            Some((head, _)) => head.to_string(),
+            None => trimmed.to_string(),
+        };
+        entries.push(stable);
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn collect_dynamic_linkage_entries(_binary: &Path) -> std::result::Result<Vec<String>, String> {
+    Err("dynamic linkage observation is unimplemented on this platform".to_string())
 }
 
 pub(crate) fn observe_environment(
