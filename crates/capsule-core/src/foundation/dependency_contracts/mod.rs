@@ -17,6 +17,6 @@ pub mod lock;
 
 pub use error::LockError;
 pub use lock::{
-    verify_and_lock, DependencyLock, DependencyLockInput, LockedDependencyEntry,
-    LockedDependencyState, ResolvedProviderManifest,
+    verify_and_lock, verify_consumer_only, DependencyLock, DependencyLockInput,
+    LockedDependencyEntry, LockedDependencyState, ResolvedProviderManifest,
 };

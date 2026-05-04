@@ -105,6 +105,65 @@ pub fn verify_and_lock(input: DependencyLockInput<'_>) -> Result<DependencyLock,
     Ok(DependencyLock { entries })
 }
 
+/// Run only the consumer-side subset of v1 lock-time verifications. Useful at
+/// lockfile generation time when the orchestrator has not yet fetched
+/// provider manifests. The full `verify_and_lock` runs at orchestration time
+/// (P5) once provider manifests are materialized; this entry point ensures
+/// fail-closed behavior for the consumer-only invariants up front.
+///
+/// Rules covered (subset of §9.1):
+///   §9.1.6: credential literal-ban + env-scope on consumer credentials
+///   §9.1.9: needs ⊆ dependencies
+///   §9.1.10: cycle detection on consumer needs graph
+///   §9.1.11: major-version uniqueness across deps
+///
+/// Rules deferred (require provider manifest):
+///   §9.1.3 contract presence
+///   §9.1.4 target binding existence
+///   §9.1.5 parameter type / required validation
+///   §9.1.6 (provider side) credential schema match
+///   §9.1.7 identity_exports purity
+///   §9.1.8 state.required + state.version
+///   §9.1.12 instance uniqueness (needs identity_exports for full hash, but
+///           the v1 hash input excludes identity_exports anyway — see §9.5.
+///           Still deferred here because the same uniqueness check at the
+///           full call site is more authoritative once parameters are
+///           resolved against provider defaults.)
+///   §9.1.13 reserved variants (provider's `ready.type`)
+///
+/// Returns `()` on success because no `DependencyLock` is produced — the
+/// orchestrator builds the full lock entry later. This is purely a
+/// fail-closed gate.
+pub fn verify_consumer_only(consumer: &CapsuleManifest) -> Result<(), LockError> {
+    let consumer_required_env: BTreeSet<&str> =
+        consumer.required_env.iter().map(String::as_str).collect();
+
+    // §9.1.9 + §9.1.10 graph checks.
+    verify_needs_integrity(consumer)?;
+    verify_no_cycles(consumer)?;
+
+    // §9.1.11 major-version uniqueness based on consumer-declared `capsule`
+    // URLs (no providers needed; the function falls back to the consumer
+    // dep's capsule URL when no resolved provider is supplied).
+    verify_major_version_uniqueness(consumer, &BTreeMap::new())?;
+
+    // §9.1.6 credential literal-ban + env-scope on each consumer dep.
+    for (alias, dep) in &consumer.dependencies {
+        for (key, value) in &dep.credentials {
+            check_credential_template(alias, key, value, &consumer_required_env)?;
+        }
+        // §9.1 ownership = "shared" is parser-rejected at the manifest layer;
+        // double-check here as defense-in-depth.
+        if let Some(state) = dep.state.as_ref() {
+            if !matches!(state.ownership, DependencyStateOwnership::Parent) {
+                return Err(LockError::StateOwnershipShared { dep: alias.clone() });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn verify_one_dependency(
     alias: &str,
     dep: &DependencySpec,
