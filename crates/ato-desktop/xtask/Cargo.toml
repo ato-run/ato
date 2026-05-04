@@ -4,6 +4,9 @@ name = "ato-desktop-xtask"
 # env!("CARGO_PKG_VERSION") to embed into MSI/DMG/AppImage filenames.
 version = "0.4.115"
 edition = "2021"
+# Internal build helper — never published. Excluded from the workspace
+# (see root Cargo.toml) so release-plz's `cargo package` step skips it.
+publish = false
 
 # Internal build helper — never shipped via cargo-dist.
 [package.metadata.dist]
