@@ -365,6 +365,110 @@ http_get = "/health"
 port     = "PORT"
 ```
 
+### `[dependencies.*]` — capsule dependency contracts
+
+Declare another capsule that ato should start automatically before this
+one. The dependency is resolved by `capsule://` URL and bound to a
+contract that defines its runtime exports + ready semantics. See
+[CAPSULE_DEPENDENCY_CONTRACTS.md](../../docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
+for the full RFC.
+
+```toml
+# Manifest top-level: required_env that {{env.X}} in [dependencies.*]
+# may reference (RFC §5.2).
+required_env = ["PG_PASSWORD"]
+
+[dependencies.db]
+capsule  = "capsule://ato/postgres@16"
+contract = "service@1"
+
+# Identity-bearing parameters. These enter instance_hash and the
+# dependency_derivation_hash on the consumer's v2 receipt.
+[dependencies.db.parameters]
+database = "myapp"
+
+# Runtime-only credentials. Kept in the lock as the template form
+# only; the resolved value is materialized via Rule M1 TempFile and
+# never written to argv, env capture, or logs.
+[dependencies.db.credentials]
+password = "{{env.PG_PASSWORD}}"
+
+# Per-parent state directory (RFC §7.7 path rule).
+[dependencies.db.state]
+name = "data"
+
+[targets.app]
+needs   = ["db"]   # block target start until `db` is ready
+[targets.app.env]
+DATABASE_URL = "{{deps.db.runtime_exports.DATABASE_URL}}"
+```
+
+Key semantics:
+
+| Field | Identity? | Lockfile records | Value source |
+|-------|-----------|------------------|--------------|
+| `parameters.<key>` | YES | resolved value | author / `{{env.X}}` from `required_env` |
+| `credentials.<key>` | NO | template form only | host env via `{{env.X}}` (literals lock-fail) |
+| provider `runtime_exports.<key>` | NO (excluded from `intrinsic_keys`) | not in lock | provider, post-start |
+| provider `identity_exports.<key>` | YES | resolved value | provider, lock-time from `parameters` |
+
+Hard invariants enforced fail-closed at lock time:
+
+- `credentials.<key>.default` is forbidden
+- `{{credentials.X}}` may not appear in `identity_exports` values
+- `{{env.X}}` in dep blocks must reference a key in manifest top-level
+  `required_env`
+- credential literals (non-template) in consumer manifest fail the lock
+- `unix_socket = "auto"` and `ready.type = "http" | "unix_socket"` are
+  reserved-only and fail the lock
+
+### `[contracts."<name>@<major>"]` — provider side
+
+Capsules that act as providers (e.g. `ato/postgres@16`) declare the
+contract they implement:
+
+```toml
+[targets.server]
+runtime = "source"
+driver  = "native"
+# {{port}} is allocated by the orchestrator. {{credentials.password}}
+# is rewritten by the orchestrator to a Rule M1 TempFile path; the
+# provider reads the password from that file (e.g. initdb --pwfile=).
+run = "./bootstrap.sh {{state.dir}} {{port}} {{credentials.password}}"
+
+[contracts."service@1"]
+target = "server"
+ready  = { type = "probe", run = "pg_isready -h 127.0.0.1 -p {{port}}", timeout = "30s" }
+
+[contracts."service@1".parameters]
+database = { type = "string", required = true }
+
+[contracts."service@1".credentials]
+password = { type = "string", required = true }
+
+[contracts."service@1".identity_exports]
+database = "{{params.database}}"
+protocol = "postgresql"
+major    = "16"
+
+[contracts."service@1".runtime_exports]
+PGHOST = "{{host}}"
+PGPORT = "{{port}}"
+
+[contracts."service@1".runtime_exports.DATABASE_URL]
+value  = "postgresql://postgres:{{credentials.password}}@{{host}}:{{port}}/{{params.database}}"
+secret = true   # redact in logs / receipts / explain output
+
+[contracts."service@1".state]
+required = true
+version  = "16"   # state schema version (independent of provider capsule version)
+```
+
+`ready.type` accepts `tcp` and `probe` in v1; `http` and `unix_socket`
+are reserved (lock-fail-closed). v1 implements one materialization
+channel for credentials (TempFile); the parsed grammar reserves Stdin
+and EnvVar variants for follow-up.
+
 ### `[foundation_requirements]` — conformance assertions
 
 Declares which Foundation-approved runtime profile and engine versions this capsule requires. A conformant ato implementation rejects execution if it cannot satisfy these constraints.
