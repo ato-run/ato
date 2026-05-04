@@ -4,7 +4,7 @@ status: accepted
 accepted_date: "2026-05-04"
 draft_history: "v1.0 → v1.5 (4 review rounds)"
 date: "2026-05-04"
-revision: "v1.5"
+revision: "v1.6"
 author: "@koh0920"
 related:
   - "docs/rfcs/draft/CAPSULE_URL_SPEC.md"
@@ -18,7 +18,9 @@ related:
 
 # Capsule Dependency Contracts
 
-> Status: **Accepted (v1.5)** — 2026-05-04. v1 scope は §3、follow-up は §12。実装計画は本ファイル末尾の §15 / `docs/plan_capsule_dependency_contracts_20260504.md` 参照。
+> Status: **Accepted (v1.6)** — 2026-05-04. v1 scope は §3、follow-up は §12。実装計画は本ファイル末尾の §15 / `docs/plan_capsule_dependency_contracts_20260504.md` 参照。
+>
+> v1.6 = v1.5 + P0 spec closure: §4.4 (template namespace v1 grammar) と §5.3 (v0.3 legacy `dependencies = "<file>"` migration) を normative 本文に追加し、§13 から該当 open question を移動。
 >
 > Ato が依存先 capsule (service / tool / app) を **同一の識別子空間と同一の lock セマンティクス** で扱うための grammar を定義する。`managed_services` のような実装由来の語彙は外部仕様に出さず、`capsule dependency graph + service contract + exports + needs + state binding` のみを公開語彙とする。
 >
@@ -123,6 +125,37 @@ mutable-ref   = 1*ALPHANUM-DOT          ; authority-specific syntax
 immutable-ref = "sha256:" 64HEXDIG      ; content hash
 ```
 
+### 4.4 Template Variable Namespace (v1)
+
+v1 で予約されるテンプレ式は以下 8 種のみ。これ以外の `{{...}}` は parser error とする (実装が独自解釈する余地を作らないため):
+
+| 表記 | 出現位置 | 値の決まり方 | 評価タイミング |
+| --- | --- | --- | --- |
+| `{{params.<key>}}` | provider の `identity_exports` / `runtime_exports` 値、`provision`/`run`/`ready.run` body | consumer の `[dependencies.*.parameters].<key>` を string 化 | lock 時 (deterministic) |
+| `{{credentials.<key>}}` | provider の `runtime_exports` 値、`provision`/`run`/`ready.run` body | consumer の `[dependencies.*.credentials].<key>` を §7.3.2 channel 経由で materialize | orchestration 直前 (literal substitution 禁止) |
+| `{{env.<KEY>}}` | consumer の `[dependencies.<X>].parameters` / `[dependencies.<X>].credentials` 値 | host env から `<KEY>` を読む | lock 時 (parameters) / orchestration 直前 (credentials) |
+| `{{host}}` | provider の `runtime_exports` / `ready` 値、target `run` body | provider target の `host` (default `127.0.0.1`) | 起動時 |
+| `{{port}}` | 同上 | provider target の `port` (`"auto"` なら起動時 allocation) | 起動時 |
+| `{{state.dir}}` | provider の `provision`/`run`/`ready.run` body、`runtime_exports` | §7.7 の path rule で導出 | lock 後・起動前 |
+| `{{deps.<name>.runtime_exports.<key>}}` | consumer の `[targets.*.env]` 等 | `<name>` dep の provider が起動完了後に展開した `runtime_exports` 値 | dep 起動完了後 |
+| `{{deps.<name>.identity_exports.<key>}}` | consumer の任意の文字列 (env 注入は info-only) | lock 時に解決された `identity_exports` 値 | lock 時 (deterministic) |
+
+**予約のみ (parser AST に reserved token として受理、lock fail-closed)**:
+- `{{socket}}` — `unix_socket = "auto"` の v1.x 実装時に正式予約。v1 では使うと lock 失敗。
+
+**escape**:
+- v1 では `{{` と `}}` を文字列リテラルに含める escape を提供しない (例: `\{\{`)。`{{` が出現すれば必ずテンプレ式として parse される。リテラルで `{{` を書きたい場合は v1.x で escape 構文を別 RFC で追加。
+
+**未定義 key**:
+- 上記 8 種以外の `{{X}}` (例: `{{vars.foo}}`、`{{custom_pkg.X}}`) は parser error。lock 時 fail ではなく parse 時 fail とすることで、実装が独自意味を後付けで持ち込めないようにする。
+- 8 種の中で `<key>` / `<KEY>` / `<name>` が provider/consumer の宣言と整合しない (= 存在しない key を参照) 場合は **lock 時 fail-closed** (§9.1 verification 6 等)。
+
+**評価順序の規範**:
+- **lock 時に fixed**: `params`, `env` (parameters 経由), `identity_exports`, 上記から導出される `instance_hash` / `dependency_derivation_hash`
+- **orchestration 直前 / 起動時**: `credentials`, `env` (credentials 経由), `host`, `port`, `state.dir`, `deps.<name>.runtime_exports`
+
+評価順序を仕様化することで、「lock 時に credential が hash に混入する」「runtime 値が identity に漏れる」事故を構文時点で防ぐ。
+
 ## 5. `[dependencies.*]` Block Grammar
 
 consumer 側 `capsule.toml`:
@@ -188,6 +221,22 @@ required_env = ["SECRET_KEY"]                   # target が直接読む env の
 [dependencies.db.credentials]
 password = "{{env.PG_PASSWORD}}"                # top-level required_env から拾う
 ```
+
+### 5.3 v0.3 Legacy `dependencies = "<file>"` Migration
+
+v0.3 の inline single-target form では top-level に `dependencies = "requirements.txt"` のような **string field** を書ける (Python の requirements.txt や Node の package.json などの language package file への path)。本 RFC の `[dependencies.<X>]` は **table** であり、TOML 上は同じ key 名だが値の shape が異なる。
+
+v1 の grammar 上はこれら 2 つを demux する規範:
+
+| 値の shape | 意味 | 処理 |
+| --- | --- | --- |
+| `dependencies = "<string>"` (top-level) | 旧 v0.3 inline form の language-pkg file ref | v0.3 normalizer が `[targets.<default>] dependencies = "<file>"` に fold (per-target field) |
+| `[dependencies.<X>]` (top-level table) | 本 RFC の dependency contract grammar | strict deserializer がそのまま `BTreeMap<String, DependencySpec>` として処理 |
+| 両方併存 | v0.3 inline form ではなく `[targets.*]` form と新 RFC dep を組み合わせる正規パターン | top-level に string が無いので衝突なし |
+
+v0.3 inline form を **新 RFC の dependency contract と同じ manifest で併用するのは禁止** (= top-level に string `dependencies` がある時、新 RFC の `[dependencies.<X>]` も併存する manifest は v0.3 normalizer で error)。実装上はそもそも TOML レベルで `dependencies = "..."` (string) と `[dependencies.foo]` (table) は同じ key を二重宣言できないため、TOML parser がブロックする。
+
+**実装責務**: v0.3 normalizer (`manifest_v03.rs`) と manifest hash 計算 path (`semantic_manifest_hash_from_text`) の双方で、top-level string `dependencies` を per-target に fold するか strip する。新 RFC table form は normalizer を素通りして strict schema parser に到達。
 
 ## 6. Contract Identifier
 
@@ -1129,10 +1178,13 @@ provision の credential 経路について (§7.3.2 適用結果):
 本 RFC v1 を実装するまでに最低でも別 issue で詰める:
 
 - **Local override**: `capsule://ato/postgres@16` を local path に差し替える grammar (`--with-dep db=path:./local-postgres-capsule` か config か manifest field)。lock identity の整合性 (override は lock を invalidate するか、lock 内に override marker を入れるか)。
-- **テンプレ変数 namespace の最終 grammar**: `{{params.*}}`, `{{credentials.*}}`, `{{host}}`, `{{port}}`, `{{state.dir}}`, `{{deps.<name>.runtime_exports.*}}`, `{{deps.<name>.identity_exports.*}}`, `{{env.*}}` の 8 種を v1 で予約 (`{{socket}}` は v1.x で `unix_socket` runtime 追加時に予約)。escape (`\{\{...\}\}`?) を含む正式 grammar、評価順序、未定義 key の扱い。
 - **`ready.timeout` の lock 出力**: timeout を lock 出力に書くか runtime のみか。書くと `dependency_derivation_hash` には含めない選択も含めて検討 (現状は runtime 値扱いで lock 入れない方針)。
 - **Endpoint allocation の race**: `port = "auto"` で TCP socket を Ato が掴んでから provider に渡す間の race 回避。OS-assigned port を provider 自身に取らせて `<state.dir>/.port` に書かせる方式 vs Ato が握る方式の決定。`unix_socket = "auto"` 実装時にも同じ判断が必要。
 - **Credential lifecycle in process memory**: resolved credential 値の保持期間 (resolve → 注入 → ゼロクリア) を Ato runtime が責任を持つか provider に任せるか。stdout/stderr 経由の漏洩防止 hook (`secret = true` の log filter) との整合。
+
+**closed (v1.5 → v1.6 P0 spec closure 2026-05-04)**:
+- ~~テンプレ変数 namespace の最終 grammar~~ → §4.4 で 8 種を v1 で予約、未定義 key は parser error、escape は v1 では未提供と確定。
+- ~~v0.3 legacy `dependencies = "<file>"` との衝突~~ → §5.3 で migration policy を確定 (v0.3 normalizer が string form を per-target に fold)。
 
 ## 14. Implementation Sketch (非規範)
 
