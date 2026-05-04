@@ -416,17 +416,18 @@ fn observe_ulimits() -> UlimitIdentity {
     let mut limits = std::collections::BTreeMap::new();
     #[cfg(unix)]
     {
-        const PROBES: &[(&str, libc::c_int)] = &[
-            ("nofile", libc::RLIMIT_NOFILE),
-            ("fsize", libc::RLIMIT_FSIZE),
-            ("nproc", libc::RLIMIT_NPROC),
-        ];
-        for (label, resource) in PROBES {
+        // RLIMIT_* is c_int on macOS and u32 on Linux; cast through u64 and
+        // use `as _` so the compiler picks the correct type per platform.
+        for (label, resource) in [
+            ("nofile", libc::RLIMIT_NOFILE as u64),
+            ("fsize", libc::RLIMIT_FSIZE as u64),
+            ("nproc", libc::RLIMIT_NPROC as u64),
+        ] {
             let mut rlim = libc::rlimit {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            let rc = unsafe { libc::getrlimit(*resource, &mut rlim) };
+            let rc = unsafe { libc::getrlimit(resource as _, &mut rlim) };
             if rc == 0 {
                 let soft = format_rlim(rlim.rlim_cur);
                 let hard = format_rlim(rlim.rlim_max);
