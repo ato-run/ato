@@ -102,7 +102,7 @@ custom path policy が指定されると `not_enforced` を返していた
 
 ### 3.3 ドキュメント
 
-- `claudedocs/research_phase13a_sandbox_best_practices_20260429.md` に
+- `docs/research_phase13a_sandbox_best_practices_20260429.md` に
   詳細な背景と nono / alcless 比較。
 - `docs/rfcs/accepted/NACELLE_TERMINAL_SPEC.md` §9 が既に nono パターンの
   取り込みを記述しており、本 ADR と整合。
@@ -127,5 +127,5 @@ custom path policy が指定されると `not_enforced` を返していた
   — SBPL 文法のリバースエンジニアリング決定版
 - [AkihiroSuda/alcless Medium](https://medium.com/nttlabs/alcoholless-lightweight-security-sandbox-for-macos-ccf0d1927301)
   — `sandbox_init` の deprecation 状況と App Sandbox の限界に関する一次資料
-- `claudedocs/research_phase13a_sandbox_best_practices_20260429.md` —
+- `docs/research_phase13a_sandbox_best_practices_20260429.md` —
   本 ADR の元になった研究成果

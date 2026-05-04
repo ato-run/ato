@@ -86,7 +86,7 @@ impl GuestErrorCode {
     /// Map to the JSON-RPC 2.0 error code documented in CAPSULE_IPC_SPEC §8.2.
     ///
     /// Mapping decisions are recorded in
-    /// `claudedocs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` §1 軸 3.
+    /// `docs/plan_phase13b9_guest_jsonrpc_migration_20260429.md` §1 軸 3.
     pub fn to_jsonrpc_code(self) -> i64 {
         match self {
             GuestErrorCode::PermissionDenied => error_codes::PERMISSION_DENIED,
