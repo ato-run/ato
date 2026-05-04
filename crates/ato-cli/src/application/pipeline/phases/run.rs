@@ -1241,6 +1241,15 @@ where
         target_runner::resolve_launch_context(&decision.plan, &prepared, &request.reporter)
             .await?
             .with_effective_cwd(request.effective_cwd().to_path_buf())
+            // workspace_root is the materialized capsule root for this run.
+            // The host source executor uses it to discriminate caller_cwd
+            // (user's pwd) vs. execution_cwd (process cwd): caller_cwd is
+            // promoted to process cwd only if it lives inside this root,
+            // so `ato run github.com/...` (caller cwd unrelated to the
+            // fetched workspace) correctly cd's into LaunchSpec.working_dir
+            // rather than the user's terminal pwd. See
+            // executors::source::resolve_host_execution_cwd.
+            .with_workspace_root(prepared.workspace_root.clone())
             .with_injected_env(injected_data.env)
             .with_injected_mounts(injected_data.mounts);
     if let Some(external_capsules) = external_capsules.as_ref() {

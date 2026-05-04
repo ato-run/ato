@@ -488,11 +488,42 @@ fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
     command_path.to_path_buf()
 }
 
+/// Decide the cwd for the spawned target process.
+///
+/// Caller cwd (`launch_ctx.effective_cwd`) and execution cwd are deliberately
+/// distinct concepts. effective_cwd is the user's pwd when `ato run` was
+/// invoked — it stays useful for relative-path arg resolution, grant
+/// inference, and IO candidate detection upstream. The **process** cwd,
+/// however, defaults to the manifest-declared `working_dir` so module
+/// imports and relative scripts resolve against the capsule's source tree.
+///
+/// We promote effective_cwd to the execution cwd **only** when the user
+/// is plainly invoking from inside the capsule's own workspace (= local
+/// one-shot run, e.g. `ato run .` or `ato run ./script.py` with cwd
+/// inside the project). For materialized capsules fetched into
+/// `<ato_home>/runs/<id>/...` or `<ato_home>/external-capsules/...` the
+/// user's caller cwd is unrelated to the capsule's source tree and
+/// must not be used as the process cwd.
 fn resolve_host_execution_cwd(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) -> PathBuf {
-    launch_ctx
-        .effective_cwd()
-        .cloned()
-        .unwrap_or_else(|| working_dir.to_path_buf())
+    let working = working_dir.to_path_buf();
+    let Some(caller) = launch_ctx.effective_cwd() else {
+        return working;
+    };
+    // No workspace_root recorded → conservative fallback to working_dir.
+    let Some(workspace) = launch_ctx.workspace_root() else {
+        return working;
+    };
+    // effective_cwd is authoritative only if it lives inside (or equals)
+    // the materialized capsule's workspace_root. Compare canonicalized
+    // paths so symlinks and relative segments don't slip through.
+    let caller_canonical = std::fs::canonicalize(caller).unwrap_or_else(|_| caller.clone());
+    let workspace_canonical =
+        std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.clone());
+    if caller_canonical.starts_with(&workspace_canonical) {
+        caller.clone()
+    } else {
+        working
+    }
 }
 
 fn is_python_launch_spec(plan: &ManifestData, command: &str, language: Option<&str>) -> bool {
@@ -1184,25 +1215,112 @@ mod tests {
     }
 
     #[test]
-    fn resolve_host_execution_cwd_prefers_effective_cwd() {
-        let working_dir = PathBuf::from("/materialized/root");
-        let effective_cwd = PathBuf::from("/caller/workspace");
-        let launch_ctx = RuntimeLaunchContext::empty().with_effective_cwd(effective_cwd.clone());
+    fn resolve_host_execution_cwd_prefers_caller_cwd_when_inside_workspace() {
+        // Local one-shot: user invoked `ato run .` from inside the project
+        // tree. effective_cwd lives inside workspace_root → caller cwd is
+        // the authoritative process cwd.
+        let workspace_root = std::env::temp_dir().join("ato-cwd-test-inside");
+        let caller = workspace_root.join("subdir");
+        std::fs::create_dir_all(&caller).unwrap();
+        let working_dir = workspace_root.join("source");
+        std::fs::create_dir_all(&working_dir).unwrap();
+
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_effective_cwd(caller.clone())
+            .with_workspace_root(workspace_root.clone());
 
         assert_eq!(
             resolve_host_execution_cwd(&launch_ctx, &working_dir),
-            effective_cwd
+            caller
         );
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+    }
+
+    #[test]
+    fn resolve_host_execution_cwd_falls_back_to_working_dir_when_caller_outside_workspace() {
+        // Materialized capsule run (e.g. `ato run github.com/owner/repo`):
+        // the user's caller cwd is unrelated to the fetched workspace,
+        // so the process must cd into the manifest-declared working_dir
+        // (typically the source/ subdirectory) for module imports to
+        // resolve correctly.
+        let workspace_root = std::env::temp_dir().join("ato-cwd-test-outside-workspace");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let working_dir = workspace_root.join("backend");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let caller = std::env::temp_dir().join("ato-cwd-test-outside-caller");
+        std::fs::create_dir_all(&caller).unwrap();
+
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_effective_cwd(caller.clone())
+            .with_workspace_root(workspace_root.clone());
+
+        assert_eq!(
+            resolve_host_execution_cwd(&launch_ctx, &working_dir),
+            working_dir,
+            "materialized capsule must use working_dir, not caller's unrelated pwd"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+        let _ = std::fs::remove_dir_all(&caller);
     }
 
     #[test]
     fn resolve_host_execution_cwd_falls_back_to_working_dir() {
+        // No effective_cwd at all (e.g. some integration paths) →
+        // working_dir wins.
         let working_dir = PathBuf::from("/materialized/root");
-
         assert_eq!(
             resolve_host_execution_cwd(&RuntimeLaunchContext::empty(), &working_dir),
             working_dir
         );
+    }
+
+    #[test]
+    fn resolve_host_execution_cwd_falls_back_when_workspace_root_missing() {
+        // Defense-in-depth: if the run pipeline forgot to call
+        // with_workspace_root, the executor falls back to working_dir
+        // rather than blindly trusting the caller's pwd. This makes the
+        // brick safe-by-default — only an explicit workspace_root
+        // declaration unlocks caller-cwd promotion.
+        let working_dir = PathBuf::from("/materialized/root");
+        let caller = PathBuf::from("/somewhere/else");
+        let launch_ctx = RuntimeLaunchContext::empty().with_effective_cwd(caller);
+        assert_eq!(
+            resolve_host_execution_cwd(&launch_ctx, &working_dir),
+            working_dir
+        );
+    }
+
+    /// WasedaP2P-style regression: manifest at workspace root, source
+    /// code at `backend/`, target's `working_dir = "backend"`. When run
+    /// via `ato run github.com/...` the caller cwd is unrelated to the
+    /// fetched workspace; the process cwd must be `<workspace>/backend`
+    /// so `python -m uvicorn main:app` finds `backend/main.py`.
+    #[test]
+    fn resolve_host_execution_cwd_wasedap2p_module_import_fixture() {
+        let workspace_root = std::env::temp_dir().join("ato-wasedap2p-fixture");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let working_dir = workspace_root.join("backend");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        std::fs::write(working_dir.join("main.py"), "app = None\n").unwrap();
+        let caller = std::env::temp_dir().join("ato-wasedap2p-caller-elsewhere");
+        std::fs::create_dir_all(&caller).unwrap();
+
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_effective_cwd(caller.clone())
+            .with_workspace_root(workspace_root.clone());
+        let resolved = resolve_host_execution_cwd(&launch_ctx, &working_dir);
+
+        assert_eq!(resolved, working_dir);
+        assert!(
+            resolved.join("main.py").exists(),
+            "execution cwd must contain backend/main.py: {}",
+            resolved.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+        let _ = std::fs::remove_dir_all(&caller);
     }
 
     #[test]
