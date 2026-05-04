@@ -16,9 +16,20 @@ use crate::application::execution_observers_v2::{
 };
 use crate::executors::launch_context::RuntimeLaunchContext;
 
-/// Receipt schema selector. Stable default remains v1 until step 17 of the
-/// portability v2 implementation sequence completes (all v2 acceptance tests
-/// pass and the default is flipped). Selectable via `ATO_RECEIPT_SCHEMA`.
+/// Receipt schema selector. Step 17 of the portability v2 implementation
+/// sequence flipped the stable default from v1 to v2; this is the
+/// "all v2 observers and acceptance tests passed, default emission moves
+/// to v2" milestone (Phase Y/8 completed). Existing v1 consumers can opt
+/// out via `ATO_RECEIPT_SCHEMA=v1`.
+///
+/// Decision matrix:
+///
+/// | `ATO_RECEIPT_SCHEMA` | Result            |
+/// |---------------------|-------------------|
+/// | unset (default)     | V2Experimental    |
+/// | `v2` / `v2-experimental` | V2Experimental |
+/// | `v1`                | V1                |
+/// | any other value     | V2Experimental + ATO-WARN |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiptSchemaSelector {
     V1,
@@ -28,8 +39,14 @@ pub(crate) enum ReceiptSchemaSelector {
 impl ReceiptSchemaSelector {
     pub(crate) fn from_env() -> Self {
         match std::env::var("ATO_RECEIPT_SCHEMA").as_deref() {
-            Ok("v2") | Ok("v2-experimental") => Self::V2Experimental,
-            _ => Self::V1,
+            Ok("v1") => Self::V1,
+            Ok("v2") | Ok("v2-experimental") | Err(_) => Self::V2Experimental,
+            Ok(other) => {
+                eprintln!(
+                    "ATO-WARN unknown ATO_RECEIPT_SCHEMA={other:?}; defaulting to v2-experimental"
+                );
+                Self::V2Experimental
+            }
         }
     }
 }
