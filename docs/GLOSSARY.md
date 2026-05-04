@@ -98,6 +98,32 @@ Capsule エコシステム全体を指すアーキテクチャコンセプト。
 ### `required_env`
 起動前に存在チェックを行う必須環境変数名リスト。未設定または空文字なら **fail-closed** で停止。
 
+**スコープ**:
+
+- **Manifest top-level `required_env`** (RFC `CAPSULE_DEPENDENCY_CONTRACTS.md` §5.2): `[dependencies.*]` 内の `{{env.X}}` テンプレ解決スコープ。Dependency credential / parameter の `{{env.PG_PASSWORD}}` 等はこのリストに `<KEY>` がある場合のみ解決される。lock 時 fail-closed。
+- **Per-target `[targets.<X>] required_env`**: target が直接読む env 変数のチェック。dep credential resolution には参加しない。
+
+### `[dependencies.<alias>]`
+Capsule dependency contract. 別 capsule を `capsule://` URL で識別し、その提供する `service@1` 等の contract に対して `parameters` (identity-bearing) と `credentials` (runtime-only, identity 除外) を渡して起動する宣言。`ato run` 時に orchestrator が自動的に provider を fetch / start / ready-wait し、target に `runtime_exports` を注入する。RFC `CAPSULE_DEPENDENCY_CONTRACTS.md` §5。
+
+### `[dependencies.<alias>.parameters]`
+Identity-bearing な dep parameter。`instance_hash` および `dependency_derivation_hash` に入る (RFC §7.3 / §9.5)。例: `database = "wasedap2p"`。
+
+### `[dependencies.<alias>.credentials]`
+Runtime-only な dep credential。**identity / lockfile に絶対に入らない**。lock には template (`"{{env.X}}"`) 形のみ記録され、resolved value は orchestration 直前に host env から拾われ、Rule M1 TempFile channel で provider process に渡される (RFC §7.3.1, §7.3.2)。Literal 値や `default` 宣言は lock fail-closed。
+
+### `[contracts."<name>@<major>"]`
+Provider 側の contract 宣言。例: `[contracts."service@1"]` は `service` contract の major version 1 を提供する宣言。`target` (provider 内のどの target を起動するか) + `ready` (probe) + `parameters` schema + `credentials` schema + `identity_exports` (deterministic) + `runtime_exports` (実行時値、identity 除外) + `state` (state.dir 要件) を持つ。RFC §6 / §7。
+
+### `instance_hash`
+Dep entry ごとの 16-byte blake3 hash。`blake3-128(JCS({resolved, contract, parameters}))[:16]` で計算され、state path のキー兼 instance uniqueness key になる (RFC §7.7 / §9.3)。Credentials, alias, runtime_exports, identity_exports は入力に**入らない** — credential rotation で state path が変わらないことを構文で保証する。
+
+### `runtime_exports` / `identity_exports`
+Provider contract が consumer に渡す値。
+
+- `identity_exports` は parameters のみから derive される deterministic な値で、consumer の identity に入る (RFC §9.5)。
+- `runtime_exports` は parameters + credentials + 動的 host/port から derive される実行時値で、consumer の env に注入されるが consumer の v2 receipt `intrinsic_keys` には入らない (`EnvOrigin::DepRuntimeExport` でタグされて除外、RFC §7.4 / §7.4.1)。
+
 ### `[ipc.exports]` / `[ipc.imports]`
 Capsule が公開する Capability の定義（`exports`）と、依存する他 Capsule の Capability 宣言（`imports`）。`ato-cli` (IPC Broker) がこれを読んでサービスを自動起動・注入する。
 
@@ -178,7 +204,7 @@ Host アプリ（ato Runtime）内で別の Capsule を実行する機能。Host
 ### `GuestAction`（enum）
 Guest が Host に対して要求できる操作。stdio 上では JSON-RPC 2.0 method 名と
 `guest.v1` envelope の双方から同じ `dispatch_guest_action` に解決される（envelope
-auto-detect — 詳細は `DRAFT_CAPSULE_IPC.md`）:
+auto-detect — 詳細は `CAPSULE_IPC_SPEC.md`）:
 - `ReadPayload` / `WritePayload` / `UpdatePayload` — `.sync` ペイロードの読み書き
 - `ReadContext` / `WriteContext` — コンテキスト JSON の読み書き
 - `ExecuteWasm` — sync.wasm の実行（JSON-RPC 経路では `capsule/wasm.execute` を将来用に予約済み、現状 `-32601`）

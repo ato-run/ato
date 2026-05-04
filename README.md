@@ -171,6 +171,57 @@ ato run ./crates/my-tool
 ato run https://ato.run/s/demo
 ```
 
+### Project With a Dependency Service
+
+A capsule can declare service dependencies that ato starts automatically.
+For example, a FastAPI backend that needs Postgres:
+
+```toml
+# capsule.toml
+schema_version = "0.3"
+name           = "myapp"
+type           = "app"
+required_env   = ["PG_PASSWORD"]   # host env passthrough for dep credentials
+
+[dependencies.db]
+capsule  = "capsule://ato/postgres@16"
+contract = "service@1"
+
+[dependencies.db.parameters]
+database = "myapp"
+
+[dependencies.db.credentials]
+password = "{{env.PG_PASSWORD}}"
+
+[dependencies.db.state]
+name = "data"
+
+[targets.app]
+runtime = "source"
+driver  = "python"
+run     = "python -m uvicorn main:app --host 127.0.0.1 --port 8000"
+needs   = ["db"]
+
+[targets.app.env]
+DATABASE_URL = "{{deps.db.runtime_exports.DATABASE_URL}}"
+```
+
+```bash
+export PG_PASSWORD=$(openssl rand -hex 16)
+ato run .
+```
+
+ato starts Postgres for you, allocates a port, derives a per-project
+state directory, materializes the credential into a 0600 temp file,
+runs `pg_isready`, then injects the resolved `DATABASE_URL` into your
+target's environment. Rotating `PG_PASSWORD` does not invalidate the
+existing data — credentials are kept out of the lock identity by
+construction.
+
+See [`docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md`](docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
+for the full grammar and safety model. Provider authoring for
+`service@1` is documented in the same RFC, §11.2.
+
 ## What ato Is Not
 
 ato is not a full replacement for every tool in your stack.
@@ -287,6 +338,7 @@ cargo xtask bundle linux-x86_64
 
 - [Known limitations](crates/ato-cli/docs/known-limitations.md)
 - [Core architecture](docs/core-architecture.md)
+- [Capsule dependency contracts](docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md) — declaring service deps in `capsule.toml`
 - [Design RFCs](https://ato-run.github.io/ato/)
 - [RFC sources](docs/rfcs/)
 - [Glossary](docs/GLOSSARY.md)
