@@ -128,14 +128,113 @@ external_dependencies = [
             name: "auth".to_string(),
             source: "capsule://store/acme/auth-svc".to_string(),
             source_type: "store".to_string(),
+            contract: None,
             injection_bindings: BTreeMap::from([(
                 "MODEL_DIR".to_string(),
                 "https://data.tld/weights.zip".to_string(),
             )]),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
             resolved_version: Some("1.2.3".to_string()),
             digest: Some("blake3:deadbeef".to_string()),
             sha256: Some("sha256:beadfeed".to_string()),
             artifact_url: Some("https://example.test/auth.capsule".to_string()),
+        }],
+        injected_data: HashMap::new(),
+        tools: None,
+        runtimes: None,
+        targets: HashMap::new(),
+    };
+
+    verify_lockfile_external_dependencies(&manifest, &lockfile).unwrap();
+}
+
+#[test]
+fn manifest_external_capsule_dependencies_reads_top_level_dependency_contracts() {
+    let manifest: toml::Value = toml::from_str(
+        r#"
+schema_version = "0.3"
+name = "consumer"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "main.py"
+
+[dependencies.db]
+capsule = "capsule://ato/acme-postgres@16"
+contract = "service@1"
+
+  [dependencies.db.parameters]
+  database = "appdb"
+
+  [dependencies.db.credentials]
+  password = "{{env.PG_PASSWORD}}"
+"#,
+    )
+    .unwrap();
+
+    let dependencies = super::manifest_external_capsule_dependencies(&manifest).unwrap();
+    assert_eq!(dependencies.len(), 1);
+    assert_eq!(dependencies[0].alias, "db");
+    assert_eq!(dependencies[0].source_type, "store");
+    assert_eq!(dependencies[0].contract.as_deref(), Some("service@1"));
+    assert_eq!(
+        dependencies[0].parameters.get("database"),
+        Some(&crate::types::ParamValue::String("appdb".to_string()))
+    );
+    assert_eq!(
+        dependencies[0]
+            .credentials
+            .get("password")
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("{{env.PG_PASSWORD}}")
+    );
+}
+
+#[test]
+fn verify_lockfile_external_dependencies_matches_top_level_dependency_contracts() {
+    let manifest: toml::Value = toml::from_str(
+        r#"
+schema_version = "0.3"
+name = "consumer"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "main.py"
+
+[dependencies.db]
+capsule = "capsule://ato/acme-postgres@16"
+contract = "service@1"
+
+  [dependencies.db.parameters]
+  database = "appdb"
+"#,
+    )
+    .unwrap();
+
+    let lockfile = CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-01-20T00:00:00Z".to_string(),
+            manifest_hash: "sha256:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: vec![LockedCapsuleDependency {
+            name: "db".to_string(),
+            source: "capsule://ato/acme-postgres@16".to_string(),
+            source_type: "store".to_string(),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::from([(
+                "database".to_string(),
+                crate::types::ParamValue::String("appdb".to_string()),
+            )]),
+            credentials: BTreeMap::new(),
+            resolved_version: Some("16.0.0".to_string()),
+            digest: Some("blake3:deadbeef".to_string()),
+            sha256: Some("sha256:beadfeed".to_string()),
+            artifact_url: Some("https://example.test/postgres.capsule".to_string()),
         }],
         injected_data: HashMap::new(),
         tools: None,

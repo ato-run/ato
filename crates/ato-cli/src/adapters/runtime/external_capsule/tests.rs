@@ -71,10 +71,13 @@ fn cli_bindings_override_locked_dependency_bindings() {
         name: "worker".to_string(),
         source: "capsule://store/acme/worker".to_string(),
         source_type: "store".to_string(),
+        contract: None,
         injection_bindings: BTreeMap::from([(
             "MODEL_DIR".to_string(),
             "https://data.tld/default.zip".to_string(),
         )]),
+        parameters: BTreeMap::new(),
+        credentials: BTreeMap::new(),
         resolved_version: Some("1.0.0".to_string()),
         digest: None,
         sha256: None,
