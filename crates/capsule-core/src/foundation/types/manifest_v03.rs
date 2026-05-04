@@ -1173,7 +1173,10 @@ fn normalize_v03_external_dependency(
         alias: alias.to_string(),
         source,
         source_type,
+        contract: None,
         injection_bindings,
+        parameters: BTreeMap::new(),
+        credentials: BTreeMap::new(),
     })
 }
 
