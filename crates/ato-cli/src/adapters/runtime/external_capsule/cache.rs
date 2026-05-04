@@ -94,11 +94,28 @@ async fn ensure_github_runtime_tree_for_dependency(
 
     let cache_dir = github_capsule_cache_dir(&parsed)?;
     let manifest_path = cache_dir.join("capsule.toml");
-    if !manifest_path.exists() {
-        // Not cached yet — download the tarball at the pinned commit and
-        // copy the checkout into the persistent cache. The downloader
-        // uses `tempfile::TempDir` which auto-deletes; we copy *before*
-        // returning so the cache survives.
+    let fingerprint_path = cache_dir.join(".ato-cache-fingerprint");
+
+    // Cache integrity check: if the cache dir already has a manifest
+    // and a recorded fingerprint, verify the fingerprint matches the
+    // manifest content. Mismatch means local corruption (manual edit,
+    // partial copy, etc.) — wipe and refetch. The github commit SHA
+    // alone is the upstream identity; this sentinel guards the cache
+    // against drift from the materialized snapshot.
+    let cache_is_valid = manifest_path.exists()
+        && fingerprint_path.exists()
+        && verify_github_cache_fingerprint(&manifest_path, &fingerprint_path).unwrap_or(false);
+    if manifest_path.exists() && !cache_is_valid {
+        // Wipe the stale cache and let the fetch path below re-create it.
+        let _ = fs::remove_dir_all(&cache_dir);
+    }
+
+    if !cache_is_valid {
+        // Not cached (or wiped just now) — download the tarball at the
+        // pinned commit and copy the checkout into the persistent
+        // cache. The downloader uses `tempfile::TempDir` which
+        // auto-deletes; we copy *before* returning so the cache
+        // survives.
         let repository = format!("{}/{}", parsed.owner, parsed.repo);
         // `checkout` is held in scope so its internal TempDir handle is
         // not dropped before we finish copying the contents into the
@@ -124,7 +141,19 @@ async fn ensure_github_runtime_tree_for_dependency(
                 cache_dir.display()
             )
         })?;
+        // Record the fingerprint so subsequent cache hits can detect
+        // local corruption. We hash the canonicalized capsule.toml
+        // bytes — the manifest is the single file ato actually reads
+        // out of the checkout, so its integrity is what matters.
+        if let Err(err) = write_github_cache_fingerprint(&manifest_path, &fingerprint_path) {
+            anyhow::bail!(
+                "failed to record cache fingerprint for github capsule dependency '{}' at {}: {err}",
+                locked.name,
+                parsed.commit
+            );
+        }
     }
+
     if !manifest_path.exists() {
         anyhow::bail!(
             "github capsule dependency '{}' did not contain a capsule.toml at the repo root (commit {})",
@@ -134,6 +163,32 @@ async fn ensure_github_runtime_tree_for_dependency(
     }
     Ok(manifest_path)
 }
+
+/// Compute `blake3(capsule.toml bytes)` and write it to `<cache_dir>/.ato-cache-fingerprint`.
+fn write_github_cache_fingerprint(manifest_path: &Path, fingerprint_path: &Path) -> Result<()> {
+    let bytes = fs::read(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    fs::write(fingerprint_path, format!("blake3:{}\n", hash))
+        .with_context(|| format!("failed to write {}", fingerprint_path.display()))?;
+    Ok(())
+}
+
+/// Verify the cached manifest's `blake3` matches the recorded fingerprint.
+fn verify_github_cache_fingerprint(manifest_path: &Path, fingerprint_path: &Path) -> Result<bool> {
+    let recorded = fs::read_to_string(fingerprint_path)
+        .with_context(|| format!("failed to read {}", fingerprint_path.display()))?;
+    let recorded = recorded.trim();
+    let recorded = recorded.strip_prefix("blake3:").ok_or_else(|| {
+        anyhow::anyhow!("malformed fingerprint at {}", fingerprint_path.display())
+    })?;
+    let bytes = fs::read(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let actual = blake3::hash(&bytes).to_hex().to_string();
+    Ok(actual == recorded)
+}
+
+use std::path::Path;
 
 fn github_capsule_cache_dir(
     parsed: &capsule_core::lockfile::GitHubCapsuleSource,
@@ -253,4 +308,50 @@ fn parse_store_source_identity(source: &str) -> Result<(String, String)> {
         anyhow::bail!("invalid store source '{}'", source);
     }
     Ok((publisher.to_string(), slug.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_fingerprint_verifies_unchanged_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("capsule.toml");
+        let fingerprint_path = dir.path().join(".ato-cache-fingerprint");
+        fs::write(&manifest_path, b"name = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+        write_github_cache_fingerprint(&manifest_path, &fingerprint_path).expect("write");
+        assert!(
+            verify_github_cache_fingerprint(&manifest_path, &fingerprint_path).expect("verify"),
+            "fresh fingerprint must verify"
+        );
+    }
+
+    #[test]
+    fn cache_fingerprint_detects_tampered_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("capsule.toml");
+        let fingerprint_path = dir.path().join(".ato-cache-fingerprint");
+        fs::write(&manifest_path, b"name = \"x\"\n").unwrap();
+        write_github_cache_fingerprint(&manifest_path, &fingerprint_path).expect("write");
+        // Simulate local corruption: append to the manifest.
+        fs::write(&manifest_path, b"name = \"x\"\ntampered = true\n").unwrap();
+        assert!(
+            !verify_github_cache_fingerprint(&manifest_path, &fingerprint_path).expect("verify"),
+            "tampered manifest must fail fingerprint check"
+        );
+    }
+
+    #[test]
+    fn cache_fingerprint_rejects_malformed_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest_path = dir.path().join("capsule.toml");
+        let fingerprint_path = dir.path().join(".ato-cache-fingerprint");
+        fs::write(&manifest_path, b"name = \"x\"\n").unwrap();
+        // Write a fingerprint without the `blake3:` prefix.
+        fs::write(&fingerprint_path, b"deadbeef\n").unwrap();
+        let err = verify_github_cache_fingerprint(&manifest_path, &fingerprint_path)
+            .expect_err("must reject malformed fingerprint");
+        assert!(format!("{err}").contains("malformed fingerprint"));
+    }
 }
