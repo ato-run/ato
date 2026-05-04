@@ -1,0 +1,74 @@
+# `ato/postgres@16` — provider capsule for RFC CAPSULE_DEPENDENCY_CONTRACTS.md
+#
+# Implements `service@1` contract. Consumers declare:
+#
+#   [dependencies.db]
+#   capsule  = "capsule://ato/postgres@16"
+#   contract = "service@1"
+#   parameters.database = "myapp"
+#   credentials.password = "{{env.PG_PASSWORD}}"
+#   [dependencies.db.state]
+#   name = "data"
+#
+# This is the P7 fixture form: a local directory exercising the new RFC
+# grammar against the real postgres binary on the host.
+
+schema_version = "0.3"
+name           = "postgres"
+version        = "16.0.0"
+type           = "app"
+default_target = "server"
+
+[metadata]
+display_name = "PostgreSQL (capsule provider)"
+description  = "Postgres 14+ exposed as an Ato service@1 provider"
+author       = "ato"
+
+[targets.server]
+runtime  = "source"
+driver   = "native"
+# Wrapper script handles initdb-once + exec postgres. {{state.dir}} expands
+# to <ato_home>/state/<parent>/<instance>/<state.version>/<state.name>/.
+# {{credentials.password}} is the M1 TempFile path the orchestrator
+# materializes the password into; we pass that path through to initdb's
+# --pwfile so the secret never appears in argv or env.
+# {{port}} is allocated by the orchestrator (orchestrator MVP treats
+# port=None on the parsed NamedTarget as port="auto").
+run = "./bootstrap.sh {{state.dir}} {{port}} {{credentials.password}}"
+working_dir = "."
+
+# Inject the target database name via env so the bootstrap script can
+# decide whether to createdb on first init. The script reads
+# ATO_PG_DATABASE.
+[targets.server.env]
+ATO_PG_DATABASE = "wasedap2p"
+
+[contracts."service@1"]
+target = "server"
+ready  = { type = "probe", run = "/opt/homebrew/bin/pg_isready -h 127.0.0.1 -p {{port}}", timeout = "90s" }
+
+[contracts."service@1".parameters]
+database = { type = "string", required = true }
+encoding = { type = "string", default = "utf8" }
+
+[contracts."service@1".credentials]
+password = { type = "string", required = true }
+
+[contracts."service@1".identity_exports]
+database = "{{params.database}}"
+encoding = "{{params.encoding}}"
+protocol = "postgresql"
+major    = "16"
+
+[contracts."service@1".runtime_exports]
+PGHOST = "{{host}}"
+PGPORT = "{{port}}"
+
+[contracts."service@1".runtime_exports.DATABASE_URL]
+value  = "postgresql+psycopg://postgres:{{credentials.password}}@{{host}}:{{port}}/{{params.database}}"
+secret = true
+
+[contracts."service@1".state]
+required = true
+version  = "16"
+mount    = "PGDATA"

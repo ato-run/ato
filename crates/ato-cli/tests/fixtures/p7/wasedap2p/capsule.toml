@@ -1,0 +1,80 @@
+# P7 fixture: WasedaP2P backend migrated to the RFC dependency-contract
+# grammar (CAPSULE_DEPENDENCY_CONTRACTS.md §11.1).
+#
+# Compared to the legacy capsule.toml at /Users/egamikohsuke/ato-tests/WasedaP2P/:
+#   - DATABASE_URL no longer hardcoded; resolved from
+#     {{deps.db.runtime_exports.DATABASE_URL}} at run time.
+#   - host-side prerequisite "PostgreSQL 14+ reachable" is gone — the
+#     `[dependencies.db]` block + `ato/postgres@16` provider start it
+#     automatically.
+#   - PG_PASSWORD is in manifest top-level required_env (RFC §5.2 dep
+#     env scope) so {{env.PG_PASSWORD}} resolves to the host env value
+#     for credential materialization.
+#
+# Run with:
+#     export SECRET_KEY=$(openssl rand -hex 32)
+#     export PG_PASSWORD=$(openssl rand -hex 16)
+#     ato run /tmp/p7-test/wasedap2p
+
+schema_version = "0.3"
+name           = "wasedap2p-backend"
+version        = "0.1.0"
+type           = "app"
+default_target = "app"
+
+# RFC §5.2: top-level required_env is the resolution scope for
+# {{env.X}} appearing inside [dependencies.*] blocks.
+required_env = ["PG_PASSWORD"]
+
+[metadata]
+display_name = "WasedaP2P (P7 fixture)"
+description  = "Waseda P2P backend migrated to RFC dependency-contract grammar"
+author       = "ato"
+
+[dependencies.db]
+capsule  = "capsule://ato/postgres@16"
+contract = "service@1"
+
+[dependencies.db.parameters]
+database = "wasedap2p"
+
+[dependencies.db.credentials]
+password = "{{env.PG_PASSWORD}}"
+
+[dependencies.db.state]
+name = "data"
+
+[targets.app]
+runtime         = "source"
+driver          = "python"
+runtime_version = "3.11.10"
+working_dir     = "backend"
+run             = "python -m uvicorn main:app --host 127.0.0.1 --port 8000"
+port            = 8000
+needs           = ["db"]
+required_env    = ["SECRET_KEY"]
+
+[targets.app.env]
+ALGORITHM       = "HS256"
+DATABASE_URL    = "{{deps.db.runtime_exports.DATABASE_URL}}"
+FRONTEND_URL    = "http://localhost:5173"
+SMTP_HOST       = "smtp.gmail.com"
+SMTP_PORT       = "587"
+SMTP_USERNAME   = ""
+SMTP_PASSWORD   = ""
+SMTP_FROM_EMAIL = ""
+SMTP_USE_TLS    = "true"
+SMTP_USE_SSL    = "false"
+
+[isolation]
+# SECRET_KEY: target reads directly via env injection.
+# PG_PASSWORD intentionally NOT in allow_env: credential resolver pulls
+# it from the host env into Ato runtime memory only, materializes via
+# Rule M1 TempFile for the postgres provider, and consumer never sees
+# the raw value (consumer connects via DATABASE_URL where the password
+# is embedded in the URL — that value is also redacted in logs because
+# the provider's runtime_exports.DATABASE_URL has secret = true).
+allow_env = ["SECRET_KEY"]
+
+[network]
+egress_allow = ["smtp.gmail.com"]
