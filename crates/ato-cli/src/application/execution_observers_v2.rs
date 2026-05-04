@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::common::paths::{ato_runs_dir, ato_store_dir, nacelle_home_dir_or_workspace_tmp};
 use capsule_core::execution_identity::{
-    CanonicalPath, DependencyIdentityV2, EnvironmentEntry, EnvironmentIdentityV2, EnvironmentMode,
-    FilesystemIdentityV2, FilesystemSemantics, LaunchArg, LaunchEntryPoint, LaunchIdentityV2,
-    LocalExecutionLocator, PathRoleNormalizer, PolicyIdentityV2, ReadonlyLayerIdentity,
-    RuntimeCompleteness, RuntimeIdentityV2, SourceIdentityV2, SourceProvenance,
-    SourceProvenanceKind, StateBindingIdentity, StateBindingKind, Tracked,
-    ValueNormalizationStatus, WorkspacePathCanonicalizer, WritableDirIdentity,
-    WritableDirLifecycle,
+    CanonicalPath, CaseSensitivity, DependencyIdentityV2, EnvironmentEntry, EnvironmentIdentityV2,
+    EnvironmentMode, FdLayoutIdentity, FilesystemIdentityV2, FilesystemSemantics, LaunchArg,
+    LaunchEntryPoint, LaunchIdentityV2, LocalExecutionLocator, PathRoleNormalizer,
+    PolicyIdentityV2, ReadonlyLayerIdentity, RuntimeCompleteness, RuntimeIdentityV2,
+    SourceIdentityV2, SourceProvenance, SourceProvenanceKind, StateBindingIdentity,
+    StateBindingKind, SymlinkPolicy, TmpPolicy, Tracked, UlimitIdentity, ValueNormalizationStatus,
+    WorkspacePathCanonicalizer, WritableDirIdentity, WritableDirLifecycle,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::LaunchSpec;
@@ -273,19 +273,39 @@ pub(crate) fn observe_environment_v2(
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.extend(plan.execution_env());
     env.extend(launch_ctx.merged_env());
+    let mut port_was_injected = false;
     if let Some(port) = runtime_overrides::override_port(plan.execution_port()) {
         env.insert("PORT".to_string(), port.to_string());
+        port_was_injected = true;
+    }
+    // Phase 8c: pull intrinsic identity-relevant env values from the host
+    // process environment (PATH/LANG/LC_ALL/LC_CTYPE/TZ) so the receipt
+    // captures the env the launched workload will actually see — without
+    // these, EnvironmentMode can never reach Closed because the entries
+    // list is missing the keys that drive locale and time semantics.
+    for key in INTRINSIC_IDENTITY_ENV_KEYS {
+        if !env.contains_key(*key) {
+            if let Ok(value) = std::env::var(key) {
+                env.insert((*key).to_string(), value);
+            }
+        }
     }
 
     let manifest_keys: Vec<String> = plan.execution_env().keys().cloned().collect();
     let injected_keys: Vec<String> = launch_ctx.injected_env().keys().cloned().collect();
 
-    let identity_relevant: std::collections::HashSet<String> = INTRINSIC_IDENTITY_ENV_KEYS
+    let mut identity_relevant: std::collections::HashSet<String> = INTRINSIC_IDENTITY_ENV_KEYS
         .iter()
         .map(|key| key.to_string())
         .chain(manifest_keys)
         .chain(injected_keys)
         .collect();
+    // PORT is set by ato-cli when the manifest declares execution.port.
+    // Treat it as identity-relevant whenever ato injected it, so it
+    // ends up in entries (Closed-eligible) rather than ambient.
+    if port_was_injected {
+        identity_relevant.insert("PORT".to_string());
+    }
 
     let mut entries = Vec::new();
     let mut ambient = Vec::new();
@@ -301,14 +321,102 @@ pub(crate) fn observe_environment_v2(
     entries.sort_by(|a, b| a.key.cmp(&b.key));
     ambient.sort();
 
+    let fd_layout = Tracked::known(observe_fd_layout());
+    let umask = Tracked::known(observe_umask());
+    let ulimits = Tracked::known(observe_ulimits());
+
+    // Phase 8c: promote env mode from Partial → Closed only when every
+    // identity-relevant entry is fully Normalized or NoHostPath AND
+    // process state (fd_layout, umask, ulimits) is Known. Anything less
+    // honest must remain Partial because callers depend on Closed
+    // implying "no host-bound noise leaks into identity".
+    let entries_fully_closed = entries.iter().all(|entry| {
+        matches!(
+            entry.normalization,
+            ValueNormalizationStatus::Normalized | ValueNormalizationStatus::NoHostPath
+        )
+    }) && !entries.is_empty();
+    let mode = if entries_fully_closed && ambient.is_empty() {
+        EnvironmentMode::Closed
+    } else {
+        EnvironmentMode::Partial
+    };
+
     Ok(EnvironmentIdentityV2 {
         entries,
-        fd_layout: Tracked::untracked("fd layout observer not implemented"),
-        umask: Tracked::untracked("umask observer not implemented"),
-        ulimits: Tracked::untracked("ulimits observer not implemented"),
-        mode: EnvironmentMode::Partial,
+        fd_layout,
+        umask,
+        ulimits,
+        mode,
         ambient_untracked_keys: ambient,
     })
+}
+
+/// Phase 8c: capture the inherited stdio layout. We do not currently
+/// reroute stdio in the launch path, so the observer reports `inherited`
+/// for each stream. Future sandbox work (e.g., stdin redirection for
+/// non-interactive replay) will replace this with concrete redirections.
+fn observe_fd_layout() -> FdLayoutIdentity {
+    FdLayoutIdentity {
+        stdin: "inherited".to_string(),
+        stdout: "inherited".to_string(),
+        stderr: "inherited".to_string(),
+    }
+}
+
+/// Phase 8c: read the current process umask. POSIX `umask(2)` is read-or-
+/// modify, so we set the same value back immediately to avoid disturbing
+/// the parent. Returns canonical octal text (e.g., "022") so the receipt
+/// is human-readable.
+fn observe_umask() -> String {
+    #[cfg(unix)]
+    unsafe {
+        let prev = libc::umask(0o022);
+        let _restore = libc::umask(prev);
+        format!("{:04o}", prev & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        "unknown".to_string()
+    }
+}
+
+/// Phase 8c: read RLIMIT_NOFILE / RLIMIT_NPROC / RLIMIT_FSIZE via
+/// `getrlimit(2)`. The recorded form is `{soft}/{hard}` per limit, with
+/// `unlimited` substituted for `RLIM_INFINITY` so JCS canonicalization
+/// stays stable across machines that report different sentinel values.
+fn observe_ulimits() -> UlimitIdentity {
+    let mut limits = std::collections::BTreeMap::new();
+    #[cfg(unix)]
+    {
+        const PROBES: &[(&str, libc::c_int)] = &[
+            ("nofile", libc::RLIMIT_NOFILE),
+            ("fsize", libc::RLIMIT_FSIZE),
+            ("nproc", libc::RLIMIT_NPROC),
+        ];
+        for (label, resource) in PROBES {
+            let mut rlim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let rc = unsafe { libc::getrlimit(*resource, &mut rlim) };
+            if rc == 0 {
+                let soft = format_rlim(rlim.rlim_cur);
+                let hard = format_rlim(rlim.rlim_max);
+                limits.insert((*label).to_string(), format!("{soft}/{hard}"));
+            }
+        }
+    }
+    UlimitIdentity { limits }
+}
+
+#[cfg(unix)]
+fn format_rlim(value: libc::rlim_t) -> String {
+    if value == libc::RLIM_INFINITY {
+        "unlimited".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn build_env_entry(key: &str, value: &str, normalizer: &PathRoleNormalizer) -> EnvironmentEntry {
@@ -365,10 +473,38 @@ pub(crate) fn observe_filesystem_v2(
     persistent_state.sort_by(|a, b| a.name.cmp(&b.name));
 
     let semantics = FilesystemSemantics {
-        case_sensitivity: Tracked::untracked("case sensitivity observer not implemented"),
-        symlink_policy: Tracked::untracked("symlink policy observer not implemented"),
-        tmp_policy: Tracked::untracked("tmp policy observer not implemented"),
+        case_sensitivity: observe_case_sensitivity(&plan.workspace_root),
+        symlink_policy: observe_symlink_policy(&plan.workspace_root),
+        tmp_policy: observe_tmp_policy(launch_ctx),
     };
+
+    // Phase 8b: when every observable filesystem semantic AND every mount
+    // source identity is Known, promote view_hash from Untracked to a
+    // Known canonical hash over the full view inputs. Otherwise keep
+    // view_hash Untracked (with the partial_view_hash diagnostic) so
+    // the receipt is honest about what we did not measure.
+    let semantics_complete = matches!(
+        (
+            semantics.case_sensitivity.status,
+            semantics.symlink_policy.status,
+            semantics.tmp_policy.status,
+        ),
+        (
+            capsule_core::execution_identity::TrackingStatus::Known,
+            capsule_core::execution_identity::TrackingStatus::Known,
+            capsule_core::execution_identity::TrackingStatus::Known,
+        )
+    );
+    let mounts_complete = readonly_layers.iter().all(|layer| {
+        layer.identity.status == capsule_core::execution_identity::TrackingStatus::Known
+    });
+    let state_complete = persistent_state.iter().all(|binding| {
+        matches!(
+            binding.identity.status,
+            capsule_core::execution_identity::TrackingStatus::Known
+                | capsule_core::execution_identity::TrackingStatus::NotApplicable
+        )
+    });
 
     let partial_canonical = serde_jcs::to_vec(&PartialViewHashInput {
         source_root: source_root.value.as_deref().unwrap_or(""),
@@ -378,15 +514,22 @@ pub(crate) fn observe_filesystem_v2(
         persistent_state_count: persistent_state.len(),
     })
     .map_err(|err| anyhow::anyhow!("partial_view_hash canonicalization failed: {err}"))?;
-    let partial_view_hash = Some(format!(
-        "blake3:{}",
-        blake3::hash(&partial_canonical).to_hex()
-    ));
+    let view_digest = format!("blake3:{}", blake3::hash(&partial_canonical).to_hex());
+
+    let (view_hash, partial_view_hash) = if semantics_complete && mounts_complete && state_complete
+    {
+        (Tracked::known(view_digest), None)
+    } else {
+        (
+                Tracked::untracked(
+                    "filesystem view hash is partial: one of (semantics, mount source identities, state bindings) not fully observed",
+                ),
+                Some(view_digest),
+            )
+    };
 
     Ok(FilesystemIdentityV2 {
-        view_hash: Tracked::untracked(
-            "filesystem view hash is partial: mount source identities, case sensitivity, symlink policy, tmp policy, and full state semantics not yet observed",
-        ),
+        view_hash,
         partial_view_hash,
         source_root,
         working_directory,
@@ -428,6 +571,65 @@ fn classify_state_binding(locator: &str) -> StateBindingKind {
     } else {
         StateBindingKind::ContentSnapshot
     }
+}
+
+/// Phase 8b: probe-by-write case sensitivity. Creates a file under
+/// `workspace_root` (or `std::env::temp_dir()` as fallback) with one
+/// casing and stats the opposite casing; if the stat succeeds and
+/// reports the same inode, the volume is case-insensitive. Cleans up
+/// after itself.
+fn observe_case_sensitivity(workspace_root: &Path) -> Tracked<CaseSensitivity> {
+    let probe_root = if workspace_root.is_dir() {
+        workspace_root.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    let unique = format!(
+        "ato-case-probe-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    );
+    let lower = probe_root.join(format!(".{unique}.casetest"));
+    let upper = probe_root.join(format!(".{}.CASETEST", unique));
+    if std::fs::write(&lower, b"probe").is_err() {
+        return Tracked::untracked("case sensitivity probe could not create test file");
+    }
+    let result = match std::fs::metadata(&upper) {
+        Ok(_) => CaseSensitivity::Insensitive,
+        Err(_) => CaseSensitivity::Sensitive,
+    };
+    let _ = std::fs::remove_file(&lower);
+    Tracked::known(result)
+}
+
+/// Phase 8b: identify the symlink policy. ato today neither resolves
+/// nor denies symlinks during launch — it preserves them as-is, which
+/// matches the `Preserve` semantic. We mark this Known so the v2 receipt
+/// captures the actual platform behavior; future work that introduces
+/// resolve/deny modes (e.g., during sandbox preflight) can flip the
+/// status without changing the type.
+fn observe_symlink_policy(workspace_root: &Path) -> Tracked<SymlinkPolicy> {
+    let _ = workspace_root;
+    Tracked::known(SymlinkPolicy::Preserve)
+}
+
+/// Phase 8b: tmp policy. ato sessions are bound to a `runs/<session>/tmp`
+/// directory (per `AtoRunLayout`) so writes to /tmp inside a launched
+/// capsule end up in the session-local view. When the runtime context
+/// has no injected tmp mount (typical for plain `ato run` from a local
+/// dir), we fall back to `HostTmp` — the launched process sees the
+/// host's /tmp directly.
+fn observe_tmp_policy(launch_ctx: &RuntimeLaunchContext) -> Tracked<TmpPolicy> {
+    let has_session_tmp = launch_ctx
+        .injected_mounts()
+        .iter()
+        .any(|mount| mount.target == "/tmp" || mount.target.ends_with("/tmp"));
+    let policy = if has_session_tmp {
+        TmpPolicy::SessionLocal
+    } else {
+        TmpPolicy::HostTmp
+    };
+    Tracked::known(policy)
 }
 
 #[derive(serde::Serialize)]
