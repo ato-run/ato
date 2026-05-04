@@ -1,11 +1,23 @@
 ---
-title: "Implementation Plan: Capsule Dependency Contracts (RFC v1.5)"
-status: planning
+title: "Implementation Plan: Capsule Dependency Contracts (RFC v1.6)"
+status: complete
 date: "2026-05-04"
+completed: "2026-05-05"
 related:
   - "docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md"
-  - "docs/plan_phase13b9_guest_jsonrpc_migration_20260429.md"
+  - "docs/handoff_p5_phase3_ato_run_integration_20260504.md"
 ---
+
+> **Status (2026-05-05)**: P0–P7 all closed. RFC v1.6 implemented end-to-end.
+> ato-cli 1210 passing / 0 failing / 1 ignored (P7 host-bound real-Postgres E2E
+> behind `--ignored`). capsule-core 530 / 0. All 9 RFC §3 v1 invariants
+> enforced fail-closed at lock time and verified at run time against a
+> real `/opt/homebrew/bin/postgres` provider.
+>
+> Final commit chain on main: `5c9eb67d` (P3 verifier) →
+> `5433a740` (P4 credential) → `7509a0cf` (P3 bridge) →
+> `22ef0c68` (P5 phase 1) → `e4836ea5` (P5 phase 2) →
+> `c7c1d6b8` (P5 phase 3) → `7cb61d48` (P7 real-Postgres E2E).
 
 # Implementation Plan: Capsule Dependency Contracts
 
