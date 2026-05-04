@@ -78,6 +78,7 @@ fn cli_bindings_override_locked_dependency_bindings() {
         )]),
         parameters: BTreeMap::new(),
         credentials: BTreeMap::new(),
+        identity_exports: BTreeMap::new(),
         resolved_version: Some("1.0.0".to_string()),
         digest: None,
         sha256: None,
