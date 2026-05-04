@@ -15,7 +15,9 @@ use capsule_core::execution_identity::{
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::LaunchSpec;
+use capsule_core::lockfile::CapsuleLock;
 use capsule_core::router::ManifestData;
+use serde::Serialize;
 
 use crate::application::build_materialization::BuildObservation;
 use crate::application::execution_observers::{hash_source_tree, hash_tree, is_sensitive_env_key};
@@ -160,6 +162,7 @@ pub(crate) fn observe_dependencies_v2(
         launch_ctx,
         build_observation,
     )?;
+    let direct_capsule_dependencies = read_direct_capsule_dependency_inputs(plan)?;
 
     let derivation_inputs = build_observation.map(|observation| {
         let install_tokens = shell_words::split(&observation.command)
@@ -195,8 +198,23 @@ pub(crate) fn observe_dependencies_v2(
         }
     });
 
+    let derivation_hash = if direct_capsule_dependencies.is_empty() {
+        dep_v1.derivation_hash
+    } else {
+        match dep_v1.derivation_hash.status {
+            capsule_core::execution_identity::TrackingStatus::Known
+            | capsule_core::execution_identity::TrackingStatus::NotApplicable => {
+                Tracked::known(hash_dependency_derivation_inputs(
+                    dep_v1.derivation_hash.value,
+                    direct_capsule_dependencies,
+                )?)
+            }
+            _ => dep_v1.derivation_hash,
+        }
+    };
+
     Ok(DependencyIdentityV2 {
-        derivation_hash: dep_v1.derivation_hash,
+        derivation_hash,
         output_hash: dep_v1.output_hash,
         derivation_inputs,
     })
@@ -218,6 +236,75 @@ fn build_observation_lockfile_digests(plan: &ManifestData) -> BTreeMap<String, S
         }
     }
     digests
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DirectCapsuleDependencyHashInput {
+    alias: String,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contract: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    parameters: BTreeMap<String, capsule_core::types::ParamValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    identity_exports: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DependencyDerivationHashInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_derivation_hash: Option<String>,
+    direct_capsule_dependencies: Vec<DirectCapsuleDependencyHashInput>,
+}
+
+fn read_direct_capsule_dependency_inputs(
+    plan: &ManifestData,
+) -> Result<Vec<DirectCapsuleDependencyHashInput>> {
+    if !plan.lock_path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let bytes = std::fs::read(&plan.lock_path).with_context(|| {
+        format!(
+            "failed to read capsule lock for dependency identity: {}",
+            plan.lock_path.display()
+        )
+    })?;
+    let lock: CapsuleLock = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse capsule lock for dependency identity: {}",
+            plan.lock_path.display()
+        )
+    })?;
+
+    let mut dependencies = lock
+        .capsule_dependencies
+        .into_iter()
+        .map(|dependency| DirectCapsuleDependencyHashInput {
+            alias: dependency.name,
+            source: dependency.source,
+            resolved_version: dependency.resolved_version,
+            contract: dependency.contract,
+            parameters: dependency.parameters,
+            identity_exports: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(dependencies)
+}
+
+fn hash_dependency_derivation_inputs(
+    build_derivation_hash: Option<String>,
+    direct_capsule_dependencies: Vec<DirectCapsuleDependencyHashInput>,
+) -> Result<String> {
+    let canonical = serde_jcs::to_vec(&DependencyDerivationHashInput {
+        build_derivation_hash,
+        direct_capsule_dependencies,
+    })
+    .context("failed to canonicalize dependency derivation inputs")?;
+    Ok(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
 }
 
 pub(crate) fn observe_runtime_v2(
@@ -1073,6 +1160,96 @@ env_allowlist = ["DATABASE_URL"]
         assert!(environment.ambient_untracked_keys.is_empty());
     }
 
+    #[test]
+    fn dependency_derivation_hash_changes_when_contract_parameters_change() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut first_plan = sample_plan(workspace.path().to_path_buf());
+        write_capsule_lock(
+            &workspace
+                .path()
+                .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME),
+            "appdb",
+            "secret-a",
+        );
+        first_plan.lock_path = workspace
+            .path()
+            .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME);
+
+        let mut second_plan = sample_plan(workspace.path().to_path_buf());
+        write_capsule_lock(
+            &workspace.path().join("capsule-alt.lock.json"),
+            "otherdb",
+            "secret-a",
+        );
+        second_plan.lock_path = workspace.path().join("capsule-alt.lock.json");
+
+        let launch_spec =
+            capsule_core::launch_spec::derive_launch_spec(&first_plan).expect("derive launch spec");
+        let first = observe_dependencies_v2(
+            &first_plan,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe first");
+        let second = observe_dependencies_v2(
+            &second_plan,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe second");
+
+        assert_ne!(first.derivation_hash.value, second.derivation_hash.value);
+    }
+
+    #[test]
+    fn dependency_derivation_hash_ignores_contract_credentials() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut first_plan = sample_plan(workspace.path().to_path_buf());
+        write_capsule_lock(
+            &workspace
+                .path()
+                .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME),
+            "appdb",
+            "secret-a",
+        );
+        first_plan.lock_path = workspace
+            .path()
+            .join(capsule_core::lockfile::CAPSULE_LOCK_FILE_NAME);
+
+        let mut second_plan = sample_plan(workspace.path().to_path_buf());
+        write_capsule_lock(
+            &workspace.path().join("capsule-rotated.lock.json"),
+            "appdb",
+            "secret-b",
+        );
+        second_plan.lock_path = workspace.path().join("capsule-rotated.lock.json");
+
+        let launch_spec =
+            capsule_core::launch_spec::derive_launch_spec(&first_plan).expect("derive launch spec");
+        let first = observe_dependencies_v2(
+            &first_plan,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe first");
+        let second = observe_dependencies_v2(
+            &second_plan,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe second");
+
+        assert_eq!(first.derivation_hash.value, second.derivation_hash.value);
+    }
+
     fn sample_plan(workspace_root: PathBuf) -> ManifestData {
         sample_plan_from_manifest(
             workspace_root,
@@ -1104,5 +1281,57 @@ run = "main.py"
             std::collections::HashMap::new(),
         )
         .expect("execution descriptor")
+    }
+
+    fn sample_runtime_identity() -> RuntimeIdentityV2 {
+        RuntimeIdentityV2 {
+            declared: Some("source/python@3.11".to_string()),
+            resolved_ref: Tracked::known("python@3.11".to_string()),
+            binary_hash: Tracked::unknown("not needed for dependency tests"),
+            dynamic_linkage: Tracked::unknown("not needed for dependency tests"),
+            completeness: RuntimeCompleteness::DeclaredOnly,
+            platform: capsule_core::execution_identity::PlatformIdentity {
+                os: std::env::consts::OS.to_string(),
+                arch: std::env::consts::ARCH.to_string(),
+                libc: "unknown".to_string(),
+            },
+        }
+    }
+
+    fn write_capsule_lock(path: &Path, database: &str, password: &str) {
+        let lock = capsule_core::lockfile::CapsuleLock {
+            version: "1".to_string(),
+            meta: capsule_core::lockfile::LockMeta {
+                created_at: "2026-05-04T00:00:00Z".to_string(),
+                manifest_hash: "sha256:deadbeef".to_string(),
+            },
+            allowlist: None,
+            capsule_dependencies: vec![capsule_core::lockfile::LockedCapsuleDependency {
+                name: "db".to_string(),
+                source: "capsule://ato/acme-postgres@16".to_string(),
+                source_type: "store".to_string(),
+                contract: Some("service@1".to_string()),
+                injection_bindings: BTreeMap::new(),
+                parameters: BTreeMap::from([(
+                    "database".to_string(),
+                    capsule_core::types::ParamValue::String(database.to_string()),
+                )]),
+                credentials: BTreeMap::from([(
+                    "password".to_string(),
+                    serde_json::from_str(&format!("\"{{{{env.{password}}}}}\""))
+                        .expect("credential template"),
+                )]),
+                resolved_version: Some("16.0.0".to_string()),
+                digest: Some("blake3:deadbeef".to_string()),
+                sha256: Some("sha256:beadfeed".to_string()),
+                artifact_url: Some("https://example.test/postgres.capsule".to_string()),
+            }],
+            injected_data: std::collections::HashMap::new(),
+            tools: None,
+            runtimes: None,
+            targets: std::collections::HashMap::new(),
+        };
+        std::fs::write(path, serde_json::to_vec(&lock).expect("serialize lock"))
+            .expect("write lock");
     }
 }
