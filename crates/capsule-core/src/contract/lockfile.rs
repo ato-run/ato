@@ -1880,8 +1880,25 @@ fn semantic_manifest_hash(manifest: &CapsuleManifest) -> Result<String> {
 fn semantic_manifest_hash_from_text(text: &str) -> Result<String> {
     // Use serde directly — the text may be compat-normalized TOML (with v0.2-style `entrypoint`
     // in targets) which CapsuleManifest::from_toml would reject via reject_v03_legacy_fields.
-    let manifest: CapsuleManifest = toml::from_str(text)
+    //
+    // However, v0.3 also supports a legacy top-level `dependencies = "<file>"` (a string ref to
+    // a language-pkg file like requirements.txt) for the inline single-target form. The new RFC
+    // dependency-contract grammar (CAPSULE_DEPENDENCY_CONTRACTS.md §5) uses
+    // `[dependencies.<X>]` (a table) at top level. Both share the same key, so before strict
+    // serde we strip the legacy string form: it is meaningful only as a per-target field and is
+    // already folded down by the full v0.3 normalizer in `normalize_v03_manifest_value_with_path`.
+    // For hashing we just want strict deserialize to succeed; the value's contribution is
+    // captured via `targets.<x>.dependencies` after that normalizer runs in the lock pipeline.
+    let mut value: toml::Value = toml::from_str(text)
         .map_err(|e| CapsuleError::Config(format!("Failed to parse manifest schema: {}", e)))?;
+    if let Some(table) = value.as_table_mut() {
+        if matches!(table.get("dependencies"), Some(v) if v.is_str()) {
+            table.remove("dependencies");
+        }
+    }
+    let manifest: CapsuleManifest = value.try_into().map_err(|e: toml::de::Error| {
+        CapsuleError::Config(format!("Failed to parse manifest schema: {}", e))
+    })?;
     semantic_manifest_hash(&manifest)
 }
 

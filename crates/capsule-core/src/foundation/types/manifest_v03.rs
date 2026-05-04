@@ -1756,6 +1756,22 @@ pub(super) fn normalize_v03_manifest_value_with_path(
             .unwrap_or("app")
             .to_string();
 
+        // Legacy v0.3 inline-target form supports `dependencies = "<file>"`
+        // (e.g. requirements.txt) at top level as a per-target field. The new
+        // RFC dependency-contract grammar (CAPSULE_DEPENDENCY_CONTRACTS.md §5)
+        // uses `[dependencies.<X>]` (table) at top level. They share the same
+        // key, so v0.3 normalization must demux: a string here means the
+        // legacy package-deps file ref → fold into target. A table is the new
+        // RFC grammar → leave at top level for the new schema parser.
+        let legacy_dependencies_file = table
+            .get("dependencies")
+            .filter(|value| value.is_str())
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned);
+        if legacy_dependencies_file.is_some() {
+            table.remove("dependencies");
+        }
+
         let mut targets_table = table
             .remove("targets")
             .and_then(|value| value.as_table().cloned())
@@ -1766,6 +1782,9 @@ pub(super) fn normalize_v03_manifest_value_with_path(
             .unwrap_or_default();
         let normalized_target = normalize_v03_target_table(&default_target, &table)?;
         target_table = shallow_merge_v03_tables(&target_table, &normalized_target);
+        if let Some(file_ref) = legacy_dependencies_file {
+            target_table.insert("dependencies".to_string(), toml::Value::String(file_ref));
+        }
         let external_injection = normalize_v03_external_injection_table(&default_target, &table)?;
         if !external_injection.is_empty() {
             let mut normalized_table = Table::new();
