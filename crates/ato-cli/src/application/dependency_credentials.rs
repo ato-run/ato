@@ -296,10 +296,11 @@ pub fn materialize_credential(
             // PermissionsExt is unix-only).
             #[cfg(unix)]
             {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                    .map_err(|err| CredentialError::MaterializationFailure {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                    |err| CredentialError::MaterializationFailure {
                         detail: format!("chmod 0600 on {}: {}", path.display(), err),
-                    })?;
+                    },
+                )?;
             }
             file.write_all(secret.as_str().as_bytes()).map_err(|err| {
                 CredentialError::MaterializationFailure {

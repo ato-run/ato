@@ -27,7 +27,6 @@
 //!   an error so callers can surface the limitation without claiming support.
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -152,6 +151,7 @@ fn project_inner(payload: &Path, target: &Path) -> Result<ProjectionOutcome> {
 #[cfg(target_os = "macos")]
 fn try_clonefile(src: &Path, dst: &Path) -> Result<Option<ProjectionOutcome>> {
     use std::ffi::CString;
+    use std::io;
     use std::os::unix::ffi::OsStrExt;
 
     let src_c = CString::new(src.as_os_str().as_bytes())
