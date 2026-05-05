@@ -4,12 +4,12 @@ status: accepted
 date: "2026-03-14"
 author: "@egamikohsuke"
 ssot:
-  - "apps/ato-cli/core/src/types/manifest.rs"
+  - "crates/capsule-core/src/foundation/types/manifest.rs"
 ---
 
 # Capsule Manifest Specification for ato-cli (Current)
 
-この文書は、現在の `ato-cli` が実際に読み取っている `capsule.toml` 契約をまとめたものである。将来案や Store/Theater 側の理想仕様ではなく、`ato open` / `ato build` / `ato validate` / `ato inspect requirements` / `ato publish` で使われる現行実装を優先する。
+この文書は、現在の `ato-cli` / `capsule-core` が実際に読み取っている `capsule.toml` 契約をまとめたものである。将来案や Store/Theater 側の理想仕様ではなく、`ato run` / `ato build` / `ato validate` / `ato inspect requirements` / `ato publish` で使われる現行実装を優先する。
 
 ## 1. 位置づけ
 
@@ -27,8 +27,8 @@ ssot:
 | --- | --- | --- |
 | `schema_version` | Required | `"0.3"` のみ受理する |
 | `name` | Required | kebab-case、長さ 3..64 |
-| `version` | Required | semver |
-| `type` | Required | `app` / `tool` / `inference` |
+| `version` | Optional | 空文字は未設定として扱える |
+| `type` | Required | `app` / `tool` / `inference` / `job` / `library` |
 | `default_target` | Required | `[targets]` に実在する label を指す必要がある |
 | `[targets.<label>]` | Required | 少なくとも 1 つ必要 |
 
@@ -47,7 +47,7 @@ driver = "native"
 run = "./hello"
 ```
 
-Node / Deno / Python を source target として使う場合は、`runtime_version` まで固定するのが現行契約である。
+Node / Deno / Python を source target として使う場合は、`runtime_version` を固定する運用が基本である。
 
 ```toml
 schema_version = "0.3"
@@ -128,6 +128,12 @@ run = "main.py"
 - 実行計画の target summary では dynamic web driver (`node` / `deno` / `python`) が `runtime = "source"` + `driver = "<suffix>"` として表示されることがある
 - この場合でも `render_strategy = "web"` と `port` が web 表示契約を保持するため、Desktop / web pane は web capsule として扱う
 - `web/static` は静的配布契約なので `runtime = "web"` + `driver = "static"` を維持する
+
+### 4.5 v0.3 flat-surface compatibility
+
+- 現在の router は `schema_version = "0.3"` かつ `[targets]` を持たない flat surface も受理できる
+- この場合は `run` / `packages` などの v0.3 field から実行 target を合成し、内部 routing model へ正規化する
+- lock-backed 実行では `ato.lock.json` から compatibility manifest bridge を再構成する
 
 ### 4.3 `runtime = "wasm"`
 

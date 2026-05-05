@@ -53,18 +53,20 @@ Preview は author intent を書き換えない derived state として扱う。
 
 CLI の front-door は `run`, `decap`, `encap` の 3 つに固定する。物語は `Try -> Keep -> Share` とし、他コマンドは互換・高度機能として help 上の優先度を下げる。
 
-- `ato run [path|publisher/slug|github.com/owner/repo|https://ato.run/s/<id>] [-t <label>] [--entry <id>] [--env-file <path>] [--prompt-env] [--watch] [--background] [--nacelle] [--registry] [--enforcement] [-y|--yes]`
+  - `ato run [path|publisher/slug|github.com/owner/repo|https://ato.run/s/<id>|capsule://...] [-t <label>] [--entry <id>] [--env-file <path>] [--prompt-env] [--watch] [--background] [--nacelle] [--registry] [--enforcement] [-y|--yes]`
   - 既定で `path="."`。`.capsule` または `capsule.toml` を実行。
   - `run` は常に ephemeral execution とする。repo や workspace を永続配置してはならない。
-  - `capsule://...` canonical handle は Phase 1 では拒否する。CLI の run surface は terse ref と local path のみに保つ。
+  - `capsule://...` canonical handle は `run` で受理し、内部で canonical form に正規化してから通常の run path に流す。
   - `github.com/owner/repo` 入力は PreviewSession を内部生成し、`preview metadata` → optional retry/manual edit → build → promotion → installed run の順で進む。
   - share URL (`https://ato.run/s/<id>` / `https://ato.run/s/<id>@r<revision>`) は first-class input として受理し、mutable URL は内部で immutable revision に固定してから run / next-step を組み立てる。
+  - local `share.spec.json` / `share.lock.json` も `run` 入力として受理する。
   - workspace target を run する場合、resolver は runnable `entries[]` を返し、`run` はその中から 1 つを ephemeral 実行する。
     - runnable entry が 1 つなら自動選択
     - 複数なら TTY では対話選択
     - non-TTY では `--entry <id>` を必須とする
-  - required env がある target は process failure まで進めず preflight で停止する。入力手段は `--env-file`, `--prompt-env`, target-local saved env reuse (`~/.ato/env/targets/<fingerprint>.env`) の 3 つを正本とする。
+  - required env がある target は process failure まで進めず preflight で停止する。入力手段は `--env-file`, `--prompt-env`, target-local saved env reuse (`~/.ato/env/targets/<fingerprint>.env`), and SecretStore reuse を正本とする。
   - `run` は repo 配下や target workspace 配下に `.env` を自動生成しない。
+  - 実行フローは hourglass pipeline（Install → Prepare → Build → Verify → DryRun → Execute）を通す。
   - MVP では独立した `ato preview` コマンドは持たず、`ato run github.com/...` の内部フローとして preview を実行する。
   - 実行前ガード（RuntimeGuard）:
     - `source/node` は Tier1 として扱い、`--unsafe` は不要。
