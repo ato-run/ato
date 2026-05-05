@@ -46,6 +46,21 @@ impl Drop for MockGitHubArchiveServer {
 }
 
 #[cfg(unix)]
+struct MockStoreInstallDraftServer {
+    base_url: String,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Drop for MockStoreInstallDraftServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("mock store install draft server thread");
+        }
+    }
+}
+
+#[cfg(unix)]
 struct FakeOllamaServer {
     base_url: String,
     shutdown: Arc<AtomicBool>,
@@ -209,6 +224,62 @@ fn spawn_github_archive_server(
     });
 
     MockGitHubArchiveServer {
+        base_url: format!("http://{}", addr),
+        handle: Some(handle),
+    }
+}
+
+#[cfg(unix)]
+fn spawn_store_install_draft_server(
+    owner: &'static str,
+    repo: &'static str,
+    resolved_sha: &'static str,
+) -> MockStoreInstallDraftServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local store server");
+    let addr = listener.local_addr().expect("store listener addr");
+    let response_body = serde_json::json!({
+        "repo": {
+            "owner": owner,
+            "repo": repo,
+            "fullName": format!("{owner}/{repo}"),
+            "defaultBranch": "main"
+        },
+        "capsuleToml": { "exists": true },
+        "repoRef": format!("{owner}/{repo}"),
+        "proposedRunCommand": null,
+        "proposedInstallCommand": "",
+        "resolvedRef": {
+            "ref": "refs/heads/main",
+            "sha": resolved_sha
+        },
+        "manifestSource": "repository",
+        "previewToml": null,
+        "capsuleHint": null,
+        "inferenceMode": "manifest",
+        "retryable": false
+    })
+    .to_string();
+
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept store request");
+        let mut request = [0u8; 4096];
+        let _ = stream.read(&mut request).expect("read store request");
+        let response = format!(
+            "HTTP/1.1 200 OK
+content-type: application/json
+content-length: {}
+connection: close
+
+{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write store response");
+    });
+
+    MockStoreInstallDraftServer {
         base_url: format!("http://{}", addr),
         handle: Some(handle),
     }
@@ -557,6 +628,8 @@ fn github_source_python_run_uses_repo_manifest_and_ollama_preflight() {
     );
     let index_server = spawn_static_file_server(index_root.clone());
     let ollama_server = spawn_fake_ollama_server(&["qwen2:7b"], "translated-by-fake-ollama");
+    let store_server =
+        spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
 
     let archive = build_github_tarball(
         "wolfreka-ollama-translator-abcdef",
@@ -606,6 +679,7 @@ fn github_source_python_run_uses_repo_manifest_and_ollama_preflight() {
         ])
         .env("HOME", home.path())
         .env("ATO_TOKEN", "test-token")
+        .env("ATO_STORE_API_URL", store_server.base_url.as_str())
         .env("ATO_GITHUB_API_BASE_URL", github_server.base_url.as_str())
         .env(
             "UV_INDEX_URL",
@@ -682,6 +756,7 @@ fn github_source_python_run_uses_repo_manifest_and_ollama_preflight() {
 fn github_source_python_run_errors_when_ollama_is_unreachable() {
     let temp = workspace_tempdir("github-ollama-missing-service-");
     let caller_dir = temp.path().join("caller");
+    let home = workspace_tempdir("github-ollama-missing-service-home-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
 
     let archive = build_github_tarball(
@@ -697,6 +772,8 @@ fn github_source_python_run_errors_when_ollama_is_unreachable() {
     );
     let github_server =
         spawn_github_archive_server("/repos/wolfreka/ollama-translator/tarball", archive);
+    let store_server =
+        spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
@@ -714,7 +791,9 @@ fn github_source_python_run_errors_when_ollama_is_unreachable() {
             "--output-dir",
             "./md-ja",
         ])
+        .env("HOME", home.path())
         .env("ATO_TOKEN", "test-token")
+        .env("ATO_STORE_API_URL", store_server.base_url.as_str())
         .env("ATO_GITHUB_API_BASE_URL", github_server.base_url.as_str())
         .output()
         .expect("run GitHub source missing Ollama fixture");
@@ -744,6 +823,7 @@ fn github_source_python_run_errors_when_ollama_is_unreachable() {
 fn github_source_python_run_errors_when_required_ollama_model_is_missing() {
     let temp = workspace_tempdir("github-ollama-missing-model-");
     let caller_dir = temp.path().join("caller");
+    let home = workspace_tempdir("github-ollama-missing-model-home-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
 
     let ollama_server = spawn_fake_ollama_server(&["llama3:8b"], "unused");
@@ -760,6 +840,8 @@ fn github_source_python_run_errors_when_required_ollama_model_is_missing() {
     );
     let github_server =
         spawn_github_archive_server("/repos/wolfreka/ollama-translator/tarball", archive);
+    let store_server =
+        spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
@@ -777,7 +859,9 @@ fn github_source_python_run_errors_when_required_ollama_model_is_missing() {
             "--output-dir",
             "./md-ja",
         ])
+        .env("HOME", home.path())
         .env("ATO_TOKEN", "test-token")
+        .env("ATO_STORE_API_URL", store_server.base_url.as_str())
         .env("ATO_GITHUB_API_BASE_URL", github_server.base_url.as_str())
         .output()
         .expect("run GitHub source missing model fixture");
@@ -805,6 +889,7 @@ fn github_source_python_run_errors_when_required_ollama_model_is_missing() {
 fn github_source_python_run_errors_when_required_external_service_is_unreachable() {
     let temp = workspace_tempdir("github-required-external-missing-service-");
     let caller_dir = temp.path().join("caller");
+    let home = workspace_tempdir("github-required-external-missing-service-home-");
     fs::create_dir_all(&caller_dir).expect("create caller dir");
 
     let archive = build_github_tarball(
@@ -819,13 +904,17 @@ fn github_source_python_run_errors_when_required_external_service_is_unreachable
     );
     let github_server =
         spawn_github_archive_server("/repos/wolfreka/generic-service-client/tarball", archive);
+    let store_server =
+        spawn_store_install_draft_server("wolfreka", "generic-service-client", "abcdef");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
         .arg("run")
         .arg("--yes")
         .arg("github.com/wolfreka/generic-service-client")
+        .env("HOME", home.path())
         .env("ATO_TOKEN", "test-token")
+        .env("ATO_STORE_API_URL", store_server.base_url.as_str())
         .env("ATO_GITHUB_API_BASE_URL", github_server.base_url.as_str())
         .output()
         .expect("run GitHub source missing required-external service fixture");

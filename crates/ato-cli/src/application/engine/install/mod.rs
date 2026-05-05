@@ -48,6 +48,7 @@ use persistence::*;
 const DEFAULT_STORE_DIR: &str = ".ato/store";
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
+const DEFAULT_STORE_API_TIMEOUT_SECS: u64 = 8;
 const SEGMENT_MAX_LEN: usize = 63;
 const LEASE_REFRESH_INTERVAL_SECS: u64 = 300;
 const NEGOTIATE_DEFAULT_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -752,12 +753,19 @@ pub fn parse_github_run_ref(input: &str) -> Result<Option<String>> {
     );
 }
 
+fn store_api_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(DEFAULT_STORE_API_TIMEOUT_SECS))
+        .build()
+        .with_context(|| "Failed to build store API client")
+}
+
 pub async fn fetch_github_install_draft(repository: &str) -> Result<GitHubInstallDraftResponse> {
     let normalized = normalize_github_repository(repository)?;
     let (owner, repo) = normalized
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repository must include owner/repo"))?;
-    let client = reqwest::Client::new();
+    let client = store_api_client()?;
     let endpoint = format!(
         "{}/v1/github/repos/{}/{}/install-draft",
         resolve_store_api_base_url(),
@@ -794,7 +802,7 @@ pub async fn retry_github_install_draft(
     let (owner, repo) = normalized
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repository must include owner/repo"))?;
-    let client = reqwest::Client::new();
+    let client = store_api_client()?;
     let endpoint = format!(
         "{}/v1/github/repos/{}/{}/install-draft/retry",
         resolve_store_api_base_url(),

@@ -279,28 +279,37 @@ fn prompt_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::shared_env_lock as env_lock;
 
-    #[test]
-    fn key_match_is_exact_for_five_elements() {
-        let record = ConsentRecord {
-            scoped_id: "publisher/app".to_string(),
-            version: "1.0.0".to_string(),
-            target_label: "cli".to_string(),
-            policy_segment_hash: "blake3:aaa".to_string(),
-            provisioning_policy_hash: "blake3:bbb".to_string(),
-            approved_at: "2026-01-01T00:00:00Z".to_string(),
-        };
+    use tempfile::TempDir;
 
-        assert_eq!(record.scoped_id, "publisher/app");
-        assert_eq!(record.version, "1.0.0");
-        assert_eq!(record.target_label, "cli");
-        assert_eq!(record.policy_segment_hash, "blake3:aaa");
-        assert_eq!(record.provisioning_policy_hash, "blake3:bbb");
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
     }
 
-    #[test]
-    fn zero_permission_plan_is_auto_consented() {
-        let plan = ExecutionPlan {
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(next) => std::env::set_var(key, next),
+                None => std::env::remove_var(key),
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn sample_plan() -> ExecutionPlan {
+        ExecutionPlan {
             schema_version: "1".to_string(),
             capsule: capsule_core::execution_plan::model::CapsuleRef {
                 scoped_id: "local/test".to_string(),
@@ -357,8 +366,68 @@ mod tests {
                     libc: "unknown".to_string(),
                 },
             },
+        }
+    }
+
+    #[test]
+    fn key_match_is_exact_for_five_elements() {
+        let record = ConsentRecord {
+            scoped_id: "publisher/app".to_string(),
+            version: "1.0.0".to_string(),
+            target_label: "cli".to_string(),
+            policy_segment_hash: "blake3:aaa".to_string(),
+            provisioning_policy_hash: "blake3:bbb".to_string(),
+            approved_at: "2026-01-01T00:00:00Z".to_string(),
         };
 
+        assert_eq!(record.scoped_id, "publisher/app");
+        assert_eq!(record.version, "1.0.0");
+        assert_eq!(record.target_label, "cli");
+        assert_eq!(record.policy_segment_hash, "blake3:aaa");
+        assert_eq!(record.provisioning_policy_hash, "blake3:bbb");
+    }
+
+    #[test]
+    fn zero_permission_plan_is_auto_consented() {
+        let plan = sample_plan();
+
         assert!(is_zero_permission_plan(&plan));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn seed_consent_hardens_store_permissions() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+        let mut plan = sample_plan();
+        plan.runtime
+            .policy
+            .network
+            .allow_hosts
+            .push("api.example.com".to_string());
+
+        seed_consent(&plan).expect("seed consent store");
+
+        let consent_dir = home.path().join(".ato").join("consent");
+        let consent_file = consent_dir.join(CONSENT_FILE_NAME);
+        let dir_mode = fs::metadata(&consent_dir)
+            .expect("consent dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = fs::metadata(&consent_file)
+            .expect("consent file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
     }
 }

@@ -7,33 +7,38 @@ use fail_closed_support::*;
 
 #[test]
 #[cfg(unix)]
-fn consent_store_permissions_are_hardened() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn missing_consent_in_non_interactive_mode_does_not_create_consent_store() {
     let (_workspace, fixture) = prepare_fixture_workspace("network-exfil-capsule");
     let home = tempfile::TempDir::new().expect("failed to create temporary HOME");
+    let nacelle_dir = tempfile::TempDir::new().expect("failed to create temp dir for mock nacelle");
+    let nacelle_path = nacelle_dir.path().join("nacelle");
+    write_mock_nacelle(&nacelle_path);
+    let nacelle_owned = nacelle_path.to_string_lossy().into_owned();
 
     let output = ato_cmd()
         .arg("run")
         .arg(&fixture)
+        .arg("--sandbox")
         .env("HOME", home.path())
+        .env("NACELLE_PATH", nacelle_owned)
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .output()
         .expect("failed to execute ato");
 
     assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ATO_ERR_POLICY_VIOLATION") || stderr.contains("E302"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("consent") || stderr.contains("ExecutionPlan consent"),
+        "stderr={stderr}"
+    );
 
     let consent_dir = home.path().join(".ato").join("consent");
-    let consent_file = consent_dir.join("executionplan_v1.jsonl");
-    assert!(consent_dir.exists());
-    assert!(consent_file.exists());
-
-    let dir_mode = fs::metadata(&consent_dir).unwrap().permissions().mode() & 0o777;
-    let file_mode = fs::metadata(&consent_file).unwrap().permissions().mode() & 0o777;
-
-    assert_eq!(dir_mode, 0o700);
-    assert_eq!(file_mode, 0o600);
+    assert!(!consent_dir.exists(), "consent store should not be created");
 }
 
 #[test]
