@@ -170,6 +170,11 @@ pub fn resolve_credential_template(
 /// Materialization channel choice. v1 default is `TempFile`; `EnvVar` is for
 /// providers that explicitly opt-in via env reading; `Stdin` is for
 /// providers whose `run` command can read the secret from stdin.
+// EnvVar / Stdin variants are part of the v1 API surface but only TempFile
+// is wired today (per Rule M1). The dormant variants are kept so providers
+// can opt in without churn — clippy's dead-code lint is suppressed for
+// that reason.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum MaterializationChannel {
     /// Write to `<state_dir>/.ato-cred-<key>` with mode 0600. The
@@ -193,11 +198,16 @@ pub enum MaterializationChannel {
 /// (path / env key / stdin payload) needed by the orchestrator. The
 /// underlying `ResolvedSecret` lives inside this struct and is zeroized on
 /// drop alongside any temp file unlink.
+// `secret` is kept by-value so its `Drop` zeroizes the buffer when the
+// `MaterializedRef` itself is dropped — even when the orchestrator only
+// reads `file_path()`. Same shape for the dormant `EnvVar { key }` arm.
+#[allow(dead_code)]
 pub struct MaterializedRef {
     secret: ResolvedSecret,
     kind: MaterializedKind,
 }
 
+#[allow(dead_code)]
 enum MaterializedKind {
     TempFile {
         path: PathBuf,
@@ -226,6 +236,10 @@ impl Drop for TempFileGuard {
     }
 }
 
+// `env_key` and `reveal` are forward-compat with the EnvVar / Stdin
+// channels (see `MaterializationChannel` above); they are not called yet
+// while only TempFile is wired.
+#[allow(dead_code)]
 impl MaterializedRef {
     /// Channel-specific reference for the orchestrator.
     pub fn file_path(&self) -> Option<&Path> {
