@@ -29,6 +29,9 @@ pub struct RuntimeLaunchContext {
     /// inside the materialized capsule's workspace_root (= the user is
     /// invoking from within the project tree).
     effective_cwd: Option<PathBuf>,
+    /// True when effective_cwd came from an explicit `ato run --cwd ...`
+    /// override rather than the caller's ambient shell cwd.
+    effective_cwd_is_explicit_override: bool,
     /// Filesystem root of the materialized capsule. When `effective_cwd`
     /// is outside this root (e.g. `ato run github.com/...` invoked from
     /// somewhere unrelated), the spawned process cwd defaults to
@@ -51,6 +54,7 @@ impl RuntimeLaunchContext {
                 injected_mounts: Vec::new(),
                 command_args: Vec::new(),
                 effective_cwd: None,
+                effective_cwd_is_explicit_override: false,
                 workspace_root: None,
             }
         } else {
@@ -98,8 +102,18 @@ impl RuntimeLaunchContext {
         self
     }
 
+    pub fn with_effective_cwd_override(mut self, cwd: PathBuf) -> Self {
+        self.effective_cwd = Some(cwd);
+        self.effective_cwd_is_explicit_override = true;
+        self
+    }
+
     pub fn effective_cwd(&self) -> Option<&PathBuf> {
         self.effective_cwd.as_ref()
+    }
+
+    pub fn effective_cwd_is_explicit_override(&self) -> bool {
+        self.effective_cwd_is_explicit_override
     }
 
     pub fn with_workspace_root(mut self, root: PathBuf) -> Self {

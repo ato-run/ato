@@ -509,6 +509,9 @@ fn resolve_host_execution_cwd(launch_ctx: &RuntimeLaunchContext, working_dir: &P
     let Some(caller) = launch_ctx.effective_cwd() else {
         return working;
     };
+    if launch_ctx.effective_cwd_is_explicit_override() {
+        return caller.clone();
+    }
     // No workspace_root recorded → conservative fallback to working_dir.
     let Some(workspace) = launch_ctx.workspace_root() else {
         return working;
@@ -1235,6 +1238,29 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&workspace_root);
+    }
+
+    #[test]
+    fn resolve_host_execution_cwd_prefers_explicit_override_even_outside_workspace() {
+        let workspace_root = std::env::temp_dir().join("ato-cwd-test-explicit-override-workspace");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let working_dir = workspace_root.join("backend");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let override_cwd = std::env::temp_dir().join("ato-cwd-test-explicit-override-caller");
+        std::fs::create_dir_all(&override_cwd).unwrap();
+
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_effective_cwd_override(override_cwd.clone())
+            .with_workspace_root(workspace_root.clone());
+
+        assert_eq!(
+            resolve_host_execution_cwd(&launch_ctx, &working_dir),
+            override_cwd,
+            "explicit --cwd override must win even when outside the materialized workspace"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+        let _ = std::fs::remove_dir_all(&override_cwd);
     }
 
     #[test]

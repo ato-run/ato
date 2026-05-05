@@ -1255,10 +1255,14 @@ where
 
     let injected_data =
         crate::data_injection::resolve_and_record(&decision.plan, &request.inject_bindings).await?;
-    let mut launch_ctx =
+    let launch_ctx =
         target_runner::resolve_launch_context(&decision.plan, &prepared, &request.reporter)
-            .await?
-            .with_effective_cwd(request.effective_cwd().to_path_buf())
+            .await?;
+    let mut launch_ctx = if request.effective_cwd.is_some() {
+        launch_ctx.with_effective_cwd_override(request.effective_cwd().to_path_buf())
+    } else {
+        launch_ctx.with_effective_cwd(request.effective_cwd().to_path_buf())
+    }
             // workspace_root is the materialized capsule root for this run.
             // The host source executor uses it to discriminate caller_cwd
             // (user's pwd) vs. execution_cwd (process cwd): caller_cwd is
