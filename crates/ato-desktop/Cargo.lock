@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "ato-desktop"
-version = "0.4.119"
+version = "0.4.120"
 dependencies = [
  "anyhow",
  "ato-session-core",
