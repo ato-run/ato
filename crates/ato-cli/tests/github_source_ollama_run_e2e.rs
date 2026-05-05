@@ -55,7 +55,9 @@ struct MockStoreInstallDraftServer {
 impl Drop for MockStoreInstallDraftServer {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            handle.join().expect("mock store install draft server thread");
+            handle
+                .join()
+                .expect("mock store install draft server thread");
         }
     }
 }
@@ -628,8 +630,7 @@ fn github_source_python_run_uses_repo_manifest_and_ollama_preflight() {
     );
     let index_server = spawn_static_file_server(index_root.clone());
     let ollama_server = spawn_fake_ollama_server(&["qwen2:7b"], "translated-by-fake-ollama");
-    let store_server =
-        spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
+    let store_server = spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
 
     let archive = build_github_tarball(
         "wolfreka-ollama-translator-abcdef",
@@ -772,8 +773,7 @@ fn github_source_python_run_errors_when_ollama_is_unreachable() {
     );
     let github_server =
         spawn_github_archive_server("/repos/wolfreka/ollama-translator/tarball", archive);
-    let store_server =
-        spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
+    let store_server = spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
@@ -840,8 +840,7 @@ fn github_source_python_run_errors_when_required_ollama_model_is_missing() {
     );
     let github_server =
         spawn_github_archive_server("/repos/wolfreka/ollama-translator/tarball", archive);
-    let store_server =
-        spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
+    let store_server = spawn_store_install_draft_server("wolfreka", "ollama-translator", "abcdef");
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_ato"))
         .current_dir(&caller_dir)
