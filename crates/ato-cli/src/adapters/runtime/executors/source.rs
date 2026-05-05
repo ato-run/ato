@@ -504,6 +504,15 @@ fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
 /// `<ato_home>/runs/<id>/...` or `<ato_home>/external-capsules/...` the
 /// user's caller cwd is unrelated to the capsule's source tree and
 /// must not be used as the process cwd.
+///
+/// One subtlety: when the caller is **exactly** at the workspace root
+/// (e.g. `ato run .` from the project directory) and the manifest
+/// declares a more specific `working_dir` (e.g. `working_dir = "backend"`
+/// for a flat v0.3 layout), the manifest's working_dir wins — otherwise
+/// `python -m uvicorn main:app` would be invoked from the project root
+/// and fail to import `main` because `main.py` lives in `backend/`. If
+/// the user has actually cd'd into a subdirectory of the workspace, the
+/// caller cwd still wins (preserves the existing local-one-shot ergonomics).
 fn resolve_host_execution_cwd(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) -> PathBuf {
     let working = working_dir.to_path_buf();
     let Some(caller) = launch_ctx.effective_cwd() else {
@@ -522,11 +531,14 @@ fn resolve_host_execution_cwd(launch_ctx: &RuntimeLaunchContext, working_dir: &P
     let caller_canonical = std::fs::canonicalize(caller).unwrap_or_else(|_| caller.clone());
     let workspace_canonical =
         std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.clone());
-    if caller_canonical.starts_with(&workspace_canonical) {
-        caller.clone()
-    } else {
-        working
+    if !caller_canonical.starts_with(&workspace_canonical) {
+        return working;
     }
+    let working_canonical = std::fs::canonicalize(&working).unwrap_or_else(|_| working.clone());
+    if caller_canonical == workspace_canonical && working_canonical != workspace_canonical {
+        return working;
+    }
+    caller.clone()
 }
 
 fn is_python_launch_spec(plan: &ManifestData, command: &str, language: Option<&str>) -> bool {
@@ -612,7 +624,8 @@ impl NacelleExecAdapter {
         _mode: ExecuteMode,
         launch_ctx: &RuntimeLaunchContext,
     ) -> Result<Self> {
-        let normalized_manifest_path = write_normalized_manifest(plan, launch_ctx.command_args())?;
+        let normalized_manifest_path =
+            write_normalized_manifest(plan, launch_ctx.command_args(), launch_ctx.dep_endpoints())?;
         let mut env_map = runtime_overrides::merged_env(plan.execution_env());
         if plan
             .execution_language()
@@ -732,7 +745,11 @@ fn runtime_cwd_payload(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) ->
     )
 }
 
-fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> Result<PathBuf> {
+fn write_normalized_manifest(
+    plan: &ManifestData,
+    explicit_args: &[String],
+    dep_endpoints: &[String],
+) -> Result<PathBuf> {
     let launch_spec = derive_launch_spec(plan)?;
     let entrypoint = plan
         .execution_entrypoint()
@@ -825,8 +842,54 @@ fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> R
     }
     manifest.insert("execution".to_string(), toml::Value::Table(execution));
 
-    if let Some(isolation) = plan.manifest.get("isolation").cloned() {
-        manifest.insert("isolation".to_string(), isolation);
+    let mut isolation_table = plan
+        .manifest
+        .get("isolation")
+        .and_then(|value| value.as_table())
+        .cloned()
+        .unwrap_or_default();
+    // Merge the manifest's top-level `[network]` section under
+    // `[isolation.network]` for the synthesized nacelle manifest. v0.3
+    // capsule manifests author network policy at the top level; nacelle's
+    // `IsolationConfig` parser only sees `[isolation.network]` and
+    // otherwise falls back to a deny-by-default `NetworkPermissions::default()`
+    // (because the `#[serde(default = ...)]` only fires when the FIELD
+    // exists), which silently drops the user's `egress_allow` and
+    // produces a Seatbelt profile that denies all networking.
+    let mut network_table = plan
+        .manifest
+        .get("network")
+        .and_then(|value| value.as_table())
+        .cloned()
+        .unwrap_or_default();
+    if !network_table.contains_key("enabled") {
+        network_table.insert("enabled".to_string(), toml::Value::Boolean(true));
+    }
+    if !dep_endpoints.is_empty() {
+        let existing = network_table
+            .remove("egress_allow")
+            .and_then(|value| match value {
+                toml::Value::Array(values) => Some(values),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut merged: Vec<toml::Value> = existing;
+        let mut seen: std::collections::HashSet<String> = merged
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        for endpoint in dep_endpoints {
+            if seen.insert(endpoint.clone()) {
+                merged.push(toml::Value::String(endpoint.clone()));
+            }
+        }
+        network_table.insert("egress_allow".to_string(), toml::Value::Array(merged));
+    }
+    if !network_table.is_empty() {
+        isolation_table.insert("network".to_string(), toml::Value::Table(network_table));
+    }
+    if !isolation_table.is_empty() {
+        manifest.insert("isolation".to_string(), toml::Value::Table(isolation_table));
     }
 
     let language_version = plan.execution_runtime_version();
@@ -1399,6 +1462,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&caller);
     }
 
+    /// Flat-layout v0.3 regression (#15): manifest at workspace root,
+    /// source code at `backend/`, target's `working_dir = "backend"`,
+    /// user invokes `ato run .` from the project directory itself.
+    /// caller_cwd == workspace_root, so the previous rule promoted
+    /// caller_cwd to execution_cwd and `python -m uvicorn main:app`
+    /// was launched from the project root with no `main.py` visible.
+    /// The manifest-declared working_dir must win in this case.
+    #[test]
+    fn resolve_host_execution_cwd_flat_v03_layout_prefers_working_dir_at_workspace_root() {
+        let workspace_root = std::env::temp_dir().join("ato-cwd-test-flat-v03");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let working_dir = workspace_root.join("backend");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        std::fs::write(working_dir.join("main.py"), "app = None\n").unwrap();
+
+        let launch_ctx = RuntimeLaunchContext::empty()
+            .with_effective_cwd(workspace_root.clone())
+            .with_workspace_root(workspace_root.clone());
+        let resolved = resolve_host_execution_cwd(&launch_ctx, &working_dir);
+
+        assert_eq!(
+            resolved, working_dir,
+            "manifest working_dir must override caller_cwd when caller is exactly at workspace_root"
+        );
+        assert!(
+            resolved.join("main.py").exists(),
+            "execution cwd must contain backend/main.py: {}",
+            resolved.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace_root);
+    }
+
     #[test]
     fn test_apply_python_runtime_hardening_sets_env() {
         let mut cmd = Command::new("echo");
@@ -1452,7 +1548,7 @@ mod tests {
             "dev",
         );
 
-        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
         let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
 
@@ -1484,7 +1580,7 @@ mod tests {
             "dev",
         );
 
-        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
         let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
 
@@ -1511,7 +1607,7 @@ mod tests {
             "dev",
         );
 
-        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
         let expected_entrypoint = sandbox_source_entrypoint(&plan, "main.py");
 
@@ -1538,7 +1634,7 @@ mod tests {
             "dev",
         );
 
-        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
 
         assert!(!normalized.contains("UV_MANAGED_PYTHON"));
@@ -1564,7 +1660,7 @@ mod tests {
             "dev",
         );
 
-        let normalized_path = write_normalized_manifest(&plan, &[]).unwrap();
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).unwrap();
         let normalized = fs::read_to_string(&normalized_path).unwrap();
 
         assert!(normalized.contains("entrypoint = \"uv\""));
@@ -1574,6 +1670,71 @@ mod tests {
         assert!(
             !normalized.contains("source/-m") && !normalized.contains("source\\\\-m"),
             "normalized={normalized}"
+        );
+    }
+
+    /// Sandbox network-policy regression (#17): consumer→provider TCP on
+    /// `127.0.0.1:<port>` must survive `--sandbox`. The synthesized manifest
+    /// nacelle parses must (a) carry the manifest's top-level `[network]`
+    /// section under `[isolation.network]` so user-declared egress hosts
+    /// aren't dropped, and (b) include each provider endpoint that the
+    /// orchestrator allocated, so the resulting Seatbelt profile permits
+    /// the loopback connection rather than emitting a deny.
+    #[test]
+    fn test_write_normalized_manifest_carries_network_egress_and_dep_endpoints() {
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            name = "demo"
+            version = "1.2.3"
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            driver = "python"
+            runtime_version = "3.11.10"
+            entrypoint = "main.py"
+
+            [isolation]
+            sandbox = true
+
+            [network]
+            egress_allow = ["smtp.gmail.com"]
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(
+            &plan,
+            &[],
+            &["127.0.0.1:54321".to_string(), "127.0.0.1:54322".to_string()],
+        )
+        .unwrap();
+        let normalized = fs::read_to_string(&normalized_path).unwrap();
+        let parsed: toml::Value = toml::from_str(&normalized).expect("normalized toml");
+        let network = parsed
+            .get("isolation")
+            .and_then(|v| v.get("network"))
+            .and_then(|v| v.as_table())
+            .expect("[isolation.network] must exist");
+        assert_eq!(
+            network.get("enabled").and_then(|v| v.as_bool()),
+            Some(true),
+            "default network.enabled must be true so seatbelt does not deny"
+        );
+        let egress: Vec<&str> = network
+            .get("egress_allow")
+            .and_then(|v| v.as_array())
+            .map(|values| values.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            egress.contains(&"smtp.gmail.com"),
+            "manifest [network].egress_allow must round-trip: {egress:?}"
+        );
+        assert!(
+            egress.contains(&"127.0.0.1:54321") && egress.contains(&"127.0.0.1:54322"),
+            "dep endpoints must be appended: {egress:?}"
         );
     }
 

@@ -38,6 +38,14 @@ pub struct RuntimeLaunchContext {
     /// `LaunchSpec.working_dir` instead so module imports / relative
     /// scripts resolve against the capsule's source tree.
     workspace_root: Option<PathBuf>,
+    /// Endpoints (`host:port` strings) of capsule dependencies the
+    /// orchestrator started for this consumer. Surfaced into the
+    /// nacelle-side normalized manifest's `[isolation.network.egress_allow]`
+    /// so the consumer's sandbox profile permits TCP back to providers
+    /// like postgres on `127.0.0.1:<allocated_port>`. Without this, the
+    /// consumer hits EPERM on `psycopg.connect(...)` even though the
+    /// provider is happily listening on the same loopback (#17).
+    dep_endpoints: Vec<String>,
 }
 
 impl RuntimeLaunchContext {
@@ -56,6 +64,7 @@ impl RuntimeLaunchContext {
                 effective_cwd: None,
                 effective_cwd_is_explicit_override: false,
                 workspace_root: None,
+                dep_endpoints: Vec::new(),
             }
         } else {
             Self::empty()
@@ -123,6 +132,15 @@ impl RuntimeLaunchContext {
 
     pub fn workspace_root(&self) -> Option<&PathBuf> {
         self.workspace_root.as_ref()
+    }
+
+    pub fn with_dep_endpoints(mut self, endpoints: Vec<String>) -> Self {
+        self.dep_endpoints = endpoints;
+        self
+    }
+
+    pub fn dep_endpoints(&self) -> &[String] {
+        &self.dep_endpoints
     }
 
     pub fn ipc(&self) -> Option<&IpcContext> {
