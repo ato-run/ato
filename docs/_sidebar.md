@@ -9,7 +9,7 @@
 
 **Reference**
 
-- [Core Architecture (JA)](core-architecture.md)
-- [Glossary (JA)](GLOSSARY.md)
+- [Core Architecture](core-architecture.md)
+- [Glossary](GLOSSARY.md)
 - [RFCs](rfcs/README.md)
 - [Topic Page Template](TEMPLATE.md)
