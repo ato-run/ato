@@ -1,5 +1,6 @@
 # Research
 
-比較調査、境界メモ、設計検討の下書きを置く。
+Comparative research, boundary notes, and design explorations belong here.
 
-公開仕様に昇格させる前の検討材料をここに集約する。
+Use this folder for material that has not yet graduated into public reference
+docs or RFCs.
