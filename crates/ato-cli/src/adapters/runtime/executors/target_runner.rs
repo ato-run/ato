@@ -232,6 +232,8 @@ pub fn prepare_target_execution(
 
     if !options.defer_consent {
         let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
+        let has_authoritative_lock = prepared.authoritative_lock.is_some()
+            || !runtime_decision.plan.lock_path.as_os_str().is_empty();
         let guard_result = guard::evaluate_for_mode_with_authority(
             &execution_plan,
             &guard_manifest_dir,
@@ -239,7 +241,7 @@ pub fn prepare_target_execution(
             options.sandbox_mode,
             options.dangerously_skip_permissions,
             guard_mode,
-            prepared.authoritative_lock.is_some(),
+            has_authoritative_lock,
         )?;
         if options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan) {
             crate::consent_store::record_consent(&execution_plan)?;
@@ -261,6 +263,8 @@ pub fn prepare_target_execution(
     // guard rejects sessions that just provisioned successfully (issue
     // hit by ato-desktop's `capsule://` flow when `defer_consent = true`).
     let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
+    let has_authoritative_lock = prepared.authoritative_lock.is_some()
+        || !runtime_decision.plan.lock_path.as_os_str().is_empty();
     let guard_result = guard::evaluate_for_mode_with_authority(
         &execution_plan,
         &guard_manifest_dir,
@@ -268,7 +272,7 @@ pub fn prepare_target_execution(
         options.sandbox_mode,
         options.dangerously_skip_permissions,
         guard_mode,
-        prepared.authoritative_lock.is_some(),
+        has_authoritative_lock,
     )?;
 
     Ok(PreparedTargetExecution {

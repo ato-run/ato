@@ -251,6 +251,77 @@ fn import_workloads(
         return Ok(workloads);
     }
 
+    if let Some(targets) = manifest.model.targets.as_ref() {
+        let mut target_names = targets.named.keys().cloned().collect::<Vec<_>>();
+        target_names.sort();
+
+        for name in target_names {
+            let target = targets.named.get(&name).expect("target present");
+            if !is_executable_target(target) {
+                continue;
+            }
+
+            workloads.push(workload_from_named_target(&name, target));
+        }
+
+        if !workloads.is_empty() {
+            if let Some(default_workload) = workloads.iter().find(|workload| {
+                workload
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .map(|label| label == manifest.model.default_target)
+                    .unwrap_or(false)
+            }) {
+                draft_lock.contract.entries.insert(
+                    "process".to_string(),
+                    default_workload
+                        .get("process")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                );
+                provenance.push(ProvenanceRecord::new(
+                    CompilerOwnedField::new("contract", "process"),
+                    ProvenanceKind::CompilerInferred,
+                    Some(manifest.path.as_path()),
+                    Some("targets.<default_target>"),
+                    Some(
+                        "default target selected as primary process from imported target workloads",
+                    ),
+                ));
+            } else {
+                draft_lock.contract.unresolved.push(UnresolvedValue {
+                    field: Some("contract.process".to_string()),
+                    reason: UnresolvedReason::ExplicitSelectionRequired,
+                    detail: Some(
+                        "multiple imported target workloads exist but none matches default_target"
+                            .to_string(),
+                    ),
+                    candidates: workloads
+                        .iter()
+                        .filter_map(|workload| workload.get("target").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect(),
+                });
+                diagnostics.push(CompatibilityDiagnostic::new(
+                    CompatibilityDiagnosticCode::PrimaryProcessUnresolved,
+                    CompatibilityDiagnosticSeverity::Warning,
+                    "contract.process",
+                    "target workloads were imported but no deterministic primary process was selected",
+                    Some(manifest.path.as_path()),
+                ));
+            }
+
+            provenance.push(ProvenanceRecord::new(
+                CompilerOwnedField::new("contract", "workloads"),
+                ProvenanceKind::CompilerInferred,
+                Some(manifest.path.as_path()),
+                Some("targets"),
+                Some("executable manifest targets synthesized into workloads for downstream consistency"),
+            ));
+            return Ok(workloads);
+        }
+    }
+
     let default_target = manifest.model.resolve_default_target()?;
     let synthesized_name = manifest.model.default_target.clone();
     let synthesized = json!({
@@ -262,7 +333,7 @@ fn import_workloads(
             "env": default_target.env,
             "required_env": default_target.required_env,
         },
-        "depends_on": [],
+        "depends_on": default_target.needs,
     });
 
     draft_lock.contract.entries.insert(
@@ -288,6 +359,36 @@ fn import_workloads(
     ));
     workloads.push(synthesized);
     Ok(workloads)
+}
+
+fn is_executable_target(target: &capsule_core::types::NamedTarget) -> bool {
+    if target.package_type.as_deref() == Some("library") {
+        return false;
+    }
+
+    !target.entrypoint.trim().is_empty()
+        || target
+            .run_command
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        || !target.cmd.is_empty()
+}
+
+fn workload_from_named_target(label: &str, target: &capsule_core::types::NamedTarget) -> Value {
+    json!({
+        "name": label,
+        "target": label,
+        "process": {
+            "entrypoint": target.entrypoint,
+            "run_command": target.run_command,
+            "cmd": target.cmd,
+            "env": target.env,
+            "required_env": target.required_env,
+        },
+        "depends_on": target.needs,
+        "readiness_probe": target.readiness_probe,
+    })
 }
 
 fn import_target_hints(
@@ -333,9 +434,12 @@ fn import_target_hints(
             "run_command": target.run_command,
             "runtime_tools": target.runtime_tools,
             "cmd": target.cmd,
+            "env": target.env,
             "required_env": target.required_env,
             "port": target.port,
             "working_dir": target.working_dir,
+            "source_layout": target.source_layout,
+            "compatible": true,
         }));
 
         if let Some(driver) = target.driver.as_deref() {

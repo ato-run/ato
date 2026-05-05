@@ -140,6 +140,10 @@ pub(super) fn synthesize_manifest_from_lock(
 
     if runtime_model.services.len() > 1 {
         let mut services = toml::map::Map::new();
+        let has_main_service = runtime_model
+            .services
+            .iter()
+            .any(|service| service.name == "main");
         for service in &runtime_model.services {
             let mut service_table = toml::map::Map::new();
             service_table.insert(
@@ -164,7 +168,14 @@ pub(super) fn synthesize_manifest_from_lock(
                     service_table.insert("readiness_probe".to_string(), value);
                 }
             }
-            services.insert(service.name.clone(), toml::Value::Table(service_table));
+            let service_name = if !has_main_service
+                && service.target_label == runtime_model.selected.target_label
+            {
+                "main"
+            } else {
+                service.name.as_str()
+            };
+            services.insert(service_name.to_string(), toml::Value::Table(service_table));
         }
         manifest.insert("services".to_string(), toml::Value::Table(services));
     }

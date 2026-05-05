@@ -1838,7 +1838,7 @@ async fn ensure_orchestration_target_runtimes(
     runtimes: &mut RuntimeSection,
     tools: &mut ToolSection,
 ) -> Result<()> {
-    for target_label in orchestration_service_target_labels(manifest_raw) {
+    for target_label in lockfile_runtime_target_labels(manifest_raw) {
         if selected_target_label(manifest_raw)
             .as_deref()
             .map(|selected| selected == target_label)
@@ -2150,6 +2150,20 @@ fn orchestration_service_target_labels(manifest: &toml::Value) -> Vec<String> {
         if let Some(target) = target {
             if !labels.iter().any(|existing| existing == &target) {
                 labels.push(target);
+            }
+        }
+    }
+
+    labels
+}
+
+fn lockfile_runtime_target_labels(manifest: &toml::Value) -> Vec<String> {
+    let mut labels = orchestration_service_target_labels(manifest);
+
+    if let Some(targets) = manifest.get("targets").and_then(|value| value.as_table()) {
+        for label in targets.keys() {
+            if !labels.iter().any(|existing| existing == label) {
+                labels.push(label.clone());
             }
         }
     }

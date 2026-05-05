@@ -1274,8 +1274,13 @@ fn array_to_vec(values: &[toml::Value]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{route_manifest, route_manifest_with_state_overrides, ExecutionProfile};
+    use super::{
+        route_manifest, route_manifest_with_state_overrides, CompatManifestBridge, ExecutionProfile,
+    };
+    use crate::ato_lock::AtoLock;
+    use crate::lock_runtime::resolve_lock_runtime_model;
     use crate::types::Mount;
+    use serde_json::json;
     use std::fs;
 
     fn write_manifest(contents: &str) -> tempfile::TempDir {
@@ -1328,6 +1333,58 @@ target = "db"
                 .target_for_service("main")
                 .expect("main target"),
             Some("web".to_string())
+        );
+    }
+
+    #[test]
+    fn lock_bridge_aliases_selected_multi_target_service_to_main() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "tool", "version": "1.0.0", "default_target": "default"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"run_command": "python3 default.py"}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {"name": "default", "target": "default", "process": {"run_command": "python3 default.py"}},
+                {"name": "export", "target": "export", "process": {"run_command": "python3 tool.py"}}
+            ]),
+        );
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "python", "selected_target": "default"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "default", "runtime": "source", "driver": "python"},
+                {"label": "export", "runtime": "source", "driver": "python"}
+            ]),
+        );
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+
+        let runtime_model = resolve_lock_runtime_model(&lock, None).expect("runtime model");
+        let bridge = CompatManifestBridge::from_lock(&lock, &runtime_model).expect("bridge");
+        let raw = bridge.raw_value().expect("raw manifest");
+        let services = raw
+            .get("services")
+            .and_then(toml::Value::as_table)
+            .expect("services table");
+
+        assert!(services.contains_key("main"));
+        assert!(services.contains_key("export"));
+        assert_eq!(
+            services
+                .get("main")
+                .and_then(|service| service.get("target"))
+                .and_then(toml::Value::as_str),
+            Some("default")
         );
     }
 

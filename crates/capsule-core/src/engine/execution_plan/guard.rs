@@ -95,6 +95,7 @@ pub fn evaluate_for_mode_with_authority(
     if requires_capsule_lock(runtime, driver)
         && matches!(tier, ExecutionTier::Tier1)
         && !has_authoritative_lock
+        && !dangerously_skip_permissions
         && !resolve_capsule_lock_path(manifest_dir).exists()
         && !matches!(mode, RuntimeGuardMode::Preview)
     {
@@ -119,6 +120,7 @@ pub fn evaluate_for_mode_with_authority(
         Some(RequiredLock::NodeDependencyLock) => {
             if resolve_node_dependency_lock_path(manifest_dir).is_none()
                 && !has_authoritative_lock
+                && !dangerously_skip_permissions
                 && !matches!(mode, RuntimeGuardMode::Preview)
             {
                 return Err(AtoExecutionError::lock_incomplete(
@@ -130,6 +132,7 @@ pub fn evaluate_for_mode_with_authority(
         Some(RequiredLock::UvLock) => {
             if resolve_python_dependency_path(manifest_dir).is_none()
                 && !has_authoritative_lock
+                && !dangerously_skip_permissions
                 && !matches!(mode, RuntimeGuardMode::Preview)
             {
                 return Err(AtoExecutionError::lock_incomplete(

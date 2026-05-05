@@ -707,10 +707,7 @@ impl NacelleExecAdapter {
     }
 }
 
-fn runtime_cwd_payload(
-    launch_ctx: &RuntimeLaunchContext,
-    working_dir: &Path,
-) -> Option<String> {
+fn runtime_cwd_payload(launch_ctx: &RuntimeLaunchContext, working_dir: &Path) -> Option<String> {
     if cfg!(target_os = "linux") {
         // The Linux sandbox bind-mounts the materialized workspace at
         // /workspace, so the cwd inside the sandbox is always /workspace
@@ -728,7 +725,11 @@ fn runtime_cwd_payload(
     // workspace, breaking module imports and `--with-requirements`
     // resolution. Callers that explicitly set --cwd, or invoke ato from
     // inside the workspace, still get their pwd honoured.
-    Some(resolve_host_execution_cwd(launch_ctx, working_dir).display().to_string())
+    Some(
+        resolve_host_execution_cwd(launch_ctx, working_dir)
+            .display()
+            .to_string(),
+    )
 }
 
 fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> Result<PathBuf> {
@@ -876,7 +877,7 @@ fn sandbox_source_entrypoint(plan: &ManifestData, entrypoint: &str) -> String {
     if cfg!(target_os = "linux") {
         Path::new("/workspace").join(relative).display().to_string()
     } else {
-        plan.manifest_dir.join(relative).display().to_string()
+        Path::new(".").join(relative).display().to_string()
     }
 }
 
@@ -1241,6 +1242,29 @@ mod tests {
 
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
+    }
+
+    #[test]
+    fn sandbox_source_entrypoint_keeps_shell_entrypoints_relative_off_linux() {
+        let dir = tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [targets.dev]
+            runtime = "source/native"
+            run = "run.sh"
+            "#,
+            "dev",
+        );
+
+        let entrypoint = sandbox_source_entrypoint(&plan, "run.sh");
+
+        if cfg!(target_os = "linux") {
+            assert_eq!(entrypoint, "/workspace/run.sh");
+        } else {
+            assert!(entrypoint.starts_with("./"));
+            assert!(entrypoint.ends_with("run.sh"));
+        }
     }
 
     #[test]
