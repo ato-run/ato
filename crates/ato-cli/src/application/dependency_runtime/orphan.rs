@@ -143,6 +143,66 @@ pub fn sweep_stale_sentinel(state_dir: &Path) -> Result<(), OrphanError> {
     fs::remove_file(&path).map_err(|source| OrphanError::SweepFailed { path, source })
 }
 
+/// Outcome of `kill_orphan_provider`, returned for surfacing in the
+/// orchestrator's per-dep `warnings` field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrphanProviderKillOutcome {
+    /// Sentinel didn't record a `provider_pid`, or the recorded pid was
+    /// already dead. Nothing was killed.
+    NotPresent,
+    /// SIGTERM was delivered. Caller can proceed to start a fresh
+    /// provider — the kernel reaps the corpse asynchronously.
+    Killed { pid: i32 },
+    /// SIGTERM call returned an error other than ESRCH. Treated as
+    /// best-effort — the caller still proceeds, since most providers
+    /// (e.g. postgres) refuse to start over their own postmaster.pid
+    /// and will surface a clearer error than the kill failure.
+    KillFailed { pid: i32, detail: String },
+}
+
+/// SIGTERM the orphan provider process recorded in a stale sentinel,
+/// best-effort. Used in the `StaleDeadOwner` branch when the ato session
+/// that started the provider is gone but the provider itself is still
+/// holding the state dir (typical for postgres: the postmaster survives
+/// SIGKILL of its parent ato session and keeps its PGDATA postmaster.pid
+/// locked, blocking the next run's bootstrap from re-binding).
+///
+/// Falls back to `NotPresent` when the sentinel did not capture a
+/// `provider_pid` (older sentinels) — the caller still sweeps the
+/// sentinel; postgres-style locks may still need manual cleanup in
+/// that legacy case.
+#[cfg(unix)]
+pub fn kill_orphan_provider(sentinel: &SessionSentinel) -> OrphanProviderKillOutcome {
+    let Some(pid) = sentinel.provider_pid else {
+        return OrphanProviderKillOutcome::NotPresent;
+    };
+    if pid <= 0 || !pid_is_alive(pid) {
+        return OrphanProviderKillOutcome::NotPresent;
+    }
+    // SAFETY: kill(pid, SIGTERM) is the standard way to ask a process to
+    // terminate. SIGTERM lets postgres run its shutdown handler so PGDATA
+    // is left in a clean state. Errors are surfaced as KillFailed; ESRCH
+    // (raced with natural exit) is treated as success.
+    let res = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if res == 0 {
+        return OrphanProviderKillOutcome::Killed { pid };
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        OrphanProviderKillOutcome::NotPresent
+    } else {
+        OrphanProviderKillOutcome::KillFailed {
+            pid,
+            detail: err.to_string(),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn kill_orphan_provider(_sentinel: &SessionSentinel) -> OrphanProviderKillOutcome {
+    OrphanProviderKillOutcome::NotPresent
+}
+
 #[cfg(unix)]
 fn pid_is_alive(pid: i32) -> bool {
     if pid <= 0 {

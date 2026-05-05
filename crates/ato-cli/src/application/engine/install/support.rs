@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rand::Rng;
+
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
@@ -1142,7 +1144,20 @@ fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
         .and_then(|value| value.to_str())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("checkout");
-    let destination = transient_root.join(checkout_name);
+    // Append a process-unique suffix so two concurrent `ato run`
+    // invocations against the same GitHub source don't race on the
+    // shared `gh-run/<checkout_name>` destination. Previously both
+    // runs would (a) remove_dir_all the same destination and (b)
+    // rename their own checkouts onto it — the second remove_dir_all
+    // could wipe the first run's just-renamed tree, and the rename
+    // could fail with ENOENT or trample the other run. Each run now
+    // owns its own destination subdir; the parent transient_root
+    // sweep already covers cleanup at session end.
+    let destination = transient_root.join(format!(
+        "{checkout_name}-{}-{}",
+        std::process::id(),
+        rand::thread_rng().gen::<u32>()
+    ));
     if destination.exists() {
         std::fs::remove_dir_all(&destination).with_context(|| {
             format!(
