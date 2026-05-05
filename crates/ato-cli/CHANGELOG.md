@@ -4,7 +4,35 @@ All notable changes to `ato-cli` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.116] - 2026-05-04
+
 ### Added
+
+- **Dependency-contract orchestrator (P1–P7).** `ato run` now resolves
+  `capsule.toml` `[dependencies.*]` entries with `contract = "service@N"`,
+  fetches provider capsules (including `capsule://github.com/<owner>/<repo>@<sha>`
+  sources), allocates TCP ports, materializes credentials per Rule M1, and
+  starts dependency processes before the consumer. State paths follow
+  `<ato_home>/state/<parent_pkg_id>/<instance_hash>/<state.version>/<state.name>/`.
+  Run summary is written to stderr after start, listing alias, resolved URL,
+  port, state.dir, log path, and (key-only, redacted) `runtime_export` names.
+- **Cache integrity sentinel.** github-sourced capsules now write a
+  `.ato-cache-fingerprint` file (blake3 of `capsule.toml`) under
+  `~/.ato/external-capsules/github/<owner>/<repo>/<commit>/`. On cache hit
+  the fingerprint is verified; mismatch wipes the cache and refetches.
+- **Auto-lock for github runs.** When `[dependencies.*]` contracts are
+  declared and no compat lockfile exists, `ato run` materializes
+  `.ato/derived/capsule.lock.json` on the fly (using the lock-draft engine).
+
+### Fixed
+
+- `ato run` for materialized capsules now uses `LaunchSpec.working_dir` (the
+  fetched capsule root) as the process `current_dir`. Caller cwd is only
+  promoted to execution cwd when canonicalized caller is inside the
+  canonicalized workspace_root — fixes `Could not import module 'main'`
+  when consumer is fetched from github.
+
+### Changed
 
 - `ato guest` now accepts JSON-RPC 2.0 envelopes alongside the legacy
   `guest.v1` envelope. The wire layer auto-detects which envelope is in use
