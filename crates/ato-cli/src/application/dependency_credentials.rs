@@ -19,8 +19,9 @@
 //!   command lines / env / stdin via the appropriate channel.
 
 use std::collections::BTreeSet;
-use std::fs::{OpenOptions, Permissions};
+use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
@@ -288,11 +289,18 @@ pub fn materialize_credential(
                 .map_err(|err| CredentialError::MaterializationFailure {
                     detail: format!("create temp credential file {}: {}", path.display(), err),
                 })?;
-            std::fs::set_permissions(&path, Permissions::from_mode(0o600)).map_err(|err| {
-                CredentialError::MaterializationFailure {
-                    detail: format!("chmod 0600 on {}: {}", path.display(), err),
-                }
-            })?;
+            // On Unix, lock the file down to mode 0600 so only this user
+            // can read it. On Windows, parent-directory ACLs handle this:
+            // the state_dir is created under the user's profile and is
+            // not world-readable, so per-file chmod is unnecessary (and
+            // PermissionsExt is unix-only).
+            #[cfg(unix)]
+            {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|err| CredentialError::MaterializationFailure {
+                        detail: format!("chmod 0600 on {}: {}", path.display(), err),
+                    })?;
+            }
             file.write_all(secret.as_str().as_bytes()).map_err(|err| {
                 CredentialError::MaterializationFailure {
                     detail: format!("write to {}: {}", path.display(), err),
