@@ -2,13 +2,14 @@
 
 ## Overview
 
-Execution Identity は、Ato が「この起動条件は同じか」を識別するための launch
-envelope の identity である。単なる source hash ではなく、runtime と環境も含む。
+Execution Identity is the launch-envelope identity Ato uses to answer “are these
+launch conditions the same?” It is not just a source hash; it also includes the
+runtime and environment shape.
 
 ## How it works
 
-execution identity は起動前に計算される。対象は source tree だけではなく、次の
-ような launch condition 全体である。
+Execution identity is computed before launch. It covers the full launch
+condition, not only the source tree:
 
 - source tree
 - dependency derivation
@@ -19,8 +20,8 @@ execution identity は起動前に計算される。対象は source tree だけ
 - capability policy
 - entry point / argv / working directory
 
-desktop 側では、receipt-aware launch で得られた `execution_id` を surface metadata に
-保持し、`~/.ato/executions/<execution_id>/receipt.json` と対応づける。
+On the desktop side, receipt-aware launches keep `execution_id` in the surface
+metadata and map it to `~/.ato/executions/<execution_id>/receipt.json`.
 
 ## Specification
 
@@ -29,12 +30,13 @@ desktop 側では、receipt-aware launch で得られた `execution_id` を surf
 - execution receipts MUST be addressable by `execution_id`.
 - secret values MUST NOT be recorded directly in receipts.
 
-根拠:
+References:
 
 - [`rfcs/draft/beyond-reproducible-build.ja.md`](rfcs/draft/beyond-reproducible-build.ja.md)
 - [`crates/ato-desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-desktop/src/orchestrator.rs)
 
 ## Design Notes
 
-「同じコード」だけでは再現性を表せない。Ato が残したいのは build artifact の一致
-ではなく、どの world を観測する起動だったかという実行条件の輪郭である。
+“Same code” is not enough to describe reproducibility. What Ato wants to retain
+is not only artifact equality, but the shape of the world a launch was about to
+observe.

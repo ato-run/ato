@@ -1,104 +1,109 @@
-# RFCs — 技術仕様ドキュメント
+# RFCs — Technical Specification Documents
 
-すべての技術仕様は RFC として管理する。
+All technical specifications are managed as RFCs.
 
 ```
 rfcs/
-├── accepted/      ← 確定仕様（現行実装の根拠）
-├── draft/         ← 議論中・未確定（実装前または変更検討中）
-├── archived/      ← 廃止・旧バージョン・非仕様ドキュメント
+├── accepted/      ← accepted specs that back current implementation
+├── draft/         ← under discussion, not implementation authority yet
+├── archived/      ← retired, old-version, or non-spec documents
 ├── TEMPLATE_ADR.md
 ├── TEMPLATE_SPEC.md
-└── README.md      ← このファイル
+└── README.md      ← this file
 ```
 
-## ドキュメント種別
+## Document types
 
-| 種別 | テンプレート | 用途 | 目安 |
+| Type | Template | Purpose | Typical size |
 |------|-------------|------|------|
-| **ADR** | `TEMPLATE_ADR.md` | 設計上の意思決定を記録 | 1-2 ページ。「なぜこう決めたか」 |
-| **SPEC** | `TEMPLATE_SPEC.md` | コンポーネント/機能の仕様 | 数ページ〜。「どう動くか」 |
+| **ADR** | `TEMPLATE_ADR.md` | record a design decision | 1-2 pages; “why this decision” |
+| **SPEC** | `TEMPLATE_SPEC.md` | define a component or feature contract | several pages; “how it works” |
 
-## ライフサイクル
+## Lifecycle
 
 ```
-draft/ で作成・議論  →  確定  →  accepted/ に移動
-                    →  破棄  →  archived/ に移動
-accepted/ の仕様が陳腐化  →  archived/ に移動
+create and discuss in draft/  →  accept  →  move to accepted/
+                             →  discard →  move to archived/
+accepted/ becomes obsolete   →  move to archived/
 ```
 
-## ステータス
+## Status
 
-| ステータス | 場所 | 意味 |
+| Status | Location | Meaning |
 |-----------|------|------|
-| `draft` | `draft/` | 設計中・議論中。実装の根拠として使わない |
-| `accepted` | `accepted/` | 確定済み。現行実装と一致している |
-| `archived` | `archived/` | 廃止・後継あり・旧バージョン |
+| `draft` | `draft/` | in design or discussion; not implementation authority |
+| `accepted` | `accepted/` | approved and expected to match current implementation |
+| `archived` | `archived/` | retired, superseded, or old-version |
 
-## フォーマットルール
+## Format rules
 
-### 1. YAML frontmatter（必須）
+### 1. YAML frontmatter (required)
 
-すべての RFC は先頭に frontmatter を持つ:
+Every RFC starts with frontmatter:
 
 ```yaml
 ---
-title: "ドキュメントタイトル"
+title: "Document title"
 status: draft          # draft | accepted | archived
 date: YYYY-MM-DD
 author: "@github_handle"
-ssot:                  # SPEC のみ。Source of Truth のコードパス
+ssot:                  # SPEC only. Source-of-truth code paths
   - "apps/xxx/src/yyy.rs"
-related:               # 関連ドキュメント（任意）
+related:               # related docs (optional)
   - "CAPSULE_CORE.md"
 ---
 ```
 
-### 2. ファイル名
+### 2. File naming
 
-| 種別 | 形式 | 例 |
+| Type | Format | Example |
 |------|------|-----|
 | ADR | `ADR-NNN-kebab-case-title.md` | `ADR-001-runtime-selection-order.md` |
 | SPEC | `SCREAMING_SNAKE_SPEC.md` | `CAPSULE_CORE.md`, `NACELLE_SPEC.md` |
 
-- ADR は通し番号 (`NNN`) で管理
-- SPEC はコンポーネント名ベース
+- ADRs use a sequential number (`NNN`)
+- SPECs are named after the component or contract
 
-### 3. セクション構成
+### 3. Section structure
 
 **ADR** — Context → Decision → Alternatives Considered → Consequences
 
-**SPEC** — 概要 → スコープ → 設計 → インターフェース → セキュリティ → 既知の制限 → 参照
+**SPEC** — Overview → Scope → Design → Interface → Security → Known limitations → References
 
-不要なセクションは省略可。セクションは番号付き (`## 1. 概要`) を推奨。
+Omit sections that do not add value. Numbered sections (for example,
+`## 1. Overview`) are recommended.
 
 ### 4. Source of Truth (SSOT)
 
-コードが正。仕様ドキュメントはコードの説明であり、乖離が見つかったらコードを信じる。
-SPEC には `ssot` フィールドでコードパスを明記し、本文中でも `file:line` 形式で参照する。
+Code is authoritative. Specs explain the code; if they diverge, trust the code.
+SPEC docs should declare `ssot` code paths and should cite `file:line` locations
+when useful.
 
-### 5. 言語
+### 5. Language
 
-日本語を基本とする。セクション見出しはどちらでもよいが、1ドキュメント内で統一する。
+New public-facing docs should be English-first. Existing RFC content is still
+mixed-language, and much of the deeper archive remains Japanese for now. Keep a
+single document internally consistent.
 
-## 新しい RFC を追加するとき
+## Adding a new RFC
 
-1. テンプレートをコピーして `draft/` に配置
-2. frontmatter を埋める
-3. PR でレビュー
-4. 確定したら `accepted/` に移動し、`status: accepted` に更新
+1. Copy the template into `draft/`
+2. Fill in the frontmatter
+3. Review it in a PR
+4. When accepted, move it to `accepted/` and update `status: accepted`
 
-## 公開サイト
+## Public site
 
 - GitHub Pages: <https://ato-run.github.io/ato/>
-- RFC 一覧は docs ルートの docsify サイトから参照する。
-- 公開ナビゲーションには `accepted/` と `draft/` のみを含める。`archived/` はリポジトリ内に保持する。
+- The RFC index is served from the docs-root docsify site.
+- Public navigation should include only `accepted/` and `draft/`. Keep
+  `archived/` in the repository, but out of the main public nav.
 
-ローカルで確認するとき:
+For local preview:
 
 ```bash
 cd docs
 python3 -m http.server 4173
 ```
 
-ブラウザで <http://localhost:4173> を開き、`RFCs` を選ぶ。
+Open <http://localhost:4173> in a browser and select `RFCs`.

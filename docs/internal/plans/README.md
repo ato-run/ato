@@ -1,8 +1,8 @@
 # Plans
 
-実装計画、移行計画、段階的 rollout のメモを置く。
+Implementation plans, migration plans, and rollout notes belong here.
 
-例:
+Examples:
 
 - `plan_*.md`
 - `*-plan.md`

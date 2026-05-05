@@ -1,3 +1,4 @@
 # Dashboards
 
-TODO、進捗ボード、readiness のような運用用ドキュメントを置く。
+Operational docs such as TODO lists, progress boards, and readiness dashboards
+belong here.
