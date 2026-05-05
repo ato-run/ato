@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use capsule_core::execution_identity::{
@@ -45,7 +45,7 @@ fn plan_replay_v1(receipt: ExecutionReceipt, mode: ReplayMode) -> Result<ReplayP
     }
     let run_path = source_run_path(&receipt)?;
     let cwd = replay_cwd(&receipt)?;
-    validate_same_host_cwd(&run_path, cwd.as_ref())?;
+    validate_same_host_cwd(&run_path, cwd.as_deref())?;
     let warnings = replay_warnings(&receipt);
     let args = receipt.launch.argv.clone();
     let entry = if receipt.launch.entry_point.trim().is_empty() {
@@ -119,7 +119,7 @@ fn plan_replay_v2(
         })?;
 
     let cwd = local.working_directory_path.as_deref().map(PathBuf::from);
-    validate_same_host_cwd(&run_path, cwd.as_ref())?;
+    validate_same_host_cwd(&run_path, cwd.as_deref())?;
 
     let warnings = v2_replay_warnings(&receipt);
     let entry = local
@@ -336,7 +336,7 @@ fn replay_cwd(receipt: &ExecutionReceipt) -> Result<Option<PathBuf>> {
     Ok(Some(PathBuf::from(&receipt.launch.working_directory)))
 }
 
-fn validate_same_host_cwd(run_path: &PathBuf, cwd: Option<&PathBuf>) -> Result<()> {
+fn validate_same_host_cwd(run_path: &Path, cwd: Option<&Path>) -> Result<()> {
     let Some(cwd) = cwd else {
         return Ok(());
     };

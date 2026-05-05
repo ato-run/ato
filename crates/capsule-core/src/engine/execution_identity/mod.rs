@@ -80,6 +80,10 @@ pub struct ExecutionIdentityInput {
 }
 
 impl ExecutionIdentityInput {
+    // Each argument corresponds to one of the canonical execution-identity
+    // facets pinned by the v1 schema; they don't generalize into a builder
+    // without obscuring which facet is which at the call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: SourceIdentity,
         dependencies: DependencyIdentity,
@@ -187,6 +191,10 @@ pub struct ExecutionIdentityInputV2 {
 }
 
 impl ExecutionIdentityInputV2 {
+    // V2 adds source_provenance + local on top of v1's eight facets; like
+    // the v1 constructor these are all canonical schema fields, not a place
+    // for builder-style indirection.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: SourceIdentityV2,
         source_provenance: SourceProvenance,
@@ -266,6 +274,13 @@ impl ExecutionReceiptV2 {
     }
 }
 
+// Variants differ in size (V1 ~1.1KB, V2 ~2.4KB) but the enum is the
+// canonical receipt envelope and is held by-value across many call
+// sites that pattern-match `&doc`. Boxing V2 would force a `&**r` /
+// `*Box::new(...)` ceremony at every call site (see ato-cli/src/cli/
+// commands/inspect.rs and application/execution_replay.rs) for a few
+// stack-bytes saved per receipt — not worth the churn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "schema", rename_all = "kebab-case")]
 pub enum ExecutionReceiptDocument {
@@ -283,6 +298,10 @@ pub struct ExecutionReceiptView {
     pub reproducibility: ReproducibilityIdentity,
 }
 
+// V2 is already boxed; V1 is left inline because it's the smaller
+// variant. Symmetry isn't worth the call-site churn (see the
+// ExecutionReceiptDocument note above for the same trade-off).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PortableExecutionIdentityView {
     V1(ExecutionIdentityInput),
@@ -667,7 +686,7 @@ impl PathRoleNormalizer {
             .into_iter()
             .map(|(token, path)| (token.into(), normalize_host_path(&path.into())))
             .collect();
-        roles.sort_by(|(_, left), (_, right)| right.len().cmp(&left.len()));
+        roles.sort_by_key(|(_, root)| std::cmp::Reverse(root.len()));
         Self { roles }
     }
 
@@ -1302,8 +1321,9 @@ mod tests {
 
     #[test]
     fn execution_identity_drift_matrix_covers_launch_envelope_components() {
+        type Perturbation = Box<dyn Fn(&mut ExecutionIdentityInput)>;
         let baseline = sample_input().compute_id().expect("baseline").execution_id;
-        let mut perturbations: Vec<(&str, Box<dyn Fn(&mut ExecutionIdentityInput)>)> = vec![
+        let mut perturbations: Vec<(&str, Perturbation)> = vec![
             (
                 "source",
                 Box::new(|input| {
