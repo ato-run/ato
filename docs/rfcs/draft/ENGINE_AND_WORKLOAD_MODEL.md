@@ -11,7 +11,7 @@ related:
   - "NACELLE_SPEC.md"
   - "RUNTIME_AND_BUILD_MODEL.md"
   - "UNIFIED_EXECUTION_MODEL.md"
-  - "../../GLOSSARY.md"
+  - "../../glossary-reference.md"
 ---
 
 # Engine & Workload Model (Draft)
@@ -298,5 +298,5 @@ HourglassPipeline
 - [NACELLE_SPEC.md](../accepted/NACELLE_SPEC.md) — nacelle 単体仕様
 - [RUNTIME_AND_BUILD_MODEL.md](../accepted/RUNTIME_AND_BUILD_MODEL.md) — Smart Build / Dumb Runtime
 - [UNIFIED_EXECUTION_MODEL.md](./UNIFIED_EXECUTION_MODEL.md) — Pipeline × Runtime 統一（Provider Toolchain 層）
-- [GLOSSARY.md](../../GLOSSARY.md) — Engine / Workload / Provider Toolchain 用語定義
+- [glossary-reference.md](../../glossary-reference.md) — Engine / Workload / Provider Toolchain 用語定義
 - SSOT: `apps/ato-cli/core/src/engine.rs`, `apps/ato-cli/core/src/executors/`, `apps/ato-cli/core/src/runtime/`
