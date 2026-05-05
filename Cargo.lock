@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "ato-cli"
-version = "0.4.117"
+version = "0.4.118"
 dependencies = [
  "adk-core",
  "adk-model",
@@ -4159,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "nacelle"
-version = "0.4.115"
+version = "0.4.118"
 dependencies = [
  "anyhow",
  "async-trait",
