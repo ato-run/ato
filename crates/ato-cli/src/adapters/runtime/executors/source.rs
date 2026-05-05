@@ -609,7 +609,7 @@ struct NacelleExecError {
 impl NacelleExecAdapter {
     fn for_plan(
         plan: &ManifestData,
-        mode: ExecuteMode,
+        _mode: ExecuteMode,
         launch_ctx: &RuntimeLaunchContext,
     ) -> Result<Self> {
         let normalized_manifest_path = write_normalized_manifest(plan, launch_ctx.command_args())?;
@@ -672,16 +672,24 @@ impl NacelleExecAdapter {
             })
             .filter(|paths| !paths.is_empty());
 
+        // `interactive` in nacelle's ExecEnvelope means "allocate a PTY and
+        // treat stdin as TerminalCommand JSON". Source workloads (uvicorn,
+        // node, etc.) are never PTY sessions — those go through
+        // workload.type=shell. Foreground execute mode means "ato waits on
+        // the child"; it does NOT imply PTY. Setting interactive=true here
+        // routes to launch_interactive, which returns a pid without
+        // registering the child, so the supervisor fails with
+        // "lost child handle".
         Ok(Self {
             payload: json!({
                 "spec_version": "0.1.0",
-                "interactive": matches!(mode, ExecuteMode::Foreground),
+                "interactive": false,
                 "workload": {
                     "type": "source",
                     "manifest": normalized_manifest_path.display().to_string(),
                 },
                 "env": env,
-                "cwd": runtime_cwd_payload(launch_ctx.effective_cwd()),
+                "cwd": runtime_cwd_payload(launch_ctx, &plan.execution_working_directory()),
                 "mounts": launch_ctx
                     .injected_mounts()
                     .iter()
@@ -699,13 +707,28 @@ impl NacelleExecAdapter {
     }
 }
 
-fn runtime_cwd_payload(effective_cwd: Option<&PathBuf>) -> Option<String> {
-    let cwd = effective_cwd?;
+fn runtime_cwd_payload(
+    launch_ctx: &RuntimeLaunchContext,
+    working_dir: &Path,
+) -> Option<String> {
     if cfg!(target_os = "linux") {
-        Some("/workspace".to_string())
-    } else {
-        Some(cwd.display().to_string())
+        // The Linux sandbox bind-mounts the materialized workspace at
+        // /workspace, so the cwd inside the sandbox is always /workspace
+        // regardless of the host effective_cwd. Subdirectories like
+        // working_dir.relative_to(workspace) are not yet routed here —
+        // the orchestrator's existing /workspace contract preserves the
+        // historical behaviour.
+        return Some("/workspace".to_string());
     }
+    // macOS sandbox runs in the host filesystem namespace, so apply the
+    // same caller-vs-workspace resolution the host execution path uses
+    // (resolve_host_execution_cwd). Without this, nacelle would receive
+    // launch_ctx.effective_cwd() — the user's caller pwd — and uvicorn /
+    // node entrypoints would be invoked from outside the materialized
+    // workspace, breaking module imports and `--with-requirements`
+    // resolution. Callers that explicitly set --cwd, or invoke ato from
+    // inside the workspace, still get their pwd honoured.
+    Some(resolve_host_execution_cwd(launch_ctx, working_dir).display().to_string())
 }
 
 fn write_normalized_manifest(plan: &ManifestData, explicit_args: &[String]) -> Result<PathBuf> {
@@ -898,15 +921,18 @@ fn resolve_python_requirements_argument(plan: &ManifestData) -> Option<String> {
         plan.manifest_dir.join("requirements.txt"),
         plan.manifest_dir.join("source").join("requirements.txt"),
     ];
+    // Return an absolute path. The previous code returned a path relative to
+    // manifest_dir, but the consumer is launched via nacelle with cwd=
+    // launch_ctx.effective_cwd() — the user's caller pwd, not manifest_dir.
+    // For `ato run capsule://github.com/...` the caller pwd has nothing to
+    // do with the materialized capsule layout, so a relative path resolves
+    // against the wrong tree and uv aborts with `File not found`. The host
+    // sandbox already grants read access to source_dir / manifest_dir, so an
+    // absolute path is reachable regardless of cwd.
     candidates
         .into_iter()
         .find(|path| path.exists())
-        .map(|path| {
-            pathdiff::diff_paths(&path, &plan.manifest_dir)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string()
-        })
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 fn has_local_uv_cache(plan: &ManifestData) -> bool {
@@ -1626,7 +1652,7 @@ mod tests {
         );
         assert_eq!(
             adapter.payload["cwd"].as_str(),
-            runtime_cwd_payload(Some(&effective_cwd)).as_deref()
+            runtime_cwd_payload(&launch_ctx, &plan.execution_working_directory()).as_deref()
         );
         let payload_env = adapter.payload["env"].as_array().expect("payload env");
         assert!(payload_env.iter().any(|pair| {
