@@ -50,8 +50,8 @@ use thiserror::Error;
 
 use super::endpoint::{EndpointAllocator, EndpointError};
 use super::orphan::{
-    detect_orphan_state, sweep_stale_sentinel, write_session_sentinel, OrphanCheckOutcome,
-    OrphanError, SessionSentinel,
+    detect_orphan_state, kill_orphan_provider, sweep_stale_sentinel, write_session_sentinel,
+    OrphanCheckOutcome, OrphanError, OrphanProviderKillOutcome, SessionSentinel,
 };
 use super::ready::{wait_for_ready, ReadyError, ReadyProbeKind};
 use super::teardown::{teardown_reverse_topological, TeardownError, TeardownTarget};
@@ -95,6 +95,12 @@ pub struct OrchestratorInput<'a> {
     pub default_ready_timeout: Duration,
     /// Polling interval between ready probe attempts.
     pub ready_probe_interval: Duration,
+    /// Label of the consumer target being launched. When `Some(_)`,
+    /// `start_all` only spawns deps that the target actually `needs`
+    /// (transitively) instead of every top-level `[dependencies.*]`
+    /// entry. `None` preserves the legacy "start every declared dep"
+    /// behaviour for callers that haven't been migrated yet.
+    pub selected_target: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -318,7 +324,7 @@ impl Drop for RunningGraph {
 /// `RunningGraph`. Errors mid-start trigger a teardown of any deps that
 /// were already started.
 pub fn start_all(input: OrchestratorInput<'_>) -> Result<RunningGraph, OrchestratorError> {
-    let order = topological_dep_order(input.consumer)?;
+    let order = topological_dep_order(input.consumer, input.selected_target.as_deref())?;
     let mut started: Vec<RunningDep> = Vec::new();
     let allocator = EndpointAllocator::new();
     let env_scope: BTreeSet<&str> = input
@@ -361,14 +367,42 @@ pub fn start_all(input: OrchestratorInput<'_>) -> Result<RunningGraph, Orchestra
     })
 }
 
-fn topological_dep_order(consumer: &CapsuleManifest) -> Result<Vec<String>, OrchestratorError> {
+fn topological_dep_order(
+    consumer: &CapsuleManifest,
+    selected_target: Option<&str>,
+) -> Result<Vec<String>, OrchestratorError> {
     // Build edges from each target's needs into deps. For start order, a
     // dep that another dep needs comes first. For v1 the consumer's
     // dependencies graph itself is flat (deps don't depend on other deps
     // — that's `transitive identity` follow-up). So we simply order
     // deps by the order they appear in consumer.dependencies (BTreeMap
     // ordering is alphabetical, deterministic).
-    Ok(consumer.dependencies.keys().cloned().collect())
+    let all_deps: Vec<String> = consumer.dependencies.keys().cloned().collect();
+    let Some(target_label) = selected_target else {
+        return Ok(all_deps);
+    };
+    // When the caller named a target, only the deps that target needs
+    // (matching `[targets.<label>] needs = [...]`) start. This avoids
+    // spinning up irrelevant providers (e.g. running `--target web`
+    // for a Vite frontend should not boot the postgres sidecar that
+    // only the FastAPI backend uses). Targets that omit `needs` are
+    // treated as "needs nothing" — the historical "start every dep"
+    // semantics is reachable by passing `selected_target = None`.
+    let Some(targets_block) = consumer.targets.as_ref() else {
+        return Ok(all_deps);
+    };
+    let Some(target) = targets_block.named.get(target_label) else {
+        // Unknown target — defer to caller error handling. Returning
+        // every dep here is the conservative path; downstream code
+        // already validates the target label and surfaces a clearer
+        // error if it is missing.
+        return Ok(all_deps);
+    };
+    let needs: BTreeSet<&str> = target.needs.iter().map(String::as_str).collect();
+    Ok(all_deps
+        .into_iter()
+        .filter(|alias| needs.contains(alias.as_str()))
+        .collect())
 }
 
 fn start_one(
@@ -433,6 +467,30 @@ fn start_one(
                 "swept stale sentinel for dep '{alias}' (owner pid {} is dead)",
                 sentinel.session_pid
             ));
+            // The owning Ato session is gone, but its provider process
+            // can survive (postgres detaches its postmaster from the
+            // parent's signal group, keeps PGDATA's postmaster.pid
+            // locked, and refuses to let a fresh `bootstrap.sh exec
+            // postgres` re-bind). SIGTERM the recorded provider_pid
+            // before we sweep so the next start isn't blocked by the
+            // previous run's leak. Best-effort: if the kill fails for
+            // a non-ESRCH reason we still proceed and let the provider
+            // surface its own startup error.
+            match kill_orphan_provider(&sentinel) {
+                OrphanProviderKillOutcome::NotPresent => {}
+                OrphanProviderKillOutcome::Killed { pid } => {
+                    warnings.push(format!(
+                        "killed orphan provider for dep '{alias}' (pid {pid})"
+                    ));
+                    // Tiny grace so postgres can flush its postmaster.pid.
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                OrphanProviderKillOutcome::KillFailed { pid, detail } => {
+                    warnings.push(format!(
+                        "failed to kill orphan provider for dep '{alias}' (pid {pid}): {detail}"
+                    ));
+                }
+            }
             sweep_stale_sentinel(&state_dir).map_err(|err| OrchestratorError::Orphan {
                 alias: alias.to_string(),
                 source: err,
@@ -1185,6 +1243,7 @@ version = "1"
             session_pid: std::process::id() as i32,
             default_ready_timeout: Duration::from_secs(5),
             ready_probe_interval: Duration::from_millis(20),
+            selected_target: None,
         };
 
         let graph = start_all(input).expect("start_all");
@@ -1294,6 +1353,7 @@ version = "1"
             session_pid: std::process::id() as i32,
             default_ready_timeout: Duration::from_secs(2),
             ready_probe_interval: Duration::from_millis(20),
+            selected_target: None,
         };
 
         let err = start_all(input).expect_err("must abort on alive other session");
@@ -1417,6 +1477,7 @@ version = "1"
             session_pid: std::process::id() as i32,
             default_ready_timeout: Duration::from_secs(120),
             ready_probe_interval: Duration::from_millis(500),
+            selected_target: None,
         };
 
         let graph = start_all(input).unwrap_or_else(|err| {
@@ -1501,5 +1562,57 @@ version = "1"
             "instance_hash MUST be stable across PG_PASSWORD rotation"
         );
         eprintln!("[P7] rotation invariant holds");
+    }
+
+    /// `topological_dep_order` must filter top-level [dependencies.*]
+    /// down to the deps the selected target lists in `needs`. Without
+    /// this, e.g. running `--target web` on a multi-target consumer
+    /// boots backend-only providers (postgres) and collides with the
+    /// real backend run via the shared state dir.
+    #[test]
+    fn topological_dep_order_filters_by_selected_target_needs() {
+        let manifest = r#"
+schema_version = "0.3"
+name = "multi-target"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "python -m uvicorn main:app"
+needs = ["db"]
+
+[targets.web]
+runtime = "source"
+driver = "node"
+run = "npm run dev"
+"#;
+        let consumer = CapsuleManifest::from_toml(manifest).expect("parse manifest");
+
+        // None → legacy "every dep" behaviour preserved
+        let all = topological_dep_order(&consumer, None).expect("legacy order");
+        assert_eq!(all, vec!["db".to_string()]);
+
+        // app `needs = ["db"]` → starts postgres
+        let app = topological_dep_order(&consumer, Some("app")).expect("app order");
+        assert_eq!(app, vec!["db".to_string()]);
+
+        // web has no `needs` → no deps spawn (frontend skips postgres)
+        let web = topological_dep_order(&consumer, Some("web")).expect("web order");
+        assert!(
+            web.is_empty(),
+            "target without needs must skip top-level deps, got {web:?}"
+        );
+
+        // unknown target → fall back to all-deps so caller can surface
+        // the missing-target error itself rather than silently empty
+        let bogus = topological_dep_order(&consumer, Some("nope")).expect("bogus order");
+        assert_eq!(bogus, vec!["db".to_string()]);
     }
 }
