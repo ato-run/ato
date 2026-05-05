@@ -19,8 +19,9 @@ use super::lockfile_support::{
 use super::{
     ensure_lockfile, ensure_lockfile_for_compat_input, generate_lockfile,
     lockfile_has_required_platform_coverage, lockfile_inputs_snapshot_path, lockfile_output_path,
-    lockfile_runtime_platforms, orchestration_service_target_labels, read_lockfile,
-    read_runtime_tools, required_runtime_version, resolve_external_capsule_dependencies,
+    lockfile_runtime_platforms, lockfile_runtime_target_labels,
+    orchestration_service_target_labels, read_lockfile, read_runtime_tools,
+    required_runtime_version, resolve_external_capsule_dependencies,
     semantic_manifest_hash_from_text, verify_lockfile_external_dependencies,
     verify_lockfile_manifest, CapsuleLock, LockMeta, LockedCapsuleDependency, RuntimeArtifact,
     RuntimeEntry, RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
@@ -364,6 +365,30 @@ target = "control_plane"
         labels,
         vec!["control_plane".to_string(), "dashboard".to_string()]
     );
+}
+
+#[test]
+fn lockfile_runtime_targets_include_named_targets_without_services() {
+    let manifest: toml::Value = toml::from_str(
+        r#"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+runtime_version = "20.12.0"
+"#,
+    )
+    .unwrap();
+
+    let mut labels = lockfile_runtime_target_labels(&manifest);
+    labels.sort();
+    assert_eq!(labels, vec!["app".to_string(), "web".to_string()]);
 }
 
 #[test]
