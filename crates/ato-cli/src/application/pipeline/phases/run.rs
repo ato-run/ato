@@ -1169,7 +1169,12 @@ where
         );
     }
     let mut dep_contracts = None;
-    let mut auto_generated_lock: Option<CompatibilityLegacyLockContext> = None;
+    // Held outside the match arm so a lock context produced inside the
+    // `None =>` branch survives long enough to be borrowed by
+    // `compatibility_legacy_lock`. Declared without an initial value so
+    // clippy does not flag a dead `None` initialization that the auto-lock
+    // path always overwrites.
+    let auto_generated_lock: CompatibilityLegacyLockContext;
     if has_dependency_contracts {
         if request.background {
             anyhow::bail!("dependency-contract services do not support --background yet");
@@ -1213,12 +1218,12 @@ where
                             lock_path.display()
                         )
                     })?;
-                auto_generated_lock = Some(CompatibilityLegacyLockContext {
+                auto_generated_lock = CompatibilityLegacyLockContext {
                     manifest_path: compat_input.workspace_root().join("capsule.toml"),
                     path: lock_path,
                     lock,
-                });
-                auto_generated_lock.as_ref().expect("set above")
+                };
+                &auto_generated_lock
             }
         };
         verify_lockfile_external_dependencies(

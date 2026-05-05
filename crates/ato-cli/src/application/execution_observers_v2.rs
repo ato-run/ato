@@ -422,15 +422,12 @@ pub(crate) fn observe_environment_v2(
 
     let manifest_keys: Vec<String> = plan.execution_env().keys().cloned().collect();
     for key in plan.execution_required_envs() {
-        if !env.contains_key(&key) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = env.entry(key.clone()) {
             if let Ok(value) = std::env::var(&key) {
-                env.insert(
-                    key,
-                    ObservedEnvValue {
-                        value,
-                        origin: EnvOrigin::ManifestRequiredEnv,
-                    },
-                );
+                entry.insert(ObservedEnvValue {
+                    value,
+                    origin: EnvOrigin::ManifestRequiredEnv,
+                });
             }
         }
     }
