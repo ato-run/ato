@@ -641,4 +641,57 @@ mod tests {
             Some("3.11.10")
         );
     }
+
+    #[test]
+    fn build_services_picks_explicit_target_from_multi_target_lock() {
+        let mut lock = AtoLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "demo", "version": "0.1.0", "default_target": "app"}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([
+                {
+                    "name": "app",
+                    "target": "app",
+                    "process": {"entrypoint": "python", "run_command": "python -m uvicorn main:app"},
+                    "depends_on": ["db"]
+                },
+                {
+                    "name": "web",
+                    "target": "web",
+                    "process": {"entrypoint": "npm", "run_command": "npm run dev"}
+                }
+            ]),
+        );
+        lock.contract
+            .entries
+            .insert("process".to_string(), json!({"entrypoint": "python"}));
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "source", "selected_target": "app"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([
+                {"label": "app", "runtime": "source", "driver": "python", "port": 8000},
+                {"label": "web", "runtime": "source", "driver": "node", "port": 5173}
+            ]),
+        );
+        lock.resolution
+            .entries
+            .insert("closure".to_string(), json!({"kind": "metadata_only"}));
+
+        let resolved = resolve_lock_runtime_model(&lock, Some("web")).expect("resolved web");
+        assert_eq!(resolved.selected.target_label, "web");
+        assert_eq!(resolved.selected.runtime.driver.as_deref(), Some("node"));
+        assert_eq!(resolved.selected.runtime.port, Some(5173));
+        assert_eq!(resolved.services.len(), 2);
+
+        let resolved_app = resolve_lock_runtime_model(&lock, Some("app")).expect("resolved app");
+        assert_eq!(resolved_app.selected.target_label, "app");
+        assert_eq!(resolved_app.selected.runtime.port, Some(8000));
+        assert_eq!(resolved_app.selected.depends_on, vec!["db".to_string()]);
+    }
 }
