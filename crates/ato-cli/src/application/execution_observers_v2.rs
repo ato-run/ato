@@ -259,6 +259,19 @@ struct DependencyDerivationHashInput {
     direct_capsule_dependencies: Vec<DirectCapsuleDependencyHashInput>,
 }
 
+fn dependency_hash_input_from_locked_dependency(
+    dependency: capsule_core::lockfile::LockedCapsuleDependency,
+) -> DirectCapsuleDependencyHashInput {
+    DirectCapsuleDependencyHashInput {
+        alias: dependency.name,
+        source: dependency.source,
+        resolved_version: dependency.resolved_version,
+        contract: dependency.contract,
+        parameters: dependency.parameters,
+        identity_exports: dependency.identity_exports,
+    }
+}
+
 fn read_direct_capsule_dependency_inputs(
     plan: &ManifestData,
 ) -> Result<Vec<DirectCapsuleDependencyHashInput>> {
@@ -272,25 +285,41 @@ fn read_direct_capsule_dependency_inputs(
             plan.lock_path.display()
         )
     })?;
-    let lock: CapsuleLock = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "failed to parse capsule lock for dependency identity: {}",
-            plan.lock_path.display()
-        )
-    })?;
 
-    let mut dependencies = lock
-        .capsule_dependencies
-        .into_iter()
-        .map(|dependency| DirectCapsuleDependencyHashInput {
-            alias: dependency.name,
-            source: dependency.source,
-            resolved_version: dependency.resolved_version,
-            contract: dependency.contract,
-            parameters: dependency.parameters,
-            identity_exports: dependency.identity_exports,
-        })
-        .collect::<Vec<_>>();
+    let mut dependencies = match serde_json::from_slice::<CapsuleLock>(&bytes) {
+        Ok(lock) => lock
+            .capsule_dependencies
+            .into_iter()
+            .map(dependency_hash_input_from_locked_dependency)
+            .collect::<Vec<_>>(),
+        Err(capsule_lock_error) => {
+            let mut lock: capsule_core::ato_lock::AtoLock =
+                serde_json::from_slice(&bytes).with_context(|| {
+                    format!(
+                        "failed to parse dependency identity lock data: {} (capsule.lock parse failed: {capsule_lock_error})",
+                        plan.lock_path.display()
+                    )
+                })?;
+            let locked_dependencies = lock
+                .resolution
+                .entries
+                .remove("locked_dependencies")
+                .map(serde_json::from_value::<Vec<capsule_core::lockfile::LockedCapsuleDependency>>)
+                .transpose()
+                .with_context(|| {
+                    format!(
+                        "failed to parse resolution.locked_dependencies for dependency identity: {}",
+                        plan.lock_path.display()
+                    )
+                })?
+                .unwrap_or_default();
+            locked_dependencies
+                .into_iter()
+                .map(dependency_hash_input_from_locked_dependency)
+                .collect::<Vec<_>>()
+        }
+    };
+
     dependencies.sort_by(|a, b| a.alias.cmp(&b.alias));
     Ok(dependencies)
 }
@@ -1248,6 +1277,42 @@ env_allowlist = ["DATABASE_URL"]
     }
 
     #[test]
+    fn dependency_derivation_hash_reads_locked_dependencies_from_ato_lock() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let capsule_lock = workspace.path().join("capsule.lock.json");
+        let ato_lock = workspace.path().join("ato.lock.json");
+
+        write_capsule_lock(&capsule_lock, "appdb", "secret-a");
+        write_ato_lock(&ato_lock, "appdb", "secret-a");
+
+        let mut capsule_plan = sample_plan(workspace.path().to_path_buf());
+        capsule_plan.lock_path = capsule_lock;
+        let mut ato_plan = sample_plan(workspace.path().to_path_buf());
+        ato_plan.lock_path = ato_lock;
+
+        let launch_spec = capsule_core::launch_spec::derive_launch_spec(&capsule_plan)
+            .expect("derive launch spec");
+        let capsule_observed = observe_dependencies_v2(
+            &capsule_plan,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe capsule lock dependencies");
+        let ato_observed = observe_dependencies_v2(
+            &ato_plan,
+            &launch_spec,
+            &RuntimeLaunchContext::empty(),
+            None,
+            &sample_runtime_identity(),
+        )
+        .expect("observe ato lock dependencies");
+
+        assert_eq!(capsule_observed.derivation_hash.value, ato_observed.derivation_hash.value);
+    }
+
+    #[test]
     fn dependency_derivation_hash_includes_identity_exports() {
         // RFC §9.5: dep hash input tuple is (resolved, contract, parameters,
         // identity_exports). Without identity_exports in the hash input, a
@@ -1383,6 +1448,42 @@ run = "main.py"
                 libc: "unknown".to_string(),
             },
         }
+    }
+
+    fn write_ato_lock(path: &Path, database: &str, password: &str) {
+        let locked_dependencies = vec![capsule_core::lockfile::LockedCapsuleDependency {
+            name: "db".to_string(),
+            source: "capsule://ato/acme-postgres@16".to_string(),
+            source_type: "store".to_string(),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::from([(
+                "database".to_string(),
+                capsule_core::types::ParamValue::String(database.to_string()),
+            )]),
+            credentials: BTreeMap::from([(
+                "password".to_string(),
+                serde_json::from_str(&format!("\"{{{{env.{password}}}}}\""))
+                    .expect("credential template"),
+            )]),
+            identity_exports: BTreeMap::new(),
+            resolved_version: Some("16.0.0".to_string()),
+            digest: Some("blake3:deadbeef".to_string()),
+            sha256: Some("sha256:beadfeed".to_string()),
+            artifact_url: Some("https://example.test/postgres.capsule".to_string()),
+        }];
+        let lock = capsule_core::ato_lock::AtoLock {
+            resolution: capsule_core::ato_lock::ResolutionSection {
+                entries: BTreeMap::from([(
+                    "locked_dependencies".to_string(),
+                    serde_json::to_value(&locked_dependencies).expect("serialize locked dependencies"),
+                )]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        std::fs::write(path, serde_json::to_vec(&lock).expect("serialize ato lock"))
+            .expect("write ato lock");
     }
 
     fn write_capsule_lock(path: &Path, database: &str, password: &str) {
