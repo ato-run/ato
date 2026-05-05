@@ -1061,6 +1061,19 @@ where
         // fields (build_command, language, package_type, etc.) are available to
         // run_v03_lifecycle_steps. The inferred lock used by route_lock_with_state_overrides
         // does not preserve these fields, causing the build step to be skipped (#301).
+        //
+        // Also patch `prepared.bridge_manifest` from the same capsule.toml so the
+        // top-level `[dependencies.<alias>]` block survives into
+        // `manifest_external_capsule_dependencies` below — the lock-derived
+        // bridge_manifest seeded by `PreparedRunContext::from_authoritative_input`
+        // does not preserve the dependency-contract grammar, so without this
+        // local-path runs of a capsule with `[dependencies.db]` etc. would skip
+        // dep_contracts startup entirely and the consumer would see literal
+        // `{{deps.db.runtime_exports.DATABASE_URL}}` instead of the resolved
+        // value (#22). The github-URL fetch path patches bridge_manifest via a
+        // separate code path (the relocated checkout reseeds the prepared
+        // context downstream); local-path runs go straight from the install
+        // phase's authoritative_input into this branch.
         let capsule_toml = authoritative_input.workspace_root.join("capsule.toml");
         if capsule_toml.exists() {
             if let Ok(loaded) = capsule_core::manifest::load_manifest_with_validation_mode(
@@ -1071,6 +1084,9 @@ where
                     capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
                 {
                     decision.plan.compat_manifest = Some(bridge);
+                }
+                if let Ok(value) = toml::from_str::<toml::Value>(&loaded.raw_text) {
+                    prepared.bridge_manifest = DerivedBridgeManifest::new(value);
                 }
             }
         }
@@ -1288,14 +1304,29 @@ where
         }
     }
     if let Some(dep_contracts) = dep_contracts.as_ref() {
+        let graph = dep_contracts
+            .graph()
+            .context("dependency contract graph missing after startup")?;
         launch_ctx = inject_dependency_contract_env(
             launch_ctx,
             &decision.plan,
             dep_contracts.lock(),
-            dep_contracts
-                .graph()
-                .context("dependency contract graph missing after startup")?,
+            graph,
         )?;
+        // Surface the providers' loopback endpoints to the consumer's
+        // sandbox so `--sandbox` consumers can `connect(127.0.0.1:<port>)`
+        // without tripping the egress-deny default. The orchestrator owns
+        // port allocation; without this the consumer's psycopg/sqlalchemy
+        // stack hits EPERM mid-startup even though the provider is happily
+        // listening on the same loopback (#17).
+        let dep_endpoints: Vec<String> = graph
+            .deps()
+            .iter()
+            .filter_map(|dep| dep.allocated_port.map(|port| format!("127.0.0.1:{port}")))
+            .collect();
+        if !dep_endpoints.is_empty() {
+            launch_ctx = launch_ctx.with_dep_endpoints(dep_endpoints);
+        }
     }
 
     if request.sandbox_mode && !request.dangerously_skip_permissions {
