@@ -278,8 +278,8 @@ fn prompt_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::shared_env_lock as env_lock;
+    use super::*;
 
     use tempfile::TempDir;
 
