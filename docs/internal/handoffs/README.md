@@ -1,3 +1,3 @@
 # Handoffs
 
-作業引き継ぎ、継続タスク向けのコンテキスト共有文書を置く。
+Task handoffs and context documents for ongoing work belong here.

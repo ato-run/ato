@@ -1,22 +1,23 @@
 # Topic Page Template
 
-1ページ1トピック。ページ内の役割はこの4セクションで分ける。
+One page per topic. Separate the role of the text with these four sections.
 
 ## Overview
 
-今このトピックが何を扱うかを書く。
+Explain what this topic covers today.
 
 ## How it works
 
-実際の流れ、主要なデータ、関連コンポーネントを書く。
+Describe the real flow, key data, and related components.
 
 ## Specification
 
-- MUST / SHOULD / MAY を使って、現在守るべき契約を書く
-- より厳密な契約が必要なら RFC を正本として参照する
+- Use MUST / SHOULD / MAY for the current contract
+- If stricter detail is needed, point to the RFC as the source of truth
 
 ## Design Notes
 
-なぜこの形なのか、何を意図してこうしているのかを書く。
+Explain why the design looks like this and what intent shaped it.
 
-Design Notes は最後に置く。普段読む人は上3セクションだけで十分な形を保つ。
+Keep Design Notes last. A normal reader should be able to stop after the first
+three sections.
