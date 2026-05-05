@@ -10,6 +10,6 @@
 **Reference**
 
 - [Core Architecture](core-architecture.md)
-- [Glossary](GLOSSARY.md)
+- [Glossary](glossary-reference.md)
 - [RFCs](rfcs/README.md)
-- [Topic Page Template](TEMPLATE.md)
+- [Topic Page Template](topic-page-template.md)
