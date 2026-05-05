@@ -657,6 +657,106 @@ target = "main"
     }
 
     #[test]
+    fn multi_target_manifest_without_services_imports_executable_workloads() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(
+            dir.path(),
+            r#"schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[dependencies.db]
+capsule = "capsule://github.com/example/postgres@abc123"
+contract = "service@1"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+run = "python -m uvicorn main:app"
+port = 8000
+needs = ["db"]
+required_env = ["SECRET_KEY"]
+
+[targets.app.env]
+APP_ENV = "dev"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+runtime_version = "20.12.0"
+working_dir = "frontend"
+run = "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort"
+port = 5173
+"#,
+        );
+
+        let result = compile_from_dir(dir.path());
+        let workloads = result
+            .draft_lock
+            .contract
+            .entries
+            .get("workloads")
+            .and_then(Value::as_array)
+            .expect("workloads array");
+        assert_eq!(workloads.len(), 2);
+        assert_eq!(
+            workloads[0].get("target").and_then(Value::as_str),
+            Some("app")
+        );
+        assert_eq!(
+            workloads[1].get("target").and_then(Value::as_str),
+            Some("web")
+        );
+        assert_eq!(
+            workloads[0]
+                .get("depends_on")
+                .and_then(Value::as_array)
+                .and_then(|values| values.first())
+                .and_then(Value::as_str),
+            Some("db")
+        );
+        assert_eq!(
+            workloads[1]
+                .get("depends_on")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+
+        let resolved_targets = result
+            .draft_lock
+            .resolution
+            .entries
+            .get("resolved_targets")
+            .and_then(Value::as_array)
+            .expect("resolved targets array");
+        assert_eq!(resolved_targets.len(), 2);
+        assert_eq!(
+            resolved_targets[1]
+                .get("working_dir")
+                .and_then(Value::as_str),
+            Some("frontend")
+        );
+        assert_eq!(
+            resolved_targets[1].get("port").and_then(Value::as_u64),
+            Some(5173)
+        );
+        assert_eq!(
+            result
+                .draft_lock
+                .contract
+                .entries
+                .get("process")
+                .and_then(|process| process.get("run_command"))
+                .and_then(Value::as_str),
+            Some("python -m uvicorn main:app")
+        );
+    }
+
+    #[test]
     fn legacy_conflict_only_affects_resolution_and_unresolved() {
         let base = tempdir().expect("tempdir");
         write_manifest(
