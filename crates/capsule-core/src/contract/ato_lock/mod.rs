@@ -98,6 +98,14 @@ pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
 /// Writes a durable pretty ato.lock artifact after recomputing lock_id.
 pub fn write_pretty_to_path(lock: &AtoLock, path: &Path) -> Result<()> {
     let raw = to_pretty_json(lock)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            CapsuleError::Config(format!(
+                "Failed to create parent directory {}: {err}",
+                parent.display()
+            ))
+        })?;
+    }
     fs::write(path, raw)
         .map_err(|err| CapsuleError::Config(format!("Failed to write {}: {err}", path.display())))
 }

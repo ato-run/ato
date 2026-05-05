@@ -2630,9 +2630,19 @@ mod tests {
 
         let relocated = relocate_github_run_checkout(&checkout_root).expect("relocate checkout");
 
+        let expected_parent = ato_home.join("tmp").join("gh-run");
         assert_eq!(
-            relocated,
-            ato_home.join("tmp").join("gh-run").join("checkout")
+            relocated.parent(),
+            Some(expected_parent.as_path()),
+            "relocated checkout must live under the ATO_HOME gh-run root"
+        );
+        assert!(
+            relocated
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.starts_with("checkout-")),
+            "relocated checkout must use a collision-resistant checkout-* suffix: {}",
+            relocated.display()
         );
         assert!(relocated.join("capsule.toml").exists());
         assert!(!checkout_root.exists());
