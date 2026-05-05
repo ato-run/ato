@@ -235,9 +235,19 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
         other => bail!("unsupported windows target: {}", other),
     };
     let paths = WorkspacePaths::discover()?;
-    run_cargo_build(&paths.desktop_manifest, "ato-desktop", rust_target)?;
-    run_cargo_build(&paths.ato_manifest, "ato", rust_target)?;
-    run_cargo_build(&paths.nacelle_manifest, "nacelle", rust_target)?;
+    run_cargo_build(
+        &paths.desktop_manifest,
+        "ato-desktop",
+        rust_target,
+        &paths.target_root,
+    )?;
+    run_cargo_build(&paths.ato_manifest, "ato", rust_target, &paths.target_root)?;
+    run_cargo_build(
+        &paths.nacelle_manifest,
+        "nacelle",
+        rust_target,
+        &paths.target_root,
+    )?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("Ato");
     if staging.exists() {
@@ -276,9 +286,19 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
         other => bail!("unsupported linux target: {}", other),
     };
     let paths = WorkspacePaths::discover()?;
-    run_cargo_build(&paths.desktop_manifest, "ato-desktop", rust_target)?;
-    run_cargo_build(&paths.ato_manifest, "ato", rust_target)?;
-    run_cargo_build(&paths.nacelle_manifest, "nacelle", rust_target)?;
+    run_cargo_build(
+        &paths.desktop_manifest,
+        "ato-desktop",
+        rust_target,
+        &paths.target_root,
+    )?;
+    run_cargo_build(&paths.ato_manifest, "ato", rust_target, &paths.target_root)?;
+    run_cargo_build(
+        &paths.nacelle_manifest,
+        "nacelle",
+        rust_target,
+        &paths.target_root,
+    )?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("AppDir");
     if staging.exists() {
@@ -814,9 +834,24 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     let spec = MacTarget::parse(target)?;
     let paths = WorkspacePaths::discover()?;
 
-    run_cargo_build(&paths.desktop_manifest, "ato-desktop", &spec.rust_target)?;
-    run_cargo_build(&paths.ato_manifest, "ato", &spec.rust_target)?;
-    run_cargo_build(&paths.nacelle_manifest, "nacelle", &spec.rust_target)?;
+    run_cargo_build(
+        &paths.desktop_manifest,
+        "ato-desktop",
+        &spec.rust_target,
+        &paths.target_root,
+    )?;
+    run_cargo_build(
+        &paths.ato_manifest,
+        "ato",
+        &spec.rust_target,
+        &paths.target_root,
+    )?;
+    run_cargo_build(
+        &paths.nacelle_manifest,
+        "nacelle",
+        &spec.rust_target,
+        &paths.target_root,
+    )?;
 
     let bundle_root = paths
         .desktop_root
@@ -883,10 +918,24 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     Ok(bundle_root)
 }
 
-fn run_cargo_build(manifest_path: &Path, bin: &str, rust_target: &str) -> Result<()> {
+fn run_cargo_build(
+    manifest_path: &Path,
+    bin: &str,
+    rust_target: &str,
+    target_dir: &Path,
+) -> Result<()> {
     let manifest_path_str = manifest_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("manifest path is not valid UTF-8"))?;
+    let target_dir_str = target_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("target_dir is not valid UTF-8"))?;
+    // ato-desktop is excluded from the workspace (root Cargo.toml `exclude`)
+    // so without an explicit --target-dir its build artifacts land in
+    // `crates/ato-desktop/target/...` while ato + nacelle land in the
+    // workspace `target/...`. Forcing a single target_dir for all three
+    // builds is the simplest way to keep `paths.target_root` (used by the
+    // staging copies below) honest.
     let status = Command::new("cargo")
         .args([
             "build",
@@ -897,6 +946,8 @@ fn run_cargo_build(manifest_path: &Path, bin: &str, rust_target: &str) -> Result
             bin,
             "--target",
             rust_target,
+            "--target-dir",
+            target_dir_str,
         ])
         .env_remove("CARGO_TARGET_DIR")
         .status()
