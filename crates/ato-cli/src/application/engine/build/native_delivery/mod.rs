@@ -2763,7 +2763,8 @@ fn staged_delivery_config(plan: &NativeBuildPlan) -> Result<DeliveryConfig> {
 
 fn run_finalize_command(derived_dir: &Path, config: &DeliveryConfig) -> Result<()> {
     let tool = config.finalize.tool.trim();
-    let mut command = Command::new(tool);
+    let resolved_tool = resolve_finalize_tool_path(tool);
+    let mut command = Command::new(&resolved_tool);
     command.args(&config.finalize.args).current_dir(derived_dir);
     let output = run_captured_command(&mut command, || {
         format!("Failed to execute {} in {}", tool, derived_dir.display())
@@ -2785,7 +2786,8 @@ fn run_finalize_command(derived_dir: &Path, config: &DeliveryConfig) -> Result<(
 }
 
 fn strip_codesign_signature(tool: &str, app_path: &Path) -> Result<()> {
-    let mut command = Command::new(tool);
+    let resolved_tool = resolve_finalize_tool_path(tool);
+    let mut command = Command::new(&resolved_tool);
     command.arg("--remove-signature").arg(app_path);
     let output = run_captured_command(&mut command, || {
         format!("Failed to execute {} for {}", tool, app_path.display())
@@ -2809,6 +2811,18 @@ fn strip_codesign_signature(tool: &str, app_path: &Path) -> Result<()> {
             format!(": {}", details)
         }
     )
+}
+
+fn resolve_finalize_tool_path(tool: &str) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if tool.eq_ignore_ascii_case("codesign") {
+        let system_codesign = Path::new("/usr/bin/codesign");
+        if system_codesign.is_file() {
+            return system_codesign.to_path_buf();
+        }
+    }
+
+    PathBuf::from(tool)
 }
 
 fn run_captured_command(
