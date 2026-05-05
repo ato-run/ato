@@ -2,23 +2,23 @@
 
 ## Overview
 
-`ato run` は、ローカルディレクトリ、GitHub リポジトリ、Store 参照、share URL を
-「いま動かす」ための front door である。Ato の公開ドキュメントでは、まずこの
-ページから run の振る舞いを理解し、詳細契約は RFC に降りる。
+`ato run` is the front door for running a local directory, GitHub repository,
+Store reference, or share URL right now. In the public docs, this page gives the
+working model first and then points to RFCs for the deeper contract.
 
 ## How it works
 
-大きな流れは次の通り。
+At a high level, the flow is:
 
-1. 入力を正規化する
-2. `capsule.toml` または preview metadata をもとに runtime を決める
-3. 必要な tool/runtime を解決する
-4. lock と policy を使って実行計画を固める
-5. 制御された環境で起動する
+1. Normalize the input
+2. Choose a runtime from `capsule.toml` or preview metadata
+3. Resolve the required tools and runtimes
+4. Freeze the execution plan with lock state and policy
+5. Launch in a controlled environment
 
-詳細な CLI surface と routing は
-[`ATO_CLI_SPEC.md`](rfcs/accepted/ATO_CLI_SPEC.md) と
-[Core Architecture](core-architecture.md) が正本に近い説明になる。
+The detailed CLI surface and routing rules live in
+[`ATO_CLI_SPEC.md`](rfcs/accepted/ATO_CLI_SPEC.md) and
+[Core Architecture (JA)](core-architecture.md).
 
 ## Specification
 
@@ -28,12 +28,13 @@
 - runtime resolution SHOULD prefer pinned runtimes and tools recorded by lock state.
 - `capsule.toml` is the primary authoring contract for local projects.
 
-根拠:
+References:
 
 - [`Repository README`](https://github.com/ato-run/ato/blob/main/README.md)
 - [`rfcs/accepted/ATO_CLI_SPEC.md`](rfcs/accepted/ATO_CLI_SPEC.md)
 
 ## Design Notes
 
-`run` を front door に固定する理由は、対象ごとに mental model を増やさないため。
-「何を開くか」ではなく「同じ handle でどう実行するか」を優先する。
+`run` stays the front door so the user does not need a different mental model
+for each kind of software. The priority is not “what kind of thing is this?” but
+“how do I run it through the same handle?”
