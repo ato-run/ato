@@ -96,6 +96,8 @@ single document internally consistent.
 
 - GitHub Pages: <https://ato-run.github.io/ato/>
 - The RFC index is served from the docs-root docsify site.
+- [Accepted RFCs](accepted/README.md)
+- [Draft RFCs](draft/README.md)
 - Public navigation should include only `accepted/` and `draft/`. Keep
   `archived/` in the repository, but out of the main public nav.
 

@@ -18,8 +18,8 @@ each topic page should contain these four sections.
 
 ## Reference
 
-- [Core Architecture (JA)](core-architecture.md)
-- [Glossary (JA)](GLOSSARY.md)
+- [Core Architecture](core-architecture.md)
+- [Glossary](GLOSSARY.md)
 - [RFCs](rfcs/README.md)
 - [Topic Page Template](TEMPLATE.md)
 
@@ -28,3 +28,9 @@ each topic page should contain these four sections.
 Plans, research notes, handoffs, and dashboards belong under
 [`internal/`](internal/README.md). They are workspace artifacts, not part of the
 main public navigation.
+
+## Source of truth
+
+Code is the source of truth. These topic pages should track the current
+implementation in `crates/`, while RFCs remain the deeper contract and design
+history.
