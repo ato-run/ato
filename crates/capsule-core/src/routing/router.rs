@@ -763,9 +763,17 @@ impl ExecutionDescriptor {
     }
 
     pub fn is_orchestration_mode(&self) -> bool {
-        if self.runtime_model.services.len() > 1 {
-            return true;
-        }
+        // Orchestration mode = the consumer manifest declared a top-level
+        // `[services]` block whose entries point at named targets. This
+        // is distinct from the multi-target case (`[targets.app]` +
+        // `[targets.web]` with no `[services]`), which 0.4.120's compat
+        // import synthesizes into multiple workload entries on the lock
+        // contract for `--target` dispatch — those are still single-
+        // service runs and must not be routed through the orchestration
+        // executor (which requires `[services]` and bails out otherwise).
+        // Previously this returned `true` whenever
+        // `runtime_model.services.len() > 1`, which gave false positives
+        // for any multi-target source-only manifest.
         self.services().values().any(|service| {
             service
                 .target
