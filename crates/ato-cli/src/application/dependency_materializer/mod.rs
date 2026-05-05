@@ -327,6 +327,13 @@ fn materialize_node_dependencies(
             )
         })?;
         run_npm_ci(&work_dir)?;
+        if !node_modules.is_dir() {
+            if work_dir.exists() {
+                fs::remove_dir_all(&work_dir)
+                    .with_context(|| format!("failed to clean {}", work_dir.display()))?;
+            }
+            return Ok(None);
+        }
     }
 
     let outcome = freeze_dep_tree(&node_modules, &derivation_hash, "npm")

@@ -7,7 +7,7 @@ use fail_closed_support::*;
 
 #[test]
 #[cfg(unix)]
-fn missing_consent_in_non_interactive_mode_does_not_create_consent_store() {
+fn missing_consent_in_non_interactive_mode_bootstraps_consent_store() {
     let (_workspace, fixture) = prepare_fixture_workspace("network-exfil-capsule");
     let home = tempfile::TempDir::new().expect("failed to create temporary HOME");
     let nacelle_dir = tempfile::TempDir::new().expect("failed to create temp dir for mock nacelle");
@@ -38,7 +38,9 @@ fn missing_consent_in_non_interactive_mode_does_not_create_consent_store() {
     );
 
     let consent_dir = home.path().join(".ato").join("consent");
-    assert!(!consent_dir.exists(), "consent store should not be created");
+    let consent_file = consent_dir.join("executionplan_v1.jsonl");
+    assert!(consent_dir.exists(), "consent store should be initialized");
+    assert!(consent_file.exists(), "consent file should be initialized");
 }
 
 #[test]
