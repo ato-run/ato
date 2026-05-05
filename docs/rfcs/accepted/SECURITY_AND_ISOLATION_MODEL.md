@@ -37,14 +37,15 @@ related:
 
 参照: `CAPSULE_FORMAT_V2.md`, `SIGNATURE_SPEC.md`
 
-## 3. 環境変数の扱い（default-deny）
+## 3. 環境変数の扱い（reconstructed baseline）
 
 ランタイムはホスト環境変数を **暗黙に継承しない**。
 
 - まず環境をクリア
-- 最小ベースライン（`PATH`, `LANG`, `HOME`, `CAPSULE_*` など）を再構成
-- `isolation.allow_env` で allowlist 指定されたもののみ透過
+- 最小ベースライン（`PATH`, locale vars, reconstructed `HOME` / `TMPDIR`, proxy / CA vars, `CAPSULE_*` など）を再構成
 - `execution.env` を最後に適用（最優先）
+
+このモデルは「完全な空 env」ではなく、「再構成された isolation baseline」を正本とする。
 
 ### 3.1 Secret 分類と注入経路
 
@@ -74,11 +75,22 @@ related:
 
 参照: `ARCHITECTURE_OVERVIEW.md` Section 1 (Smart Build, Dumb Runtime)
 
+## 4.3 Filesystem grants
+
+- ホスト filesystem 追加アクセスは `--read`, `--write`, `--read-write` で明示付与する
+- grant 解決は呼び出し側 cwd 基準で正規化する
+- symlink traversal を含む grant は拒否する
+
 ## 5. OS別実装（system abstraction）
 
 OSネイティブの隔離（eBPF/WFP/PF 等）は `system` モジュールの trait 経由で提供し、コア実行コードからOS分岐を隔離する。
 
 参照: `apps/nacelle/src/system/` モジュール
+
+## 5.1 Engine discovery
+
+- nacelle の探索順は `--nacelle` → `NACELLE_PATH` → manifest / compat engine setting → user config default → portable mode
+- PATH search はセキュリティ上の理由で無効
 
 ## 6. OS APIアクセス（Host Bridge Pattern）
 
