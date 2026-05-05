@@ -702,6 +702,12 @@ async fn start_dependency_contracts_for_run(
         session_pid: std::process::id() as i32,
         default_ready_timeout: Duration::from_secs(30),
         ready_probe_interval: Duration::from_millis(200),
+        // Honour `[targets.<label>] needs = [...]`: only deps the
+        // selected target actually requires get spawned. Frontend-only
+        // runs (e.g. `--target web`) skip backend-only providers like
+        // postgres, which removes the orphan-postgres collision when
+        // alternating between `--target web` and the default backend.
+        selected_target: Some(plan.selected_target_label().to_string()),
     })
     .with_context(|| {
         format!(
