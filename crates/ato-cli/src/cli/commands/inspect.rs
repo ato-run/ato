@@ -1966,6 +1966,11 @@ fn diff_kind(path: &str) -> &'static str {
     }
 }
 
+// Helper functions used by both tests and the inspect-requirements
+// subcommand follow this `mod tests` block. Moving the tests to the end
+// of the file would be a 700+ line shuffle for a stylistic lint, so
+// we accept the items-after-test-module ordering here.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use capsule_core::execution_identity::{

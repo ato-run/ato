@@ -21,6 +21,11 @@ use thiserror::Error;
 
 const SENTINEL_FILENAME: &str = ".ato-session";
 
+// Variant names share a `Failed` suffix because they correspond to
+// distinct sentinel-IO operations (read/parse/write/sweep) that each
+// fail in their own way. Renaming them away from "X-failed" loses the
+// "what was being attempted" framing that error messages depend on.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Error)]
 pub enum OrphanError {
     #[error("failed to read sentinel {path}: {source}")]
