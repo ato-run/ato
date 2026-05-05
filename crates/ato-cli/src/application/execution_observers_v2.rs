@@ -1309,7 +1309,10 @@ env_allowlist = ["DATABASE_URL"]
         )
         .expect("observe ato lock dependencies");
 
-        assert_eq!(capsule_observed.derivation_hash.value, ato_observed.derivation_hash.value);
+        assert_eq!(
+            capsule_observed.derivation_hash.value,
+            ato_observed.derivation_hash.value
+        );
     }
 
     #[test]
@@ -1476,7 +1479,8 @@ run = "main.py"
             resolution: capsule_core::ato_lock::ResolutionSection {
                 entries: BTreeMap::from([(
                     "locked_dependencies".to_string(),
-                    serde_json::to_value(&locked_dependencies).expect("serialize locked dependencies"),
+                    serde_json::to_value(&locked_dependencies)
+                        .expect("serialize locked dependencies"),
                 )]),
                 ..Default::default()
             },
