@@ -85,7 +85,11 @@ jobs:
           # never link the ato-cli library. Catching this at Cargo-dep
           # level keeps the boundary honest even if the spawn site looks
           # innocuous.
-          tree=$(cargo tree -p ato-desktop --prefix=none --edges=normal,build,dev)
+          # NOTE: ato-desktop lives outside the workspace (see root
+          # Cargo.toml `exclude` — its git-only deps would break
+          # `cargo package --workspace`), so we must address it via
+          # --manifest-path rather than `-p ato-desktop`.
+          tree=$(cargo tree --manifest-path crates/ato-desktop/Cargo.toml --prefix=none --edges=normal,build,dev)
           if echo "$tree" | awk '{print $1}' | sort -u | grep -E '^ato-cli$' > /dev/null; then
             echo "::error::ato-desktop linked ato-cli as a Cargo dep — that violates the process-spawn boundary."
             echo "ato-desktop must spawn the ato binary, not link its library."
