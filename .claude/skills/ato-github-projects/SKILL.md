@@ -16,6 +16,7 @@ It covers:
 - checking and refreshing the required GitHub auth scopes
 - creating or locating the organization-level roadmap project
 - creating the minimum custom fields needed for planning
+- keeping milestone usage separate from project fields and using milestones only for release buckets
 - linking the project to `ato-run/ato` when it should appear in the repository's Projects tab
 - adding issues and pull requests into the project
 - running triage and release-readiness queries from the CLI
@@ -62,6 +63,14 @@ Default custom fields:
 - `User signal`: `None`, `1 user`, `2-5 users`, `Many`
 - `Demo blocker`: `Yes`, `No`
 
+Milestones are separate from Projects. Treat them as repository-level release buckets, for example:
+
+- `v0.5.0`
+- `v0.6.0`
+- `Show HN Launch`
+
+Use `Target` for rough planning horizons inside Projects, and use milestones only for work that is actually committed to a specific release or launch.
+
 Treat `Status` as the main workflow field in the UI, with values like `Inbox`, `Triaging`, `Planned`, `In Progress`, `Blocked`, `Done`, and `Deferred`.
 
 ## Preflight
@@ -91,11 +100,27 @@ Do not continue with project mutations until scope is confirmed.
 Choose the lightest tool that solves the task:
 
 - Use `gh project list`, `view`, `create`, `field-create`, `item-add`, `item-list` for normal operations.
+- Use repository milestones for release-scope tracking on issues and pull requests; do not try to model milestones as project custom fields.
 - Use the GitHub UI for view layout, board columns, roadmap presentation, and charts.
 - Use built-in project workflows or GitHub Actions for routine auto-add, archive, and status transitions.
 - Use `gh api graphql` only when `gh project` cannot perform the required mutation cleanly.
 
 Avoid large shell wrappers around `item-edit` unless the user explicitly wants that complexity. For normal items, `item-edit` requires `item ID`, `project ID`, and `field ID`, and it updates one field at a time.
+
+## Milestones Vs Projects
+
+Keep the boundary explicit:
+
+- Milestone: repository-level release or launch bucket on issues and pull requests
+- Project: status, priority, area, roadmap placement, and cross-cutting triage
+- Label: lightweight classification tags
+
+For `ato-run/ato`, the normal split is:
+
+- milestone = `v0.5.0`, `v0.6.0`, `Show HN Launch`
+- project `Target` = `v0.5.x`, `v0.6.x`, `Later`
+
+If a task is not yet firmly committed to a release, keep it in the project with `Target` only. Do not assign a milestone just to fill the field.
 
 ## Bootstrap Flow
 
@@ -190,8 +215,18 @@ Visibility still matters. Repository members can only see a linked project if th
 Preferred flow:
 
 1. Create or identify the issue or PR.
-2. Add it to the project.
-3. Let UI workflows or lightweight manual triage assign `Status` and the minimum classification fields.
+2. If the work is firmly committed to a release, set the repository milestone on the issue or PR.
+3. Add it to the project.
+4. Let UI workflows or lightweight manual triage assign `Status` and the minimum classification fields.
+
+Issue milestone examples:
+
+```bash
+gh issue edit 123 --repo ato-run/ato --milestone "v0.5.0"
+gh issue list --repo ato-run/ato --milestone "v0.5.0"
+```
+
+Milestones themselves are created at the repository layer, not with `gh project`. If needed, create them through GitHub UI or `gh api` against `repos/ato-run/ato/milestones`.
 
 Example issue creation plus intake:
 
