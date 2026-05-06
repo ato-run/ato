@@ -39,6 +39,9 @@ Do not use this skill when:
 
 Hermetic verification is driven by one root switch: `ATO_HOME`.
 
+Every hermetic verification run must use a fresh environment root by default.
+Do not reuse the same `ATO_HOME` across retries, MCP smoke attempts, or manual suites unless you are explicitly debugging state carry-over.
+
 For test runs that should not leak into real user state, isolate all of:
 
 - `ATO_HOME`
@@ -46,7 +49,8 @@ For test runs that should not leak into real user state, isolate all of:
 - `XDG_CONFIG_HOME`
 - `XDG_CACHE_HOME`
 
-In this repo, the default way to do that is `scripts/ato-test-shell.sh`.
+In this repo, the default way to do that is `scripts/ato-test-shell.sh`, which allocates a fresh `.tmp/ato-test-shell/env.XXXXXX` root on every invocation.
+If you intentionally need to reuse an existing hermetic root, set both `ATO_TEST_REUSE_ENV_ROOT=1` and `ATO_TEST_ENV_ROOT=<existing-root>` explicitly.
 
 ## Fast Path
 
@@ -121,7 +125,7 @@ cargo test --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp d
 
 ### Hermetic desktop + MCP smoke flow
 
-Desktop and MCP must share the same `ATO_HOME`.
+Desktop and MCP must share the same `ATO_HOME`, and that `ATO_HOME` should belong to the current smoke run only.
 
 Start by entering the isolated shell and printing the env:
 
@@ -157,7 +161,7 @@ Expected result: a JSON-RPC response with `protocolVersion`, `capabilities`, and
 
 ## Manual Verification Rules
 
-All scripts under `tests/manual/` already source `tests/manual/config.sh`, which defaults to a hermetic env.
+All scripts under `tests/manual/` already source `tests/manual/config.sh`, which allocates a fresh hermetic env root per suite invocation by default.
 
 Use the default behavior unless the user explicitly wants to test against real local state.
 
@@ -168,6 +172,12 @@ ATO_TEST_HERMETIC=0 tests/manual/<suite>/test.sh
 ```
 
 Do not set this casually.
+
+If you intentionally need to rerun against the same hermetic root, opt in explicitly:
+
+```bash
+ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT=/path/to/existing/env tests/manual/<suite>/test.sh
+```
 
 ## Validation Order
 
@@ -216,6 +226,7 @@ If it fails, route the path through the canonical ATO path helpers instead of jo
 When you use this skill, report:
 
 - whether the run was hermetic
+- whether the hermetic root was fresh or explicitly reused
 - which focused tests or commands you executed
 - whether the desktop MCP path used `${ATO_HOME}/run`
 - any remaining reliance on ad-hoc env setup or real-machine state

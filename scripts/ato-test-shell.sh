@@ -6,12 +6,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TMP_ROOT="$REPO_ROOT/.tmp/ato-test-shell"
 mkdir -p "$TMP_ROOT"
 
-ENV_ROOT="${ATO_TEST_ENV_ROOT:-$(mktemp -d "$TMP_ROOT/env.XXXXXX")}" 
+if [ "${ATO_TEST_REUSE_ENV_ROOT:-0}" = "1" ] && [ -n "${ATO_TEST_ENV_ROOT:-}" ]; then
+    ENV_ROOT="$ATO_TEST_ENV_ROOT"
+else
+    ENV_ROOT="$(mktemp -d "$TMP_ROOT/env.XXXXXX")"
+fi
 export ATO_TEST_ENV_ROOT="$ENV_ROOT"
-export ATO_HOME="${ATO_HOME:-$ENV_ROOT/ato-home}"
+export ATO_HOME="$ENV_ROOT/ato-home"
 export HOME="$ENV_ROOT/home"
-export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ENV_ROOT/xdg-config}"
-export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$ENV_ROOT/xdg-cache}"
+export XDG_CONFIG_HOME="$ENV_ROOT/xdg-config"
+export XDG_CACHE_HOME="$ENV_ROOT/xdg-cache"
 unset ATO_DESKTOP_SESSION_ROOT
 unset DESKY_SESSION_ROOT
 
