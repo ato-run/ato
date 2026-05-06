@@ -13,6 +13,7 @@ Turn something we just discussed into a well-formed GitHub issue on `ato-run/ato
 Trigger phrases (any language): "issueを作成", "issue化して", "issue立てて", "open an issue", "file a bug", "track this as an issue", "bug report にしておいて".
 
 Do **not** use this skill for:
+
 - Pull requests (use `gh pr create` directly).
 - Editing or commenting on an existing issue (use `gh issue edit` / `gh issue comment`).
 - Internal-only TODOs that should not be public — confirm with the user first if unsure.
@@ -33,6 +34,7 @@ Do **not** use this skill for:
 Source of truth is `gh label list --repo ato-run/ato`. Cache below is current as of 2026-05-06 — re-list if a label you want is missing.
 
 Pick **one type label**:
+
 - `bug` — something is broken or behaves incorrectly
 - `enhancement` — new feature or improvement to existing behavior
 - `documentation` — docs-only change
@@ -40,17 +42,64 @@ Pick **one type label**:
 - `type:rfc` — design discussion / proposal
 
 Pick **one area label** when the surface is obvious:
+
 - `area:ato-cli`
 - `area:ato-desktop`
 - `area:capsule-core`
 
 Add **topic labels** when relevant (zero or more):
+
 - `topic:dependency-contracts`, `topic:runtime-tools`, `topic:lockfile`, `topic:execution-identity`, `topic:capabilities`, `topic:validation`, `topic:sandbox`
 
 Add **platform labels** only when the issue is platform-specific:
+
 - `platform:windows`
 
 Pass them as a single comma-separated string: `--label "bug,area:ato-desktop"`. Do not invent new labels — if nothing fits, leave the area/topic off rather than create one.
+
+## Milestones
+
+Milestones are a repository-level GitHub feature for grouping issues and pull requests by release or launch bucket. They are **not** GitHub Projects fields.
+
+For `ato-run/ato`, use this rule:
+
+- Set a milestone only when the work is committed to a specific release or launch bucket.
+- If the timing is still tentative, leave the milestone unset and let GitHub Projects `Target` carry the rough planning horizon.
+- Do not force every issue into a milestone.
+
+Recommended milestone shapes are small and release-oriented, for example:
+
+- `v0.5.0`
+- `v0.6.0`
+- `Show HN Launch`
+
+When creating an issue, add the milestone only if the session already established a concrete target:
+
+```bash
+gh issue create --repo ato-run/ato \
+  --title "cli: improve first-run runtime diagnostics" \
+  --label "enhancement,area:ato-cli" \
+  --milestone "v0.5.0" \
+  --body "$(cat <<'EOF'
+...
+EOF
+)"
+```
+
+For existing issues:
+
+```bash
+gh issue edit 123 --repo ato-run/ato --milestone "v0.5.0"
+gh issue edit 123 --repo ato-run/ato --remove-milestone
+```
+
+For release audits:
+
+```bash
+gh issue list --repo ato-run/ato --milestone "v0.5.0"
+```
+
+GitHub CLI does not provide a dedicated `gh milestone create` command. If the user asks to create or edit milestones themselves, use `gh api` against the repository milestones REST endpoints.
 
 ## Title
 
@@ -94,6 +143,7 @@ For `enhancement` / `type:rfc` issues, replace `Repro` with a `Motivation` or `A
 ## Distilling from the session
 
 Before drafting, scan the conversation for:
+
 - The actual user complaint (quote it loosely in `Summary`).
 - Any file paths, commands, error messages, or commit SHAs that came up — those belong in `Current behavior` / `Repro`, not in `Summary`.
 - Decisions the user already made ("we don't want to touch X") — encode them in `Scope` so the issue isn't reopened by a future contributor proposing the rejected approach.
@@ -108,6 +158,7 @@ Always use a HEREDOC for the body so newlines and backticks survive the shell:
 gh issue create --repo ato-run/ato \
   --title "<area>: <summary>" \
   --label "<type>,<area>[,<topic>...]" \
+  [--milestone "<release>"] \
   --body "$(cat <<'EOF'
 ## Summary
 
@@ -126,9 +177,11 @@ Never pass `--body` as an inline double-quoted string — backticks and `$` will
 ## After creation
 
 `gh issue create` prints the issue URL on success. Reply to the user with:
+
 - The URL.
 - The final title.
 - The labels that were applied.
+- The milestone, if one was applied.
 
 Keep the reply to ~3 lines unless the user asked for a writeup. Do not paste the full body back — they can click the link.
 
