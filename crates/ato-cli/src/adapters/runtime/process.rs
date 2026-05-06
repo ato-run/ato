@@ -369,7 +369,13 @@ impl ProcessManager {
     pub fn stop_process(&self, id: &str, force: bool) -> Result<bool> {
         let info = match self.read_pid(id) {
             Ok(i) => i,
-            Err(_) => return Ok(false),
+            Err(_) => {
+                let stopped_deps = self.stop_dependency_session(id, force)?;
+                if stopped_deps {
+                    self.delete_pid(id)?;
+                }
+                return Ok(stopped_deps);
+            }
         };
 
         if !info.status.is_active() {
@@ -981,6 +987,43 @@ mod tests {
         assert!(pm
             .read_dependency_session_snapshot("capsule-123")
             .expect("read after delete")
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_process_stops_dependency_session_when_pid_file_is_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        let pm = ProcessManager { run_dir };
+        let mut provider = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn provider");
+        let snapshot = DependencyContractSessionSnapshot {
+            session_id: "capsule-no-pid".to_string(),
+            consumer_pid: 999_999_999,
+            providers: vec![DependencyContractProcessInfo {
+                alias: "db".to_string(),
+                pid: provider.id() as i32,
+                state_dir: tmp.path().join("state/db"),
+                resolved: "capsule://github.com/Koh0920/ato-postgres@65b3ee5".to_string(),
+                allocated_port: Some(5432),
+                log_path: Some(tmp.path().join("db.log")),
+                runtime_export_keys: vec!["DATABASE_URL".to_string()],
+            }],
+        };
+        pm.write_dependency_session_snapshot("capsule-no-pid", &snapshot)
+            .expect("write dependency session snapshot");
+
+        assert!(pm
+            .stop_process("capsule-no-pid", true)
+            .expect("stop process"));
+        assert!(provider.try_wait().expect("provider wait").is_some());
+        assert!(pm
+            .read_dependency_session_snapshot("capsule-no-pid")
+            .expect("read after stop")
             .is_none());
     }
 
