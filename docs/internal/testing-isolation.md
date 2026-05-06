@@ -3,6 +3,8 @@
 Hermetic verification in this repo is driven by one root switch: `ATO_HOME`.
 All global ato state under `.ato/` should follow that root. For CLI and desktop flows that still need OS-level config locations, pair it with isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_CACHE_HOME`.
 
+Use a fresh hermetic environment root for each verification run by default. Do not reuse the same `ATO_HOME` across retries unless you are explicitly debugging state carry-over.
+
 ## Fixture model
 
 - `ATO_HOME` moves the canonical ato state tree: `run`, `logs`, `store`, `cache`, `trust`, `apps`, desktop config, desktop tabs, secrets, and MCP discovery.
@@ -16,6 +18,9 @@ Use [scripts/ato-test-shell.sh](../../scripts/ato-test-shell.sh) to enter an iso
 ```bash
 ./scripts/ato-test-shell.sh
 ```
+
+Each invocation creates a new `.tmp/ato-test-shell/env.XXXXXX` root by default.
+To reuse an existing hermetic root intentionally, set both `ATO_TEST_REUSE_ENV_ROOT=1` and `ATO_TEST_ENV_ROOT=<existing-root>`.
 
 Run a single command in isolation:
 
@@ -47,6 +52,7 @@ That helper now creates a fresh per-suite environment root by default and export
 - `XDG_CACHE_HOME`
 
 Set `ATO_TEST_HERMETIC=0` only if you intentionally need to run against your real local state.
+Set `ATO_TEST_REUSE_ENV_ROOT=1` only if you intentionally need to rerun against the same hermetic root.
 
 ## Guard
 
