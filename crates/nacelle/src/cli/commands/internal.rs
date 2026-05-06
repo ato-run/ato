@@ -351,6 +351,18 @@ enum ManagedChild {
     Sync(std::process::Child),
 }
 
+struct LogForwarders {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl LogForwarders {
+    async fn wait(self) {
+        for task in self.tasks {
+            let _ = task.await;
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ReadinessOutcome {
     Ready,
@@ -534,6 +546,13 @@ impl ManagedChild {
         }
     }
 
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            ManagedChild::Async(child) => child.wait().await,
+            ManagedChild::Sync(child) => tokio::task::block_in_place(|| child.wait()),
+        }
+    }
+
     async fn kill(&mut self) -> std::io::Result<()> {
         match self {
             ManagedChild::Async(child) => child.kill().await,
@@ -542,24 +561,28 @@ impl ManagedChild {
     }
 }
 
-fn start_log_forwarding(child: &mut ManagedChild) {
+fn start_log_forwarding(child: &mut ManagedChild) -> LogForwarders {
+    let mut tasks = Vec::new();
+
     if let Some(stdout) = child.take_stdout() {
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 eprintln!("[stdout] {}", line);
             }
-        });
+        }));
     }
 
     if let Some(stderr) = child.take_stderr() {
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 eprintln!("[stderr] {}", line);
             }
-        });
+        }));
     }
+
+    LogForwarders { tasks }
 }
 
 fn emit_service_exited(service: &str, status: &std::process::ExitStatus) {
@@ -629,13 +652,7 @@ async fn wait_for_readiness_or_exit(
 }
 
 async fn wait_for_child_exit(child: &mut ManagedChild) -> Result<std::process::ExitStatus> {
-    loop {
-        if let Some(status) = child.poll_exit().await? {
-            return Ok(status);
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    child.wait().await.context("Failed waiting for child exit")
 }
 
 async fn readiness_probe_ok(
@@ -1315,7 +1332,7 @@ async fn execute_prepared_launch(
             );
         };
 
-        start_log_forwarding(&mut child);
+        let mut log_forwarders = Some(start_log_forwarding(&mut child));
 
         if let Some(probe) = manifest.readiness_probe.as_ref() {
             match wait_for_readiness_or_exit(&mut child, probe, &source_target.ipc_socket_paths)
@@ -1332,11 +1349,13 @@ async fn execute_prepared_launch(
                     .emit();
                 }
                 ReadinessOutcome::Exited(status) => {
+                    if let Some(log_forwarders) = log_forwarders.take() {
+                        log_forwarders.wait().await;
+                    }
                     emit_service_exited(&manifest.name, &status);
                     prepared.sync_derived_outputs()?;
                     emit_execution_completed(&manifest.name, &prepared, status.code())?;
                     prepared.cleanup();
-                    tokio::time::sleep(Duration::from_millis(100)).await;
                     std::process::exit(status.code().unwrap_or(1));
                 }
             }
@@ -1345,11 +1364,13 @@ async fn execute_prepared_launch(
         }
 
         let status = wait_for_child_exit(&mut child).await?;
+        if let Some(log_forwarders) = log_forwarders.take() {
+            log_forwarders.wait().await;
+        }
         emit_service_exited(&manifest.name, &status);
         prepared.sync_derived_outputs()?;
         emit_execution_completed(&manifest.name, &prepared, status.code())?;
         prepared.cleanup();
-        tokio::time::sleep(Duration::from_millis(100)).await;
         std::process::exit(status.code().unwrap_or(1));
     }
 
