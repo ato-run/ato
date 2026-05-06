@@ -50,7 +50,7 @@ grep -n '"X.Y.Z-prev"' crates/*/Cargo.toml crates/ato-desktop/xtask/Cargo.toml C
 # expected: zero matches
 ```
 
-Commit (no `Co-Authored-By:` trailer per repo memory):
+Commit (use the current git-configured author identity; no `Co-Authored-By:` trailer):
 ```
 git commit -m "chore(release): bump to X.Y.Z"
 git tag -a vX.Y.Z -m "vX.Y.Z"
@@ -187,7 +187,7 @@ gh api -X DELETE repos/ato-run/ato/releases/$DRAFT_ID
 - **All four crates bump together.** ato-cli, ato-desktop, ato-desktop-xtask, nacelle. Same version. No exceptions. cargo-dist will silently drop any laggard.
 - **Release commit goes on main, not a feature branch.** push:tag triggers two workflows that pin themselves to the tagged commit; they cannot see commits on side branches.
 - **Never amend after tagging.** The tag will silently keep pointing at the old commit; the workflows will run on stale code.
-- **No `Co-Authored-By:` trailers** in the release commit (per repo memory: only `Koh0920` as author).
+- **Do not hardcode `Koh0920` or any other author.** Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for the release commit. **No `Co-Authored-By:` trailers** in the release commit.
 - **Don't `cargo update` to refresh the lockfile.** Edit the four entries by hand. `cargo update` pulls in unrelated dependency bumps that have no business riding inside a release commit.
 - **Don't push a release commit if `crates/nacelle/Cargo.toml` lags `crates/ato-cli/Cargo.toml`.** That single check would have prevented the v0.4.98–v0.4.100 install.sh outage.
 
