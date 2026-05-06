@@ -476,6 +476,6 @@ async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() 
     );
     assert!(manager
         .age_home
-        .join(".ato/credentials/auth/session.age")
+        .join("credentials/auth/session.age")
         .exists());
 }
