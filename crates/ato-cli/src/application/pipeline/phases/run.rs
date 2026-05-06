@@ -604,11 +604,11 @@ impl DependencyContractGuard {
         }
     }
 
-    fn graph(&self) -> Option<&RunningGraph> {
+    pub(crate) fn graph(&self) -> Option<&RunningGraph> {
         self.graph.as_ref()
     }
 
-    fn lock(&self) -> &DependencyLock {
+    pub(crate) fn lock(&self) -> &DependencyLock {
         &self.lock
     }
 
@@ -633,7 +633,10 @@ impl DependencyContractGuard {
     }
 }
 
-fn dependency_contract_start_error(target_label: &str, error: OrchestratorError) -> anyhow::Error {
+pub(crate) fn dependency_contract_start_error(
+    target_label: &str,
+    error: OrchestratorError,
+) -> anyhow::Error {
     use crate::application::dependency_credentials::CredentialError;
     match error {
         OrchestratorError::OrphanAliveOtherSession {
@@ -731,7 +734,7 @@ fn dependency_contract_session_snapshot(
     }
 }
 
-fn persist_background_dependency_contracts(
+pub(crate) fn persist_background_dependency_contracts(
     session_id: &str,
     consumer_pid: i32,
     dep_contracts: Option<&DependencyContractGuard>,
@@ -754,7 +757,7 @@ fn detach_dependency_contracts_for_background(dep_contracts: &mut Option<Depende
     }
 }
 
-async fn start_dependency_contracts_for_run(
+pub(crate) async fn start_dependency_contracts_for_run(
     prepared: &PreparedRunContext,
     plan: &capsule_core::router::ManifestData,
     lockfile: &CapsuleLock,
@@ -868,7 +871,7 @@ fn parent_package_id(consumer: &CapsuleManifest) -> String {
     }
 }
 
-fn inject_dependency_contract_env(
+pub(crate) fn inject_dependency_contract_env(
     mut launch_ctx: crate::executors::launch_context::RuntimeLaunchContext,
     plan: &capsule_core::router::ManifestData,
     lock: &DependencyLock,
