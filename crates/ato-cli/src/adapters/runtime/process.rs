@@ -4,10 +4,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(any(unix, windows))]
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 const RUN_DIR: &str = ".ato/run";
 const PID_FILE_EXT: &str = ".pid";
+const RUN_SESSIONS_DIR_NAME: &str = "run-sessions";
+const DEPENDENCY_SESSION_FILE: &str = "graph.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessInfo {
@@ -37,6 +39,28 @@ pub struct ProcessInfo {
     pub last_error: Option<String>,
     #[serde(default)]
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyContractProcessInfo {
+    pub alias: String,
+    pub pid: i32,
+    pub state_dir: PathBuf,
+    pub resolved: String,
+    #[serde(default)]
+    pub allocated_port: Option<u16>,
+    #[serde(default)]
+    pub log_path: Option<PathBuf>,
+    #[serde(default)]
+    pub runtime_export_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyContractSessionSnapshot {
+    pub session_id: String,
+    pub consumer_pid: i32,
+    #[serde(default)]
+    pub providers: Vec<DependencyContractProcessInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +125,82 @@ impl ProcessManager {
         self.run_dir.join(format!("{}{}", id, PID_FILE_EXT))
     }
 
+    fn run_sessions_dir(&self) -> PathBuf {
+        self.run_dir
+            .parent()
+            .map(|parent| parent.join(RUN_SESSIONS_DIR_NAME))
+            .unwrap_or_else(|| self.run_dir.join(RUN_SESSIONS_DIR_NAME))
+    }
+
+    fn dependency_session_dir(&self, id: &str) -> PathBuf {
+        self.run_sessions_dir().join(id)
+    }
+
+    fn dependency_session_path(&self, id: &str) -> PathBuf {
+        self.dependency_session_dir(id)
+            .join(DEPENDENCY_SESSION_FILE)
+    }
+
+    pub fn write_dependency_session_snapshot(
+        &self,
+        id: &str,
+        snapshot: &DependencyContractSessionSnapshot,
+    ) -> Result<PathBuf> {
+        let session_dir = self.dependency_session_dir(id);
+        fs::create_dir_all(&session_dir).with_context(|| {
+            format!(
+                "Failed to create dependency session directory: {}",
+                session_dir.display()
+            )
+        })?;
+        let path = session_dir.join(DEPENDENCY_SESSION_FILE);
+        let content = serde_json::to_string_pretty(snapshot)
+            .with_context(|| "Failed to serialize dependency session snapshot")?;
+        fs::write(&path, content).with_context(|| {
+            format!(
+                "Failed to write dependency session snapshot: {}",
+                path.display()
+            )
+        })?;
+        Ok(path)
+    }
+
+    pub fn read_dependency_session_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<Option<DependencyContractSessionSnapshot>> {
+        let path = self.dependency_session_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Failed to read dependency session snapshot: {}",
+                path.display()
+            )
+        })?;
+        let snapshot = serde_json::from_str(&content).with_context(|| {
+            format!(
+                "Failed to parse dependency session snapshot: {}",
+                path.display()
+            )
+        })?;
+        Ok(Some(snapshot))
+    }
+
+    fn delete_dependency_session_snapshot(&self, id: &str) -> Result<()> {
+        let session_dir = self.dependency_session_dir(id);
+        if session_dir.exists() {
+            fs::remove_dir_all(&session_dir).with_context(|| {
+                format!(
+                    "Failed to remove dependency session directory: {}",
+                    session_dir.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn write_pid(&self, info: &ProcessInfo) -> Result<PathBuf> {
         let pid_path = self.pid_file_path(&info.id);
         let content = toml::to_string(info).with_context(|| "Failed to serialize process info")?;
@@ -143,9 +243,14 @@ impl ProcessManager {
 
     pub fn delete_pid(&self, id: &str) -> Result<()> {
         let pid_path = self.pid_file_path(id);
+        let transient_workspace = transient_workspace_for_pid_file(&pid_path);
         if pid_path.exists() {
             fs::remove_file(&pid_path)
                 .with_context(|| format!("Failed to remove PID file: {}", pid_path.display()))?;
+        }
+        self.delete_dependency_session_snapshot(id)?;
+        if let Some(workspace) = transient_workspace {
+            let _ = fs::remove_dir_all(workspace);
         }
         Ok(())
     }
@@ -188,8 +293,7 @@ impl ProcessManager {
             return info.clone();
         }
 
-        let is_alive = is_process_alive(info.pid) && process_identity_matches(info);
-        if is_alive {
+        if process_info_is_alive(info) {
             return info.clone();
         }
 
@@ -235,7 +339,11 @@ impl ProcessManager {
             .into_iter()
             .filter(|process| process.scoped_id.as_deref() == Some(scoped_id))
         {
-            if process.status.is_active() {
+            let has_dependency_session = self
+                .read_dependency_session_snapshot(&process.id)
+                .map(|snapshot| snapshot.is_some())
+                .unwrap_or(false);
+            if process.status.is_active() || has_dependency_session {
                 match self.stop_process(&process.id, force) {
                     Ok(_) => {
                         cleaned += 1;
@@ -268,27 +376,84 @@ impl ProcessManager {
         };
 
         if !info.status.is_active() {
-            return Ok(false);
+            let stopped_deps = self.stop_dependency_session(id, force)?;
+            if stopped_deps {
+                self.delete_pid(id)?;
+            }
+            return Ok(stopped_deps);
         }
 
-        if !is_process_alive(info.pid) {
+        if !process_info_is_alive(&info) {
+            let stopped_deps = self.stop_dependency_session(id, force)?;
             self.delete_pid(id)?;
-            return Ok(false);
+            return Ok(stopped_deps);
         }
 
-        if !process_identity_matches(&info) {
-            self.delete_pid(id)?;
-            return Ok(false);
-        }
-
-        if terminate_process(info.pid, force)? {
-            wait_for_process_exit(info.pid, 10)?;
+        let stopped_consumer = self.stop_process_tree(&info, force)?;
+        if stopped_consumer {
+            let _ = self.stop_dependency_session(id, force)?;
             self.delete_pid(id)?;
             Ok(true)
         } else {
+            let stopped_deps = self.stop_dependency_session(id, force)?;
             self.delete_pid(id)?;
-            Ok(false)
+            Ok(stopped_deps)
         }
+    }
+
+    fn stop_process_tree(&self, info: &ProcessInfo, force: bool) -> Result<bool> {
+        let mut stopped = false;
+        if is_process_alive(info.pid) && process_identity_matches(info) {
+            if terminate_process(info.pid, force)? {
+                wait_for_process_exit(info.pid, 10)?;
+                stopped = true;
+            }
+        }
+        if let Some(workload_pid) = info.workload_pid {
+            if is_process_alive(workload_pid) {
+                if terminate_process(workload_pid, force)? {
+                    wait_for_process_exit(workload_pid, 10)?;
+                    stopped = true;
+                }
+            }
+        }
+        Ok(stopped)
+    }
+
+    fn stop_dependency_session(&self, id: &str, force: bool) -> Result<bool> {
+        let Some(snapshot) = self.read_dependency_session_snapshot(id)? else {
+            return Ok(false);
+        };
+        if snapshot.providers.is_empty() {
+            return Ok(false);
+        }
+
+        let targets = snapshot
+            .providers
+            .iter()
+            .map(
+                |provider| crate::application::dependency_runtime::TeardownTarget {
+                    dep: provider.alias.clone(),
+                    pid: provider.pid,
+                    state_dir: provider.state_dir.clone(),
+                    needs: Vec::new(),
+                },
+            )
+            .collect();
+        let grace = if force {
+            Duration::from_secs(0)
+        } else {
+            Duration::from_secs(10)
+        };
+        let result =
+            crate::application::dependency_runtime::teardown_reverse_topological(targets, grace);
+        for provider in &snapshot.providers {
+            let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
+                &provider.state_dir,
+            );
+        }
+        result.with_context(|| format!("Failed to stop dependency contracts for {id}"))?;
+        Ok(true)
     }
 
     pub fn cleanup_dead_processes_with_details(&self) -> Result<Vec<ProcessInfo>> {
@@ -307,12 +472,12 @@ impl ProcessManager {
                     if let Some(id) = filename.to_str() {
                         if let Ok(info) = self.read_pid(id) {
                             if !info.status.is_active()
-                                || (info.status.is_active()
-                                    && (!is_process_alive(info.pid)
-                                        || !process_identity_matches(&info)))
+                                || (info.status.is_active() && !process_info_is_alive(&info))
                             {
-                                let _ = fs::remove_file(&path);
-                                cleaned.push(info);
+                                if self.stop_dependency_session(id, false).is_ok() {
+                                    let _ = self.delete_pid(id);
+                                    cleaned.push(info);
+                                }
                             }
                         }
                     }
@@ -325,6 +490,20 @@ impl ProcessManager {
         }
 
         Ok(cleaned)
+    }
+}
+
+fn transient_workspace_for_pid_file(pid_path: &Path) -> Option<PathBuf> {
+    let content = fs::read_to_string(pid_path).ok()?;
+    let info = toml::from_str::<ProcessInfo>(&content).ok()?;
+    let manifest_path = info.manifest_path?;
+    let workspace = manifest_path.parent()?.to_path_buf();
+    let ato_root = pid_path.parent()?.parent()?;
+    let gh_run_root = ato_root.join("tmp").join("gh-run");
+    if workspace.starts_with(&gh_run_root) {
+        Some(workspace)
+    } else {
+        None
     }
 }
 
@@ -389,6 +568,11 @@ fn is_unix_zombie(pid: i32) -> bool {
 #[cfg(unix)]
 fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn process_info_is_alive(info: &ProcessInfo) -> bool {
+    (is_process_alive(info.pid) && process_identity_matches(info))
+        || info.workload_pid.is_some_and(is_process_alive)
 }
 
 fn process_identity_matches(info: &ProcessInfo) -> bool {
@@ -683,6 +867,126 @@ mod tests {
         assert_eq!(info.id, deserialized.id);
         assert!(deserialized.manifest_path.is_none());
         assert!(deserialized.requested_port.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workload_pid_keeps_nacelle_record_active_and_is_stopped() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        let pm = ProcessManager { run_dir };
+
+        let mut workload = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn workload");
+        let info = ProcessInfo {
+            id: "capsule-workload".to_string(),
+            name: "demo".to_string(),
+            pid: 0,
+            workload_pid: Some(workload.id() as i32),
+            status: ProcessStatus::Ready,
+            runtime: "nacelle".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            manifest_path: None,
+            scoped_id: None,
+            target_label: Some("app".to_string()),
+            requested_port: None,
+            log_path: None,
+            ready_at: Some(SystemTime::UNIX_EPOCH),
+            last_event: Some("ready".to_string()),
+            last_error: None,
+            exit_code: None,
+        };
+        pm.write_pid(&info).expect("write pid");
+
+        let read = pm.read_pid("capsule-workload").expect("read pid");
+        assert_eq!(read.status, ProcessStatus::Ready);
+
+        let stopped = pm
+            .stop_process("capsule-workload", true)
+            .expect("stop workload");
+        assert!(stopped);
+        let _ = workload.wait().expect("wait workload");
+        assert!(!pm.pid_file_path("capsule-workload").exists());
+    }
+
+    #[test]
+    fn delete_pid_removes_transient_github_workspace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("home/.ato/run");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        let gh_workspace = tmp.path().join("home/.ato/tmp/gh-run/demo-123");
+        fs::create_dir_all(&gh_workspace).expect("create gh workspace");
+        fs::write(
+            gh_workspace.join("capsule.toml"),
+            "name = \"demo\"
+",
+        )
+        .expect("write manifest");
+        let pm = ProcessManager { run_dir };
+        let info = ProcessInfo {
+            id: "capsule-transient".to_string(),
+            name: "demo".to_string(),
+            pid: 0,
+            workload_pid: None,
+            status: ProcessStatus::Stopped,
+            runtime: "nacelle".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            manifest_path: Some(gh_workspace.join("capsule.toml")),
+            scoped_id: None,
+            target_label: Some("app".to_string()),
+            requested_port: None,
+            log_path: None,
+            ready_at: None,
+            last_event: None,
+            last_error: None,
+            exit_code: None,
+        };
+        pm.write_pid(&info).expect("write pid");
+
+        pm.delete_pid("capsule-transient").expect("delete pid");
+        assert!(!gh_workspace.exists());
+    }
+
+    #[test]
+    fn dependency_session_snapshot_round_trips_through_run_sessions_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("create run dir");
+        let pm = ProcessManager { run_dir };
+        let snapshot = DependencyContractSessionSnapshot {
+            session_id: "capsule-123".to_string(),
+            consumer_pid: 123,
+            providers: vec![DependencyContractProcessInfo {
+                alias: "db".to_string(),
+                pid: 456,
+                state_dir: tmp.path().join("state/db"),
+                resolved: "capsule://github.com/Koh0920/ato-postgres@65b3ee5".to_string(),
+                allocated_port: Some(5432),
+                log_path: Some(tmp.path().join("db.log")),
+                runtime_export_keys: vec!["DATABASE_URL".to_string()],
+            }],
+        };
+
+        let path = pm
+            .write_dependency_session_snapshot("capsule-123", &snapshot)
+            .expect("write dependency session snapshot");
+        assert!(path.ends_with("run-sessions/capsule-123/graph.json"));
+
+        let loaded = pm
+            .read_dependency_session_snapshot("capsule-123")
+            .expect("read dependency session snapshot")
+            .expect("snapshot exists");
+        assert_eq!(loaded, snapshot);
+
+        pm.delete_pid("capsule-123")
+            .expect("delete pid also removes session");
+        assert!(pm
+            .read_dependency_session_snapshot("capsule-123")
+            .expect("read after delete")
+            .is_none());
     }
 
     #[test]
