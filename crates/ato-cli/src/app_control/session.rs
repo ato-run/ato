@@ -24,8 +24,11 @@ use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
-use crate::application::pipeline::phases::run::DerivedBridgeManifest;
-use crate::application::pipeline::phases::run::PreparedRunContext;
+use crate::application::pipeline::phases::run::{
+    inject_dependency_contract_env, persist_background_dependency_contracts,
+    start_dependency_contracts_for_run, DependencyContractGuard, DerivedBridgeManifest,
+    PreparedRunContext,
+};
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
     prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
@@ -386,7 +389,10 @@ pub(super) fn start_runtime_session(
         .with_context(|| format!("failed to create session root {}", session_root.display()))?;
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "prepare_session_execution");
-    let prepared = prepare_session_execution(plan, raw_manifest)?;
+    let PreparedSessionExecution {
+        prepared,
+        dep_contracts,
+    } = prepare_session_execution(plan, raw_manifest)?;
     timer.finish_ok();
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_runtime_process");
@@ -513,6 +519,29 @@ pub(super) fn start_runtime_session(
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
+
+    // Persist a sidecar snapshot of any started dep-contract providers
+    // (postgres, redis, …) before we detach so `ato ps` / `ato stop`
+    // can find and tear them down later. Then detach the
+    // DependencyContractGuard so its `Drop` does NOT SIGTERM the
+    // providers when this fn returns — the consumer process needs
+    // them to outlive ato-desktop's session-start invocation.
+    let session_id_for_snapshot = session.session_id.clone();
+    let consumer_pid = runtime_process.child.id() as i32;
+    if let Err(err) = persist_background_dependency_contracts(
+        &session_id_for_snapshot,
+        consumer_pid,
+        dep_contracts.as_ref(),
+    ) {
+        eprintln!(
+            "ATO-WARN failed to persist session dependency snapshot ({}): {}",
+            session_id_for_snapshot, err
+        );
+    }
+    if let Some(guard) = dep_contracts {
+        guard.detach();
+    }
+
     Ok(session_info_from_stored(session))
 }
 
@@ -661,13 +690,24 @@ fn try_load_authoritative_lock(
     }
 }
 
+/// Output of `prepare_session_execution`. Carries both the prepared target
+/// (passed straight to `spawn_runtime_process`) and the optional
+/// `DependencyContractGuard` for top-level `[dependencies.<alias>]`
+/// providers — the caller must keep the guard alive until either the
+/// session is persisted (snapshot + detach so the providers outlive ato)
+/// or the session start aborts (Drop tears the providers down).
+pub(super) struct PreparedSessionExecution {
+    pub(super) prepared: crate::executors::target_runner::PreparedTargetExecution,
+    pub(super) dep_contracts: Option<DependencyContractGuard>,
+}
+
 fn prepare_session_execution(
     plan: &capsule_core::router::ManifestData,
     raw_manifest: &str,
-) -> Result<crate::executors::target_runner::PreparedTargetExecution> {
+) -> Result<PreparedSessionExecution> {
     let reporter = Arc::new(CliReporter::new(false));
     let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root);
-    let prepared = PreparedRunContext {
+    let mut prepared = PreparedRunContext {
         authoritative_lock,
         lock_path,
         workspace_root: plan.workspace_root.clone(),
@@ -685,8 +725,31 @@ fn prepare_session_execution(
         .enable_all()
         .build()
         .context("failed to create runtime for session execution preparation")?;
-    let launch_ctx = runtime.block_on(resolve_launch_context(plan, &prepared, &reporter))?;
-    prepare_target_execution(
+
+    let mut launch_ctx = runtime.block_on(resolve_launch_context(plan, &prepared, &reporter))?;
+
+    // session-start used to skip dependency contracts entirely — the
+    // run.rs pipeline is the only path that wires `[dependencies.*]`
+    // providers into the consumer's launch context. That meant every
+    // Desktop launch of a capsule with `DATABASE_URL =
+    // "{{deps.db.runtime_exports.DATABASE_URL}}"` (the WasedaP2P
+    // pattern) handed the consumer the literal template string
+    // verbatim, which sqlalchemy / equivalent URL parsers immediately
+    // reject. We now mirror the run.rs flow: auto-lock if needed,
+    // start the providers, render the template, and add their loopback
+    // endpoints to the sandbox egress allowlist.
+    let dep_contracts = runtime
+        .block_on(setup_session_dependency_contracts(
+            plan,
+            &mut prepared,
+            &reporter,
+            &mut launch_ctx,
+        ))
+        .map_err(|err| {
+            err.context("failed to set up dependency contracts for session start")
+        })?;
+
+    let prepared_target = prepare_target_execution(
         plan,
         &prepared,
         launch_ctx,
@@ -700,7 +763,199 @@ fn prepare_session_execution(
             preview_mode: false,
             defer_consent: true,
         },
+    )?;
+
+    Ok(PreparedSessionExecution {
+        prepared: prepared_target,
+        dep_contracts,
+    })
+}
+
+/// Mirror of run.rs's `if has_dependency_contracts { ... }` block,
+/// adapted to the session-start flow. Returns `None` when the
+/// consumer's lockfile (auto-generated if absent) declares no
+/// `[dependencies.<alias>]` entries with `contract = "..."`.
+async fn setup_session_dependency_contracts(
+    plan: &capsule_core::router::ManifestData,
+    prepared: &mut PreparedRunContext,
+    reporter: &Arc<CliReporter>,
+    launch_ctx: &mut crate::executors::launch_context::RuntimeLaunchContext,
+) -> Result<Option<DependencyContractGuard>> {
+    use capsule_core::lockfile::manifest_external_capsule_dependencies;
+
+    let capsule_dependencies =
+        manifest_external_capsule_dependencies(prepared.bridge_manifest.as_toml())
+            .context("failed to read consumer dependency declarations")?;
+    let has_dependency_contracts = capsule_dependencies
+        .iter()
+        .any(|dependency| dependency.contract.is_some());
+    if !has_dependency_contracts {
+        return Ok(None);
+    }
+
+    // Auto-lock when the consumer wasn't fetched with a pre-existing
+    // capsule.lock.json (typical for Desktop opening a github capsule).
+    // This is the same auto-lock invocation the run.rs pipeline uses.
+    let lockfile = match prepared
+        .compatibility_legacy_lock
+        .as_ref()
+        .map(|ctx| ctx.lock.clone())
+    {
+        Some(lock) => lock,
+        None => {
+            let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
+                prepared.bridge_manifest.as_toml(),
+            )
+            .context("failed to build compatibility bridge for session-start auto-lock")?;
+            let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
+                prepared.workspace_root.clone(),
+                bridge,
+            )
+            .context("failed to build CompatProjectInput for session-start auto-lock")?;
+            let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
+                &compat_input,
+                reporter.clone(),
+                false,
+            )
+            .await
+            .context("session-start auto-lock for dependency contracts failed")?;
+            let bytes = std::fs::read(&lock_path).with_context(|| {
+                format!("failed to read auto-generated lock {}", lock_path.display())
+            })?;
+            let lock: capsule_core::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+                .with_context(|| {
+                    format!(
+                        "failed to parse auto-generated lock {}",
+                        lock_path.display()
+                    )
+                })?;
+            prepared.compatibility_legacy_lock =
+                Some(crate::application::pipeline::phases::run::CompatibilityLegacyLockContext {
+                    manifest_path: compat_input.workspace_root().join("capsule.toml"),
+                    path: lock_path,
+                    lock: lock.clone(),
+                });
+            lock
+        }
+    };
+
+    // Surface missing dep credential env vars (PG_PASSWORD etc.) as
+    // MissingRequiredEnv BEFORE we try to actually start the providers.
+    // The orchestrator path would also catch this, but only after a full
+    // provider materialize / spawn / template resolution cycle, and the
+    // resulting OrchestratorError gets wrapped by anyhow context() so
+    // session-start callers (Desktop) can't downcast it back into the
+    // structured MissingRequiredEnv that their MissingConfig modal
+    // already understands. Pre-flighting here keeps the typed envelope
+    // intact for `[dependencies.<alias>].credentials` the same way
+    // target-level `required_env` is already handled upstream.
+    preflight_session_dep_credentials(plan, &lockfile)?;
+
+    let guard = start_dependency_contracts_for_run(prepared, plan, &lockfile).await?;
+
+    if let Some(graph) = guard.graph() {
+        // Eagerly surface a redacted summary on stderr so Desktop /
+        // human users see which provider was started, where its log
+        // lives, and what port the orchestrator allocated. Mirrors
+        // run.rs's per-line eprintln so the same diagnostic data
+        // reaches whoever is watching the session-start envelope.
+        for line in graph.summary_lines() {
+            eprintln!("{line}");
+        }
+
+        let mut updated = std::mem::replace(
+            launch_ctx,
+            crate::executors::launch_context::RuntimeLaunchContext::empty(),
+        );
+        updated = inject_dependency_contract_env(updated, plan, guard.lock(), graph)?;
+        let dep_endpoints: Vec<String> = graph
+            .deps()
+            .iter()
+            .filter_map(|dep| dep.allocated_port.map(|port| format!("127.0.0.1:{port}")))
+            .collect();
+        if !dep_endpoints.is_empty() {
+            updated = updated.with_dep_endpoints(dep_endpoints);
+        }
+        *launch_ctx = updated;
+    }
+
+    Ok(Some(guard))
+}
+
+/// Walk every `[dependencies.<alias>].credentials = "{{env.X}}"` template
+/// in the resolved lockfile and check that each referenced env var is
+/// present on the host. When something is missing, surface a typed
+/// MissingRequiredEnv (the same envelope shape `preflight_required_env`
+/// already produces for a target's own `required_env`) so the Desktop
+/// missing-config modal can route this exactly like a missing
+/// `SECRET_KEY` instead of having the orchestrator E999 mid-spawn.
+///
+/// Only `{{env.X}}` segments are inspected: the orchestrator's full
+/// resolver also validates that `X` is in the manifest's top-level
+/// `required_env` and rejects credential templates that mix in other
+/// expression kinds. We reproduce both checks at preflight so the
+/// session-start path doesn't get further than the missing-config UX.
+fn preflight_session_dep_credentials(
+    plan: &capsule_core::router::ManifestData,
+    lockfile: &capsule_core::lockfile::CapsuleLock,
+) -> Result<()> {
+    use capsule_core::execution_plan::error::AtoExecutionError;
+    use capsule_core::foundation::types::{ConfigField, ConfigKind, TemplateExpr, TemplateSegment};
+
+    let mut missing_keys: Vec<String> = Vec::new();
+    let mut missing_schema: Vec<ConfigField> = Vec::new();
+    let mut seen_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in &lockfile.capsule_dependencies {
+        if entry.contract.is_none() {
+            continue;
+        }
+        for (cred_key, template) in &entry.credentials {
+            for segment in &template.segments {
+                let TemplateSegment::Expr(TemplateExpr::Env(name)) = segment else {
+                    continue;
+                };
+                let name = name.clone();
+                if std::env::var(&name).is_ok_and(|value| !value.is_empty()) {
+                    continue;
+                }
+                if !seen_missing.insert(name.clone()) {
+                    continue;
+                }
+                missing_keys.push(name.clone());
+                let label = format!(
+                    "dep '{}'.credentials.{} → {{env.{}}}",
+                    entry.name, cred_key, name
+                );
+                missing_schema.push(ConfigField {
+                    name: name.clone(),
+                    label: Some(label),
+                    description: None,
+                    kind: ConfigKind::Secret,
+                    default: None,
+                    placeholder: None,
+                });
+            }
+        }
+    }
+
+    if missing_keys.is_empty() {
+        return Ok(());
+    }
+
+    let target = plan.selected_target_label();
+    let message = format!(
+        "missing required environment variables for dependency credentials of target '{}': {} (set them before launching the session)",
+        target,
+        missing_keys.join(", ")
+    );
+    Err(AtoExecutionError::missing_required_env(
+        message,
+        missing_keys,
+        missing_schema,
+        Some(target),
     )
+    .into())
 }
 
 fn spawn_runtime_process(
@@ -759,18 +1014,12 @@ fn spawn_runtime_process(
         };
     }
 
-    if plan.is_orchestration_mode() {
-        return crate::executors::shell::execute(plan, ExecuteMode::Piped, &prepared.launch_ctx)
-            .or_else(|_| {
-                crate::executors::source::execute_host(
-                    plan,
-                    None,
-                    Arc::new(CliReporter::new(false)),
-                    ExecuteMode::Piped,
-                    &prepared.launch_ctx,
-                )
-            });
-    }
+    // See display_strategy_for_runtime: Desktop session-start treats
+    // [services] manifests as single-target launches, so we deliberately
+    // skip the orchestration shell::execute branch here. dep contracts
+    // are already started in prepare_session_execution; the consumer
+    // process below sees the resolved env via prepared.launch_ctx.
+    let _ = plan.is_orchestration_mode();
 
     match prepared.guard_result.executor_kind {
         capsule_core::execution_plan::guard::ExecutorKind::Deno => Ok(CapsuleProcess {
@@ -839,9 +1088,18 @@ fn spawn_runtime_process(
 fn display_strategy_for_runtime(
     plan: &capsule_core::router::ManifestData,
 ) -> CapsuleDisplayStrategy {
-    if plan.is_orchestration_mode() {
-        return CapsuleDisplayStrategy::ServiceBackground;
-    }
+    // ato Desktop's "open this capsule" UX is single-target by design:
+    // it launches `default_target` (or `--target`) and points a WebView
+    // at it. The full multi-service orchestration that `[services]`
+    // unlocks is only invoked from the `ato run` CLI pipeline, which
+    // owns the orchestrator executor's lifecycle (provider startup,
+    // service-to-service deps, parallel ready probes). Routing through
+    // ServiceBackground here would call `shell::execute` which doesn't
+    // know how to wait on the consumer's HTTP port and would orphan
+    // the providers we just started above. Treat orchestration_mode
+    // manifests like single-service ones — the selected target's
+    // runtime/driver/port still drives the display strategy below.
+    let _ = plan.is_orchestration_mode();
 
     if plan
         .execution_runtime()
@@ -1039,7 +1297,23 @@ pub(crate) fn http_get_ok(port: u16, path: &str) -> bool {
     if stream.read_to_string(&mut response).is_err() {
         return false;
     }
-    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
+    // The probe is "is the consumer's HTTP server alive on this port",
+    // not "does the consumer happen to define `path` as a 200 route".
+    // FastAPI / framework apps that don't register a `/` handler return
+    // 404 — that's still a healthy HTTP server, so accept any
+    // well-formed status line in the 1xx-4xx range and treat 5xx as
+    // not-yet-ready (the server is listening but the framework's
+    // startup hook may still be raising). 3xx (auth redirects), 401/403
+    // (auth gates), 404 (no root route) all count as ready.
+    let status_line = response.lines().next().unwrap_or_default();
+    if !(status_line.starts_with("HTTP/1.0 ") || status_line.starts_with("HTTP/1.1 ")) {
+        return false;
+    }
+    let status_token = status_line.split_whitespace().nth(1).unwrap_or_default();
+    let Ok(status_code) = status_token.parse::<u16>() else {
+        return false;
+    };
+    (100..500).contains(&status_code)
 }
 
 pub(super) fn print_session_info(info: &SessionInfo) {
