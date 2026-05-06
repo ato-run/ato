@@ -127,18 +127,28 @@ cargo test --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp d
 
 Desktop and MCP must share the same `ATO_HOME`, and that `ATO_HOME` should belong to the current smoke run only.
 
-Start by entering the isolated shell and printing the env:
+Preferred flow: create one fresh shell and launch both processes inside it.
 
 ```bash
 ./scripts/ato-test-shell.sh --print-env
-```
 
-Then launch the desktop process and MCP process from the same shell:
-
-```bash
 cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop
 cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp
 ```
+
+If you need separate terminal invocations, first allocate one fresh root and then reuse it explicitly for the duration of that single smoke run:
+
+```bash
+env_root="$(./scripts/ato-test-shell.sh --print-env true | sed -n 's/^ATO_TEST_ENV_ROOT=//p')"
+
+ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT="$env_root" \
+  ./scripts/ato-test-shell.sh cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop
+
+ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT="$env_root" \
+  ./scripts/ato-test-shell.sh cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp
+```
+
+Do not call `./scripts/ato-test-shell.sh` twice without the explicit reuse flags above; each invocation creates a different fresh root by default.
 
 `ato-desktop-mcp` discovers its socket from:
 
@@ -196,6 +206,7 @@ Prefer this order:
 Check:
 
 - desktop and MCP are running with the same `ATO_HOME`
+- if they were started from separate commands, the second and later commands used `ATO_TEST_REUSE_ENV_ROOT=1` with the same `ATO_TEST_ENV_ROOT`
 - `${ATO_HOME}/run/ato-desktop-current.json` exists
 - the desktop process started its automation listener successfully
 
