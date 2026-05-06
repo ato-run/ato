@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use capsule_core::common::paths::nacelle_home_dir;
 use serde::{Deserialize, Serialize};
 
 use super::policy::SecretPolicy;
@@ -60,9 +61,9 @@ impl SecretStore {
     /// backend is disabled; callers should prompt via `ato session start` or
     /// `ato secrets init`.
     pub(crate) fn open() -> Result<Self> {
-        let home = dirs::home_dir().context("failed to resolve home directory")?;
+        let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;
 
-        let mut age_backend = AgeFileBackend::new(home.clone());
+        let mut age_backend = AgeFileBackend::new(ato_home.clone());
         let loaded = try_load_identity(&mut age_backend);
         let age = if loaded {
             Some(Arc::new(age_backend))
@@ -70,8 +71,8 @@ impl SecretStore {
             None
         };
 
-        let order =
-            credential::config::read_order(&home).unwrap_or_else(credential::config::default_order);
+        let order = credential::config::read_order(&ato_home)
+            .unwrap_or_else(credential::config::default_order);
 
         Ok(Self {
             chain: build_chain(&order, age.clone()),

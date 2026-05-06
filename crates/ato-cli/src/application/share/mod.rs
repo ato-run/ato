@@ -2693,12 +2693,8 @@ fn target_env_fingerprint(input: &str, entry_id: Option<&str>) -> String {
 
 #[allow(dead_code)]
 fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("failed to resolve home directory for saved env store")?;
-    Ok(home
-        .join(".ato")
-        .join("env")
-        .join("targets")
-        .join(format!("{fingerprint}.env")))
+    capsule_core::common::paths::ato_path(format!("env/targets/{fingerprint}.env"))
+        .context("failed to resolve ato home for saved env store")
 }
 
 #[allow(dead_code)]

@@ -33,10 +33,7 @@ pub(crate) async fn resolve_installed_capsule_archive(
     registry: Option<&str>,
     preferred_version: Option<&str>,
 ) -> Result<Option<PathBuf>> {
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ato")
-        .join("store");
+    let store_root = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
     if let Some(path) = resolve_installed_capsule_archive_in_store(
         &store_root.join(&scoped_ref.publisher),
         &scoped_ref.slug,
@@ -1333,9 +1330,8 @@ fn detect_desktop_open_path_for_installed_capsule(capsule_path: &Path) -> Option
         .to_string();
     let scoped_id = format!("{publisher}/{slug}");
 
-    let apps_root = dirs::home_dir()?
-        .join(".ato")
-        .join("apps")
+    let apps_root = capsule_core::common::paths::ato_path("apps")
+        .ok()?
         .join(&publisher)
         .join(&slug);
     let content_dirs = std::fs::read_dir(apps_root)

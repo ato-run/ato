@@ -184,13 +184,11 @@ fn runtime_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ATO_RUNTIME_ROOT") {
         return Ok(PathBuf::from(path));
     }
-    let home = dirs::home_dir().context("Failed to determine home directory")?;
-    Ok(home.join(RUNTIMES_DIR))
+    capsule_core::common::paths::runtime_cache_dir().map_err(Into::into)
 }
 
 fn store_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Failed to determine home directory")?;
-    Ok(home.join(STORE_DIR))
+    Ok(capsule_core::common::paths::ato_store_dir())
 }
 
 fn parse_store_capsule_identity_at(

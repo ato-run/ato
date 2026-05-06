@@ -103,9 +103,7 @@ pub struct ProcessManager {
 
 impl ProcessManager {
     pub fn new() -> Result<Self> {
-        let run_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-            .join(RUN_DIR);
+        let run_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("run");
 
         if !run_dir.exists() {
             fs::create_dir_all(&run_dir).with_context(|| {

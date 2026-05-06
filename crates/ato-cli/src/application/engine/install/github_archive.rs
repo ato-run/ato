@@ -7,10 +7,8 @@ pub(crate) fn github_checkout_root() -> Result<PathBuf> {
     // prevents packing from within the ato internal scratch space.  Using
     // ~/.ato/gh-install/ instead places checkouts alongside the global ato state but
     // outside the blocked WORKSPACE_INTERNAL_SUBDIRS list.
-    let root = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory for GitHub checkout"))?
-        .join(".ato")
-        .join("gh-install");
+    let root = capsule_core::common::paths::ato_path("gh-install")
+        .context("Cannot determine ato home directory for GitHub checkout")?;
     std::fs::create_dir_all(&root).with_context(|| {
         format!(
             "Failed to create temporary checkout root: {}",

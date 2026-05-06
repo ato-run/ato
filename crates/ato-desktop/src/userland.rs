@@ -19,6 +19,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use capsule_core::common::paths::ato_path;
+
 /// Toolchain family (i.e. the ecosystem the binary is part of).
 ///
 /// We classify by the argv[0] of the toolchain, not by installed package name.
@@ -57,8 +59,7 @@ impl Family {
 /// Returns `None` if `$HOME` is unavailable (should never happen on macOS/Linux
 /// in practice, but we do not panic).
 pub fn family_root(family: Family) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(home.join(".ato").join("userland").join(family.dir_name()))
+    ato_path(format!("userland/{}", family.dir_name())).ok()
 }
 
 /// Env vars to inject when spawning a toolchain binary so that global-install

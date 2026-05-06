@@ -26,6 +26,8 @@
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
+
 /// `target:` value for icon / favicon plumbing.
 pub const TARGET_FAVICON: &str = "favicon";
 /// `target:` value for guest<->host IPC messages in `bridge.rs`.
@@ -53,27 +55,25 @@ const FEATURE_TARGETS: &[&str] = &[
 pub fn init_tracing() -> Option<WorkerGuard> {
     let filter = build_env_filter();
 
-    let log_dir = dirs::home_dir().map(|h| h.join(".ato").join("logs"));
+    let log_dir = ato_path_or_workspace_tmp("logs");
 
-    if let Some(ref dir) = log_dir {
-        if std::fs::create_dir_all(dir).is_ok() {
-            let file_appender = tracing_appender::rolling::daily(dir, "ato-desktop.log");
-            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    if std::fs::create_dir_all(&log_dir).is_ok() {
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "ato-desktop.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-            Registry::default()
-                .with(filter)
-                .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
-                .with(
-                    fmt::layer()
-                        .with_target(true)
-                        .with_thread_ids(true)
-                        .with_ansi(false)
-                        .with_writer(non_blocking),
-                )
-                .init();
+        Registry::default()
+            .with(filter)
+            .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
+            .with(
+                fmt::layer()
+                    .with_target(true)
+                    .with_thread_ids(true)
+                    .with_ansi(false)
+                    .with_writer(non_blocking),
+            )
+            .init();
 
-            return Some(guard);
-        }
+        return Some(guard);
     }
 
     // Fallback: stderr only.

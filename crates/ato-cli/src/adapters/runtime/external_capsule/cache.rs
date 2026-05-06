@@ -196,10 +196,8 @@ fn github_capsule_cache_dir(
     let base = if let Ok(path) = std::env::var(EXTERNAL_CAPSULE_CACHE_DIR_ENV) {
         PathBuf::from(path)
     } else {
-        dirs::home_dir()
-            .context("failed to determine home directory")?
-            .join(".ato")
-            .join("external-capsules")
+        capsule_core::common::paths::ato_path("external-capsules")
+            .context("failed to determine ato home")?
     };
     Ok(base
         .join("github")
@@ -237,10 +235,8 @@ fn external_capsule_cache_path(locked: &LockedCapsuleDependency) -> Result<PathB
     let base = if let Ok(path) = std::env::var(EXTERNAL_CAPSULE_CACHE_DIR_ENV) {
         PathBuf::from(path)
     } else {
-        dirs::home_dir()
-            .context("failed to determine home directory")?
-            .join(".ato")
-            .join("external-capsules")
+        capsule_core::common::paths::ato_path("external-capsules")
+            .context("failed to determine ato home")?
     };
     let key = locked
         .sha256

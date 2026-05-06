@@ -13,6 +13,7 @@
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result};
+use capsule_core::common::paths::nacelle_home_dir;
 
 use crate::application::credential::AgeFileBackend;
 
@@ -38,8 +39,8 @@ pub(crate) enum BootstrapOutcome {
 /// caller can fall back to the memory-only path with its own warning. Errors
 /// are only propagated when identity creation itself fails (I/O, encryption).
 pub(crate) fn ensure_identity_interactive() -> Result<BootstrapOutcome> {
-    let home = dirs::home_dir().context("failed to resolve home directory")?;
-    let age = AgeFileBackend::new(home);
+    let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;
+    let age = AgeFileBackend::new(ato_home);
 
     if age.identity_exists() {
         return Ok(BootstrapOutcome::AlreadyPresent);

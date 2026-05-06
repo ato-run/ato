@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use capsule_core::common::paths::nacelle_home_dir;
 use std::io::IsTerminal;
 
 use age::secrecy::ExposeSecret;
@@ -154,8 +155,8 @@ fn cmd_init(no_passphrase: bool, ssh_key: Option<std::path::PathBuf>) -> Result<
         bail!("--ssh-key is not yet implemented; use the default X25519 identity");
     }
 
-    let home = dirs::home_dir().context("failed to resolve home directory")?;
-    let age = AgeFileBackend::new(home.clone());
+    let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;
+    let age = AgeFileBackend::new(ato_home.clone());
 
     if age.identity_exists() {
         bail!(

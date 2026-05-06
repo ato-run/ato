@@ -20,6 +20,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use capsule_core::common::paths::ato_path;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
@@ -30,7 +31,6 @@ use super::{
 };
 
 const PERSIST_FILE_NAME: &str = "desktop-tabs.json";
-const PERSIST_DIR_NAME: &str = ".ato";
 const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -119,7 +119,7 @@ impl PersistedRoute {
 }
 
 fn persist_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(PERSIST_DIR_NAME).join(PERSIST_FILE_NAME))
+    ato_path(PERSIST_FILE_NAME).ok()
 }
 
 fn snapshot_state(state: &AppState) -> PersistedShell {

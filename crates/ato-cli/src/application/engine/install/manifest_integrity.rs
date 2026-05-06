@@ -561,11 +561,7 @@ pub(crate) fn verify_manifest_merkle_root(manifest: &CapsuleManifest) -> Result<
 }
 
 pub(crate) fn epoch_guard_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ato")
-        .join("state")
-        .join("epoch-guard.json")
+    capsule_core::common::paths::ato_state_dir().join("epoch-guard.json")
 }
 
 pub(crate) fn enforce_epoch_monotonicity(
