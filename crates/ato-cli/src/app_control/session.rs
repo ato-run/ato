@@ -26,8 +26,8 @@ use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
 use crate::application::pipeline::phases::run::{
-    inject_dependency_contract_env, persist_background_dependency_contracts,
-    start_dependency_contracts_for_run, DependencyContractGuard, DerivedBridgeManifest,
+    persist_background_dependency_contracts, preflight_dependency_contract_manifest_env,
+    setup_dependency_contracts_launch_context, DependencyContractGuard, DerivedBridgeManifest,
     PreparedRunContext,
 };
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
@@ -370,28 +370,9 @@ pub(super) fn start_runtime_session(
     plan: &capsule_core::router::ManifestData,
     raw_manifest: &str,
     launch: &capsule_core::launch_spec::LaunchSpec,
-    target_was_explicit: bool,
+    _target_was_explicit: bool,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
-    // When the manifest declares `[services]` orchestration AND the caller
-    // didn't pin a single `--target`, defer to `ato run` as a supervisor.
-    // Background: Desktop calls `ato app session start <handle>` without
-    // `--target`, the resolver falls back to `default_target` (typically the
-    // backend), and the WebView ends up showing the API instead of the UI.
-    // Honouring orchestration mode here picks the user-facing leaf service
-    // (the one nothing else `depends_on`) for the WebView while letting
-    // `ato run` bring up dep contracts + sibling services in topo order.
-    if plan.is_orchestration_mode() && !target_was_explicit {
-        return start_orchestration_runtime_session(
-            handle,
-            resolution,
-            manifest_path,
-            plan,
-            raw_manifest,
-            notes,
-        );
-    }
-
     let display_strategy = display_strategy_for_runtime(plan);
     if matches!(display_strategy, CapsuleDisplayStrategy::Unsupported) {
         anyhow::bail!(
@@ -571,15 +552,7 @@ pub(super) fn start_runtime_session(
     Ok(session_info_from_stored(session))
 }
 
-/// Spawn `ato run` as a supervisor process for `[services]`-mode capsules,
-/// then bind the WebView session to the orchestration's leaf service (the
-/// service no other service `depends_on`).
-///
-/// `ato run` itself owns dep-contract lifecycle, sibling-service startup,
-/// and topological readiness ordering. We just wait for the leaf service's
-/// HTTP port to come up and record the supervisor PID so `ato app session
-/// stop` can SIGTERM the whole tree.
-fn start_orchestration_runtime_session(
+pub(super) fn start_orchestration_session_supervisor(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
@@ -593,6 +566,21 @@ fn start_orchestration_runtime_session(
     let orchestration = plan
         .resolve_services()
         .context("failed to resolve [services] orchestration plan")?;
+    preflight_orchestration_service_required_env(manifest_path, &orchestration)?;
+
+    let manifest_value: toml::Value = toml::from_str(raw_manifest).with_context(|| {
+        format!(
+            "failed to parse manifest at {} for orchestration preflight",
+            manifest_path.display()
+        )
+    })?;
+    preflight_dependency_contract_manifest_env(
+        plan,
+        &manifest_value,
+        &crate::application::dependency_credentials::ProcessHostEnv,
+        "launching the session",
+    )?;
+
     let leaf = pick_orchestration_leaf_service(&orchestration)?;
     let leaf_target_label = leaf.runtime.runtime().target.clone();
     let leaf_port = leaf.runtime.runtime().port.ok_or_else(|| {
@@ -611,23 +599,6 @@ fn start_orchestration_runtime_session(
         .unwrap_or_else(|| leaf_runtime.clone());
     let leaf_name = leaf.name.clone();
 
-    // Surface missing dep credential env vars (PG_PASSWORD etc.) as
-    // `MissingRequiredEnv` BEFORE we spawn the supervisor. The supervised
-    // `ato run` would also fail on missing PG_PASSWORD, but only after a
-    // full provisioning cycle (~30s) and the typed envelope would land in
-    // the supervisor's log file rather than this process's stderr — Desktop
-    // can't surface its MissingConfig modal from there. This preflight
-    // mirrors the single-target session-start path that the d4fc2662 fix
-    // wired through `setup_session_dependency_contracts`.
-    preflight_orchestration_dep_credentials(plan, manifest_path, raw_manifest)?;
-
-    // Pass the original capsule handle (e.g. `capsule://github.com/...`) to
-    // the supervisor — NOT the manifest's directory. The session-start path
-    // resolves the handle into `~/.ato/tmp/gh-run/<...>/capsule.toml`, but
-    // that directory lives under WORKSPACE_STATE_DIR and the input
-    // resolver rejects it as "Workspace-local internal state path is not an
-    // authoritative input". Re-passing the handle lets the supervisor go
-    // through the normal cached github resolver.
     let supervisor_input = handle.to_string();
     let ato_bin = std::env::current_exe()
         .context("failed to resolve current `ato` binary path for orchestration supervisor")?;
@@ -636,14 +607,6 @@ fn start_orchestration_runtime_session(
     fs::create_dir_all(&session_root)
         .with_context(|| format!("failed to create session root {}", session_root.display()))?;
 
-    // Open the session log file BEFORE spawning so we can route the
-    // supervisor's stdout/stderr directly into it via `Stdio::from(file)`.
-    // We deliberately avoid `Stdio::piped()` + `attach_process_logs`'s
-    // copy-thread approach: when this `ato app session start` process
-    // exits, those threads die, the pipes become broken, and the
-    // supervisor's next write triggers SIGPIPE — killing the entire
-    // orchestration. Direct file handoff lets the kernel forward the
-    // supervisor's output without our process being in the loop.
     let provisional_log_path = session_root.join("orchestration-supervisor.log");
     let stdout_file = OpenOptions::new()
         .create(true)
@@ -666,11 +629,6 @@ fn start_orchestration_runtime_session(
     let mut cmd = Command::new(&ato_bin);
     cmd.arg("run")
         .arg("-y")
-        // Source-runtime targets require either --sandbox or
-        // --dangerously-skip-permissions before they can execute. Desktop's
-        // session-start path treats the user's "Open" click as the trust
-        // gesture, so we mirror the `--sandbox` enforcement that the
-        // single-target path applies via `prepare_target_execution`.
         .arg("--sandbox")
         .arg(&supervisor_input)
         .stdin(Stdio::null())
@@ -686,10 +644,6 @@ fn start_orchestration_runtime_session(
 
     let session_id = format!("ato-desktop-session-{}", child.id());
     let log_path = session_root.join(format!("{}.log", session_id));
-    // Rename the provisional log to its final, pid-stamped name now that we
-    // know the supervisor's PID. If rename fails (race with the supervisor
-    // already writing), fall back to keeping the provisional path in the
-    // session record so the user still has a discoverable log.
     let log_path = match fs::rename(&provisional_log_path, &log_path) {
         Ok(()) => log_path,
         Err(_) => provisional_log_path,
@@ -712,7 +666,7 @@ fn start_orchestration_runtime_session(
 
     let local_url = format!("http://127.0.0.1:{}/", leaf_port);
     notes.push(format!(
-        "Orchestration mode: launched `ato run` as supervisor; WebView bound to leaf service '{}' (target='{}', port={}).",
+        "Orchestration mode: launched run supervisor; WebView bound to leaf service '{}' (target='{}', port={}).",
         leaf_name, leaf_target_label, leaf_port
     ));
 
@@ -772,9 +726,6 @@ fn start_orchestration_runtime_session(
         }),
         terminal: None,
         service: None,
-        // The supervised `ato run` owns dep-contract lifecycle internally;
-        // we don't persist a sibling snapshot here. Killing the supervisor
-        // PID cascades through its own teardown path.
         dependency_contracts: None,
         schema_version: None,
         launch_digest: None,
@@ -782,101 +733,9 @@ fn start_orchestration_runtime_session(
     };
     write_session_record(&session_root, &session)?;
 
-    // Detach the supervisor: drop the Child handle so we don't reap or
-    // signal it on this scope's exit. `ato app session stop <id>` will
-    // SIGTERM the recorded PID when the user closes the pane.
     std::mem::forget(child);
 
     Ok(session_info_from_stored(session))
-}
-
-/// Walk every `[dependencies.<alias>].credentials = "{{env.X}}"` template
-/// in the orchestration manifest and surface missing env vars (e.g.
-/// `PG_PASSWORD`) as a typed `MissingRequiredEnv` BEFORE we spawn the
-/// supervisor. Mirrors `preflight_session_dep_credentials` but reads the
-/// manifest directly instead of going through the lockfile — orchestration
-/// mode delegates lockfile generation to the supervised `ato run`, so we
-/// don't want to provision a redundant lockfile here just to discover a
-/// missing credential.
-///
-/// Without this preflight, the supervisor would catch the missing env,
-/// but its typed envelope only reaches its own log file (we hand off
-/// stdout/stderr directly to a file so the supervisor survives our exit).
-/// Desktop's MissingConfig modal has no path to that envelope, so the
-/// user sees a generic "process exited before readiness" instead of the
-/// field-by-field config prompt the single-target path produces.
-fn preflight_orchestration_dep_credentials(
-    plan: &capsule_core::router::ManifestData,
-    manifest_path: &Path,
-    raw_manifest: &str,
-) -> Result<()> {
-    use capsule_core::execution_plan::error::AtoExecutionError;
-    use capsule_core::foundation::types::{ConfigField, ConfigKind, TemplateExpr, TemplateSegment};
-    use capsule_core::lockfile::manifest_external_capsule_dependencies;
-
-    let manifest_value: toml::Value = toml::from_str(raw_manifest).with_context(|| {
-        format!(
-            "failed to parse manifest at {} for orchestration preflight",
-            manifest_path.display()
-        )
-    })?;
-    let capsule_dependencies = manifest_external_capsule_dependencies(&manifest_value)
-        .context("failed to read consumer dependency declarations for orchestration preflight")?;
-
-    let mut missing_keys: Vec<String> = Vec::new();
-    let mut missing_schema: Vec<ConfigField> = Vec::new();
-    let mut seen_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for entry in &capsule_dependencies {
-        if entry.contract.is_none() {
-            continue;
-        }
-        for (cred_key, template) in &entry.credentials {
-            for segment in &template.segments {
-                let TemplateSegment::Expr(TemplateExpr::Env(name)) = segment else {
-                    continue;
-                };
-                let name = name.clone();
-                if std::env::var(&name).is_ok_and(|value| !value.is_empty()) {
-                    continue;
-                }
-                if !seen_missing.insert(name.clone()) {
-                    continue;
-                }
-                missing_keys.push(name.clone());
-                let label = format!(
-                    "dep '{}'.credentials.{} → {{env.{}}}",
-                    entry.alias, cred_key, name
-                );
-                missing_schema.push(ConfigField {
-                    name: name.clone(),
-                    label: Some(label),
-                    description: None,
-                    kind: ConfigKind::Secret,
-                    default: None,
-                    placeholder: None,
-                });
-            }
-        }
-    }
-
-    if missing_keys.is_empty() {
-        return Ok(());
-    }
-
-    let target = plan.selected_target_label();
-    let message = format!(
-        "missing required environment variables for dependency credentials of target '{}': {} (set them before launching the session)",
-        target,
-        missing_keys.join(", ")
-    );
-    Err(AtoExecutionError::missing_required_env(
-        message,
-        missing_keys,
-        missing_schema,
-        Some(target),
-    )
-    .into())
 }
 
 /// Pick the leaf service of the orchestration dependency graph — the one
@@ -925,6 +784,69 @@ fn pick_orchestration_leaf_service(
                 .expect("non-empty leaves vec"))
         }
     }
+}
+
+pub(super) fn orchestration_leaf_target_label(
+    plan: &capsule_core::router::ManifestData,
+) -> Result<Option<String>> {
+    if !plan.is_orchestration_mode() {
+        return Ok(None);
+    }
+    let orchestration = plan
+        .resolve_services()
+        .context("failed to resolve [services] orchestration plan")?;
+    let leaf = pick_orchestration_leaf_service(&orchestration)?;
+    Ok(Some(leaf.runtime.runtime().target.clone()))
+}
+
+fn preflight_orchestration_service_required_env(
+    manifest_path: &Path,
+    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    let launch_ctx = crate::executors::launch_context::RuntimeLaunchContext::empty();
+    let mut seen_targets = HashSet::new();
+    for service in &orchestration.services {
+        let target_label = service.runtime.runtime().target.as_str();
+        if !seen_targets.insert(target_label.to_string()) {
+            continue;
+        }
+        let (target_plan, _guest, _notes) = resolve_local_plan(manifest_path, Some(target_label))?;
+        crate::executors::target_runner::preflight_required_environment_variables(
+            &target_plan,
+            &launch_ctx,
+        )?;
+    }
+    Ok(())
+}
+
+fn dependency_contracts_for_session_record(
+    consumer_pid: i32,
+    dep_contracts: Option<&DependencyContractGuard>,
+) -> Option<StoredDependencyContracts> {
+    let graph = dep_contracts.and_then(DependencyContractGuard::graph)?;
+    let providers = graph
+        .deps()
+        .iter()
+        .map(|dep| StoredDependencyProvider {
+            alias: dep.alias.clone(),
+            pid: dep.child.id() as i32,
+            state_dir: dep.state_dir.clone(),
+            resolved: dep.resolved.clone(),
+            allocated_port: dep.allocated_port,
+            log_path: dep.log_path.clone(),
+            runtime_export_keys: dep.runtime_exports.keys().cloned().collect(),
+        })
+        .collect::<Vec<_>>();
+    if providers.is_empty() {
+        return None;
+    }
+
+    Some(StoredDependencyContracts {
+        consumer_pid,
+        providers,
+    })
 }
 
 pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInfo {
@@ -991,34 +913,6 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         execution_id: None,
         execution_receipt_schema_version: None,
     }
-}
-
-fn dependency_contracts_for_session_record(
-    consumer_pid: i32,
-    dep_contracts: Option<&DependencyContractGuard>,
-) -> Option<StoredDependencyContracts> {
-    let graph = dep_contracts.and_then(DependencyContractGuard::graph)?;
-    let providers = graph
-        .deps()
-        .iter()
-        .map(|dep| StoredDependencyProvider {
-            alias: dep.alias.clone(),
-            pid: dep.child.id() as i32,
-            state_dir: dep.state_dir.clone(),
-            resolved: dep.resolved.clone(),
-            allocated_port: dep.allocated_port,
-            log_path: dep.log_path.clone(),
-            runtime_export_keys: dep.runtime_exports.keys().cloned().collect(),
-        })
-        .collect::<Vec<_>>();
-    if providers.is_empty() {
-        return None;
-    }
-
-    Some(StoredDependencyContracts {
-        consumer_pid,
-        providers,
-    })
 }
 
 pub(super) fn resolve_session_launch_plan(
@@ -1149,11 +1043,12 @@ fn prepare_session_execution(
     // start the providers, render the template, and add their loopback
     // endpoints to the sandbox egress allowlist.
     let dep_contracts = runtime
-        .block_on(setup_session_dependency_contracts(
+        .block_on(setup_dependency_contracts_launch_context(
             plan,
             &mut prepared,
             &reporter,
             &mut launch_ctx,
+            "launching the session",
         ))
         .map_err(|err| err.context("failed to set up dependency contracts for session start"))?;
 
@@ -1177,194 +1072,6 @@ fn prepare_session_execution(
         prepared: prepared_target,
         dep_contracts,
     })
-}
-
-/// Mirror of run.rs's `if has_dependency_contracts { ... }` block,
-/// adapted to the session-start flow. Returns `None` when the
-/// consumer's lockfile (auto-generated if absent) declares no
-/// `[dependencies.<alias>]` entries with `contract = "..."`.
-async fn setup_session_dependency_contracts(
-    plan: &capsule_core::router::ManifestData,
-    prepared: &mut PreparedRunContext,
-    reporter: &Arc<CliReporter>,
-    launch_ctx: &mut crate::executors::launch_context::RuntimeLaunchContext,
-) -> Result<Option<DependencyContractGuard>> {
-    use capsule_core::lockfile::manifest_external_capsule_dependencies;
-
-    let capsule_dependencies =
-        manifest_external_capsule_dependencies(prepared.bridge_manifest.as_toml())
-            .context("failed to read consumer dependency declarations")?;
-    let has_dependency_contracts = capsule_dependencies
-        .iter()
-        .any(|dependency| dependency.contract.is_some());
-    if !has_dependency_contracts {
-        return Ok(None);
-    }
-
-    // Auto-lock when the consumer wasn't fetched with a pre-existing
-    // capsule.lock.json (typical for Desktop opening a github capsule).
-    // This is the same auto-lock invocation the run.rs pipeline uses.
-    let lockfile = match prepared
-        .compatibility_legacy_lock
-        .as_ref()
-        .map(|ctx| ctx.lock.clone())
-    {
-        Some(lock) => lock,
-        None => {
-            let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
-                prepared.bridge_manifest.as_toml(),
-            )
-            .context("failed to build compatibility bridge for session-start auto-lock")?;
-            let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
-                prepared.workspace_root.clone(),
-                bridge,
-            )
-            .context("failed to build CompatProjectInput for session-start auto-lock")?;
-            let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
-                &compat_input,
-                reporter.clone(),
-                false,
-            )
-            .await
-            .context("session-start auto-lock for dependency contracts failed")?;
-            let bytes = std::fs::read(&lock_path).with_context(|| {
-                format!("failed to read auto-generated lock {}", lock_path.display())
-            })?;
-            let lock: capsule_core::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
-                .with_context(|| {
-                    format!(
-                        "failed to parse auto-generated lock {}",
-                        lock_path.display()
-                    )
-                })?;
-            prepared.compatibility_legacy_lock = Some(
-                crate::application::pipeline::phases::run::CompatibilityLegacyLockContext {
-                    manifest_path: compat_input.workspace_root().join("capsule.toml"),
-                    path: lock_path,
-                    lock: lock.clone(),
-                },
-            );
-            lock
-        }
-    };
-
-    // Surface missing dep credential env vars (PG_PASSWORD etc.) as
-    // MissingRequiredEnv BEFORE we try to actually start the providers.
-    // The orchestrator path would also catch this, but only after a full
-    // provider materialize / spawn / template resolution cycle, and the
-    // resulting OrchestratorError gets wrapped by anyhow context() so
-    // session-start callers (Desktop) can't downcast it back into the
-    // structured MissingRequiredEnv that their MissingConfig modal
-    // already understands. Pre-flighting here keeps the typed envelope
-    // intact for `[dependencies.<alias>].credentials` the same way
-    // target-level `required_env` is already handled upstream.
-    preflight_session_dep_credentials(plan, &lockfile)?;
-
-    let guard = start_dependency_contracts_for_run(prepared, plan, &lockfile).await?;
-
-    if let Some(graph) = guard.graph() {
-        // Eagerly surface a redacted summary on stderr so Desktop /
-        // human users see which provider was started, where its log
-        // lives, and what port the orchestrator allocated. Mirrors
-        // run.rs's per-line eprintln so the same diagnostic data
-        // reaches whoever is watching the session-start envelope.
-        for line in graph.summary_lines() {
-            eprintln!("{line}");
-        }
-
-        let mut updated = std::mem::replace(
-            launch_ctx,
-            crate::executors::launch_context::RuntimeLaunchContext::empty(),
-        );
-        updated = inject_dependency_contract_env(updated, plan, guard.lock(), graph)?;
-        let dep_endpoints: Vec<String> = graph
-            .deps()
-            .iter()
-            .filter_map(|dep| dep.allocated_port.map(|port| format!("127.0.0.1:{port}")))
-            .collect();
-        if !dep_endpoints.is_empty() {
-            updated = updated.with_dep_endpoints(dep_endpoints);
-        }
-        *launch_ctx = updated;
-    }
-
-    Ok(Some(guard))
-}
-
-/// Walk every `[dependencies.<alias>].credentials = "{{env.X}}"` template
-/// in the resolved lockfile and check that each referenced env var is
-/// present on the host. When something is missing, surface a typed
-/// MissingRequiredEnv (the same envelope shape `preflight_required_env`
-/// already produces for a target's own `required_env`) so the Desktop
-/// missing-config modal can route this exactly like a missing
-/// `SECRET_KEY` instead of having the orchestrator E999 mid-spawn.
-///
-/// Only `{{env.X}}` segments are inspected: the orchestrator's full
-/// resolver also validates that `X` is in the manifest's top-level
-/// `required_env` and rejects credential templates that mix in other
-/// expression kinds. We reproduce both checks at preflight so the
-/// session-start path doesn't get further than the missing-config UX.
-fn preflight_session_dep_credentials(
-    plan: &capsule_core::router::ManifestData,
-    lockfile: &capsule_core::lockfile::CapsuleLock,
-) -> Result<()> {
-    use capsule_core::execution_plan::error::AtoExecutionError;
-    use capsule_core::foundation::types::{ConfigField, ConfigKind, TemplateExpr, TemplateSegment};
-
-    let mut missing_keys: Vec<String> = Vec::new();
-    let mut missing_schema: Vec<ConfigField> = Vec::new();
-    let mut seen_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for entry in &lockfile.capsule_dependencies {
-        if entry.contract.is_none() {
-            continue;
-        }
-        for (cred_key, template) in &entry.credentials {
-            for segment in &template.segments {
-                let TemplateSegment::Expr(TemplateExpr::Env(name)) = segment else {
-                    continue;
-                };
-                let name = name.clone();
-                if std::env::var(&name).is_ok_and(|value| !value.is_empty()) {
-                    continue;
-                }
-                if !seen_missing.insert(name.clone()) {
-                    continue;
-                }
-                missing_keys.push(name.clone());
-                let label = format!(
-                    "dep '{}'.credentials.{} → {{env.{}}}",
-                    entry.name, cred_key, name
-                );
-                missing_schema.push(ConfigField {
-                    name: name.clone(),
-                    label: Some(label),
-                    description: None,
-                    kind: ConfigKind::Secret,
-                    default: None,
-                    placeholder: None,
-                });
-            }
-        }
-    }
-
-    if missing_keys.is_empty() {
-        return Ok(());
-    }
-
-    let target = plan.selected_target_label();
-    let message = format!(
-        "missing required environment variables for dependency credentials of target '{}': {} (set them before launching the session)",
-        target,
-        missing_keys.join(", ")
-    );
-    Err(AtoExecutionError::missing_required_env(
-        message,
-        missing_keys,
-        missing_schema,
-        Some(target),
-    )
-    .into())
 }
 
 fn spawn_runtime_process(
