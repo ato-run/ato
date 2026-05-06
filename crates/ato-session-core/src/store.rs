@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use capsule_core::common::paths::ato_path;
 use tracing::{debug, warn};
 
 use crate::record::StoredSessionInfo;
@@ -19,18 +20,12 @@ const SESSION_ROOT_ENV: &str = "ATO_DESKTOP_SESSION_ROOT";
 
 /// Returns the directory holding all `<session_id>.json` records for
 /// `ato-desktop`. Honors `ATO_DESKTOP_SESSION_ROOT`; otherwise resolves
-/// to `~/.ato/apps/ato-desktop/sessions/`.
+/// to `${ATO_HOME:-~/.ato}/apps/ato-desktop/sessions/`.
 pub fn session_root() -> Result<PathBuf> {
     if let Ok(path) = std::env::var(SESSION_ROOT_ENV) {
         return Ok(PathBuf::from(path));
     }
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("failed to resolve home directory"))?;
-    Ok(home
-        .join(".ato")
-        .join("apps")
-        .join("ato-desktop")
-        .join("sessions"))
+    ato_path("apps/ato-desktop/sessions").context("failed to resolve ato home for session root")
 }
 
 /// Path of a single session record file inside `root`.
@@ -137,7 +132,37 @@ mod tests {
     use super::*;
     use crate::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use capsule_wire::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::tempdir;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn make_record(id: &str) -> StoredSessionInfo {
         StoredSessionInfo {
@@ -227,6 +252,21 @@ mod tests {
         assert!(
             entries.iter().all(|n| !n.contains(".tmp.")),
             "no leftover temp files; saw: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn session_root_uses_ato_home_when_set() {
+        let _lock = env_lock();
+        let dir = tempdir().expect("tempdir");
+        let ato_home = dir.path().join("isolated-ato-home");
+        let fake_home = dir.path().join("real-home");
+        let _ato_home = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let _home = EnvVarGuard::set_path("HOME", &fake_home);
+
+        assert_eq!(
+            session_root().expect("session root"),
+            ato_home.join("apps/ato-desktop/sessions")
         );
     }
 }
