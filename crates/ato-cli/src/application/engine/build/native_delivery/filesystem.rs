@@ -612,15 +612,11 @@ pub(crate) fn digest_dir_name(digest: &str) -> Result<String> {
 }
 
 pub(crate) fn fetches_root() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(DEFAULT_FETCHES_DIR))
+    Ok(capsule_core::common::paths::ato_path_or_workspace_tmp("fetches"))
 }
 
 pub(crate) fn derived_apps_root(scoped_id: &str, parent_digest: &str) -> Result<PathBuf> {
-    let mut root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(DEFAULT_DERIVED_APPS_DIR);
+    let mut root = capsule_core::common::paths::ato_path_or_workspace_tmp("apps");
     for segment in scoped_id.split('/') {
         root.push(segment.trim());
     }

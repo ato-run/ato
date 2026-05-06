@@ -762,9 +762,9 @@ fn finalize_projection_status(
 }
 
 fn projections_root() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(PROJECTIONS_DIR))
+    Ok(capsule_core::common::paths::ato_path_or_workspace_tmp(
+        "native-delivery/projections",
+    ))
 }
 
 fn resolve_launcher_dir(launcher_dir: Option<&Path>) -> Result<PathBuf> {

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use super::{DEFAULT_PREVIEW_DIR, ENV_PREVIEW_ROOT, PREVIEW_MANIFEST_FILE_NAME};
+use super::{ENV_PREVIEW_ROOT, PREVIEW_MANIFEST_FILE_NAME};
 use crate::application::preview::PreviewSession;
 
 pub fn persist_session_with_warning(session: &PreviewSession) -> Option<String> {
