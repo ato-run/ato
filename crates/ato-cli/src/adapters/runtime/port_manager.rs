@@ -11,7 +11,6 @@ use std::time::SystemTime;
 const PORT_MAP_FILE: &str = "port_map.json";
 const PORT_RANGE_START: u16 = 10000;
 const PORT_RANGE_END: u16 = 19999;
-const RUN_DIR: &str = ".ato/run";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PortAllocation {

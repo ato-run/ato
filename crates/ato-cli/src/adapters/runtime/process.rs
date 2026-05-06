@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-const RUN_DIR: &str = ".ato/run";
 const PID_FILE_EXT: &str = ".pid";
 const RUN_SESSIONS_DIR_NAME: &str = "run-sessions";
 const DEPENDENCY_SESSION_FILE: &str = "graph.json";
@@ -761,7 +760,7 @@ pub fn format_duration(duration: std::time::Duration) -> String {
 impl Default for ProcessManager {
     fn default() -> Self {
         Self::new().unwrap_or_else(|_| {
-            let run_dir = capsule_core::common::paths::home_dir_or_workspace_tmp().join(RUN_DIR);
+            let run_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("run");
             Self { run_dir }
         })
     }
