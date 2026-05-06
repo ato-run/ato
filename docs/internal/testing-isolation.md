@@ -32,12 +32,28 @@ Run a single command in isolation:
 
 Desktop and MCP must share the same `ATO_HOME`.
 
+Preferred flow: open one fresh hermetic shell and run both commands inside it.
+
 ```bash
 ./scripts/ato-test-shell.sh --print-env
 
 ATO_HOME="$ATO_HOME" cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop
 ATO_HOME="$ATO_HOME" cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp
 ```
+
+If you need separate command invocations, allocate one fresh root first and then opt into reuse for that single verification run:
+
+```bash
+env_root="$(./scripts/ato-test-shell.sh --print-env true | sed -n 's/^ATO_TEST_ENV_ROOT=//p')"
+
+ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT="$env_root" \
+	./scripts/ato-test-shell.sh cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop
+
+ATO_TEST_REUSE_ENV_ROOT=1 ATO_TEST_ENV_ROOT="$env_root" \
+	./scripts/ato-test-shell.sh cargo run --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop-mcp
+```
+
+Do not call `./scripts/ato-test-shell.sh` twice without the explicit reuse flags above; each invocation creates a different fresh root by default.
 
 The discovery socket and `ato-desktop-current.json` will be created under `$ATO_HOME/run/`, not the developer's real `~/.ato/run/`.
 
