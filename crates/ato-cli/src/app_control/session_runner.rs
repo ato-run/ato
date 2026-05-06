@@ -34,8 +34,8 @@ use crate::application::pipeline::executor::{
     HourglassPhaseRunner, PhaseAnnotation, PhaseStageTimer,
 };
 use crate::application::pipeline::hourglass::HourglassPhase;
-use crate::application::pipeline::phases::run::preflight_selected_target_environment;
 use crate::executors::launch_context::RuntimeLaunchContext;
+use crate::executors::target_runner;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
@@ -56,6 +56,7 @@ pub(super) struct SessionStartPhaseRunner<'a> {
     plan: Option<ManifestData>,
     launch: Option<LaunchSpec>,
     raw_manifest: Option<String>,
+    manifest_value: Option<toml::Value>,
     notes: Vec<String>,
     launch_ctx: RuntimeLaunchContext,
 
@@ -89,6 +90,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             plan: None,
             launch: None,
             raw_manifest: None,
+            manifest_value: None,
             notes: Vec::new(),
             launch_ctx: RuntimeLaunchContext::empty(),
             build_observation: None,
@@ -129,17 +131,34 @@ impl<'a> SessionStartPhaseRunner<'a> {
         notes.extend(resolution.notes.clone());
         let raw_manifest = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let manifest_value: toml::Value = toml::from_str(&raw_manifest)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
         // RuntimeLaunchContext::empty() matches the pre-pipeline behavior of
         // `start_session`: no IPC bindings, no extra injected env. The check
         // falls back to OS env / manifest env entries — which is what the
         // spawned child will actually receive.
-        preflight_selected_target_environment(&plan, &self.launch_ctx)?;
+        if orchestration_supervisor_mode {
+            let orchestration = plan
+                .resolve_services()
+                .context("failed to resolve [services] orchestration plan")?;
+            crate::application::pipeline::phases::run::preflight_orchestration_session_environment(
+                &plan,
+                &manifest_value,
+                &orchestration,
+                &self.launch_ctx,
+                &crate::application::dependency_credentials::ProcessHostEnv,
+                "launching the session",
+            )?;
+        } else {
+            target_runner::preflight_required_environment_variables(&plan, &self.launch_ctx)?;
+        }
 
         self.resolution = Some(resolution);
         self.manifest_path = Some(manifest_path);
         self.plan = Some(plan);
         self.launch = Some(launch);
         self.raw_manifest = Some(raw_manifest);
+        self.manifest_value = Some(manifest_value);
         self.notes = notes;
         self.orchestration_supervisor_mode = orchestration_supervisor_mode;
         Ok(())
@@ -221,6 +240,10 @@ impl<'a> SessionStartPhaseRunner<'a> {
             .raw_manifest
             .as_ref()
             .expect("install populates raw_manifest");
+        let manifest_value = self
+            .manifest_value
+            .as_ref()
+            .expect("install populates manifest_value");
 
         // App Session Materialization (RFC v0.2 §5.1):
         //
@@ -289,6 +312,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                         resolution,
                         manifest_path,
                         plan,
+                        manifest_value,
                         raw_manifest,
                         launch,
                     )?,
@@ -307,6 +331,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                         resolution,
                         manifest_path,
                         plan,
+                        manifest_value,
                         raw_manifest,
                         launch,
                     )?,
@@ -387,25 +412,22 @@ impl<'a> SessionStartPhaseRunner<'a> {
         resolution: &HandleResolution,
         manifest_path: &std::path::Path,
         plan: &ManifestData,
+        manifest_value: &toml::Value,
         raw_manifest: &str,
         launch: &LaunchSpec,
     ) -> Result<SessionInfo> {
-        let manifest_value: toml::Value = toml::from_str(raw_manifest)
-            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-
         if self.orchestration_supervisor_mode {
             return start_orchestration_session_supervisor(
                 self.handle,
                 resolution,
                 manifest_path,
                 plan,
-                &manifest_value,
                 self.notes.clone(),
             );
         }
 
         let guest = parse_guest_contract(
-            &manifest_value,
+            manifest_value,
             manifest_path
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new(".")),

@@ -1044,11 +1044,20 @@ pub(crate) fn preflight_dependency_contract_manifest_env(
     )
 }
 
-pub(crate) fn preflight_selected_target_environment(
-    plan: &capsule_core::router::ManifestData,
-    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
-) -> Result<()> {
-    target_runner::preflight_required_environment_variables(plan, launch_ctx)
+pub(crate) fn is_env_satisfied(
+    name: &str,
+    env_layers: &[&HashMap<String, String>],
+    host_env: Option<&dyn HostEnv>,
+) -> bool {
+    env_layers.iter().any(|layer| {
+        layer
+            .get(name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    }) || host_env
+        .and_then(|env| env.get(name))
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 pub(crate) fn preflight_orchestration_session_environment(
@@ -1089,25 +1098,7 @@ fn preflight_orchestration_service_required_env(
             if name.is_empty() {
                 continue;
             }
-            if launch_env
-                .get(name)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if base_env
-                .get(name)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if host_env
-                .get(name)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
+            if is_env_satisfied(name, &[&launch_env, &base_env], Some(host_env)) {
                 continue;
             }
             if !seen_missing.insert(name.to_string()) {
@@ -2912,6 +2903,7 @@ where
             crate::consent_store::require_consent(&execution_plan, request.assume_yes)?;
         }
     } else if host_fallback_requested {
+        // Host fallback opt-in is independent of dangerously-skip-permissions.
         if use_progressive_ui {
             if request.assume_yes {
                 crate::progressive_ui::show_warning(
