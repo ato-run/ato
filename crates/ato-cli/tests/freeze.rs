@@ -1,7 +1,6 @@
 //! Tests for the A1 freeze pipeline: tree hash → atomic store write → ref +
 //! meta records → idempotent re-freeze and concurrent flock contention.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
@@ -16,7 +15,10 @@ use ato_cli::dependency_materializer::{
 use capsule_core::blob::BlobManifest;
 use capsule_core::common::store::{ato_store_dep_ref_path, BlobAddress};
 use serial_test::serial;
-use tempfile::TempDir;
+
+mod support;
+
+use support::{EnvVarGuard, IsolatedAto};
 
 fn write_file(root: &Path, rel: &str, contents: &[u8]) {
     let path = root.join(rel);
@@ -62,36 +64,13 @@ fn sample_request() -> DependencyMaterializationRequest {
     }
 }
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 #[test]
 #[serial]
 fn freeze_writes_payload_manifest_ref_and_meta() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+    let env = IsolatedAto::new();
+    let _cache = EnvVarGuard::set("ATO_DEP_CACHE", "1");
 
-    let deps = tmp.path().join("session-deps");
+    let deps = env.path().join("session-deps");
     write_file(&deps, "node_modules/foo/index.js", b"console.log('foo');\n");
     write_file(
         &deps,
@@ -139,11 +118,10 @@ fn freeze_writes_payload_manifest_ref_and_meta() {
 #[test]
 #[serial]
 fn second_freeze_observes_existing_blob_without_rewriting() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+    let env = IsolatedAto::new();
+    let _cache = EnvVarGuard::set("ATO_DEP_CACHE", "1");
 
-    let deps = tmp.path().join("session-deps");
+    let deps = env.path().join("session-deps");
     write_file(&deps, "node_modules/foo/index.js", b"const a = 1;\n");
 
     let derivation_hash = DepDerivationKeyV1::from_request(&sample_request())
@@ -168,11 +146,10 @@ fn second_freeze_observes_existing_blob_without_rewriting() {
 #[test]
 #[serial]
 fn freeze_makes_plan_report_a_hit() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+    let env = IsolatedAto::new();
+    let _cache = EnvVarGuard::set("ATO_DEP_CACHE", "1");
 
-    let deps = tmp.path().join("session-deps");
+    let deps = env.path().join("session-deps");
     write_file(&deps, "lib.js", b"// shared\n");
     write_file(&deps, "package.json", b"{\"name\":\"shared\"}");
 
@@ -192,11 +169,10 @@ fn freeze_makes_plan_report_a_hit() {
 #[test]
 #[serial]
 fn freeze_atomic_write_leaves_no_tmp_files_in_target_root() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+    let env = IsolatedAto::new();
+    let _cache = EnvVarGuard::set("ATO_DEP_CACHE", "1");
 
-    let deps = tmp.path().join("session-deps");
+    let deps = env.path().join("session-deps");
     write_file(&deps, "data.txt", b"payload");
 
     let derivation_hash = DepDerivationKeyV1::from_request(&sample_request())
@@ -223,8 +199,7 @@ fn freeze_atomic_write_leaves_no_tmp_files_in_target_root() {
 #[test]
 #[serial]
 fn derivation_lock_serializes_concurrent_acquisitions() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _env = IsolatedAto::new();
 
     let derivation_hash = "sha256:concurrent";
     let lock = DerivationLock::acquire(derivation_hash).unwrap();
@@ -257,10 +232,9 @@ fn derivation_lock_serializes_concurrent_acquisitions() {
 fn freeze_preserves_executable_bit_and_symlink() {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let env = IsolatedAto::new();
 
-    let deps = tmp.path().join("session-deps");
+    let deps = env.path().join("session-deps");
     write_file(&deps, "bin/run", b"#!/bin/sh\necho hi\n");
     fs::set_permissions(deps.join("bin/run"), fs::Permissions::from_mode(0o755)).unwrap();
     symlink("bin/run", deps.join("entrypoint")).unwrap();
