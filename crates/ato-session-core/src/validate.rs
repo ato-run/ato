@@ -192,6 +192,7 @@ mod tests {
             web: None,
             terminal: None,
             service: None,
+            dependency_contracts: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             // Match the running process so the start-time check passes
