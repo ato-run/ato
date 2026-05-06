@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use capsule_core::ato_lock::AtoLock;
 use capsule_core::dependency_contracts::{
@@ -31,7 +31,8 @@ use crate::application::dependency_materializer::{
     RuntimeSelection, SessionDependencyMaterializer,
 };
 use crate::application::dependency_runtime::orchestrator::{
-    start_all as start_dependency_graph, OrchestratorInput, OrchestratorProvider, RunningGraph,
+    start_all as start_dependency_graph, OrchestratorError, OrchestratorInput,
+    OrchestratorProvider, RunningGraph,
 };
 use crate::application::engine::install::support::{
     LocalRunManifestPreparationOutcome, ResolvedCliExportRequest, ResolvedRunTarget,
@@ -624,6 +625,135 @@ impl Drop for DependencyContractGuard {
     }
 }
 
+impl DependencyContractGuard {
+    pub(crate) fn detach(mut self) {
+        if let Some(graph) = self.graph.take() {
+            std::mem::forget(graph);
+        }
+    }
+}
+
+fn dependency_contract_start_error(target_label: &str, error: OrchestratorError) -> anyhow::Error {
+    use crate::application::dependency_credentials::CredentialError;
+    match error {
+        OrchestratorError::OrphanAliveOtherSession {
+            alias,
+            session_pid,
+            resolved,
+            state_dir,
+        } => anyhow!(
+            "dep '{}' state.dir is owned by ato session pid {}; stop that session or use --target <other> to share the workspace. state: {}; provider: {}",
+            alias,
+            session_pid,
+            state_dir.display(),
+            resolved
+        ),
+        OrchestratorError::Credential {
+            alias,
+            source: CredentialError::EnvKeyMissing { key },
+        } => anyhow!(
+            "dep '{}' credential needs ${}: export {}=<value> before re-running ('{}' is required by the manifest's top-level required_env and used in [dependencies.{}].credentials)",
+            alias,
+            key,
+            key,
+            key,
+            alias
+        ),
+        OrchestratorError::Credential {
+            alias,
+            source: CredentialError::EnvKeyOutOfScope { key },
+        } => anyhow!(
+            "dep '{}' credential references ${} but '{}' is not declared in the manifest's top-level required_env: add it under required_env so the credential resolver can read it",
+            alias,
+            key,
+            key
+        ),
+        other => anyhow::Error::new(other).context(format!(
+            "failed to start dependency contracts for target '{}'",
+            target_label
+        )),
+    }
+}
+
+fn register_dependency_contract_cleanup(
+    attempt: Option<&mut PipelineAttemptContext>,
+    graph: &RunningGraph,
+) {
+    let Some(attempt) = attempt else {
+        return;
+    };
+    let mut scope = attempt.cleanup_scope();
+    for dep in graph.deps() {
+        scope.register_kill_child_process(dep.child.id(), format!("dep:{}", dep.alias));
+    }
+}
+
+fn register_capsule_process_cleanup(
+    attempt: &mut Option<&mut PipelineAttemptContext>,
+    process: &crate::executors::source::CapsuleProcess,
+    service_name: &str,
+) {
+    let Some(attempt) = attempt.as_deref_mut() else {
+        return;
+    };
+    let mut scope = attempt.cleanup_scope();
+    scope.register_kill_child_process(process.child.id(), service_name.to_string());
+    if let Some(pid) = process.workload_pid {
+        scope.register_kill_child_process(pid, format!("{}:workload", service_name));
+    }
+}
+
+fn dependency_contract_session_snapshot(
+    session_id: &str,
+    consumer_pid: i32,
+    graph: &RunningGraph,
+) -> crate::runtime::process::DependencyContractSessionSnapshot {
+    let providers = graph
+        .deps()
+        .iter()
+        .map(|dep| {
+            let runtime_export_keys = dep.runtime_exports.keys().cloned().collect();
+            crate::runtime::process::DependencyContractProcessInfo {
+                alias: dep.alias.clone(),
+                pid: dep.child.id() as i32,
+                state_dir: dep.state_dir.clone(),
+                resolved: dep.resolved.clone(),
+                allocated_port: dep.allocated_port,
+                log_path: dep.log_path.clone(),
+                runtime_export_keys,
+            }
+        })
+        .collect();
+    crate::runtime::process::DependencyContractSessionSnapshot {
+        session_id: session_id.to_string(),
+        consumer_pid,
+        providers,
+    }
+}
+
+fn persist_background_dependency_contracts(
+    session_id: &str,
+    consumer_pid: i32,
+    dep_contracts: Option<&DependencyContractGuard>,
+) -> Result<()> {
+    let Some(graph) = dep_contracts.and_then(DependencyContractGuard::graph) else {
+        return Ok(());
+    };
+    if graph.deps().is_empty() {
+        return Ok(());
+    }
+    let snapshot = dependency_contract_session_snapshot(session_id, consumer_pid, graph);
+    let process_manager = crate::runtime::process::ProcessManager::new()?;
+    process_manager.write_dependency_session_snapshot(session_id, &snapshot)?;
+    Ok(())
+}
+
+fn detach_dependency_contracts_for_background(dep_contracts: &mut Option<DependencyContractGuard>) {
+    if let Some(guard) = dep_contracts.take() {
+        guard.detach();
+    }
+}
+
 async fn start_dependency_contracts_for_run(
     prepared: &PreparedRunContext,
     plan: &capsule_core::router::ManifestData,
@@ -709,12 +839,7 @@ async fn start_dependency_contracts_for_run(
         // alternating between `--target web` and the default backend.
         selected_target: Some(plan.selected_target_label().to_string()),
     })
-    .with_context(|| {
-        format!(
-            "failed to start dependency contracts for target '{}'",
-            plan.selected_target_label()
-        )
-    })?;
+    .map_err(|err| dependency_contract_start_error(plan.selected_target_label(), err))?;
 
     Ok(DependencyContractGuard::new(graph, dependency_lock))
 }
@@ -989,7 +1114,7 @@ fn run_validation_mode(preview_mode: bool) -> capsule_core::types::ValidationMod
 pub(crate) async fn run_prepare_phase<P>(
     request: &ConsumerRunRequest,
     progress: &P,
-    attempt: Option<&mut PipelineAttemptContext>,
+    mut attempt: Option<&mut PipelineAttemptContext>,
 ) -> Result<RunPipelineState>
 where
     P: ConsumerRunProgress,
@@ -1191,16 +1316,7 @@ where
         );
     }
     let mut dep_contracts = None;
-    // Held outside the match arm so a lock context produced inside the
-    // `None =>` branch survives long enough to be borrowed by
-    // `compatibility_legacy_lock`. Declared without an initial value so
-    // clippy does not flag a dead `None` initialization that the auto-lock
-    // path always overwrites.
-    let auto_generated_lock: CompatibilityLegacyLockContext;
     if has_dependency_contracts {
-        if request.background {
-            anyhow::bail!("dependency-contract services do not support --background yet");
-        }
         // Auto-lock: if the consumer was fetched without a pre-existing
         // capsule.lock.json (typical for `ato run github.com/...`), the
         // dep-contract path needs derived lock entries. Generate them on
@@ -1212,7 +1328,7 @@ where
         // follow-on; this auto-lock is the minimum needed for github
         // capsule provider sources.
         let compatibility_legacy_lock = match prepared.compatibility_legacy_lock.as_ref() {
-            Some(ctx) => ctx,
+            Some(ctx) => ctx.clone(),
             None => {
                 let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
                     prepared.bridge_manifest.as_toml(),
@@ -1240,26 +1356,24 @@ where
                             lock_path.display()
                         )
                     })?;
-                auto_generated_lock = CompatibilityLegacyLockContext {
+                CompatibilityLegacyLockContext {
                     manifest_path: compat_input.workspace_root().join("capsule.toml"),
                     path: lock_path,
                     lock,
-                };
-                &auto_generated_lock
+                }
             }
         };
+        prepared.compatibility_legacy_lock = Some(compatibility_legacy_lock.clone());
         verify_lockfile_external_dependencies(
             &decision.plan.manifest,
             &compatibility_legacy_lock.lock,
         )?;
-        dep_contracts = Some(
-            start_dependency_contracts_for_run(
-                &prepared,
-                &decision.plan,
-                &compatibility_legacy_lock.lock,
-            )
-            .await?,
-        );
+        let guard = start_dependency_contracts_for_run(
+            &prepared,
+            &decision.plan,
+            &compatibility_legacy_lock.lock,
+        )
+        .await?;
         // Surface a secret-free summary of started deps before the
         // consumer launches. Helps `ato run` users (especially via
         // ato-desktop) see which provider was fetched, where its
@@ -1268,11 +1382,13 @@ where
         // — only export key names are listed — because values may
         // contain credentials that the redaction filter is also
         // scrubbing from logs.
-        if let Some(graph) = dep_contracts.as_ref().and_then(|guard| guard.graph()) {
+        if let Some(graph) = guard.graph() {
+            register_dependency_contract_cleanup(attempt.as_deref_mut(), graph);
             for line in graph.summary_lines() {
                 eprintln!("{line}");
             }
         }
+        dep_contracts = Some(guard);
     }
 
     let injected_data =
@@ -1370,7 +1486,7 @@ where
         .with_injected_mounts(provisioning_outcome.additional_mounts);
 
     if let Some(shadow_workspace) = provisioning_outcome.shadow_workspace.as_ref() {
-        if let Some(attempt) = attempt {
+        if let Some(attempt) = attempt.as_deref_mut() {
             let mut scope = attempt.cleanup_scope();
             scope.register_remove_dir(shadow_workspace.root_dir.clone());
         }
@@ -2401,6 +2517,11 @@ where
         && !matches!(guard_result.executor_kind, ExecutorKind::Native)
     {
         let mut process = crate::executors::shell::execute(&decision.plan, mode, &launch_ctx)?;
+        register_capsule_process_cleanup(
+            &mut attempt,
+            &process,
+            decision.plan.selected_target_label(),
+        );
         if request.background {
             let pid = process.child.id();
             let id = format!("capsule-{}", pid);
@@ -2433,6 +2554,8 @@ where
 
             let process_manager = crate::runtime::process::ProcessManager::new()?;
             process_manager.write_pid(&info)?;
+            persist_background_dependency_contracts(&id, pid as i32, dep_contracts.as_ref())?;
+            detach_dependency_contracts_for_background(&mut dep_contracts);
             request
                 .reporter
                 .notify(format!("🚀 Capsule started in background (ID: {})", id))
@@ -2589,8 +2712,15 @@ where
                     &launch_ctx,
                 )?
             };
+            register_capsule_process_cleanup(
+                &mut attempt,
+                &process,
+                decision.plan.selected_target_label(),
+            );
 
             if request.background {
+                let process_id = format!("capsule-{}", process.child.id());
+                let consumer_pid = process.child.id() as i32;
                 let runtime = hooks.process_runtime_label(
                     &decision.plan,
                     request.dangerously_skip_permissions || desktop_native_open_only,
@@ -2610,6 +2740,12 @@ where
                         &request.reporter,
                     )
                     .await?;
+                persist_background_dependency_contracts(
+                    &process_id,
+                    consumer_pid,
+                    dep_contracts.as_ref(),
+                )?;
+                detach_dependency_contracts_for_background(&mut dep_contracts);
                 sidecar_cleanup.stop_now();
                 progress.ok(
                     HourglassPhase::Execute,
@@ -2657,8 +2793,15 @@ where
                 mode,
                 &launch_ctx,
             )?;
+            register_capsule_process_cleanup(
+                &mut attempt,
+                &process,
+                decision.plan.selected_target_label(),
+            );
 
             if request.background {
+                let process_id = format!("capsule-{}", process.child.id());
+                let consumer_pid = process.child.id() as i32;
                 let runtime =
                     hooks.process_runtime_label(&decision.plan, false, compatibility_host_mode);
                 let ready_without_events = process.event_rx.is_none();
@@ -2675,6 +2818,12 @@ where
                         &request.reporter,
                     )
                     .await?;
+                persist_background_dependency_contracts(
+                    &process_id,
+                    consumer_pid,
+                    dep_contracts.as_ref(),
+                )?;
+                detach_dependency_contracts_for_background(&mut dep_contracts);
                 sidecar_cleanup.stop_now();
                 progress.ok(
                     HourglassPhase::Execute,
@@ -2763,6 +2912,8 @@ where
 
                 let process_manager = crate::runtime::process::ProcessManager::new()?;
                 process_manager.write_pid(&info)?;
+                persist_background_dependency_contracts(&id, pid as i32, dep_contracts.as_ref())?;
+                detach_dependency_contracts_for_background(&mut dep_contracts);
 
                 request
                     .reporter
@@ -2808,6 +2959,13 @@ where
                     &launch_ctx,
                     request.dangerously_skip_permissions,
                 )?;
+                register_capsule_process_cleanup(
+                    &mut attempt,
+                    &process,
+                    decision.plan.selected_target_label(),
+                );
+                let process_id = format!("capsule-{}", process.child.id());
+                let consumer_pid = process.child.id() as i32;
                 let runtime =
                     hooks.process_runtime_label(&decision.plan, false, compatibility_host_mode);
                 let ready_without_events = process.event_rx.is_none();
@@ -2824,6 +2982,12 @@ where
                         &request.reporter,
                     )
                     .await?;
+                persist_background_dependency_contracts(
+                    &process_id,
+                    consumer_pid,
+                    dep_contracts.as_ref(),
+                )?;
+                detach_dependency_contracts_for_background(&mut dep_contracts);
                 sidecar_cleanup.stop_now();
                 progress.ok(
                     HourglassPhase::Execute,
@@ -3304,6 +3468,22 @@ run = "/usr/bin/true"
             super::locked_dependency_resolved_ref(&locked),
             "capsule://ato/postgres@16#blake3:abc"
         );
+    }
+
+    #[test]
+    fn dependency_contract_start_error_surfaces_alive_other_session_owner() {
+        let error = super::dependency_contract_start_error(
+            "app",
+            crate::application::dependency_runtime::orchestrator::OrchestratorError::OrphanAliveOtherSession {
+                alias: "db".to_string(),
+                session_pid: 4242,
+                resolved: "capsule://github.com/Koh0920/ato-postgres@65b3ee5".to_string(),
+                state_dir: PathBuf::from("/Users/example/.ato/state/wasedap2p/db"),
+            },
+        );
+        let message = error.to_string();
+        assert!(message.contains("dep 'db' state.dir is owned by ato session pid 4242"));
+        assert!(message.contains("capsule://github.com/Koh0920/ato-postgres@65b3ee5"));
     }
 
     #[test]
