@@ -326,24 +326,11 @@ pub fn preflight_required_environment_variables(
     let mut missing_keys: Vec<String> = Vec::new();
     let mut missing_schema: Vec<capsule_core::types::ConfigField> = Vec::new();
     for field in resolved {
-        if launch_env
-            .get(&field.name)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if base_env
-            .get(&field.name)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if std::env::var(&field.name)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        {
+        if crate::application::pipeline::phases::run::is_env_satisfied(
+            &field.name,
+            &[&launch_env, &base_env],
+            Some(&crate::application::dependency_credentials::ProcessHostEnv),
+        ) {
             continue;
         }
         missing_keys.push(field.name.clone());

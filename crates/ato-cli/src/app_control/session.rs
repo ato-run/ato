@@ -26,9 +26,8 @@ use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
 use crate::application::pipeline::phases::run::{
-    persist_background_dependency_contracts, preflight_orchestration_session_environment,
-    setup_dependency_contracts_launch_context, DependencyContractGuard, DerivedBridgeManifest,
-    PreparedRunContext,
+    persist_background_dependency_contracts, setup_dependency_contracts_launch_context,
+    DependencyContractGuard, DerivedBridgeManifest, PreparedRunContext,
 };
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
@@ -561,7 +560,6 @@ pub(super) fn start_orchestration_session_supervisor(
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
     plan: &capsule_core::router::ManifestData,
-    manifest_value: &toml::Value,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
     use crate::application::pipeline::executor::PhaseStageTimer;
@@ -570,14 +568,6 @@ pub(super) fn start_orchestration_session_supervisor(
     let orchestration = plan
         .resolve_services()
         .context("failed to resolve [services] orchestration plan")?;
-    preflight_orchestration_session_environment(
-        plan,
-        manifest_value,
-        &orchestration,
-        &crate::executors::launch_context::RuntimeLaunchContext::empty(),
-        &crate::application::dependency_credentials::ProcessHostEnv,
-        "launching the session",
-    )?;
 
     let leaf = pick_orchestration_leaf_service(&orchestration)?;
     let leaf_target_label = leaf.runtime.runtime().target.clone();
