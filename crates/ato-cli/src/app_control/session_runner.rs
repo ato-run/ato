@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use capsule_core::launch_spec::LaunchSpec;
+use capsule_core::launch_spec::{derive_launch_spec, LaunchSpec};
 use capsule_core::router::ManifestData;
 
 use crate::application::build_materialization as bm;
@@ -39,9 +39,10 @@ use crate::executors::target_runner::preflight_required_environment_variables;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, HandleResolution};
+use super::resolve::{build_resolution, resolve_local_plan, HandleResolution};
 use super::session::{
-    redirect_stdout_to_stderr, resolve_session_launch_plan, restore_stdout, start_guest_session,
+    orchestration_leaf_target_label, redirect_stdout_to_stderr, resolve_session_launch_plan,
+    restore_stdout, start_guest_session, start_orchestration_session_supervisor,
     start_runtime_session, SessionInfo,
 };
 
@@ -102,6 +103,30 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let resolution = build_resolution(self.handle, self.target_label, None)?;
         let (manifest_path, mut plan, mut launch, mut notes) =
             resolve_session_launch_plan(self.handle, self.target_label)?;
+
+        if self.target_label.is_none() {
+            if let Some(leaf_target) = orchestration_leaf_target_label(&plan)? {
+                if leaf_target != plan.selected_target_label() {
+                    let (rerouted_plan, _guest, rerouted_notes) =
+                        resolve_local_plan(&manifest_path, Some(&leaf_target))?;
+                    let rerouted_launch =
+                        derive_launch_spec(&rerouted_plan).with_context(|| {
+                            format!(
+                            "failed to derive launch spec for orchestration leaf target '{}' in {}",
+                            leaf_target,
+                            manifest_path.display()
+                        )
+                        })?;
+                    notes.extend(rerouted_notes);
+                    notes.push(format!(
+                        "Orchestration mode: selected leaf target '{}' for Desktop session.",
+                        leaf_target
+                    ));
+                    plan = rerouted_plan;
+                    launch = rerouted_launch;
+                }
+            }
+        }
 
         // Phase Y option 2: re-anchor the registry-installed capsule onto a
         // session-local hardlink projection so the launch cannot mutate the
@@ -374,6 +399,17 @@ impl<'a> SessionStartPhaseRunner<'a> {
         raw_manifest: &str,
         launch: &LaunchSpec,
     ) -> Result<SessionInfo> {
+        if self.target_label.is_none() && plan.is_orchestration_mode() {
+            return start_orchestration_session_supervisor(
+                self.handle,
+                resolution,
+                manifest_path,
+                plan,
+                raw_manifest,
+                self.notes.clone(),
+            );
+        }
+
         let manifest_value: toml::Value = toml::from_str(raw_manifest)
             .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
         let guest = parse_guest_contract(
