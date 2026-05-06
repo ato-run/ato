@@ -166,8 +166,7 @@ impl IpcBroker {
             return home.join(path);
         }
 
-        let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
-        let store_dir = home.join(".ato").join("store");
+        let store_dir = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
 
         if from.starts_with('@') {
             // @scope/name:version → scope/name

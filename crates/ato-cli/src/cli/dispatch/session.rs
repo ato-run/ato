@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use capsule_core::common::paths::{ato_path_or_workspace_tmp, nacelle_home_dir};
 
 use crate::cli::session::IdentitySessionCommands as SessionCommands;
 
@@ -20,10 +21,7 @@ fn session_key_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("ATO_SESSION_KEY_FILE") {
         return std::path::PathBuf::from(p);
     }
-    let home = dirs::home_dir().expect("failed to resolve home directory");
-    home.join(".ato")
-        .join("run")
-        .join(format!("session-{}.key", std::process::id()))
+    ato_path_or_workspace_tmp(format!("run/session-{}.key", std::process::id()))
 }
 
 /// Parse a human duration string ("8h", "30m", "1h30m") into seconds.
@@ -71,8 +69,8 @@ fn cmd_start(ttl: &str) -> Result<()> {
     }
 
     // Load the identity (will prompt for passphrase if needed).
-    let home = dirs::home_dir().context("failed to resolve home directory")?;
-    let age = crate::application::credential::AgeFileBackend::new(home.clone());
+    let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;
+    let age = crate::application::credential::AgeFileBackend::new(ato_home);
 
     if !age.identity_exists() {
         bail!(
@@ -167,9 +165,7 @@ fn cmd_status() -> Result<()> {
 
     if !active_path.exists() {
         // Scan for any session files for this user.
-        let run_dir = dirs::home_dir()
-            .map(|h| h.join(".ato/run"))
-            .unwrap_or_default();
+        let run_dir = ato_path_or_workspace_tmp("run");
         let sessions = find_active_sessions(&run_dir);
         if sessions.is_empty() {
             eprintln!("No active sessions.");
@@ -220,11 +216,7 @@ fn cmd_status() -> Result<()> {
 // ── Cleanup helpers ───────────────────────────────────────────────────────────
 
 fn cleanup_stale_sessions() {
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return,
-    };
-    let run_dir = home.join(".ato/run");
+    let run_dir = ato_path_or_workspace_tmp("run");
     if !run_dir.exists() {
         return;
     }

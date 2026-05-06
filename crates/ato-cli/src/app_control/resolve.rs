@@ -320,10 +320,7 @@ fn resolve_local_plan_from_store(
     let slug = registry_manifest.get("name")?.as_str()?;
     let version = registry_manifest.get("version").and_then(|v| v.as_str());
 
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ato")
-        .join("store");
+    let store_root = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
 
     let capsule_path = crate::install::support::resolve_installed_capsule_archive_in_store(
         &store_root.join(publisher),

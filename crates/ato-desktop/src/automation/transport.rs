@@ -4,6 +4,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use serde_json::Value;
 use tracing::{debug, error};
 
@@ -26,8 +27,7 @@ pub fn current_instance_file() -> PathBuf {
 }
 
 fn dirs_runtime() -> PathBuf {
-    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join(".ato").join("run")
+    ato_path_or_workspace_tmp("run")
 }
 
 /// Start the Unix socket listener in a background thread.
@@ -85,6 +85,55 @@ pub fn start_socket_listener(pending: PendingQueue, notify: NotifyFn) -> std::io
         })?;
 
     Ok(path_clone)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_instance_file;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn current_instance_file_respects_ato_home_override() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
+        assert_eq!(
+            current_instance_file(),
+            PathBuf::from(&ato_home).join("run/ato-desktop-current.json")
+        );
+    }
 }
 
 #[cfg(not(unix))]
