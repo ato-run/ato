@@ -5898,6 +5898,11 @@ print('ok')
     #[test]
     fn compatibility_run_materialization_fails_closed_when_process_unresolved() {
         let dir = tempdir().expect("tempdir");
+        // To exercise "unresolved", default_target must point at a target
+        // none of the services reference (otherwise the importer's
+        // default-target match resolves contract.process). The aux target
+        // below is the anchor; main/worker are referenced by services but
+        // neither matches default_target = "aux".
         fs::write(
             dir.path().join("capsule.toml"),
             r#"schema_version = "0.3"
@@ -5905,7 +5910,13 @@ name = "demo"
 version = "0.1.0"
 type = "app"
 
-default_target = "main"
+default_target = "aux"
+
+[targets.aux]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+run_command = "aux.ts"
 
 [targets.main]
 runtime = "source"
@@ -5918,6 +5929,7 @@ runtime = "source"
 driver = "deno"
 runtime_version = "2.1.3"
 run_command = "worker.ts"
+
 [services.main]
 target = "main"
 

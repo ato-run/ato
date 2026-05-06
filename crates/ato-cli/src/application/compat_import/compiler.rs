@@ -382,6 +382,12 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
     #[test]
     fn multi_service_leaves_contract_process_unresolved() {
         let dir = tempdir().expect("tempdir");
+        // Multiple services AND default_target does NOT match any
+        // service.target → contract.process can't be inferred and stays
+        // unresolved. The aux target below is what default_target points
+        // at; neither service references it. (When default_target *does*
+        // match exactly one service, the importer resolves it; see
+        // multi_service_with_default_target_match_resolves_process.)
         write_manifest(
             dir.path(),
             r#"schema_version = "0.3"
@@ -389,7 +395,13 @@ name = "demo"
 version = "0.1.0"
 type = "app"
 
-default_target = "main"
+default_target = "aux"
+
+[targets.aux]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+run_command = "aux.ts"
 
 [targets.main]
 runtime = "source"
@@ -402,6 +414,7 @@ runtime = "source"
 driver = "deno"
 runtime_version = "2.1.3"
 run_command = "worker.ts"
+
 [services.main]
 target = "main"
 
@@ -425,6 +438,55 @@ target = "worker"
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.lock_path == "contract.process"));
+    }
+
+    #[test]
+    fn multi_service_with_default_target_match_resolves_process() {
+        // Mirror behaviour of the [targets.*]-only branch: when
+        // default_target points at exactly one service.target, treat
+        // that service as the canonical primary process. Without this,
+        // multi-service manifests like WasedaP2P (services.main +
+        // services.web for orchestration mode + [targets.app] +
+        // [targets.web] for `--target` dispatch) error out with
+        // "multiple imported workloads exist; contract.process is
+        // intentionally unresolved" even though default_target = "app"
+        // unambiguously names the anchor.
+        let dir = tempdir().expect("tempdir");
+        write_manifest(
+            dir.path(),
+            r#"schema_version = "0.3"
+name = "demo"
+version = "0.1.0"
+type = "app"
+
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+run_command = "main.ts"
+
+[targets.worker]
+runtime = "source"
+driver = "deno"
+runtime_version = "2.1.3"
+run_command = "worker.ts"
+
+[services.main]
+target = "main"
+
+[services.worker]
+target = "worker"
+"#,
+        );
+
+        let result = compile_from_dir(dir.path());
+        assert!(
+            result.draft_lock.contract.entries.contains_key("process"),
+            "default_target = main matches services.main.target — process MUST resolve"
+        );
+        assert_eq!(result.unresolved_summary.contract, 0);
     }
 
     #[test]

@@ -230,8 +230,31 @@ pub(crate) async fn run_v03_lifecycle_steps(
         return Ok(());
     }
 
+    // In orchestration mode, every service's target needs its own
+    // provision (`uv venv`, `npm ci`, ...). The default closure from
+    // `selected_target_package_order` only walks `selected_target` plus
+    // its workspace `package_dependencies`, which leaves sibling
+    // services (e.g. a Vite frontend declared by `[services.web] target =
+    // "web"`) un-provisioned and their dev binaries (`vite` from
+    // node_modules/.bin) unreachable when the orchestrator launches
+    // them. Build a target list that covers both: the selected target's
+    // closure plus every distinct `[services.*].target`.
+    let mut targets_to_provision: Vec<String> = plan.selected_target_package_order()?;
+    if plan.is_orchestration_mode() {
+        let mut seen: std::collections::HashSet<String> =
+            targets_to_provision.iter().cloned().collect();
+        for service in plan.services().values() {
+            if let Some(target) = service.target.as_ref() {
+                let label = target.trim();
+                if !label.is_empty() && seen.insert(label.to_string()) {
+                    targets_to_provision.push(label.to_string());
+                }
+            }
+        }
+    }
+
     let mut provisioned_roots = std::collections::HashSet::new();
-    for target_label in plan.selected_target_package_order()? {
+    for target_label in targets_to_provision {
         let target_plan = plan.with_selected_target(target_label.clone());
         let working_dir = dependency_root(&target_plan);
 

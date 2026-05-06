@@ -225,6 +225,35 @@ fn import_workloads(
                 Some("services.<single>.entrypoint"),
                 Some("single imported workload selected as primary process"),
             ));
+        } else if let Some(default_workload) = workloads.iter().find(|workload| {
+            workload
+                .get("target")
+                .and_then(Value::as_str)
+                .map(|label| label == manifest.model.default_target)
+                .unwrap_or(false)
+        }) {
+            // Mirror the multi-target [targets.*] resolution at line 268: pick
+            // the workload whose service.target matches default_target as the
+            // canonical primary process. Without this, manifests that combine
+            // [services.main] (orchestration mode anchor) with [targets.app] +
+            // [targets.web] for `--target` dispatch error out as
+            // "multiple imported workloads exist; contract.process is
+            // intentionally unresolved" even though default_target points at
+            // an unambiguous workload.
+            draft_lock.contract.entries.insert(
+                "process".to_string(),
+                default_workload
+                    .get("process")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            );
+            provenance.push(ProvenanceRecord::new(
+                CompilerOwnedField::new("contract", "process"),
+                ProvenanceKind::CompilerInferred,
+                Some(manifest.path.as_path()),
+                Some("services.<default_target_match>.entrypoint"),
+                Some("default target selected as primary process from imported services"),
+            ));
         } else {
             draft_lock.contract.unresolved.push(UnresolvedValue {
                 field: Some("contract.process".to_string()),

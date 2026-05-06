@@ -571,10 +571,17 @@ fn build_service_env(
     running: &HashMap<String, RunningService>,
     launch_ctx: &RuntimeLaunchContext,
 ) -> Result<HashMap<String, String>> {
-    let mut env = launch_ctx.merged_env();
-    env.extend(runtime_overrides::merged_env(
-        service.runtime.runtime().env.clone(),
-    ));
+    // Manifest env first, then launch_ctx env on top: launch_ctx contains
+    // dependency-contract template resolutions
+    // (`{{deps.<alias>.runtime_exports.X}}` → real DATABASE_URL etc.) that
+    // run.rs computes via inject_dependency_contract_env. The earlier order
+    // (launch_ctx first, manifest second) re-overrode the resolved values
+    // with their literal-template manifest source, which made consumers in
+    // orchestration mode boot with `DATABASE_URL = "{{deps.db.runtime...}}"`
+    // and crash at startup. Inverting puts launch_ctx — the canonical
+    // resolved view — last so it wins.
+    let mut env = runtime_overrides::merged_env(service.runtime.runtime().env.clone());
+    env.extend(launch_ctx.merged_env());
 
     if let Some(port) = service.runtime.runtime().port {
         let port = if service.name == "main" {
