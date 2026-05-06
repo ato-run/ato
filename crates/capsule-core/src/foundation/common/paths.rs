@@ -179,6 +179,10 @@ pub struct AtoRunLayout {
     pub cache: PathBuf,
     pub tmp: PathBuf,
     pub log: PathBuf,
+    /// Per-run tool-capsule projection root (#71). Each `[tool_dependencies.<alias>]`
+    /// gets a subdirectory `<tools>/<alias>` projected from the immutable store
+    /// blob and exposed inside the provider sandbox.
+    pub tools: PathBuf,
 }
 
 impl AtoRunLayout {
@@ -193,8 +197,14 @@ impl AtoRunLayout {
             cache: root.join("cache"),
             tmp: root.join("tmp"),
             log: root.join("log"),
+            tools: root.join("tools"),
             root,
         }
+    }
+
+    /// Returns the projection directory for a given tool-capsule alias.
+    pub fn tool_dir(&self, alias: &str) -> PathBuf {
+        self.tools.join(alias)
     }
 }
 
@@ -400,6 +410,16 @@ mod tests {
             layout.root.join("workspace/source")
         );
         assert_eq!(layout.deps, layout.root.join("deps"));
+    }
+
+    #[test]
+    fn run_layout_exposes_tools_subtree() {
+        let layout = super::AtoRunLayout::for_root(PathBuf::from("/runs/run-1"));
+        assert_eq!(layout.tools, PathBuf::from("/runs/run-1/tools"));
+        assert_eq!(
+            layout.tool_dir("postgres"),
+            PathBuf::from("/runs/run-1/tools/postgres")
+        );
     }
 
     #[test]

@@ -2428,3 +2428,269 @@ default = "gpt-4o-mini"
     }
     assert_eq!(schema[1].default.as_deref(), Some("gpt-4o-mini"));
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Tool-capsule schema (#71)
+// ──────────────────────────────────────────────────────────────────────────
+
+const TOOL_CAPSULE_TOML: &str = r#"
+schema_version = "0.3"
+name = "postgresql-binaries"
+version = "16.4.0"
+type = "tool"
+
+[platforms.darwin-arm64]
+artifact = "postgresql-16.4-darwin-arm64.tar.zst"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+[platforms.linux-x86_64]
+artifact = "postgresql-16.4-linux-x86_64.tar.zst"
+sha256 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+[exports.binaries]
+initdb = "bin/initdb"
+postgres = "bin/postgres"
+pg_isready = "bin/pg_isready"
+
+[exports.paths]
+root = "."
+bin_dir = "bin"
+lib_dir = "lib"
+share_dir = "share"
+"#;
+
+#[test]
+fn test_parse_tool_capsule_manifest() {
+    let manifest = CapsuleManifest::from_toml(TOOL_CAPSULE_TOML).expect("parse tool capsule");
+
+    assert_eq!(manifest.capsule_type, CapsuleType::Tool);
+    assert_eq!(manifest.platforms.len(), 2);
+    let darwin = manifest
+        .platforms
+        .get("darwin-arm64")
+        .expect("darwin-arm64 entry");
+    assert_eq!(darwin.artifact, "postgresql-16.4-darwin-arm64.tar.zst");
+    assert_eq!(darwin.sha256.len(), 64);
+
+    let exports = manifest.exports.as_ref().expect("exports present");
+    assert_eq!(
+        exports.binaries.get("initdb").map(String::as_str),
+        Some("bin/initdb")
+    );
+    assert_eq!(
+        exports.binaries.get("pg_isready").map(String::as_str),
+        Some("bin/pg_isready")
+    );
+    assert_eq!(
+        exports.paths.get("share_dir").map(String::as_str),
+        Some("share")
+    );
+}
+
+#[test]
+fn test_validate_tool_capsule_ok() {
+    let manifest = CapsuleManifest::from_toml(TOOL_CAPSULE_TOML).unwrap();
+    manifest.validate().expect("tool capsule validates clean");
+}
+
+#[test]
+fn test_round_trip_tool_capsule() {
+    let manifest = CapsuleManifest::from_toml(TOOL_CAPSULE_TOML).unwrap();
+    let rendered = manifest.to_toml().expect("serialize tool capsule");
+    let reparsed = CapsuleManifest::from_toml(&rendered).expect("reparse tool capsule");
+
+    assert_eq!(reparsed.capsule_type, CapsuleType::Tool);
+    assert_eq!(reparsed.platforms.len(), manifest.platforms.len());
+    assert_eq!(
+        reparsed.platforms["darwin-arm64"].sha256,
+        manifest.platforms["darwin-arm64"].sha256
+    );
+    let original_exports = manifest.exports.as_ref().unwrap();
+    let reparsed_exports = reparsed.exports.as_ref().unwrap();
+    assert_eq!(reparsed_exports.binaries, original_exports.binaries);
+    assert_eq!(reparsed_exports.paths, original_exports.paths);
+}
+
+#[test]
+fn test_validate_tool_capsule_requires_platforms() {
+    let toml = r#"
+schema_version = "0.3"
+name = "empty-tool"
+version = "0.1.0"
+type = "tool"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("tool without platforms must fail");
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e, ValidationError::ToolMissingPlatforms)));
+}
+
+#[test]
+fn test_validate_tool_capsule_rejects_invalid_platform_key() {
+    let toml = TOOL_CAPSULE_TOML.replace("darwin-arm64", "macos-aarch64");
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("bad platform key must fail");
+    assert!(errors.iter().any(|e| matches!(
+        e,
+        ValidationError::ToolInvalidPlatformKey(key) if key == "macos-aarch64"
+    )));
+}
+
+#[test]
+fn test_validate_tool_capsule_rejects_invalid_sha256() {
+    let toml = TOOL_CAPSULE_TOML.replace(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "not-a-real-hash",
+    );
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest.validate().expect_err("bad sha256 must fail");
+    assert!(errors.iter().any(|e| matches!(
+        e,
+        ValidationError::ToolInvalidArtifactSha256(p) if p == "darwin-arm64"
+    )));
+}
+
+#[test]
+fn test_validate_tool_capsule_rejects_absolute_export_path() {
+    let toml = TOOL_CAPSULE_TOML.replace("\"bin/initdb\"", "\"/usr/bin/initdb\"");
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("absolute export path must fail");
+    assert!(errors.iter().any(|e| matches!(
+        e,
+        ValidationError::ToolExportPathInvalid { kind, alias, .. }
+            if *kind == "binaries" && alias == "initdb"
+    )));
+}
+
+#[test]
+fn test_validate_tool_capsule_rejects_parent_dir_export_path() {
+    let toml = TOOL_CAPSULE_TOML.replace("\"bin/initdb\"", "\"../etc/passwd\"");
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("parent-dir export path must fail");
+    assert!(errors.iter().any(|e| matches!(
+        e,
+        ValidationError::ToolExportPathInvalid { alias, .. } if alias == "initdb"
+    )));
+}
+
+#[test]
+fn test_validate_tool_capsule_rejects_services() {
+    let toml = format!(
+        "{TOOL_CAPSULE_TOML}\n[services.web]\nruntime = \"source\"\nrun = \"node server.js\"\nport = 3000\n"
+    );
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("tool with services must fail");
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e, ValidationError::ToolMustNotDeclareServices)));
+}
+
+#[test]
+fn test_validate_non_tool_capsule_rejects_platforms() {
+    let toml = r#"
+schema_version = "0.3"
+name = "stray-platforms"
+version = "0.1.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11"
+run = "main.py"
+
+[platforms.darwin-arm64]
+artifact = "x.tar.zst"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("non-tool with platforms must fail");
+    assert!(errors
+        .iter()
+        .any(|e| matches!(e, ValidationError::PlatformsRequiresToolType)));
+}
+
+#[test]
+fn test_parse_provider_with_tool_dependencies() {
+    let toml = r#"
+schema_version = "0.3"
+name = "ato-postgres"
+version = "0.1.0"
+type = "app"
+default_target = "server"
+
+[targets.server]
+runtime = "source"
+driver = "native"
+run = "bootstrap.sh"
+
+[tool_dependencies.postgres]
+ref = "capsule://ato.run/tools/postgresql-binaries@16.4.0"
+version = ">=16,<17"
+
+  [tool_dependencies.postgres.bind_env]
+  root = "ATO_TOOL_POSTGRES_ROOT"
+  initdb = "ATO_TOOL_INITDB"
+  pg_isready = "ATO_TOOL_PG_ISREADY"
+"#;
+    let manifest =
+        CapsuleManifest::from_toml(toml).expect("parse provider with tool dependencies");
+    let dep = manifest
+        .tool_dependencies
+        .get("postgres")
+        .expect("postgres tool dependency");
+    assert_eq!(dep.version.as_deref(), Some(">=16,<17"));
+    assert_eq!(
+        dep.bind_env.get("initdb").map(String::as_str),
+        Some("ATO_TOOL_INITDB")
+    );
+    assert_eq!(
+        dep.bind_env.get("root").map(String::as_str),
+        Some("ATO_TOOL_POSTGRES_ROOT")
+    );
+}
+
+#[test]
+fn test_validate_tool_dependency_rejects_invalid_env_name() {
+    let toml = r#"
+schema_version = "0.3"
+name = "bad-bind"
+version = "0.1.0"
+type = "app"
+default_target = "server"
+
+[targets.server]
+runtime = "source"
+driver = "native"
+run = "bootstrap.sh"
+
+[tool_dependencies.postgres]
+ref = "capsule://ato.run/tools/postgresql-binaries@16.4.0"
+
+  [tool_dependencies.postgres.bind_env]
+  initdb = "1BAD_NAME"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("invalid env-var name must fail");
+    assert!(errors.iter().any(|e| matches!(
+        e,
+        ValidationError::ToolDependencyInvalidEnvVar { alias, env_name, .. }
+            if alias == "postgres" && env_name == "1BAD_NAME"
+    )));
+}

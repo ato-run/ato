@@ -22,9 +22,10 @@ use super::{
     lockfile_runtime_platforms, lockfile_runtime_target_labels,
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
     required_runtime_version, resolve_external_capsule_dependencies,
-    semantic_manifest_hash_from_text, verify_lockfile_external_dependencies,
-    verify_lockfile_manifest, CapsuleLock, LockMeta, LockedCapsuleDependency, RuntimeArtifact,
-    RuntimeEntry, RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
+    semantic_manifest_hash_from_text, tool_capsule_env_bindings,
+    verify_lockfile_external_dependencies, verify_lockfile_manifest, CapsuleLock, LockMeta,
+    LockedCapsuleDependency, LockedToolCapsule, LockedToolExports, RuntimeArtifact, RuntimeEntry,
+    RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
     ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, SUPPORTED_RUNTIME_PLATFORMS, UV_VERSION,
 };
 
@@ -62,6 +63,7 @@ fn serialize_lockfile_with_allowlist() {
         allowlist: Some(vec!["nodejs.org".to_string()]),
         capsule_dependencies: Vec::new(),
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: None,
         runtimes: None,
         targets: HashMap::new(),
@@ -93,6 +95,7 @@ type = "app"
         allowlist: None,
         capsule_dependencies: Vec::new(),
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: None,
         runtimes: None,
         targets: HashMap::new(),
@@ -143,6 +146,7 @@ external_dependencies = [
             artifact_url: Some("https://example.test/auth.capsule".to_string()),
         }],
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: None,
         runtimes: None,
         targets: HashMap::new(),
@@ -240,6 +244,7 @@ contract = "service@1"
             artifact_url: Some("https://example.test/postgres.capsule".to_string()),
         }],
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: None,
         runtimes: None,
         targets: HashMap::new(),
@@ -507,6 +512,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
         allowlist: None,
         capsule_dependencies: Vec::new(),
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: Some(ToolSection {
             uv: Some(ToolTargets {
                 targets: host_only_tool_targets,
@@ -587,6 +593,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
         allowlist: None,
         capsule_dependencies: Vec::new(),
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: Some(ToolSection {
             uv: Some(ToolTargets {
                 targets: tool_targets,
@@ -684,6 +691,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
         allowlist: None,
         capsule_dependencies: Vec::new(),
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: Some(ToolSection {
             uv: Some(ToolTargets {
                 targets: tool_targets,
@@ -787,6 +795,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
         allowlist: None,
         capsule_dependencies: Vec::new(),
         injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
         tools: Some(ToolSection {
             uv: Some(ToolTargets {
                 targets: uv_targets,
@@ -1159,4 +1168,259 @@ async fn run_command_inner_rejects_relative_program() {
     assert!(err
         .to_string()
         .contains("Refusing to execute non-absolute command path"));
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Tool-capsule lockfile section (#71)
+// ──────────────────────────────────────────────────────────────────────────
+
+fn empty_lockfile_with_tool_capsules(
+    tool_capsules: BTreeMap<String, LockedToolCapsule>,
+) -> CapsuleLock {
+    CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-05-06T00:00:00Z".to_string(),
+            manifest_hash: "sha256:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: Vec::new(),
+        injected_data: HashMap::new(),
+        tool_capsules,
+        tools: None,
+        runtimes: None,
+        targets: HashMap::new(),
+    }
+}
+
+#[test]
+fn lockfile_serializes_tool_capsule_entries() {
+    let mut tool_capsules = BTreeMap::new();
+    tool_capsules.insert(
+        "postgres".to_string(),
+        LockedToolCapsule {
+            resolved: "capsule://ato.run/tools/postgresql-binaries@16.4.0".to_string(),
+            platform: "darwin-arm64".to_string(),
+            artifact_hash: "sha256:0123456789abcdef".to_string(),
+            artifact_url: Some(
+                "https://tools.ato.run/postgresql-16.4-darwin-arm64.tar.zst".to_string(),
+            ),
+            exports: LockedToolExports {
+                binaries: BTreeMap::from([
+                    ("initdb".to_string(), "bin/initdb".to_string()),
+                    ("pg_isready".to_string(), "bin/pg_isready".to_string()),
+                ]),
+                paths: BTreeMap::from([("share_dir".to_string(), "share".to_string())]),
+            },
+            bind_env: BTreeMap::from([
+                ("initdb".to_string(), "ATO_TOOL_INITDB".to_string()),
+                ("pg_isready".to_string(), "ATO_TOOL_PG_ISREADY".to_string()),
+            ]),
+        },
+    );
+
+    let lockfile = empty_lockfile_with_tool_capsules(tool_capsules);
+    let json = serde_json::to_string(&lockfile).unwrap();
+
+    assert!(json.contains("\"tool_capsules\""));
+    assert!(json.contains("postgresql-binaries@16.4.0"));
+    assert!(json.contains("\"darwin-arm64\""));
+    assert!(json.contains("\"ATO_TOOL_INITDB\""));
+
+    let parsed: CapsuleLock = serde_json::from_str(&json).unwrap();
+    let postgres = parsed.tool_capsules.get("postgres").expect("postgres entry");
+    assert_eq!(postgres.platform, "darwin-arm64");
+    assert_eq!(
+        postgres.exports.binaries.get("pg_isready").map(String::as_str),
+        Some("bin/pg_isready")
+    );
+    assert_eq!(
+        postgres.bind_env.get("initdb").map(String::as_str),
+        Some("ATO_TOOL_INITDB")
+    );
+}
+
+#[test]
+fn lockfile_omits_tool_capsules_when_empty() {
+    let lockfile = empty_lockfile_with_tool_capsules(BTreeMap::new());
+    let json = serde_json::to_string(&lockfile).unwrap();
+    assert!(
+        !json.contains("\"tool_capsules\""),
+        "empty tool_capsules must be omitted from serialized lockfile, got: {json}"
+    );
+}
+
+#[test]
+fn locked_tool_capsule_env_bindings_use_explicit_map() {
+    let entry = LockedToolCapsule {
+        resolved: "capsule://ato.run/tools/postgresql-binaries@16.4.0".to_string(),
+        platform: "darwin-arm64".to_string(),
+        artifact_hash: "sha256:abc".to_string(),
+        artifact_url: None,
+        exports: LockedToolExports {
+            binaries: BTreeMap::from([
+                ("initdb".to_string(), "bin/initdb".to_string()),
+                ("pg_isready".to_string(), "bin/pg_isready".to_string()),
+            ]),
+            paths: BTreeMap::from([("root".to_string(), ".".to_string())]),
+        },
+        bind_env: BTreeMap::from([
+            ("initdb".to_string(), "ATO_TOOL_INITDB".to_string()),
+            ("root".to_string(), "ATO_TOOL_POSTGRES_ROOT".to_string()),
+        ]),
+    };
+
+    let projected = std::path::Path::new("/runs/run-1/tools/postgres");
+    let bindings = entry.env_bindings("postgres", projected);
+    let map: std::collections::HashMap<_, _> = bindings.into_iter().collect();
+
+    // Explicit bind_env wins where present.
+    assert_eq!(
+        map.get("ATO_TOOL_INITDB").map(|p| p.as_path()),
+        Some(std::path::Path::new("/runs/run-1/tools/postgres/bin/initdb"))
+    );
+    assert_eq!(
+        map.get("ATO_TOOL_POSTGRES_ROOT").map(|p| p.as_path()),
+        Some(std::path::Path::new("/runs/run-1/tools/postgres/.").into())
+    );
+    // Falls back to ATO_TOOL_<ALIAS>_<EXPORT> for unbound exports.
+    assert_eq!(
+        map.get("ATO_TOOL_POSTGRES_PG_ISREADY").map(|p| p.as_path()),
+        Some(std::path::Path::new(
+            "/runs/run-1/tools/postgres/bin/pg_isready"
+        ))
+    );
+}
+
+#[test]
+fn locked_tool_capsule_env_bindings_normalize_hyphens() {
+    let entry = LockedToolCapsule {
+        resolved: "capsule://ato.run/tools/some-tool@1.0.0".to_string(),
+        platform: "linux-x86_64".to_string(),
+        artifact_hash: "sha256:def".to_string(),
+        artifact_url: None,
+        exports: LockedToolExports {
+            binaries: BTreeMap::from([("multi-word".to_string(), "bin/multi-word".to_string())]),
+            paths: BTreeMap::new(),
+        },
+        bind_env: BTreeMap::new(),
+    };
+
+    let projected = std::path::Path::new("/runs/run-1/tools/my-tool");
+    let bindings = entry.env_bindings("my-tool", projected);
+
+    assert_eq!(bindings.len(), 1);
+    let (name, path) = &bindings[0];
+    // Hyphens in alias and export normalize to underscores in env-var names.
+    assert_eq!(name, "ATO_TOOL_MY_TOOL_MULTI_WORD");
+    assert_eq!(path, std::path::Path::new("/runs/run-1/tools/my-tool/bin/multi-word"));
+}
+
+#[test]
+fn tool_capsule_env_bindings_merges_across_aliases() {
+    use crate::common::paths::AtoRunLayout;
+
+    let mut tool_capsules = BTreeMap::new();
+    tool_capsules.insert(
+        "postgres".to_string(),
+        LockedToolCapsule {
+            resolved: "capsule://ato.run/tools/postgresql-binaries@16.4.0".to_string(),
+            platform: "darwin-arm64".to_string(),
+            artifact_hash: "sha256:abc".to_string(),
+            artifact_url: None,
+            exports: LockedToolExports {
+                binaries: BTreeMap::from([("initdb".to_string(), "bin/initdb".to_string())]),
+                paths: BTreeMap::new(),
+            },
+            bind_env: BTreeMap::from([("initdb".to_string(), "ATO_TOOL_INITDB".to_string())]),
+        },
+    );
+    tool_capsules.insert(
+        "redis".to_string(),
+        LockedToolCapsule {
+            resolved: "capsule://ato.run/tools/redis-binaries@7.2.0".to_string(),
+            platform: "darwin-arm64".to_string(),
+            artifact_hash: "sha256:def".to_string(),
+            artifact_url: None,
+            exports: LockedToolExports {
+                binaries: BTreeMap::from([(
+                    "redis-cli".to_string(),
+                    "bin/redis-cli".to_string(),
+                )]),
+                paths: BTreeMap::new(),
+            },
+            bind_env: BTreeMap::new(),
+        },
+    );
+    let lock = empty_lockfile_with_tool_capsules(tool_capsules);
+    let layout = AtoRunLayout::for_root(std::path::PathBuf::from("/runs/run-1"));
+
+    let bindings = tool_capsule_env_bindings(&lock, &layout).expect("no conflicts");
+
+    assert_eq!(
+        bindings.get("ATO_TOOL_INITDB").map(|p| p.as_path()),
+        Some(std::path::Path::new("/runs/run-1/tools/postgres/bin/initdb"))
+    );
+    assert_eq!(
+        bindings.get("ATO_TOOL_REDIS_REDIS_CLI").map(|p| p.as_path()),
+        Some(std::path::Path::new("/runs/run-1/tools/redis/bin/redis-cli"))
+    );
+    assert_eq!(bindings.len(), 2);
+}
+
+#[test]
+fn tool_capsule_env_bindings_detects_conflicts() {
+    use crate::common::paths::AtoRunLayout;
+
+    let conflict_env = "ATO_TOOL_SHARED";
+    let mut tool_capsules = BTreeMap::new();
+    tool_capsules.insert(
+        "alpha".to_string(),
+        LockedToolCapsule {
+            resolved: "capsule://ato.run/tools/alpha@1.0.0".to_string(),
+            platform: "darwin-arm64".to_string(),
+            artifact_hash: "sha256:a".to_string(),
+            artifact_url: None,
+            exports: LockedToolExports {
+                binaries: BTreeMap::from([("foo".to_string(), "bin/foo".to_string())]),
+                paths: BTreeMap::new(),
+            },
+            bind_env: BTreeMap::from([("foo".to_string(), conflict_env.to_string())]),
+        },
+    );
+    tool_capsules.insert(
+        "beta".to_string(),
+        LockedToolCapsule {
+            resolved: "capsule://ato.run/tools/beta@1.0.0".to_string(),
+            platform: "darwin-arm64".to_string(),
+            artifact_hash: "sha256:b".to_string(),
+            artifact_url: None,
+            exports: LockedToolExports {
+                binaries: BTreeMap::from([("bar".to_string(), "bin/bar".to_string())]),
+                paths: BTreeMap::new(),
+            },
+            bind_env: BTreeMap::from([("bar".to_string(), conflict_env.to_string())]),
+        },
+    );
+    let lock = empty_lockfile_with_tool_capsules(tool_capsules);
+    let layout = AtoRunLayout::for_root(std::path::PathBuf::from("/runs/run-1"));
+
+    let err = tool_capsule_env_bindings(&lock, &layout).expect_err("expected conflict");
+    assert_eq!(err.env_name, conflict_env);
+    assert!(matches!(err.first_alias.as_str(), "alpha" | "beta"));
+    assert!(matches!(err.second_alias.as_str(), "alpha" | "beta"));
+    assert_ne!(err.first_alias, err.second_alias);
+}
+
+#[test]
+fn lockfile_accepts_legacy_lockfile_without_tool_capsules() {
+    // Legacy lockfile JSON written before the tool_capsules field existed.
+    let legacy = r#"{
+        "version": "1",
+        "meta": { "created_at": "2026-01-01T00:00:00Z", "manifest_hash": "sha256:deadbeef" },
+        "capsule_dependencies": [],
+        "targets": {}
+    }"#;
+    let parsed: CapsuleLock = serde_json::from_str(legacy).expect("parse legacy lockfile");
+    assert!(parsed.tool_capsules.is_empty());
 }
