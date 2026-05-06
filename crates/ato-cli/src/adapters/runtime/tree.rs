@@ -14,8 +14,6 @@ use std::os::windows::fs as windows_fs;
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::types::CapsuleManifest;
 
-const STORE_DIR: &str = ".ato/store";
-const RUNTIMES_DIR: &str = ".ato/runtimes";
 const CURRENT_SYMLINK: &str = "current";
 const PROMOTED_NAMESPACE: &str = "promoted";
 

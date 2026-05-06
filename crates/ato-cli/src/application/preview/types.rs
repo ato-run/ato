@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::install::{GitHubCheckout, GitHubInstallDraftResolvedRef, GitHubInstallDraftResponse};
 
-const DEFAULT_PREVIEW_DIR: &str = ".ato/previews";
 const ENV_PREVIEW_ROOT: &str = "ATO_PREVIEW_ROOT";
 const PREVIEW_METADATA_FILE_NAME: &str = "metadata.json";
 const PREVIEW_MANIFEST_FILE_NAME: &str = "capsule.toml";

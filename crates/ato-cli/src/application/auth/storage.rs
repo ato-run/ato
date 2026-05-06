@@ -7,8 +7,7 @@ use std::sync::Arc;
 use super::credential_store::{AuthStore, WriteLocation};
 use super::{
     read_env_non_empty, AuthManager, Credentials, CANONICAL_CREDENTIALS_DIR,
-    CANONICAL_CREDENTIALS_FILE, ENV_XDG_CONFIG_HOME, LEGACY_CREDENTIALS_DIR,
-    LEGACY_CREDENTIALS_FILE,
+    CANONICAL_CREDENTIALS_FILE, ENV_XDG_CONFIG_HOME, LEGACY_CREDENTIALS_FILE,
 };
 
 /// Physical destination of a freshly persisted token.
@@ -53,7 +52,7 @@ impl AuthManager {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
         let ato_home = nacelle_home_dir().context("Cannot determine ato home directory")?;
         let credentials_path = canonical_credentials_path(&home);
-        let legacy_credentials_path = legacy_credentials_path(&home);
+        let legacy_credentials_path = legacy_credentials_path(&ato_home);
         let auth_store = Arc::new(AuthStore::open_for_home(&ato_home)?);
         Ok(Self {
             credentials_path,
@@ -268,9 +267,8 @@ fn canonical_credentials_path(home: &Path) -> PathBuf {
         .join(CANONICAL_CREDENTIALS_FILE)
 }
 
-fn legacy_credentials_path(home: &Path) -> PathBuf {
-    home.join(LEGACY_CREDENTIALS_DIR)
-        .join(LEGACY_CREDENTIALS_FILE)
+fn legacy_credentials_path(ato_home: &Path) -> PathBuf {
+    ato_home.join(LEGACY_CREDENTIALS_FILE)
 }
 
 #[cfg(test)]

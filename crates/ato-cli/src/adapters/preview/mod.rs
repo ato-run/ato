@@ -18,7 +18,6 @@ pub(crate) use storage::{
     load_preview_session_for_manifest, persist_session_with_warning, preview_root,
 };
 
-pub(super) const DEFAULT_PREVIEW_DIR: &str = ".ato/previews";
 pub(super) const ENV_PREVIEW_ROOT: &str = "ATO_PREVIEW_ROOT";
 pub(super) const PREVIEW_METADATA_FILE_NAME: &str = "metadata.json";
 pub(super) const PREVIEW_MANIFEST_FILE_NAME: &str = "capsule.toml";

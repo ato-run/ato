@@ -11,7 +11,6 @@ use capsule_core::ato_lock::DeliveryEnvironment;
 use capsule_core::ccp::SCHEMA_VERSION;
 use capsule_core::types::ServiceSpec;
 use chrono::Utc;
-use dirs::home_dir;
 use serde::{Deserialize, Serialize};
 
 use crate::application::services::{

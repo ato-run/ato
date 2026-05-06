@@ -155,9 +155,10 @@ PYEOF
 
 print_suite_summary() {
     local suite="$1"
+    local hermetic="${ATO_TEST_HERMETIC:-1}"
     echo ""
     echo "══════════════════════════════════"
-    echo " $suite — Results"
+    echo " $suite — Results [hermetic=$hermetic]"
     echo "══════════════════════════════════"
     echo " PASS: $PASSED  FAIL: $FAILED  SKIP: $SKIPPED"
     for f in "${FAILURES[@]:-}"; do

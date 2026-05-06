@@ -45,7 +45,6 @@ use manifest_delta::*;
 use manifest_integrity::*;
 use persistence::*;
 
-const DEFAULT_STORE_DIR: &str = ".ato/store";
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 const DEFAULT_STORE_API_TIMEOUT_SECS: u64 = 8;
