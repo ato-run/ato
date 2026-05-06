@@ -140,11 +140,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn ensure_static_server_script() -> Result<PathBuf> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to resolve home directory"))?;
-    let script_path = home
-        .join(".ato")
-        .join("cache")
+    let script_path = capsule_core::common::paths::ato_cache_dir()
         .join("scripts")
         .join("static_file_server.ts");
     if let Some(parent) = script_path.parent() {

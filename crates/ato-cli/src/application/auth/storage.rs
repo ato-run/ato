@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use capsule_core::common::paths::nacelle_home_dir;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,13 +51,14 @@ impl AuthManager {
     /// Create a new AuthManager with default credentials path.
     pub fn new() -> Result<Self> {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let ato_home = nacelle_home_dir().context("Cannot determine ato home directory")?;
         let credentials_path = canonical_credentials_path(&home);
         let legacy_credentials_path = legacy_credentials_path(&home);
-        let auth_store = Arc::new(AuthStore::open_for_home(&home)?);
+        let auth_store = Arc::new(AuthStore::open_for_home(&ato_home)?);
         Ok(Self {
             credentials_path,
             legacy_credentials_path,
-            age_home: home,
+            age_home: ato_home,
             auth_store,
         })
     }

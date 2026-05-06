@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{info, warn};
 
+use capsule_core::common::paths::ato_path;
+
 /// Persistent configuration for the ato-desktop application.
 ///
 /// Stored at `~/.ato/desktop-config.json` and loaded on startup.
@@ -474,7 +476,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
 }
 
 fn config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".ato").join("desktop-config.json"))
+    ato_path("desktop-config.json").ok()
 }
 
 /// Load configuration from `~/.ato/desktop-config.json`.
@@ -585,7 +587,7 @@ impl SecretStore {
 }
 
 fn secrets_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".ato").join("secrets.json"))
+    ato_path("secrets.json").ok()
 }
 
 pub fn load_secrets() -> SecretStore {
@@ -693,7 +695,7 @@ impl CapsuleConfigStore {
 }
 
 fn capsule_configs_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".ato").join("capsule-configs.json"))
+    ato_path("capsule-configs.json").ok()
 }
 
 pub fn load_capsule_configs() -> CapsuleConfigStore {
@@ -781,7 +783,7 @@ impl CapsulePolicyOverrideStore {
 }
 
 fn capsule_policy_overrides_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".ato").join("capsule-policy-overrides.json"))
+    ato_path("capsule-policy-overrides.json").ok()
 }
 
 pub fn load_capsule_policy_overrides() -> CapsulePolicyOverrideStore {

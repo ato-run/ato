@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 
 /// Default backend resolution order: env → memory → age.
@@ -12,8 +13,12 @@ pub(crate) fn default_order() -> Vec<String> {
 ///
 /// The legacy `[secrets] backends` section (from pre-v0.5.x) is **not** read —
 /// users must migrate to `[credentials] order`.
-pub(crate) fn read_order(home: &Path) -> Option<Vec<String>> {
-    let config_path = home.join(".ato").join("config.toml");
+pub(crate) fn read_order(home_or_ato_home: &Path) -> Option<Vec<String>> {
+    let config_path = if home_or_ato_home.file_name() == Some(OsStr::new(".ato")) {
+        home_or_ato_home.join("config.toml")
+    } else {
+        home_or_ato_home.join(".ato").join("config.toml")
+    };
     let raw = std::fs::read_to_string(config_path).ok()?;
     let doc: toml::Value = raw.parse().ok()?;
     let order = doc

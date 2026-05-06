@@ -19,8 +19,7 @@ pub fn preview_root() -> Result<PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().context("Failed to determine home directory")?;
-    Ok(home.join(DEFAULT_PREVIEW_DIR))
+    capsule_core::common::paths::ato_path("previews").context("Failed to determine ato home")
 }
 
 pub fn load_preview_session_for_manifest(manifest_path: &Path) -> Result<Option<PreviewSession>> {
