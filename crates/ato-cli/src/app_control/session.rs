@@ -12,8 +12,9 @@ use anyhow::{Context, Result};
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
 pub(crate) use ato_session_core::{
-    write_session_record_atomic, GuestSessionDisplay, ServiceBackgroundDisplay, StoredSessionInfo,
-    TerminalSessionDisplay, WebSessionDisplay,
+    write_session_record_atomic, GuestSessionDisplay, ServiceBackgroundDisplay,
+    StoredDependencyContracts, StoredDependencyProvider, StoredSessionInfo, TerminalSessionDisplay,
+    WebSessionDisplay,
 };
 use capsule_core::ato_lock;
 use capsule_core::handle::{
@@ -346,6 +347,7 @@ pub(super) fn start_guest_session(
         web: None,
         terminal: None,
         service: None,
+        dependency_contracts: None,
         // App Session Materialization: filled in by run_execute after spawn
         // succeeds (start_time helper takes the freshly-spawned PID + the
         // launch_digest computed before the lock was acquired). Leaving them
@@ -512,6 +514,10 @@ pub(super) fn start_runtime_session(
                 log_path: log_path.display().to_string(),
             }
         }),
+        dependency_contracts: dependency_contracts_for_session_record(
+            runtime_process.child.id() as i32,
+            dep_contracts.as_ref(),
+        ),
         // App Session Materialization: see note on the guest variant above.
         schema_version: None,
         launch_digest: None,
@@ -609,6 +615,34 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         execution_id: None,
         execution_receipt_schema_version: None,
     }
+}
+
+fn dependency_contracts_for_session_record(
+    consumer_pid: i32,
+    dep_contracts: Option<&DependencyContractGuard>,
+) -> Option<StoredDependencyContracts> {
+    let graph = dep_contracts.and_then(DependencyContractGuard::graph)?;
+    let providers = graph
+        .deps()
+        .iter()
+        .map(|dep| StoredDependencyProvider {
+            alias: dep.alias.clone(),
+            pid: dep.child.id() as i32,
+            state_dir: dep.state_dir.clone(),
+            resolved: dep.resolved.clone(),
+            allocated_port: dep.allocated_port,
+            log_path: dep.log_path.clone(),
+            runtime_export_keys: dep.runtime_exports.keys().cloned().collect(),
+        })
+        .collect::<Vec<_>>();
+    if providers.is_empty() {
+        return None;
+    }
+
+    Some(StoredDependencyContracts {
+        consumer_pid,
+        providers,
+    })
 }
 
 pub(super) fn resolve_session_launch_plan(
@@ -745,9 +779,7 @@ fn prepare_session_execution(
             &reporter,
             &mut launch_ctx,
         ))
-        .map_err(|err| {
-            err.context("failed to set up dependency contracts for session start")
-        })?;
+        .map_err(|err| err.context("failed to set up dependency contracts for session start"))?;
 
     let prepared_target = prepare_target_execution(
         plan,
@@ -829,12 +861,13 @@ async fn setup_session_dependency_contracts(
                         lock_path.display()
                     )
                 })?;
-            prepared.compatibility_legacy_lock =
-                Some(crate::application::pipeline::phases::run::CompatibilityLegacyLockContext {
+            prepared.compatibility_legacy_lock = Some(
+                crate::application::pipeline::phases::run::CompatibilityLegacyLockContext {
                     manifest_path: compat_input.workspace_root().join("capsule.toml"),
                     path: lock_path,
                     lock: lock.clone(),
-                });
+                },
+            );
             lock
         }
     };
@@ -1178,10 +1211,93 @@ fn attach_process_logs(child: &mut std::process::Child, log_path: &Path) -> Resu
     Ok(())
 }
 
+fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn stop_recorded_dependency_contracts(
+    record: Option<&StoredSessionInfo>,
+    force: bool,
+) -> Result<bool> {
+    let Some(record) = record else {
+        return Ok(false);
+    };
+    let Some(snapshot) = record.dependency_contracts.as_ref() else {
+        return Ok(false);
+    };
+    if snapshot.providers.is_empty() {
+        return Ok(false);
+    }
+
+    let targets = snapshot
+        .providers
+        .iter()
+        .map(
+            |provider| crate::application::dependency_runtime::TeardownTarget {
+                dep: provider.alias.clone(),
+                pid: provider.pid,
+                state_dir: provider.state_dir.clone(),
+                needs: Vec::new(),
+            },
+        )
+        .collect();
+    let grace = if force {
+        Duration::from_secs(0)
+    } else {
+        Duration::from_secs(10)
+    };
+    crate::application::dependency_runtime::teardown_reverse_topological(targets, grace)
+        .with_context(|| {
+            format!(
+                "Failed to stop dependency contracts for {}",
+                record.session_id
+            )
+        })?;
+    for provider in &snapshot.providers {
+        let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
+            &provider.state_dir,
+        );
+    }
+    Ok(true)
+}
+
 pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     let process_manager = ProcessManager::new()?;
-    let stopped = process_manager.stop_process(session_id, true)?;
     let session_path = session_root()?.join(format!("{session_id}.json"));
+    let session_record = read_session_record(&session_path);
+    let has_dependency_sidecar = process_manager
+        .read_dependency_session_snapshot(session_id)
+        .ok()
+        .flatten()
+        .is_some();
+
+    let mut stop_error = None;
+    let mut stopped = match process_manager.stop_process(session_id, true) {
+        Ok(stopped) => stopped,
+        Err(err) => {
+            stop_error = Some(err);
+            false
+        }
+    };
+    if !has_dependency_sidecar {
+        match stop_recorded_dependency_contracts(session_record.as_ref(), true) {
+            Ok(record_stopped) => {
+                stopped |= record_stopped;
+            }
+            Err(err) => {
+                if stop_error.is_none() {
+                    stop_error = Some(err);
+                }
+            }
+        }
+    }
+    if let Some(err) = stop_error {
+        if !stopped {
+            return Err(err);
+        }
+    }
+
     if session_path.exists() {
         fs::remove_file(&session_path)
             .with_context(|| format!("failed to remove session file {}", session_path.display()))?;
@@ -1410,6 +1526,7 @@ pub(super) fn restore_stdout(_saved: i32) -> Result<()> {
 mod tests {
     use super::*;
     use capsule_core::handle::normalize_capsule_handle;
+    use serial_test::serial;
 
     #[test]
     fn reserve_port_returns_requested_port_when_available() {
@@ -1512,5 +1629,121 @@ mod tests {
             canonical.registry_url_override(),
             Some("http://localhost:8787")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn stop_session_uses_record_dependency_contracts_when_sidecar_is_missing() {
+        struct EnvGuard {
+            home: Option<String>,
+            session_root: Option<String>,
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.session_root {
+                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
+                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = EnvGuard {
+            home: std::env::var("HOME").ok(),
+            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
+        };
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+
+        let mut consumer = Command::new("sleep").arg("30").spawn().expect("consumer");
+        let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
+
+        let session_id = format!("ato-desktop-session-{}", consumer.id());
+        ProcessManager::new()
+            .expect("process manager")
+            .write_pid(&ProcessInfo {
+                id: session_id.clone(),
+                name: "capsule-session".to_string(),
+                pid: consumer.id() as i32,
+                workload_pid: None,
+                status: ProcessStatus::Running,
+                runtime: "source".to_string(),
+                start_time: SystemTime::now(),
+                manifest_path: None,
+                scoped_id: None,
+                target_label: Some("web".to_string()),
+                requested_port: None,
+                log_path: None,
+                ready_at: None,
+                last_event: Some("ready".to_string()),
+                last_error: None,
+                exit_code: None,
+            })
+            .expect("write pid file");
+
+        write_session_record(
+            &session_root,
+            &StoredSessionInfo {
+                session_id: session_id.clone(),
+                handle: "capsule://example/demo".to_string(),
+                normalized_handle: "capsule://example/demo".to_string(),
+                canonical_handle: Some("capsule://example/demo".to_string()),
+                trust_state: TrustState::Untrusted,
+                source: Some("registry".to_string()),
+                restricted: false,
+                snapshot: None,
+                runtime: CapsuleRuntimeDescriptor {
+                    target_label: "web".to_string(),
+                    runtime: Some("source".to_string()),
+                    driver: None,
+                    language: None,
+                    port: None,
+                },
+                display_strategy: CapsuleDisplayStrategy::WebUrl,
+                pid: consumer.id() as i32,
+                log_path: session_root.join("session.log").display().to_string(),
+                manifest_path: temp.path().join("capsule.toml").display().to_string(),
+                target_label: "web".to_string(),
+                notes: vec![],
+                guest: None,
+                web: Some(WebSessionDisplay {
+                    local_url: "http://127.0.0.1:9999/".to_string(),
+                    healthcheck_url: "http://127.0.0.1:9999/".to_string(),
+                    served_by: "ato".to_string(),
+                }),
+                terminal: None,
+                service: None,
+                dependency_contracts: Some(StoredDependencyContracts {
+                    consumer_pid: consumer.id() as i32,
+                    providers: vec![StoredDependencyProvider {
+                        alias: "db".to_string(),
+                        pid: provider.id() as i32,
+                        state_dir: temp.path().join("state/db"),
+                        resolved: "capsule://github.com/Koh0920/ato-postgres@main".to_string(),
+                        allocated_port: Some(5432),
+                        log_path: Some(temp.path().join("db.log")),
+                        runtime_export_keys: vec!["DATABASE_URL".to_string()],
+                    }],
+                }),
+                schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+                launch_digest: Some("digest".repeat(8)),
+                process_start_time_unix_ms: None,
+            },
+        )
+        .expect("write session record");
+
+        stop_session(&session_id, true).expect("stop session");
+
+        assert!(consumer.try_wait().expect("consumer wait").is_some());
+        assert!(provider.try_wait().expect("provider wait").is_some());
+        assert!(!session_root.join(format!("{}.json", session_id)).exists());
     }
 }

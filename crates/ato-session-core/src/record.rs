@@ -13,6 +13,7 @@ use capsule_wire::handle::{
     CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot, TrustState,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Minimum schema version that supports session reuse. Records below
 /// this version are display-only and MUST NOT be reused (§3.2).
@@ -39,6 +40,11 @@ pub struct StoredSessionInfo {
     pub web: Option<WebSessionDisplay>,
     pub terminal: Option<TerminalSessionDisplay>,
     pub service: Option<ServiceBackgroundDisplay>,
+    /// Embedded dependency-contract snapshot for crash recovery. This lets
+    /// `ato app session stop <id>` tear down providers even when the
+    /// `~/.ato/run-sessions/<id>/graph.json` sidecar is missing or unreadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_contracts: Option<StoredDependencyContracts>,
 
     // App Session Materialization v0 (RFC: APP_SESSION_MATERIALIZATION).
     // All three are `Option` for forward compatibility with schema=1
@@ -86,6 +92,27 @@ pub struct TerminalSessionDisplay {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceBackgroundDisplay {
     pub log_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDependencyContracts {
+    pub consumer_pid: i32,
+    #[serde(default)]
+    pub providers: Vec<StoredDependencyProvider>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredDependencyProvider {
+    pub alias: String,
+    pub pid: i32,
+    pub state_dir: PathBuf,
+    pub resolved: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocated_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_export_keys: Vec<String>,
 }
 
 #[cfg(test)]
@@ -148,6 +175,7 @@ mod tests {
         assert!(parsed.schema_version.is_none());
         assert!(parsed.launch_digest.is_none());
         assert!(parsed.process_start_time_unix_ms.is_none());
+        assert!(parsed.dependency_contracts.is_none());
 
         let reserialized = serde_json::to_string(&parsed).expect("reserialize");
         // None fields are skipped on serialize (skip_serializing_if), so a
@@ -155,6 +183,7 @@ mod tests {
         assert!(!reserialized.contains("schema_version"));
         assert!(!reserialized.contains("launch_digest"));
         assert!(!reserialized.contains("process_start_time_unix_ms"));
+        assert!(!reserialized.contains("dependency_contracts"));
     }
 
     #[test]
@@ -186,6 +215,18 @@ mod tests {
             web: None,
             terminal: None,
             service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: 5252,
+                    state_dir: PathBuf::from("/tmp/db"),
+                    resolved: "capsule://github.com/Koh0920/ato-postgres@main".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: Some(PathBuf::from("/tmp/db.log")),
+                    runtime_export_keys: vec!["DATABASE_URL".to_string()],
+                }],
+            }),
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("a".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_000_000),
@@ -196,5 +237,13 @@ mod tests {
         assert_eq!(parsed.schema_version, Some(SCHEMA_VERSION_V2));
         assert_eq!(parsed.launch_digest.as_deref(), Some(&"a".repeat(64)[..]));
         assert_eq!(parsed.process_start_time_unix_ms, Some(1_700_000_000_000));
+        assert_eq!(
+            parsed
+                .dependency_contracts
+                .as_ref()
+                .and_then(|snapshot| snapshot.providers.first())
+                .map(|provider| provider.alias.as_str()),
+            Some("db")
+        );
     }
 }
