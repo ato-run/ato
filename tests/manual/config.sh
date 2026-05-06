@@ -26,6 +26,8 @@ setup_isolated_ato_env() {
     export HOME="$ATO_TEST_ENV_ROOT/home"
     export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ATO_TEST_ENV_ROOT/xdg-config}"
     export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$ATO_TEST_ENV_ROOT/xdg-cache}"
+    unset ATO_DESKTOP_SESSION_ROOT
+    unset DESKY_SESSION_ROOT
 
     mkdir -p "$ATO_HOME" "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
 }
