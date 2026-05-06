@@ -972,8 +972,10 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
 
     let result = pipeline.run(&mut runner).await;
     if result.is_ok() {
-        if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
-            let _ = fs::remove_dir_all(transient_workspace_root);
+        if !args.background {
+            if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {
+                let _ = fs::remove_dir_all(transient_workspace_root);
+            }
         }
     } else if args.keep_failed_artifacts {
         if let Some(transient_workspace_root) = runner.transient_workspace_root.as_ref() {

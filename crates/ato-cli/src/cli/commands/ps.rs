@@ -50,6 +50,13 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                     .map(format_duration)
                     .unwrap_or_else(|_| "unknown".to_string());
 
+                let dependency_contracts = pm
+                    .read_dependency_session_snapshot(&p.id)
+                    .ok()
+                    .flatten()
+                    .map(|snapshot| snapshot.providers)
+                    .unwrap_or_default();
+
                 serde_json::json!({
                     "id": p.id,
                     "name": p.name,
@@ -62,6 +69,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                     "uptime": uptime,
                     "manifest": p.manifest_path.as_ref().map(|m| m.display().to_string()),
                     "log_path": p.log_path.as_ref().map(|m| m.display().to_string()),
+                    "dependency_contracts": dependency_contracts,
                     "ready_at": p.ready_at,
                     "last_event": p.last_event,
                     "last_error": p.last_error,
@@ -107,6 +115,26 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 "{:>8} {:>8} {:>12} {:>15} {:>34} {}",
                 p.pid, id, name, status_str, runtime_str, uptime
             )))?;
+
+            if let Some(snapshot) = pm.read_dependency_session_snapshot(&p.id).ok().flatten() {
+                if !snapshot.providers.is_empty() {
+                    let deps = snapshot
+                        .providers
+                        .iter()
+                        .map(|provider| {
+                            let port = provider
+                                .allocated_port
+                                .map(|port| format!(", port=127.0.0.1:{port}"))
+                                .unwrap_or_default();
+                            format!("{}(pid={}{})", provider.alias, provider.pid, port)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    futures::executor::block_on(
+                        reporter.notify(format!("         deps: {}", deps)),
+                    )?;
+                }
+            }
         }
 
         futures::executor::block_on(reporter.notify("-".repeat(100)))?;

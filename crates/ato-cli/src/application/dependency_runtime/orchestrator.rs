@@ -123,8 +123,13 @@ pub enum OrchestratorError {
     #[error("dep '{alias}' provider target has no `run`/`run_command` field")]
     MissingRunCommand { alias: String },
 
-    #[error("dep '{alias}' another live Ato session owns this state.dir; aborting (RFC §10.4)")]
-    OrphanAliveOtherSession { alias: String },
+    #[error("dep '{alias}' state.dir is owned by ato session pid {session_pid}; provider={resolved}; state={}", state_dir.display())]
+    OrphanAliveOtherSession {
+        alias: String,
+        session_pid: i32,
+        resolved: String,
+        state_dir: PathBuf,
+    },
 
     #[error("dep '{alias}' state.dir setup failed: {detail}")]
     StateDirSetup { alias: String, detail: String },
@@ -504,9 +509,12 @@ fn start_one(
             // v1 still re-spawns the provider to keep the running graph
             // accurate. Idempotent providers (postgres etc.) accept this.
         }
-        OrphanCheckOutcome::AliveOtherSession { .. } => {
+        OrphanCheckOutcome::AliveOtherSession { sentinel } => {
             return Err(OrchestratorError::OrphanAliveOtherSession {
                 alias: alias.to_string(),
+                session_pid: sentinel.session_pid,
+                resolved: sentinel.resolved,
+                state_dir,
             });
         }
     }
