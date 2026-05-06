@@ -1226,9 +1226,8 @@ pub struct NamedTarget {
     pub required_env: Vec<String>,
 
     /// Service dependencies that must be ready before this target is started.
-    /// Each entry must be a key in the manifest top-level `[dependencies.*]`
-    /// table (`CAPSULE_DEPENDENCY_CONTRACTS.md` §8). `dependencies` ⊇ `needs`
-    /// is enforced at lock time.
+    /// Each entry must be either a top-level `[dependencies.*]` alias or a
+    /// sibling target label (`CAPSULE_DEPENDENCY_CONTRACTS.md` §8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
 
