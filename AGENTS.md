@@ -34,10 +34,10 @@ This root directory (`capsuled-dev/`) is **NOT** a git repository. Each app unde
 
 ### Git Commit Rules
 
-- Do NOT include `Co-Authored-By` lines in commit messages
-- Commit frequently to enable easy rollback — at least once per logical change or phase boundary
-- During implementation, make small commits at a reasonable cadence so each coherent chunk is preserved
-- Use `koh0920` as the commit author identity; do not add any co-author trailers
+- Commit per logical change, not per file touched.
+- Commit in small, coherent chunks during implementation so progress is saved incrementally.
+- Do not hardcode a commit author identity. Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for local commits. Do not add any `Co-Authored-By` lines.
+- Message format: `<scope>(<app>): <what changed>` — e.g., `fix(ato-desktop): guard evaluate_script after PageLoadEvent::Finished`
 
 ## Apps Structure
 

@@ -2,7 +2,9 @@
 
 > This file supplements `AGENTS.md` (workspace root). Read `AGENTS.md` first — it covers the philosophy, repo layout, build/test commands, and code style. This file adds **stack-specific patterns** for GPUI, Wry, TypeScript, and the bridge/IPC layer.
 
+
 ---
+
 
 ## Identity
 
@@ -293,9 +295,10 @@ Serena MCP が利用可能な場合、コード操作には Serena のシンボ�
 
 ---
 
-## Commit hygiene
+## Git Commit Rules
 
 - Commit per logical change, not per file touched.
 - Commit in small, coherent chunks during implementation so progress is saved incrementally.
-- Use `koh0920` as the commit author identity and do not add any `Co-Authored-By` lines.
+- Do not hardcode a commit author identity. Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for local commits. Do not add any `Co-Authored-By` lines.
 - Message format: `<scope>(<app>): <what changed>` — e.g., `fix(ato-desktop): guard evaluate_script after PageLoadEvent::Finished`
+
