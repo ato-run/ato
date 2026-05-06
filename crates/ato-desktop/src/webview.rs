@@ -458,6 +458,7 @@ impl WebViewManager {
                 self.bridge
                     .log(ActivityTone::Info, "Detached active child webview");
             }
+            self.automation.set_active_pane(None);
             self.sync_responder_target(state);
             return;
         };
@@ -467,6 +468,7 @@ impl WebViewManager {
                 self.set_cached_visibility(previous_pane_id, false, state);
             }
             self.active_pane_id = Some(active.pane_id);
+            self.automation.set_active_pane(Some(active.pane_id));
         }
 
         let route_key = active.route.to_string();
@@ -2131,6 +2133,7 @@ impl WebViewManager {
         for &pane_id in pane_ids {
             if Some(pane_id) == self.active_pane_id {
                 self.active_pane_id = None;
+                self.automation.set_active_pane(None);
             }
             self.automation.fail_requests_for_pane(pane_id);
             self.automation.mark_page_unloaded(pane_id);

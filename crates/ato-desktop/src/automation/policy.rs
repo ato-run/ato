@@ -1,3 +1,10 @@
+// Shared timeout policy for the automation transport.
+//
+// Compiled into both `ato-desktop` (via `mod policy;` under `automation`) and
+// `ato-desktop-mcp` (via `#[path = "../automation/policy.rs"] mod policy;`).
+// Each binary uses a subset of the constants, so dead_code warnings would fire
+// from the binary that doesn't reach a particular constant — silence at the
+// module level.
 #![allow(dead_code)]
 
 use std::time::Duration;
@@ -21,3 +28,10 @@ pub const AUTOMATION_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// This lets a fast `navigate -> click` sequence behave more like manual UI
 /// interaction without special-casing each command at dispatch sites.
 pub const MCP_IMPLICIT_PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(5);
+
+// MCP read timeout must outlast desktop dispatch so the desktop emits the
+// authoritative error envelope; the +5s margin also covers connection IO.
+const _: () = assert!(
+    AUTOMATION_CLIENT_RESPONSE_TIMEOUT.as_secs()
+        >= AUTOMATION_DISPATCH_TIMEOUT.as_secs() + AUTOMATION_CONNECTION_IO_TIMEOUT.as_secs() / 2
+);
