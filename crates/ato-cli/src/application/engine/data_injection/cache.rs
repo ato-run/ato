@@ -33,8 +33,8 @@ pub(super) fn injected_cache_root() -> Result<PathBuf> {
         fs::create_dir_all(&path)?;
         return Ok(path);
     }
-    let home = dirs::home_dir().context("failed to determine home directory")?;
-    let path = home.join(".ato").join("injected-data");
+    let path = capsule_core::common::paths::ato_path("injected-data")
+        .context("failed to determine ato home")?;
     fs::create_dir_all(&path)?;
     Ok(path)
 }

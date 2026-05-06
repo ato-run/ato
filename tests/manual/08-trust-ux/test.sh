@@ -18,7 +18,8 @@ check_ato
 # Automated: trust store directory exists
 # ---------------------------------------------------------------------------
 test_trust_store_exists() {
-    local trust_dir="${ATO_HOME:-$HOME/.ato}/trust"
+    local trust_dir
+    trust_dir="$(ato_home_path trust)"
     if [ -d "$trust_dir" ]; then
         pass "Trust store directory exists: $trust_dir"
     else

@@ -674,10 +674,7 @@ pub fn resolve_local_slug(slug: &str) -> Result<LocalSlugResolution> {
     if slug.is_empty() || slug.contains('/') {
         return Ok(LocalSlugResolution::NotFound);
     }
-    let store_root = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ato")
-        .join("store");
+    let store_root = capsule_core::common::paths::ato_path_or_workspace_tmp("store");
     if !store_root.exists() {
         return Ok(LocalSlugResolution::NotFound);
     }

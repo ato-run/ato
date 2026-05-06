@@ -242,8 +242,7 @@ fn preview_root() -> Result<PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().context("Failed to determine home directory")?;
-    Ok(home.join(DEFAULT_PREVIEW_DIR))
+    capsule_core::common::paths::ato_path("previews").context("Failed to determine ato home")
 }
 
 fn generate_preview_id() -> String {

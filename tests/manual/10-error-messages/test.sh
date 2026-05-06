@@ -164,7 +164,8 @@ test_log_location_in_errors() {
     printf 'schema_version = "0.3"\nname = [broken\n' > "$dir/capsule.toml"
     local out="$ATO_TEST_TMP/log_location.txt"
     run_cmd 15 "$out" ato run "$dir" || true
-    local log_dir="${ATO_HOME:-$HOME/.ato}/logs"
+    local log_dir
+    log_dir="$(ato_home_path logs)"
     if grep -qi "log\|\.ato/logs\|debug\|stderr" "$out" || [ -d "$log_dir" ]; then
         pass "Log file location is discoverable (mentioned in error or ~/.ato/logs/ exists)"
     else

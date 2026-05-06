@@ -11,6 +11,7 @@ use ato_session_core::{
     StoredSessionInfo,
 };
 use base64::Engine as _;
+use capsule_core::common::paths::ato_path;
 use capsule_wire::handle::{
     normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
     ResolvedSnapshot,
@@ -1295,14 +1296,7 @@ fn session_root() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ATO_DESKTOP_SESSION_ROOT") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| anyhow::anyhow!("failed to resolve home directory from HOME"))?;
-    Ok(home
-        .join(".ato")
-        .join("apps")
-        .join("ato-desktop")
-        .join("sessions"))
+    ato_path("apps/ato-desktop/sessions").context("failed to resolve ato home for session root")
 }
 
 /// Parsed `.ato/share/state.json` written by `ato decap` on success.
@@ -1776,15 +1770,8 @@ fn share_tmp_dir(share_url: &str) -> Result<PathBuf> {
     let mut hasher = DefaultHasher::new();
     share_url.hash(&mut hasher);
     let hash = hasher.finish();
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| anyhow::anyhow!("HOME not set — cannot create share tmp dir"))?;
-    Ok(home
-        .join(".ato")
-        .join("apps")
-        .join("ato-desktop")
-        .join("shared-runs")
-        .join(format!("{hash:016x}")))
+    ato_path(format!("apps/ato-desktop/shared-runs/{hash:016x}"))
+        .context("failed to resolve ato home for shared run temp dir")
 }
 
 /// Materializes a share URL into a local directory by calling `ato decap`.
@@ -2367,11 +2354,11 @@ mod tests {
     fn find_ato_toolchain_binary_finds_real_python_if_installed() {
         // Integration-ish: only asserts when the real ~/.ato/toolchains
         // contains a python install. Otherwise skipped.
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return,
+        let toolchains = match capsule_core::common::paths::ato_path("toolchains") {
+            Ok(path) => path,
+            Err(_) => return,
         };
-        let has_python = std::fs::read_dir(home.join(".ato/toolchains"))
+        let has_python = std::fs::read_dir(toolchains)
             .map(|it| {
                 it.filter_map(|e| e.ok())
                     .any(|e| e.file_name().to_string_lossy().starts_with("python-"))
@@ -2403,11 +2390,11 @@ mod tests {
     /// was incorrectly routed through `ato run --` and hit `scoped_id_required`.
     #[test]
     fn find_ato_toolchain_binary_finds_npm_inside_node_family() {
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return,
+        let toolchains = match capsule_core::common::paths::ato_path("toolchains") {
+            Ok(path) => path,
+            Err(_) => return,
         };
-        let has_node = std::fs::read_dir(home.join(".ato/toolchains"))
+        let has_node = std::fs::read_dir(toolchains)
             .map(|it| {
                 it.filter_map(|e| e.ok())
                     .any(|e| e.file_name().to_string_lossy().starts_with("node-"))
@@ -2429,11 +2416,11 @@ mod tests {
     /// Companion regression for Python family siblings.
     #[test]
     fn find_ato_toolchain_binary_finds_pip_inside_python_family() {
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return,
+        let toolchains = match capsule_core::common::paths::ato_path("toolchains") {
+            Ok(path) => path,
+            Err(_) => return,
         };
-        let has_python = std::fs::read_dir(home.join(".ato/toolchains"))
+        let has_python = std::fs::read_dir(toolchains)
             .map(|it| {
                 it.filter_map(|e| e.ok())
                     .any(|e| e.file_name().to_string_lossy().starts_with("python-"))
@@ -3852,8 +3839,7 @@ fn find_ato_toolchain_binary(name: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         return None;
     }
-    let home = dirs::home_dir()?;
-    let toolchains = home.join(".ato").join("toolchains");
+    let toolchains = ato_path("toolchains").ok()?;
 
     // Build the list of directory-name prefixes we will search in priority
     // order. The direct match wins over the family fallback so

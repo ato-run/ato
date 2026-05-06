@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -76,12 +77,20 @@ impl AgeFileBackend {
         }
     }
 
+    fn ato_root(&self) -> PathBuf {
+        if self.home.file_name() == Some(OsStr::new(".ato")) {
+            self.home.clone()
+        } else {
+            self.home.join(".ato")
+        }
+    }
+
     pub(crate) fn keys_dir(&self) -> PathBuf {
-        self.home.join(".ato/keys")
+        self.ato_root().join("keys")
     }
 
     pub(crate) fn credentials_dir(&self) -> PathBuf {
-        self.home.join(".ato/credentials")
+        self.ato_root().join("credentials")
     }
 
     pub(crate) fn identity_key_path(&self) -> PathBuf {

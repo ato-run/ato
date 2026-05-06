@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use capsule_core::common::paths::ato_path;
 use ed25519_dalek::Signer;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -112,11 +113,7 @@ fn is_valid_handle(value: &str) -> bool {
 }
 
 fn publisher_signing_key_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home
-        .join(".ato")
-        .join("keys")
-        .join("publisher-signing-key.json"))
+    ato_path("keys/publisher-signing-key.json").context("Cannot determine ato home directory")
 }
 
 fn ensure_publisher_signing_key() -> Result<capsule_core::types::signing::StoredKey> {

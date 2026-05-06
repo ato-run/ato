@@ -67,10 +67,7 @@ pub fn execute(args: LogsArgs, reporter: Arc<CliReporter>) -> Result<()> {
 }
 
 fn get_log_path(id: &str) -> PathBuf {
-    let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
-    home.join(".ato")
-        .join("logs")
-        .join(format!("{}{}", id, LOG_FILE_EXT))
+    capsule_core::common::paths::ato_path_or_workspace_tmp(format!("logs/{}{}", id, LOG_FILE_EXT))
 }
 
 fn show_log(log_path: &PathBuf, tail: Option<usize>) -> Result<()> {

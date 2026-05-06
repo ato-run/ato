@@ -1174,25 +1174,16 @@ fn bootstrap_state_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ato")
-        .join("apps")
-        .join("ato-desktop")
-        .join("bootstrap-state.json")
+    capsule_core::common::paths::ato_path_or_workspace_tmp(
+        "apps/ato-desktop/bootstrap-state.json",
+    )
 }
 
 /// Pre-rename bootstrap-state location. Returned only when the canonical
 /// `bootstrap_state_path()` does not yet exist, so existing users keep their
 /// state across the upgrade. Writes always go to the canonical path.
 fn legacy_bootstrap_state_path() -> Option<PathBuf> {
-    Some(
-        home_dir()?
-            .join(".ato")
-            .join("apps")
-            .join("desky")
-            .join("bootstrap-state.json"),
-    )
+    capsule_core::common::paths::ato_path("apps/desky/bootstrap-state.json").ok()
 }
 
 fn load_state_from_path(path: &Path) -> Result<StoredBootstrapState> {

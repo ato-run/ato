@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
 use http::header::{CONTENT_TYPE, COOKIE};
 use http::{HeaderMap, HeaderValue};
@@ -311,12 +312,9 @@ impl WebViewManager {
             .detach();
         }
 
-        let web_context_dir =
-            dirs::home_dir().map(|home| home.join(".ato").join("desktop").join("webcontext"));
-        if let Some(dir) = &web_context_dir {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let web_context = WebContext::new(web_context_dir);
+        let web_context_dir = ato_path_or_workspace_tmp("desktop/webcontext");
+        let _ = std::fs::create_dir_all(&web_context_dir);
+        let web_context = WebContext::new(Some(web_context_dir));
 
         Self {
             views: HashMap::new(),

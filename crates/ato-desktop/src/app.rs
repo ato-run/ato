@@ -6,6 +6,7 @@ use gpui::{
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 #[cfg(target_os = "macos")]
 use gpui_component::input;
+use capsule_core::common::paths::ato_path;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -296,8 +297,7 @@ pub fn run() {
         // ConfirmQuitClear / CancelQuit are the resolution actions.
         cx.on_action(|_: &ConfirmQuitKeep, cx| cx.quit());
         cx.on_action(|_: &ConfirmQuitClear, cx| {
-            if let Some(home) = dirs::home_dir() {
-                let path = home.join(".ato").join("desktop-tabs.json");
+            if let Ok(path) = ato_path("desktop-tabs.json") {
                 let _ = std::fs::remove_file(&path);
             }
             cx.quit();

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use capsule_core::common::paths::ato_path;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::AtoError;
@@ -146,10 +147,9 @@ struct ConsentStore {
 
 impl ConsentStore {
     fn new() -> Result<Self, AtoExecutionError> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            AtoExecutionError::internal("failed to resolve home directory for consent store")
+        let consent_dir = ato_path("consent").map_err(|err| {
+            AtoExecutionError::internal(format!("failed to resolve consent directory: {err}"))
         })?;
-        let consent_dir = home.join(".ato").join("consent");
 
         fs::create_dir_all(&consent_dir).map_err(|err| {
             AtoExecutionError::internal(format!("failed to create consent directory: {err}"))
