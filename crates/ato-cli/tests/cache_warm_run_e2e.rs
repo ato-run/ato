@@ -3,7 +3,6 @@
 //! through. The test stays at the library boundary so it can run without
 //! invoking pnpm/uv/etc.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
@@ -17,7 +16,10 @@ use ato_cli::projection::project_payload;
 use capsule_core::blob::hash_tree;
 use capsule_core::common::store::BlobAddress;
 use serial_test::serial;
-use tempfile::TempDir;
+
+mod support;
+
+use support::{EnvVarGuard, IsolatedAto};
 
 fn write_file(root: &Path, rel: &str, contents: &[u8]) {
     let path = root.join(rel);
@@ -63,37 +65,14 @@ fn cached_request() -> DependencyMaterializationRequest {
     }
 }
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 #[test]
 #[serial]
 fn freeze_then_project_round_trip_preserves_blob_hash() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+    let env = IsolatedAto::new();
+    let _cache = EnvVarGuard::set("ATO_DEP_CACHE", "1");
 
     // Cold path: install simulation produced this dependency tree.
-    let cold_deps = tmp.path().join("cold-run/deps");
+    let cold_deps = env.path().join("cold-run/deps");
     write_file(
         &cold_deps,
         "node_modules/foo/index.js",
@@ -130,7 +109,7 @@ fn freeze_then_project_round_trip_preserves_blob_hash() {
     assert_eq!(blob_hash, original.blob_hash);
 
     let address = BlobAddress::parse(&blob_hash).unwrap();
-    let warm_deps = tmp.path().join("warm-run/deps");
+    let warm_deps = env.path().join("warm-run/deps");
     project_payload(&address.payload_dir(), &warm_deps).unwrap();
 
     let warm_hash = hash_tree(&warm_deps).unwrap();
@@ -145,11 +124,10 @@ fn freeze_then_project_round_trip_preserves_blob_hash() {
 #[test]
 #[serial]
 fn warm_run_observes_existing_blob_without_rewriting() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let _cache = EnvGuard::set("ATO_DEP_CACHE", "1");
+    let env = IsolatedAto::new();
+    let _cache = EnvVarGuard::set("ATO_DEP_CACHE", "1");
 
-    let deps = tmp.path().join("install-output");
+    let deps = env.path().join("install-output");
     write_file(&deps, "lib.js", b"// shared\n");
 
     let req = cached_request();
