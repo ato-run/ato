@@ -242,10 +242,12 @@ pub fn prepare_target_execution(
             guard_mode,
             has_authoritative_lock,
         )?;
-        if options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan) {
-            crate::consent_store::record_consent(&execution_plan)?;
-        } else {
-            crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
+        if !options.dangerously_skip_permissions {
+            if options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan) {
+                crate::consent_store::record_consent(&execution_plan)?;
+            } else {
+                crate::consent_store::require_consent(&execution_plan, options.assume_yes)?;
+            }
         }
 
         return Ok(PreparedTargetExecution {
