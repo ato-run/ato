@@ -253,13 +253,31 @@ pub(crate) async fn run_v03_lifecycle_steps(
         }
     }
 
+    // Pre-load the typed manifest so the orchestration provisioning loop
+    // can fall back to manifest-declared runtime/driver when the lock's
+    // resolved_targets/workloads are empty (the auto-lock path that
+    // produces the dep-contract derived lock often hasn't filled
+    // resolved_targets at preflight time, so plan.with_selected_target
+    // followed by execution_runtime/execution_driver returns empty for
+    // non-default targets — the provision dispatcher then short-circuits
+    // to None and `npm ci` for the Vite frontend never runs).
+    let typed_manifest = plan.typed_manifest().ok();
+
     let mut provisioned_roots = std::collections::HashSet::new();
     for target_label in targets_to_provision {
         let target_plan = plan.with_selected_target(target_label.clone());
         let working_dir = dependency_root(&target_plan);
+        let cmd_opt = match plan_v03_provision_command(&target_plan)? {
+            Some(cmd) => Some(cmd),
+            None => fallback_provision_command_from_manifest(
+                typed_manifest.as_ref(),
+                &target_label,
+                &working_dir,
+            )?,
+        };
 
         if provisioned_roots.insert(working_dir.clone()) {
-            if let Some(command) = plan_v03_provision_command(&target_plan)? {
+            if let Some(command) = cmd_opt {
                 reporter
                     .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
                     .await?;
@@ -353,6 +371,42 @@ pub(super) fn plan_v03_provision_command(
     }
 
     Ok(None)
+}
+
+/// When `plan.with_selected_target(label)` can't surface the runtime/driver
+/// (lock's `resolved_targets` not yet populated for sibling orchestration
+/// service targets), reach into the typed manifest directly and dispatch to
+/// the right importer. Mirrors `plan_v03_provision_command`'s
+/// driver→importer table but keyed off the manifest's `[targets.<label>]`
+/// entry instead of `plan.execution_runtime/driver/runtime_version`.
+fn fallback_provision_command_from_manifest(
+    manifest: Option<&capsule_core::types::CapsuleManifest>,
+    target_label: &str,
+    working_dir: &Path,
+) -> Result<Option<String>> {
+    let Some(manifest) = manifest else {
+        return Ok(None);
+    };
+    let Some(targets) = manifest.targets.as_ref() else {
+        return Ok(None);
+    };
+    let Some(target) = targets.named.get(target_label) else {
+        return Ok(None);
+    };
+    let driver = target.driver.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let runtime = target.runtime.trim().to_ascii_lowercase();
+    if runtime == "web" && driver == "static" {
+        return Ok(None);
+    }
+    match driver.as_str() {
+        "node" => provision_command_from_node_importer(working_dir),
+        "python" => provision_command_from_python_importer(
+            working_dir,
+            target.runtime_version.as_deref(),
+        ),
+        "native" => provision_command_from_cargo_importer(working_dir),
+        _ => Ok(None),
+    }
 }
 
 fn provision_command_from_node_importer(
