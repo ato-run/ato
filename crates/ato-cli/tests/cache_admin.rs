@@ -1,7 +1,6 @@
 //! Tests for `ato cache stats` and `ato cache clear` exposed through the
 //! library boundary in `application::cache_admin`.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
@@ -12,7 +11,10 @@ use ato_cli::dependency_materializer::{
     InstallPolicies, ManifestInputs, PlatformTriple, RuntimeSelection,
 };
 use serial_test::serial;
-use tempfile::TempDir;
+
+mod support;
+
+use support::IsolatedAto;
 
 fn write_file(root: &Path, rel: &str, contents: &[u8]) {
     let path = root.join(rel);
@@ -58,28 +60,6 @@ fn sample_request(seed: &str) -> DependencyMaterializationRequest {
     }
 }
 
-struct EnvGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set<V: AsRef<OsStr>>(key: &'static str, value: V) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 fn freeze_two_derivations(tmp: &Path) -> (String, String, String, String) {
     let req_a = sample_request("a");
     let req_b = sample_request("b");
@@ -105,8 +85,7 @@ fn freeze_two_derivations(tmp: &Path) -> (String, String, String, String) {
 #[test]
 #[serial]
 fn stats_on_empty_store_reports_zero_blobs() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let _env = IsolatedAto::new();
 
     let stats = collect_cache_stats().unwrap();
     assert_eq!(stats.blob_count, 0);
@@ -118,9 +97,8 @@ fn stats_on_empty_store_reports_zero_blobs() {
 #[test]
 #[serial]
 fn stats_after_two_freezes_reports_two_blobs_and_two_refs() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let (_dh_a, _dh_b, _, _) = freeze_two_derivations(tmp.path());
+    let env = IsolatedAto::new();
+    let (_dh_a, _dh_b, _, _) = freeze_two_derivations(env.path());
 
     let stats = collect_cache_stats().unwrap();
     assert_eq!(stats.blob_count, 2, "expected two blobs after two freezes");
@@ -135,9 +113,8 @@ fn stats_after_two_freezes_reports_two_blobs_and_two_refs() {
 #[test]
 #[serial]
 fn clear_all_removes_blobs_and_refs() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let (_dh_a, _dh_b, _, _) = freeze_two_derivations(tmp.path());
+    let env = IsolatedAto::new();
+    let (_dh_a, _dh_b, _, _) = freeze_two_derivations(env.path());
 
     let outcome = clear_all().unwrap();
     assert_eq!(outcome.blobs_removed, 2);
@@ -151,9 +128,8 @@ fn clear_all_removes_blobs_and_refs() {
 #[test]
 #[serial]
 fn clear_derivation_removes_only_the_named_entry() {
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
-    let (dh_a, _dh_b, blob_a, blob_b) = freeze_two_derivations(tmp.path());
+    let env = IsolatedAto::new();
+    let (dh_a, _dh_b, blob_a, blob_b) = freeze_two_derivations(env.path());
 
     let outcome = clear_derivation(&dh_a).unwrap();
     assert_eq!(outcome.refs_removed, 1);
@@ -173,10 +149,9 @@ fn clear_derivation_keeps_blob_when_another_ref_still_points_at_it() {
     use ato_cli::dependency_materializer::StoreRefRecord;
     use capsule_core::common::store::ato_store_dep_ref_path;
 
-    let tmp = TempDir::new().unwrap();
-    let _home = EnvGuard::set("ATO_HOME", tmp.path());
+    let env = IsolatedAto::new();
     let req = sample_request("shared");
-    let deps = tmp.path().join("install");
+    let deps = env.path().join("install");
     write_file(&deps, "lib.js", b"shared\n");
 
     let dh_first = DepDerivationKeyV1::from_request(&req)
