@@ -1158,6 +1158,24 @@ fn validate_dependency_contracts(
         }
     }
 
+    for (label, target) in named_targets {
+        for need in &target.needs {
+            let need = need.trim();
+            if need.is_empty() {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "target '{}' needs entries must not be empty",
+                    label
+                )));
+            } else if !manifest.dependencies.contains_key(need) && !named_targets.contains_key(need)
+            {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "target '{}' needs unknown dep alias '{}'",
+                    label, need
+                )));
+            }
+        }
+    }
+
     for (contract_id, contract) in &manifest.contracts {
         if let Err(err) = ContractRef::parse(contract_id) {
             errors.push(ValidationError::InvalidTarget(format!(

@@ -788,6 +788,37 @@ build = "pnpm --filter ui build"
 }
 
 #[test]
+fn test_validate_v03_target_needs_rejects_unknown_dep_alias() {
+    let toml = r#"
+schema_version = "0.3"
+name = "bad-needs"
+version = "0.0.1"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+runtime_version = "3.11.10"
+working_dir = "backend"
+run = "python main.py"
+needs = ["nonexistent-dep"]
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse bad needs manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("unknown needs alias must fail");
+    assert!(errors.iter().any(|error| {
+        matches!(
+            error,
+            ValidationError::InvalidTarget(message)
+                if message.contains("unknown dep alias 'nonexistent-dep'")
+        )
+    }));
+}
+
+#[test]
 fn test_from_toml_rejects_v03_top_level_legacy_entrypoint() {
     let toml = r#"
 schema_version = "0.3"
