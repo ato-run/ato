@@ -9,9 +9,14 @@
 /// If --socket is omitted, the socket path is read from ${ATO_HOME:-~/.ato}/run/ato-desktop-current.json.
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
+
+// Share the timeout policy with `ato-desktop` so client and server budgets stay
+// in lockstep (#69). The lib crate has no published library target, so we
+// pull the source in by relative path — the file is small and pure constants.
+#[path = "../automation/policy.rs"]
+mod policy;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -88,23 +93,68 @@ fn discover_socket() -> PathBuf {
     let current_file = run_dir.join("ato-desktop-current.json");
     if let Ok(data) = std::fs::read_to_string(&current_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-            if let Some(path) = v.get("socket").and_then(|s| s.as_str()) {
-                return PathBuf::from(path);
+            let pid = v.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32);
+            // Skip the discovery file's recorded socket if its pid is provably
+            // dead. When `pid` is absent we cannot prove liveness either way,
+            // so we trust the file and let the connect step surface the error
+            // (#68).
+            let pid_alive = pid.map(pid_is_alive).unwrap_or(true);
+            if pid_alive {
+                if let Some(path) = v.get("socket").and_then(|s| s.as_str()) {
+                    return PathBuf::from(path);
+                }
             }
         }
     }
-    // Fallback: first matching socket in run dir.
+    // Fallback: enumerate `ato-desktop-<pid>.sock` and pick the first whose
+    // pid is alive. This rules out orphan sockets left behind by crashed
+    // instances (#68).
     if let Ok(entries) = std::fs::read_dir(&run_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("ato-desktop-") && name.ends_with(".sock") {
+            if !(name.starts_with("ato-desktop-") && name.ends_with(".sock")) {
+                continue;
+            }
+            let stem = name
+                .strip_prefix("ato-desktop-")
+                .and_then(|s| s.strip_suffix(".sock"));
+            let pid = stem.and_then(|s| s.parse::<u32>().ok());
+            // Filenames without an embedded pid (e.g. legacy
+            // `ato-desktop.sock`) are kept; canonical `ato-desktop-<pid>.sock`
+            // entries are filtered by liveness.
+            if pid.map(pid_is_alive).unwrap_or(true) {
                 return entry.path();
             }
         }
     }
     // Last resort default.
     run_dir.join("ato-desktop.sock")
+}
+
+/// Best-effort liveness check used when picking which discovered socket to
+/// trust. Mirrors `automation::transport::pid_is_alive` — duplicated here
+/// because the bin crate cannot import private modules from the library
+/// binary. Keep the two implementations in sync.
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs error checking only; no signal is delivered.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    let errno = std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(0);
+    errno != libc::ESRCH
+}
+
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
 }
 
 // ── MCP handlers ──────────────────────────────────────────────────────────────
@@ -185,6 +235,57 @@ mod tests {
         .expect("write leaked discovery file");
 
         assert_eq!(discover_socket(), isolated_socket);
+    }
+
+    #[test]
+    fn discover_socket_skips_dead_pid_in_current_json_and_falls_back_to_live_sock() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        std::fs::create_dir_all(ato_home.join("run")).expect("create run dir");
+
+        // current.json points at a dead pid → must be ignored.
+        let dead_socket = ato_home.join("run/ato-desktop-dead.sock");
+        std::fs::write(
+            ato_home.join("run/ato-desktop-current.json"),
+            format!(
+                "{{\"pid\":0,\"socket\":\"{}\"}}",
+                dead_socket.display()
+            ),
+        )
+        .expect("write current.json");
+        std::fs::write(&dead_socket, b"").expect("touch dead socket");
+
+        // Drop a `.sock` named after this process — its pid is alive, so the
+        // fallback enumeration should pick it.
+        let live_socket = ato_home
+            .join("run")
+            .join(format!("ato-desktop-{}.sock", std::process::id()));
+        std::fs::write(&live_socket, b"").expect("touch live socket");
+
+        assert_eq!(discover_socket(), live_socket);
+    }
+
+    #[test]
+    fn discover_socket_trusts_pidless_current_json() {
+        // Backward-compat: discovery files written by older instances may
+        // omit `pid`. We can't prove liveness then, so trust the file and
+        // let connect() surface the error.
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        std::fs::create_dir_all(ato_home.join("run")).expect("create run dir");
+
+        let socket = ato_home.join("run/ato-desktop-legacy.sock");
+        std::fs::write(
+            ato_home.join("run/ato-desktop-current.json"),
+            format!("{{\"socket\":\"{}\"}}", socket.display()),
+        )
+        .expect("write current.json");
+
+        assert_eq!(discover_socket(), socket);
     }
 }
 
@@ -336,13 +437,30 @@ fn send_automation_command(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, ErrorKind, Write};
     use std::os::unix::net::UnixStream;
 
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|e| format!("cannot connect to ato-desktop socket: {e}"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(36))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => format!(
+            "no ato-desktop instance is running (no socket at {})",
+            socket_path.display()
+        ),
+        ErrorKind::PermissionDenied => format!(
+            "ato-desktop socket {} is owned by another user; only the owner can connect",
+            socket_path.display()
+        ),
+        ErrorKind::ConnectionRefused => format!(
+            "ato-desktop socket {} is stale (no listener) — start ato-desktop or remove the file",
+            socket_path.display()
+        ),
+        _ => format!("cannot connect to ato-desktop socket {}: {e}", socket_path.display()),
+    })?;
+    stream
+        .set_read_timeout(Some(policy::AUTOMATION_CLIENT_RESPONSE_TIMEOUT))
+        .ok();
+    stream
+        .set_write_timeout(Some(policy::AUTOMATION_CLIENT_WRITE_TIMEOUT))
+        .ok();
 
     let rpc = serde_json::json!({
         "jsonrpc": "2.0",
