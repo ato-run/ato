@@ -25,6 +25,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0"
+capsule-core = { path = "../capsule-core", version = "0.11.0" }
 capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
 dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -57,32 +56,28 @@ impl NamespaceData {
 
 /// Primary persistent backend using age file encryption.
 ///
-/// Path layout (relative to `home`):
-///   - Identity key:  `.ato/keys/identity.key` (shared across all domains)
-///   - Public key:    `.ato/keys/identity.pub`
-///   - Namespace file: `.ato/credentials/<domain>/<sub>.age`
+/// Path layout (relative to `ato_home`):
+///   - Identity key:  `keys/identity.key` (shared across all domains)
+///   - Public key:    `keys/identity.pub`
+///   - Namespace file: `credentials/<domain>/<sub>.age`
 ///
 /// Hierarchical namespace parsing: `"secrets/default"` →
-/// domain `"secrets"`, sub `"default"` → `.ato/credentials/secrets/default.age`.
+/// domain `"secrets"`, sub `"default"` → `credentials/secrets/default.age`.
 pub(crate) struct AgeFileBackend {
-    home: PathBuf,
+    ato_home: PathBuf,
     identity: Mutex<Option<x25519::Identity>>,
 }
 
 impl AgeFileBackend {
-    pub(crate) fn new(home: PathBuf) -> Self {
+    pub(crate) fn new(ato_home: PathBuf) -> Self {
         Self {
-            home,
+            ato_home,
             identity: Mutex::new(None),
         }
     }
 
     fn ato_root(&self) -> PathBuf {
-        if self.home.file_name() == Some(OsStr::new(".ato")) {
-            self.home.clone()
-        } else {
-            self.home.join(".ato")
-        }
+        self.ato_home.clone()
     }
 
     pub(crate) fn keys_dir(&self) -> PathBuf {
@@ -638,8 +633,8 @@ mod tests {
     fn init_identity_creates_key_and_pub_files() {
         let (dir, backend) = tmp_backend();
         backend.init_identity(None).expect("init_identity");
-        assert!(dir.path().join(".ato/keys/identity.key").exists());
-        assert!(dir.path().join(".ato/keys/identity.pub").exists());
+        assert!(dir.path().join("keys/identity.key").exists());
+        assert!(dir.path().join("keys/identity.pub").exists());
     }
 
     #[test]
@@ -667,7 +662,7 @@ mod tests {
         backend
             .set(&key, "v".into(), None, None, None)
             .expect("set");
-        let path = dir.path().join(".ato/credentials/secrets/default.age");
+        let path = dir.path().join("credentials/secrets/default.age");
         assert!(path.exists(), "expected file at {}", path.display());
     }
 
@@ -685,14 +680,26 @@ mod tests {
 
         assert!(dir
             .path()
-            .join(".ato/credentials/secrets/default.age")
+            .join("credentials/secrets/default.age")
             .exists());
         assert!(dir
             .path()
-            .join(".ato/credentials/auth/session.age")
+            .join("credentials/auth/session.age")
             .exists());
         assert_eq!(backend.get(&s_key).unwrap(), Some("secret-foo".into()));
         assert_eq!(backend.get(&a_key).unwrap(), Some("auth-token".into()));
+    }
+
+    #[test]
+    fn custom_ato_home_does_not_append_nested_dot_ato() {
+        let dir = TempDir::new().expect("tempdir");
+        let ato_home = dir.path().join("isolated-ato-home");
+        let backend = AgeFileBackend::new(ato_home.clone());
+
+        backend.init_identity(None).expect("init_identity");
+
+        assert!(ato_home.join("keys/identity.key").exists());
+        assert!(!ato_home.join(".ato/keys/identity.key").exists());
     }
 
     #[test]

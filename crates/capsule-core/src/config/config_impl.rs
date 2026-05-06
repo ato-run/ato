@@ -33,9 +33,7 @@ pub struct RegistryConfig {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .ok_or_else(|| CapsuleError::Config("Failed to determine home directory".to_string()))?
-        .join(".ato"))
+    crate::common::paths::nacelle_home_dir()
 }
 
 pub fn config_path() -> Result<PathBuf> {

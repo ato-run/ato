@@ -69,14 +69,14 @@ impl AuthStore {
         Self { chain, age, memory }
     }
 
-    /// Standard constructor: tries to unlock `<home>/.ato/keys/identity.key`
+    /// Standard constructor: tries to unlock `<ato_home>/keys/identity.key`
     /// non-interactively.
     ///
-    /// `home` is passed explicitly so tests (and anything else that wants to
-    /// redirect the age backend) can operate out of a temp directory without
-    /// mutating `$HOME`.
-    pub(crate) fn open_for_home(home: &std::path::Path) -> Result<Self> {
-        let mut age_backend = AgeFileBackend::new(home.to_path_buf());
+    /// `ato_home` is passed explicitly so tests (and anything else that wants
+    /// to redirect the age backend) can operate out of a temp directory
+    /// without mutating `$HOME`.
+    pub(crate) fn open_for_home(ato_home: &std::path::Path) -> Result<Self> {
+        let mut age_backend = AgeFileBackend::new(ato_home.to_path_buf());
         let age = if try_load_identity_non_interactive(&mut age_backend) {
             Some(Arc::new(age_backend))
         } else {
@@ -85,8 +85,8 @@ impl AuthStore {
 
         let memory = Arc::new(MemoryBackend::new(None));
 
-        let order =
-            credential::config::read_order(home).unwrap_or_else(credential::config::default_order);
+        let order = credential::config::read_order(ato_home)
+            .unwrap_or_else(credential::config::default_order);
 
         Ok(Self::with_backends(&order, age, memory))
     }
