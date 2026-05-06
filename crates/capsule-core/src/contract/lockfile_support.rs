@@ -62,6 +62,11 @@ pub(super) async fn ensure_node(
     fetcher.ensure_node(version).await
 }
 
+// TODO(tools-registry, ato-run/ato#29): the lockfile-generation path still
+// fetches pnpm via this private helper. The preflight (ato run) path now goes
+// through `crate::tools::ensure_runtime_tool(&PNPM, ...)`, so for the moment
+// pnpm has two parallel fetch sites with shared `PNPM_VERSION` constants. The
+// next slice migrates this caller to the registry and deletes the duplicate.
 pub(super) async fn ensure_pnpm(
     node_path: &Path,
     reporter: Arc<dyn CapsuleReporter + 'static>,

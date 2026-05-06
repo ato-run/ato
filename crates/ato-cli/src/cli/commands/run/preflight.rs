@@ -281,12 +281,15 @@ pub(crate) async fn run_v03_lifecycle_steps(
                 reporter
                     .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
                     .await?;
+                let extra_path =
+                    ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
                 run_lifecycle_shell_command(
                     &target_plan,
                     launch_ctx,
                     &command,
                     "provision",
                     &working_dir,
+                    extra_path.as_deref(),
                 )?;
             }
         }
@@ -299,11 +302,64 @@ pub(crate) async fn run_v03_lifecycle_steps(
             reporter
                 .notify(format!("🏗️  Build [{}]: {}", target_label, command))
                 .await?;
-            run_lifecycle_shell_command(&target_plan, launch_ctx, &command, "build", &working_dir)?;
+            let extra_path =
+                ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            run_lifecycle_shell_command(
+                &target_plan,
+                launch_ctx,
+                &command,
+                "build",
+                &working_dir,
+                extra_path.as_deref(),
+            )?;
         }
     }
 
     Ok(())
+}
+
+/// Returns an optional directory that must be prepended to PATH for the given
+/// lifecycle command. Looks up the command's leading token in the unified
+/// runtime tools registry (`capsule_core::tools`); if it matches a known tool
+/// (e.g. `pnpm`), the tool is provisioned and the shim directory is returned
+/// for PATH prepending. This is what lets capsules with `pnpm-lock.yaml` run
+/// on hosts with only `ato` installed.
+async fn ensure_lifecycle_extra_path(
+    plan: &capsule_core::router::ManifestData,
+    command: &str,
+    reporter: &Arc<CliReporter>,
+) -> Result<Option<PathBuf>> {
+    let leading = command
+        .split_whitespace()
+        .next()
+        .map(|tok| tok.trim_matches(|c: char| c == '"' || c == '\''))
+        .unwrap_or("");
+    let Some(spec) = capsule_core::tools::lookup(leading) else {
+        return Ok(None);
+    };
+
+    let version_override = capsule_core::tools::read_tool_version(
+        &plan.manifest,
+        plan.selected_target_label(),
+        spec.name,
+    );
+
+    let mut deps = capsule_core::tools::ToolDeps::default();
+    if spec.depends_on.contains(&"node") {
+        deps.node_bin = Some(runtime_manager::ensure_node_binary_with_authority(
+            plan, None,
+        )?);
+    }
+
+    let reporter_dyn: Arc<dyn capsule_core::reporter::CapsuleReporter + 'static> = reporter.clone();
+    let handle = capsule_core::tools::ensure_runtime_tool(
+        spec,
+        version_override.as_deref(),
+        &deps,
+        reporter_dyn,
+    )
+    .await?;
+    Ok(Some(handle.bin_dir))
 }
 
 pub(super) fn plan_v03_provision_command(
@@ -521,6 +577,7 @@ fn run_lifecycle_shell_command(
     command: &str,
     phase: &str,
     working_dir: &Path,
+    extra_path: Option<&Path>,
 ) -> Result<()> {
     // Prepend the ato-managed Node bin dir to PATH inside the command string itself
     // (#294). We cannot rely on setting PATH in the subprocess env because `sh -l`
@@ -530,14 +587,27 @@ fn run_lifecycle_shell_command(
     // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
     // (npm:pkg) that store runtime_version in capsule.toml are handled correctly —
     // `ensure_node_binary` alone requires capsule.lock.json which providers don't create.
-    let managed_node_path_prefix: String =
-        match runtime_manager::ensure_node_binary_with_authority(plan, None) {
-            Ok(node_bin) => node_bin
-                .parent()
-                .map(|dir| format!("export PATH={}:$PATH; ", dir.display()))
-                .unwrap_or_default(),
-            Err(_) => String::new(),
-        };
+    let managed_node_dir =
+        runtime_manager::ensure_node_binary_with_authority(plan, None)
+            .ok()
+            .and_then(|node_bin| node_bin.parent().map(Path::to_path_buf));
+    let mut path_prefix_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(extra) = extra_path {
+        path_prefix_dirs.push(extra.to_path_buf());
+    }
+    if let Some(dir) = managed_node_dir {
+        path_prefix_dirs.push(dir);
+    }
+    let managed_node_path_prefix = if path_prefix_dirs.is_empty() {
+        String::new()
+    } else {
+        let joined = path_prefix_dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(":");
+        format!("export PATH={joined}:$PATH; ")
+    };
     let effective_command = format!("{}{}", managed_node_path_prefix, command);
 
     #[cfg(windows)]
