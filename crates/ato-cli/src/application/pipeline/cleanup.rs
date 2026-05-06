@@ -392,7 +392,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::{CleanupJournal, CleanupReport, PipelineAttemptContext};
+    use super::{run_sigint_cleanup, CleanupJournal, CleanupReport, PipelineAttemptContext};
     use crate::application::pipeline::hourglass::HourglassPhase;
 
     fn ok_record(action: &str) -> CleanupActionRecord {
@@ -476,6 +476,27 @@ mod tests {
             retry_report.actions[0].status,
             CleanupActionStatus::Succeeded
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigint_cleanup_kills_registered_child_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+
+        let attempt = PipelineAttemptContext::default();
+        attempt.activate_sigint_cleanup();
+        {
+            let mut scope = attempt.cleanup_scope();
+            scope.register_kill_child_process(pid, "sleep-fixture");
+        }
+
+        run_sigint_cleanup();
+        let _ = child.wait().expect("wait after sigint cleanup");
+        assert!(child.try_wait().expect("try wait after reap").is_some());
     }
 
     #[cfg(unix)]
