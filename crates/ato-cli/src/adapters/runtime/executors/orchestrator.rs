@@ -80,6 +80,57 @@ pub async fn execute(
     .await
 }
 
+/// Execution mode for the orchestrator (#73 PR-C).
+///
+/// `ForegroundMonitorUntilExit` is the historical `ato run` path: services
+/// are started, readiness is awaited, and the call blocks in
+/// `monitor_until_exit` until the orchestration exits.
+///
+/// `DetachAfterReady` is the session-start path: services are started and
+/// readiness is awaited, then control returns to the caller along with
+/// `RunningServices` so the wrapper (e.g. `start_orchestration_session_in_process`)
+/// owns the lifecycle handoff. The caller is responsible for keeping the
+/// returned handle alive (currently via `mem::forget`; PR-D replaces this
+/// with a registered `BackgroundSessionOwner`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrchestratorExecutionMode {
+    ForegroundMonitorUntilExit,
+    DetachAfterReady,
+}
+
+/// Public summary of a running orchestration service, sufficient for the
+/// session layer to record provider lifecycle without holding the internal
+/// `RunningService` directly. PR-D consumes this when populating
+/// `SessionRecord.dependency_contracts` for orchestration capsules.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // PR-C: shape is fixed; PR-D consumes the fields.
+pub struct DetachedServiceSnapshot {
+    pub name: String,
+    pub target_label: String,
+    pub local_pid: Option<u32>,
+    pub container_id: Option<String>,
+    pub host_ports: HashMap<u16, u16>,
+    pub published_port: Option<u16>,
+}
+
+/// Handle returned by `execute_until_ready_and_detach`. The session layer
+/// reads `services` to build its `SessionRecord` view of the materialized
+/// graph subset, then `mem::forget`s the handle so the underlying
+/// `RunningService` values (and their `Child`/log threads/event channels)
+/// outlive the call. PR-D replaces the `mem::forget` with explicit
+/// ownership transfer to a session-scoped owner registered into
+/// `ProcessManager`.
+#[allow(dead_code)] // PR-C: shape is fixed; PR-D consumes the fields.
+pub struct DetachedOrchestrationServices {
+    pub services: Vec<DetachedServiceSnapshot>,
+    pub network_name: Option<String>,
+    /// Held privately so the caller cannot accidentally drop one provider
+    /// while keeping the others. Both `mem::forget(handle)` (the v0.5.0
+    /// PR-C pattern) and the future PR-D `BackgroundSessionOwner` consume
+    /// the whole map together.
+    inner: HashMap<String, RunningService>,
+}
+
 pub async fn execute_with_client<C>(
     plan: &ManifestData,
     prepared: &PreparedRunContext,
@@ -89,6 +140,96 @@ pub async fn execute_with_client<C>(
     attempt: Option<&mut PipelineAttemptContext>,
     client: C,
 ) -> Result<i32>
+where
+    C: OciRuntimeClient + Clone + Send + Sync + 'static,
+{
+    let (mut running, orchestration, network_name, client) = start_until_ready_with_client(
+        plan,
+        prepared,
+        reporter.clone(),
+        launch_ctx,
+        options,
+        attempt,
+        client,
+        OrchestratorExecutionMode::ForegroundMonitorUntilExit,
+    )
+    .await?;
+
+    let exit_code = monitor_until_exit(
+        &orchestration,
+        &mut running,
+        client.as_ref(),
+        network_name.as_deref(),
+    )
+    .await?;
+    Ok(exit_code)
+}
+
+/// Detach variant of `execute_with_client`: starts the orchestration graph,
+/// awaits readiness, and returns a `DetachedOrchestrationServices` handle
+/// instead of blocking in `monitor_until_exit`.
+///
+/// The caller (currently `start_orchestration_session_in_process`) keeps the
+/// handle alive through the session lifetime — typically by `mem::forget`
+/// after persisting the snapshot. PR-D replaces the `mem::forget` with a
+/// session-scoped `BackgroundSessionOwner` that owns the handle and is
+/// dropped from `stop_session`.
+pub async fn execute_until_ready_and_detach<C>(
+    plan: &ManifestData,
+    prepared: &PreparedRunContext,
+    reporter: Arc<CliReporter>,
+    launch_ctx: &RuntimeLaunchContext,
+    options: &OrchestratorOptions,
+    attempt: Option<&mut PipelineAttemptContext>,
+    client: C,
+) -> Result<DetachedOrchestrationServices>
+where
+    C: OciRuntimeClient + Clone + Send + Sync + 'static,
+{
+    let (running, _orchestration, network_name, _client) = start_until_ready_with_client(
+        plan,
+        prepared,
+        reporter,
+        launch_ctx,
+        options,
+        attempt,
+        client,
+        OrchestratorExecutionMode::DetachAfterReady,
+    )
+    .await?;
+
+    let services: Vec<DetachedServiceSnapshot> = running
+        .iter()
+        .map(|(name, rs)| build_detached_snapshot(name, rs))
+        .collect();
+
+    Ok(DetachedOrchestrationServices {
+        services,
+        network_name,
+        inner: running,
+    })
+}
+
+/// Shared start-up path used by both the foreground and detach modes.
+///
+/// Returns `(running_services, orchestration_plan, network_name, client_arc)`
+/// so the foreground caller can immediately enter `monitor_until_exit` and
+/// the detach caller can build a public snapshot.
+async fn start_until_ready_with_client<C>(
+    plan: &ManifestData,
+    prepared: &PreparedRunContext,
+    reporter: Arc<CliReporter>,
+    launch_ctx: &RuntimeLaunchContext,
+    options: &OrchestratorOptions,
+    attempt: Option<&mut PipelineAttemptContext>,
+    client: C,
+    _mode: OrchestratorExecutionMode,
+) -> Result<(
+    HashMap<String, RunningService>,
+    OrchestrationPlan,
+    Option<String>,
+    Arc<C>,
+)>
 where
     C: OciRuntimeClient + Clone + Send + Sync + 'static,
 {
@@ -144,18 +285,34 @@ where
     }
 
     runtime.commit_startup_cleanup();
-    let mut running = runtime.into_running().await;
+    let running = runtime.into_running().await;
 
     notify_main_endpoint(&orchestration, &running, &reporter).await?;
 
-    let exit_code = monitor_until_exit(
-        &orchestration,
-        &mut running,
-        client.as_ref(),
-        network_name.as_deref(),
-    )
-    .await?;
-    Ok(exit_code)
+    Ok((running, orchestration, network_name, client))
+}
+
+fn build_detached_snapshot(name: &str, service: &RunningService) -> DetachedServiceSnapshot {
+    let (container_id, host_ports) = match &service.handle {
+        RunningHandle::Local(_) => (None, HashMap::new()),
+        RunningHandle::Oci(oci) => (Some(oci.container_id.clone()), oci.host_ports.clone()),
+    };
+    let target_label = match &service.service.runtime {
+        ResolvedServiceRuntime::Oci(rt) => rt.target.clone(),
+        ResolvedServiceRuntime::Managed(rt) => rt.target.clone(),
+    };
+    let published_port = match &service.service.runtime {
+        ResolvedServiceRuntime::Oci(rt) => rt.port,
+        ResolvedServiceRuntime::Managed(rt) => rt.port,
+    };
+    DetachedServiceSnapshot {
+        name: name.to_string(),
+        target_label,
+        local_pid: service.local_pid(),
+        container_id,
+        host_ports,
+        published_port,
+    }
 }
 
 struct RunningService {

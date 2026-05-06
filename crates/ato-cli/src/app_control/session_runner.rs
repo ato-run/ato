@@ -42,8 +42,34 @@ use super::guest_contract::parse_guest_contract;
 use super::resolve::{build_resolution, HandleResolution};
 use super::session::{
     redirect_stdout_to_stderr, resolve_session_launch_plan, restore_stdout, start_guest_session,
-    start_orchestration_session_supervisor, start_runtime_session, SessionInfo,
+    start_orchestration_session_in_process, start_orchestration_session_supervisor,
+    start_runtime_session, SessionInfo,
 };
+
+/// Env var fence for the legacy opaque orchestration supervisor (#73 PR-C).
+///
+/// When `ATO_LEGACY_SUPERVISOR=1` the wrapper falls back to spawning a
+/// nested `ato run` subprocess (the pre-v0.5.0 behavior). The normal path
+/// uses `start_orchestration_session_in_process` which materializes the
+/// orchestration graph in-process via `executors::orchestrator`'s detach
+/// API. The fence exists only as an emergency escape if the in-process path
+/// regresses against a real-world capsule; it is not part of the supported
+/// surface and is removed in v0.5.x once the regression matrix is in place.
+pub(crate) const LEGACY_SUPERVISOR_ENV: &str = "ATO_LEGACY_SUPERVISOR";
+
+pub(crate) fn legacy_supervisor_enabled() -> bool {
+    legacy_supervisor_enabled_for_value(
+        std::env::var(LEGACY_SUPERVISOR_ENV).ok().as_deref(),
+    )
+}
+
+/// Pure-logic helper extracted so tests can verify the gate without
+/// mutating process-global env (which races other env-touching tests in
+/// the crate). Only `Some("1")` flips the gate; `None`, `Some("true")`,
+/// `Some("yes")`, etc. all keep the in-process path.
+pub(crate) fn legacy_supervisor_enabled_for_value(value: Option<&str>) -> bool {
+    matches!(value, Some("1"))
+}
 
 pub(super) struct SessionStartPhaseRunner<'a> {
     handle: &'a str,
@@ -63,7 +89,12 @@ pub(super) struct SessionStartPhaseRunner<'a> {
     // Set by Build phase
     build_observation: Option<bm::BuildObservation>,
     build_decision_kind: Option<bm::BuildResultKind>,
-    orchestration_supervisor_mode: bool,
+    // `orchestration_supervisor_mode` was removed in #73 PR-C. The Build
+    // phase now runs unconditionally (the in-process orchestration path
+    // uses the same Build helpers as single-target session start), and the
+    // Execute phase decides between in-process and legacy fallback by
+    // checking `plan.is_orchestration_mode()` and the
+    // `ATO_LEGACY_SUPERVISOR=1` env at the spawn point.
 
     // Set by Execute phase (App Session Materialization).
     /// `true` when Execute returned an envelope by reusing an existing
@@ -95,18 +126,33 @@ impl<'a> SessionStartPhaseRunner<'a> {
             launch_ctx: RuntimeLaunchContext::empty(),
             build_observation: None,
             build_decision_kind: None,
-            orchestration_supervisor_mode: false,
             execute_reused: false,
             execute_prior_kind: None,
             session_info: None,
         }
     }
 
+    /// `true` when the consumer manifest declares a top-level `[services]`
+    /// graph and no explicit target was selected. Computed from `self.plan`
+    /// after `run_install`. Replaces the old `orchestration_supervisor_mode`
+    /// field — Build no longer skips on this and Execute uses it only to
+    /// dispatch between `start_orchestration_session_in_process` (default)
+    /// and `start_orchestration_session_supervisor`
+    /// (legacy, `ATO_LEGACY_SUPERVISOR=1`).
+    fn is_orchestration_session(&self) -> bool {
+        self.target_label.is_none()
+            && self
+                .plan
+                .as_ref()
+                .map(|plan| plan.is_orchestration_mode())
+                .unwrap_or(false)
+    }
+
     async fn run_install(&mut self) -> Result<()> {
         let resolution = build_resolution(self.handle, self.target_label, None)?;
         let (manifest_path, mut plan, mut launch, mut notes) =
             resolve_session_launch_plan(self.handle, self.target_label)?;
-        let orchestration_supervisor_mode =
+        let is_orchestration =
             self.target_label.is_none() && plan.is_orchestration_mode();
 
         // Phase Y option 2: re-anchor the registry-installed capsule onto a
@@ -114,7 +160,14 @@ impl<'a> SessionStartPhaseRunner<'a> {
         // shared install dir at `~/.ato/runtimes/<scoped>/<version>/`.
         // Local capsules (manifest path outside the runtimes tree) keep
         // their original workspace_root so user edits stay live.
-        let manifest_path = if orchestration_supervisor_mode {
+        //
+        // Orchestration sessions historically skipped projection because the
+        // nested `ato run` supervisor re-resolved the manifest from the
+        // install dir. After #73 PR-C the in-process path runs in this
+        // process, so projection is applied uniformly except where it would
+        // require a workspace_root rewrite that the orchestration plan
+        // already pinned (kept conservative for v0.5.0).
+        let manifest_path = if is_orchestration {
             manifest_path
         } else {
             match maybe_project_to_session(&manifest_path, &mut plan, &mut launch) {
@@ -133,11 +186,10 @@ impl<'a> SessionStartPhaseRunner<'a> {
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
         let manifest_value: toml::Value = toml::from_str(&raw_manifest)
             .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-        // RuntimeLaunchContext::empty() matches the pre-pipeline behavior of
-        // `start_session`: no IPC bindings, no extra injected env. The check
-        // falls back to OS env / manifest env entries — which is what the
-        // spawned child will actually receive.
-        if orchestration_supervisor_mode {
+        // Preflight is the only place the run_install branch on
+        // `is_orchestration` survives, because [services] capsules need a
+        // services-aware required_env check and single-target capsules don't.
+        if is_orchestration {
             let orchestration = plan
                 .resolve_services()
                 .context("failed to resolve [services] orchestration plan")?;
@@ -160,15 +212,17 @@ impl<'a> SessionStartPhaseRunner<'a> {
         self.raw_manifest = Some(raw_manifest);
         self.manifest_value = Some(manifest_value);
         self.notes = notes;
-        self.orchestration_supervisor_mode = orchestration_supervisor_mode;
         Ok(())
     }
 
     async fn run_build(&mut self) -> Result<()> {
-        if self.orchestration_supervisor_mode {
-            self.build_decision_kind = Some(bm::BuildResultKind::NotApplicable);
-            return Ok(());
-        }
+        // PR-C: orchestration mode no longer skips Build. The in-process
+        // orchestration path runs in this process, so the wrapper owns the
+        // build instead of delegating it to a nested `ato run`. The Build
+        // helpers below are mode-agnostic; orchestration capsules whose
+        // workload requires no build observe `BuildResultKind::NotApplicable`
+        // through `prepare_decision`, the same way single-target capsules
+        // without a build script do.
 
         let plan = self
             .plan
@@ -416,12 +470,28 @@ impl<'a> SessionStartPhaseRunner<'a> {
         raw_manifest: &str,
         launch: &LaunchSpec,
     ) -> Result<SessionInfo> {
-        if self.orchestration_supervisor_mode {
-            return start_orchestration_session_supervisor(
+        // Orchestration session dispatch (#73 PR-C):
+        //   normal path  → start_orchestration_session_in_process
+        //   ATO_LEGACY_SUPERVISOR=1 → start_orchestration_session_supervisor
+        if self.is_orchestration_session() {
+            if legacy_supervisor_enabled() {
+                eprintln!(
+                    "ATO-WARN ATO_LEGACY_SUPERVISOR=1 — using legacy nested `ato run` supervisor for orchestration session start. This emergency fallback is removed in v0.5.x.",
+                );
+                return start_orchestration_session_supervisor(
+                    self.handle,
+                    resolution,
+                    manifest_path,
+                    plan,
+                    self.notes.clone(),
+                );
+            }
+            return start_orchestration_session_in_process(
                 self.handle,
                 resolution,
                 manifest_path,
                 plan,
+                raw_manifest,
                 self.notes.clone(),
             );
         }

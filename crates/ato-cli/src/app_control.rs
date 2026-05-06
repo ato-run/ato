@@ -22,7 +22,7 @@ mod guest_contract;
 mod latest;
 mod resolve;
 mod session;
-mod session_runner;
+pub(crate) mod session_runner;
 
 pub use latest::fetch_latest;
 pub use resolve::resolve_handle;
