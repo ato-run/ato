@@ -19,12 +19,12 @@ use capsule_core::lockfile::{
     manifest_external_capsule_dependencies, verify_lockfile_external_dependencies, CapsuleLock,
     CAPSULE_LOCK_FILE_NAME,
 };
-use capsule_core::types::{CapsuleManifest, CapsuleType, StateDurability};
+use capsule_core::types::{CapsuleManifest, CapsuleType, ConfigField, ConfigKind, StateDurability};
 use capsule_core::CapsuleReporter;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
-use crate::application::dependency_credentials::{ProcessHostEnv, RedactionRegistry};
+use crate::application::dependency_credentials::{HostEnv, ProcessHostEnv, RedactionRegistry};
 use crate::application::dependency_materializer::{
     digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
     DependencyMaterializer, DependencyProjection, InstallPolicies, ManifestInputs, PlatformTriple,
@@ -891,6 +891,249 @@ pub(crate) fn inject_dependency_contract_env(
     Ok(launch_ctx)
 }
 
+#[derive(Debug, Default, Clone)]
+pub(crate) struct MissingDependencyContractEnvReport {
+    pub(crate) keys: Vec<String>,
+    pub(crate) schema: Vec<ConfigField>,
+}
+
+fn push_missing_dependency_contract_env(
+    report: &mut MissingDependencyContractEnvReport,
+    seen_missing: &mut std::collections::HashSet<String>,
+    host_env: &dyn HostEnv,
+    name: &str,
+    label: Option<String>,
+) {
+    if host_env
+        .get(name)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if !seen_missing.insert(name.to_string()) {
+        return;
+    }
+
+    report.keys.push(name.to_string());
+    report.schema.push(ConfigField {
+        name: name.to_string(),
+        label,
+        description: None,
+        kind: ConfigKind::Secret,
+        default: None,
+        placeholder: None,
+    });
+}
+
+pub(crate) fn collect_missing_dependency_contract_manifest_env(
+    manifest_value: &toml::Value,
+    host_env: &dyn HostEnv,
+) -> Result<MissingDependencyContractEnvReport> {
+    use capsule_core::foundation::types::{
+        ParamValue, TemplateExpr, TemplateSegment, TemplatedString,
+    };
+
+    let capsule_dependencies = manifest_external_capsule_dependencies(manifest_value)
+        .context("failed to read consumer dependency declarations for dependency env preflight")?;
+
+    let mut report = MissingDependencyContractEnvReport::default();
+    let mut seen_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in &capsule_dependencies {
+        if entry.contract.is_none() {
+            continue;
+        }
+
+        for (param_key, value) in &entry.parameters {
+            let ParamValue::String(raw) = value else {
+                continue;
+            };
+            let Ok(template) = TemplatedString::parse(raw) else {
+                continue;
+            };
+            for segment in &template.segments {
+                let TemplateSegment::Expr(TemplateExpr::Env(name)) = segment else {
+                    continue;
+                };
+                push_missing_dependency_contract_env(
+                    &mut report,
+                    &mut seen_missing,
+                    host_env,
+                    name,
+                    Some(format!(
+                        "dep '{}'.parameters.{} → {{env.{}}}",
+                        entry.alias, param_key, name
+                    )),
+                );
+            }
+        }
+
+        for (cred_key, template) in &entry.credentials {
+            for segment in &template.segments {
+                let TemplateSegment::Expr(TemplateExpr::Env(name)) = segment else {
+                    continue;
+                };
+                push_missing_dependency_contract_env(
+                    &mut report,
+                    &mut seen_missing,
+                    host_env,
+                    name,
+                    Some(format!(
+                        "dep '{}'.credentials.{} → {{env.{}}}",
+                        entry.alias, cred_key, name
+                    )),
+                );
+            }
+        }
+    }
+
+    if let Some(required_env) = manifest_value
+        .get("required_env")
+        .and_then(toml::Value::as_array)
+    {
+        for value in required_env {
+            let Some(name) = value.as_str().map(str::trim) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            push_missing_dependency_contract_env(
+                &mut report,
+                &mut seen_missing,
+                host_env,
+                name,
+                None,
+            );
+        }
+    }
+
+    Ok(report)
+}
+
+pub(crate) fn preflight_dependency_contract_manifest_env(
+    plan: &capsule_core::router::ManifestData,
+    manifest_value: &toml::Value,
+    host_env: &dyn HostEnv,
+    action: &str,
+) -> Result<()> {
+    if !manifest_external_capsule_dependencies(manifest_value)
+        .context("failed to read consumer dependency declarations for dependency env preflight")?
+        .iter()
+        .any(|dependency| dependency.contract.is_some())
+    {
+        return Ok(());
+    }
+
+    let report = collect_missing_dependency_contract_manifest_env(manifest_value, host_env)?;
+    if report.keys.is_empty() {
+        return Ok(());
+    }
+
+    let target = plan.selected_target_label();
+    let message = format!(
+        "missing required environment variables for dependency contracts of target '{}': {} (set them before {})",
+        target,
+        report.keys.join(", "),
+        action
+    );
+    Err(
+        AtoExecutionError::missing_required_env(message, report.keys, report.schema, Some(target))
+            .into(),
+    )
+}
+
+pub(crate) async fn setup_dependency_contracts_launch_context(
+    plan: &capsule_core::router::ManifestData,
+    prepared: &mut PreparedRunContext,
+    reporter: &Arc<CliReporter>,
+    launch_ctx: &mut crate::executors::launch_context::RuntimeLaunchContext,
+    preflight_action: &str,
+) -> Result<Option<DependencyContractGuard>> {
+    let capsule_dependencies =
+        manifest_external_capsule_dependencies(prepared.bridge_manifest.as_toml())
+            .context("failed to read consumer dependency declarations")?;
+    if !capsule_dependencies
+        .iter()
+        .any(|dependency| dependency.contract.is_some())
+    {
+        return Ok(None);
+    }
+
+    let compatibility_legacy_lock = match prepared.compatibility_legacy_lock.as_ref() {
+        Some(ctx) => ctx.clone(),
+        None => {
+            let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
+                prepared.bridge_manifest.as_toml(),
+            )
+            .context("failed to build compatibility bridge for auto-lock")?;
+            let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
+                prepared.workspace_root.clone(),
+                bridge,
+            )
+            .context("failed to build CompatProjectInput for auto-lock")?;
+            let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
+                &compat_input,
+                reporter.clone(),
+                false,
+            )
+            .await
+            .context("auto-lock for dependency contracts failed")?;
+            let bytes = std::fs::read(&lock_path).with_context(|| {
+                format!("failed to read auto-generated lock {}", lock_path.display())
+            })?;
+            let lock: capsule_core::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+                .with_context(|| {
+                    format!(
+                        "failed to parse auto-generated lock {}",
+                        lock_path.display()
+                    )
+                })?;
+            CompatibilityLegacyLockContext {
+                manifest_path: compat_input.workspace_root().join("capsule.toml"),
+                path: lock_path,
+                lock,
+            }
+        }
+    };
+    prepared.compatibility_legacy_lock = Some(compatibility_legacy_lock.clone());
+
+    preflight_dependency_contract_manifest_env(
+        plan,
+        prepared.bridge_manifest.as_toml(),
+        &ProcessHostEnv,
+        preflight_action,
+    )?;
+    verify_lockfile_external_dependencies(&plan.manifest, &compatibility_legacy_lock.lock)?;
+
+    let guard =
+        start_dependency_contracts_for_run(prepared, plan, &compatibility_legacy_lock.lock).await?;
+
+    if let Some(graph) = guard.graph() {
+        for line in graph.summary_lines() {
+            eprintln!("{line}");
+        }
+
+        let mut updated = std::mem::replace(
+            launch_ctx,
+            crate::executors::launch_context::RuntimeLaunchContext::empty(),
+        );
+        updated = inject_dependency_contract_env(updated, plan, guard.lock(), graph)?;
+        let dep_endpoints: Vec<String> = graph
+            .deps()
+            .iter()
+            .filter_map(|dep| dep.allocated_port.map(|port| format!("127.0.0.1:{port}")))
+            .collect();
+        if !dep_endpoints.is_empty() {
+            updated = updated.with_dep_endpoints(dep_endpoints);
+        }
+        *launch_ctx = updated;
+    }
+
+    Ok(Some(guard))
+}
+
 fn render_consumer_dependency_template(
     raw: &str,
     lock: &DependencyLock,
@@ -1318,82 +1561,6 @@ where
             .await?,
         );
     }
-    let mut dep_contracts = None;
-    if has_dependency_contracts {
-        // Auto-lock: if the consumer was fetched without a pre-existing
-        // capsule.lock.json (typical for `ato run github.com/...`), the
-        // dep-contract path needs derived lock entries. Generate them on
-        // the fly here so the user does not have to run `ato lock` by
-        // hand. The canonical `ato.lock.json` is left untouched — this
-        // path only produces the compat-legacy derived lock that
-        // verify_lockfile_external_dependencies + start_dependency_contracts_for_run
-        // consume. RFC §13 Open Question "Local override" is a
-        // follow-on; this auto-lock is the minimum needed for github
-        // capsule provider sources.
-        let compatibility_legacy_lock = match prepared.compatibility_legacy_lock.as_ref() {
-            Some(ctx) => ctx.clone(),
-            None => {
-                let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(
-                    prepared.bridge_manifest.as_toml(),
-                )
-                .context("failed to build compatibility bridge for auto-lock")?;
-                let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
-                    prepared.workspace_root.clone(),
-                    bridge,
-                )
-                .context("failed to build CompatProjectInput for auto-lock")?;
-                let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
-                    &compat_input,
-                    request.reporter.clone(),
-                    false,
-                )
-                .await
-                .context("auto-lock for dependency contracts failed")?;
-                let bytes = std::fs::read(&lock_path).with_context(|| {
-                    format!("failed to read auto-generated lock {}", lock_path.display())
-                })?;
-                let lock: capsule_core::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
-                    .with_context(|| {
-                        format!(
-                            "failed to parse auto-generated lock {}",
-                            lock_path.display()
-                        )
-                    })?;
-                CompatibilityLegacyLockContext {
-                    manifest_path: compat_input.workspace_root().join("capsule.toml"),
-                    path: lock_path,
-                    lock,
-                }
-            }
-        };
-        prepared.compatibility_legacy_lock = Some(compatibility_legacy_lock.clone());
-        verify_lockfile_external_dependencies(
-            &decision.plan.manifest,
-            &compatibility_legacy_lock.lock,
-        )?;
-        let guard = start_dependency_contracts_for_run(
-            &prepared,
-            &decision.plan,
-            &compatibility_legacy_lock.lock,
-        )
-        .await?;
-        // Surface a secret-free summary of started deps before the
-        // consumer launches. Helps `ato run` users (especially via
-        // ato-desktop) see which provider was fetched, where its
-        // process is logging, and which port the orchestrator
-        // allocated. runtime_exports values are intentionally omitted
-        // — only export key names are listed — because values may
-        // contain credentials that the redaction filter is also
-        // scrubbing from logs.
-        if let Some(graph) = guard.graph() {
-            register_dependency_contract_cleanup(attempt.as_deref_mut(), graph);
-            for line in graph.summary_lines() {
-                eprintln!("{line}");
-            }
-        }
-        dep_contracts = Some(guard);
-    }
-
     let injected_data =
         crate::data_injection::resolve_and_record(&decision.plan, &request.inject_bindings).await?;
     let launch_ctx =
@@ -1422,29 +1589,21 @@ where
             );
         }
     }
-    if let Some(dep_contracts) = dep_contracts.as_ref() {
-        let graph = dep_contracts
-            .graph()
-            .context("dependency contract graph missing after startup")?;
-        launch_ctx = inject_dependency_contract_env(
-            launch_ctx,
+    let mut dep_contracts = None;
+    if has_dependency_contracts {
+        let guard = setup_dependency_contracts_launch_context(
             &decision.plan,
-            dep_contracts.lock(),
-            graph,
-        )?;
-        // Surface the providers' loopback endpoints to the consumer's
-        // sandbox so `--sandbox` consumers can `connect(127.0.0.1:<port>)`
-        // without tripping the egress-deny default. The orchestrator owns
-        // port allocation; without this the consumer's psycopg/sqlalchemy
-        // stack hits EPERM mid-startup even though the provider is happily
-        // listening on the same loopback (#17).
-        let dep_endpoints: Vec<String> = graph
-            .deps()
-            .iter()
-            .filter_map(|dep| dep.allocated_port.map(|port| format!("127.0.0.1:{port}")))
-            .collect();
-        if !dep_endpoints.is_empty() {
-            launch_ctx = launch_ctx.with_dep_endpoints(dep_endpoints);
+            &mut prepared,
+            &request.reporter,
+            &mut launch_ctx,
+            "running the capsule",
+        )
+        .await?;
+        if let Some(guard) = guard {
+            if let Some(graph) = guard.graph() {
+                register_dependency_contract_cleanup(attempt.as_deref_mut(), graph);
+            }
+            dep_contracts = Some(guard);
         }
     }
 
@@ -3415,6 +3574,10 @@ mod tests {
 
     use crate::reporters::CliReporter;
 
+    fn empty_host_env() -> crate::application::dependency_credentials::MapHostEnv {
+        crate::application::dependency_credentials::MapHostEnv::new(&[])
+    }
+
     fn workspace_tempdir(name: &str) -> tempfile::TempDir {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(".ato")
@@ -3524,6 +3687,100 @@ run = "/usr/bin/true"
             capsule_core::types::ValidationMode::Preview
         );
         assert!(rerouted.engine_override_declared);
+    }
+
+    #[test]
+    fn dependency_contract_env_preflight_covers_parameters_credentials_and_top_level_required_env()
+    {
+        let manifest_value: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "consumer"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+required_env = ["ATO_TEST_TOP_LEVEL_REQUIRED", "ATO_TEST_CRED_REQUIRED"]
+
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+
+  [dependencies.db.parameters]
+  password = "{{env.ATO_TEST_PARAM_REQUIRED}}"
+
+  [dependencies.db.credentials]
+  token = "{{env.ATO_TEST_CRED_REQUIRED}}"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "python main.py"
+"#,
+        )
+        .expect("parse manifest");
+
+        let report = super::collect_missing_dependency_contract_manifest_env(
+            &manifest_value,
+            &empty_host_env(),
+        )
+        .expect("collect env");
+
+        assert_eq!(
+            report.keys,
+            vec![
+                "ATO_TEST_PARAM_REQUIRED".to_string(),
+                "ATO_TEST_CRED_REQUIRED".to_string(),
+                "ATO_TEST_TOP_LEVEL_REQUIRED".to_string(),
+            ]
+        );
+        assert_eq!(
+            report.schema[0].label.as_deref(),
+            Some("dep 'db'.parameters.password → {env.ATO_TEST_PARAM_REQUIRED}")
+        );
+        assert_eq!(
+            report.schema[1].label.as_deref(),
+            Some("dep 'db'.credentials.token → {env.ATO_TEST_CRED_REQUIRED}")
+        );
+        assert_eq!(report.schema[2].label, None);
+    }
+
+    #[test]
+    fn dependency_contract_env_preflight_deduplicates_top_level_scope_and_dependency_reference() {
+        let manifest_value: toml::Value = toml::from_str(
+            r#"
+schema_version = "0.3"
+name = "consumer"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+required_env = ["ATO_TEST_SHARED_REQUIRED"]
+
+[dependencies.db]
+capsule = "capsule://ato/postgres@16"
+contract = "service@1"
+
+  [dependencies.db.credentials]
+  password = "{{env.ATO_TEST_SHARED_REQUIRED}}"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "python main.py"
+"#,
+        )
+        .expect("parse manifest");
+
+        let report = super::collect_missing_dependency_contract_manifest_env(
+            &manifest_value,
+            &empty_host_env(),
+        )
+        .expect("collect env");
+
+        assert_eq!(report.keys, vec!["ATO_TEST_SHARED_REQUIRED".to_string()]);
+        assert_eq!(
+            report.schema[0].label.as_deref(),
+            Some("dep 'db'.credentials.password → {env.ATO_TEST_SHARED_REQUIRED}")
+        );
     }
 
     #[test]
