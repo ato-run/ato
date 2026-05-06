@@ -26,7 +26,7 @@ use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
 use crate::application::pipeline::phases::run::{
-    persist_background_dependency_contracts, preflight_dependency_contract_manifest_env,
+    persist_background_dependency_contracts, preflight_orchestration_session_environment,
     setup_dependency_contracts_launch_context, DependencyContractGuard, DerivedBridgeManifest,
     PreparedRunContext,
 };
@@ -55,6 +55,11 @@ const SESSION_RUNTIME: &str = "ato-desktop-session";
 fn session_ready_timeout(plan: &capsule_core::router::ManifestData) -> Duration {
     Duration::from_secs(plan.execution_startup_timeout() as u64)
 }
+
+fn orchestration_supervisor_ready_timeout(plan: &capsule_core::router::ManifestData) -> Duration {
+    session_ready_timeout(plan).max(Duration::from_secs(180))
+}
+
 /// Interval between HTTP readiness polls while waiting for a freshly spawned
 /// session to bind its port. The value trades worst-case wasted wait time
 /// against syscall churn: 25ms is short enough that even fast servers
@@ -370,7 +375,6 @@ pub(super) fn start_runtime_session(
     plan: &capsule_core::router::ManifestData,
     raw_manifest: &str,
     launch: &capsule_core::launch_spec::LaunchSpec,
-    _target_was_explicit: bool,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
     let display_strategy = display_strategy_for_runtime(plan);
@@ -557,7 +561,7 @@ pub(super) fn start_orchestration_session_supervisor(
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
     plan: &capsule_core::router::ManifestData,
-    raw_manifest: &str,
+    manifest_value: &toml::Value,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
     use crate::application::pipeline::executor::PhaseStageTimer;
@@ -566,17 +570,11 @@ pub(super) fn start_orchestration_session_supervisor(
     let orchestration = plan
         .resolve_services()
         .context("failed to resolve [services] orchestration plan")?;
-    preflight_orchestration_service_required_env(manifest_path, &orchestration)?;
-
-    let manifest_value: toml::Value = toml::from_str(raw_manifest).with_context(|| {
-        format!(
-            "failed to parse manifest at {} for orchestration preflight",
-            manifest_path.display()
-        )
-    })?;
-    preflight_dependency_contract_manifest_env(
+    preflight_orchestration_session_environment(
         plan,
-        &manifest_value,
+        manifest_value,
+        &orchestration,
+        &crate::executors::launch_context::RuntimeLaunchContext::empty(),
         &crate::application::dependency_credentials::ProcessHostEnv,
         "launching the session",
     )?;
@@ -627,10 +625,11 @@ pub(super) fn start_orchestration_session_supervisor(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_orchestration_supervisor");
     let mut cmd = Command::new(&ato_bin);
-    cmd.arg("run")
-        .arg("-y")
-        .arg("--sandbox")
-        .arg(&supervisor_input)
+    cmd.arg("run").arg("-y").arg("--sandbox");
+    if std::env::var("CAPSULE_ALLOW_UNSAFE").as_deref() == Ok("1") {
+        cmd.arg("--dangerously-skip-permissions");
+    }
+    cmd.arg(&supervisor_input)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
@@ -650,7 +649,12 @@ pub(super) fn start_orchestration_session_supervisor(
     };
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "wait_orchestration_ready");
-    let ready = wait_for_http_ready(&mut child, leaf_port, "/", session_ready_timeout(plan));
+    let ready = wait_for_http_ready(
+        &mut child,
+        leaf_port,
+        "/",
+        orchestration_supervisor_ready_timeout(plan),
+    );
     timer.finish_ok();
     if let Err(err) = ready {
         let _ = child.kill();
@@ -784,41 +788,6 @@ fn pick_orchestration_leaf_service(
                 .expect("non-empty leaves vec"))
         }
     }
-}
-
-pub(super) fn orchestration_leaf_target_label(
-    plan: &capsule_core::router::ManifestData,
-) -> Result<Option<String>> {
-    if !plan.is_orchestration_mode() {
-        return Ok(None);
-    }
-    let orchestration = plan
-        .resolve_services()
-        .context("failed to resolve [services] orchestration plan")?;
-    let leaf = pick_orchestration_leaf_service(&orchestration)?;
-    Ok(Some(leaf.runtime.runtime().target.clone()))
-}
-
-fn preflight_orchestration_service_required_env(
-    manifest_path: &Path,
-    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
-) -> Result<()> {
-    use std::collections::HashSet;
-
-    let launch_ctx = crate::executors::launch_context::RuntimeLaunchContext::empty();
-    let mut seen_targets = HashSet::new();
-    for service in &orchestration.services {
-        let target_label = service.runtime.runtime().target.as_str();
-        if !seen_targets.insert(target_label.to_string()) {
-            continue;
-        }
-        let (target_plan, _guest, _notes) = resolve_local_plan(manifest_path, Some(target_label))?;
-        crate::executors::target_runner::preflight_required_environment_variables(
-            &target_plan,
-            &launch_ctx,
-        )?;
-    }
-    Ok(())
 }
 
 fn dependency_contracts_for_session_record(
