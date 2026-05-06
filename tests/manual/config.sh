@@ -14,6 +14,32 @@ mkdir -p "$RESULTS_DIR"
 export ATO_TEST_TMP="$MANUAL_DIR/../../.tmp/manual-tests"
 mkdir -p "$ATO_TEST_TMP"
 
+setup_isolated_ato_env() {
+    [ "${ATO_TEST_HERMETIC:-1}" = "1" ] || return 0
+
+    if [ -z "${ATO_TEST_ENV_ROOT:-}" ]; then
+        ATO_TEST_ENV_ROOT="$(mktemp -d "$ATO_TEST_TMP/env.XXXXXX")"
+        export ATO_TEST_ENV_ROOT
+    fi
+
+    export ATO_HOME="${ATO_HOME:-$ATO_TEST_ENV_ROOT/ato-home}"
+    export HOME="$ATO_TEST_ENV_ROOT/home"
+    export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ATO_TEST_ENV_ROOT/xdg-config}"
+    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$ATO_TEST_ENV_ROOT/xdg-cache}"
+
+    mkdir -p "$ATO_HOME" "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+}
+
+ato_home_path() {
+    if [ $# -eq 0 ]; then
+        printf '%s\n' "$ATO_HOME"
+    else
+        printf '%s/%s\n' "$ATO_HOME" "$1"
+    fi
+}
+
+setup_isolated_ato_env
+
 # Per-suite result accumulators (set by each suite)
 PASSED=0
 FAILED=0

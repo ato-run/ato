@@ -317,13 +317,13 @@ fn check_import_resolvability(
             }
         } else {
             // Named dependency — check local store
-            let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
             let store_path = if from.starts_with('@') {
                 let without_at = from.strip_prefix('@').unwrap_or(from);
                 let name = without_at.split(':').next().unwrap_or(without_at);
-                home.join(".ato").join("store").join(format!("@{}", name))
+                capsule_core::common::paths::ato_path_or_workspace_tmp("store")
+                    .join(format!("@{}", name))
             } else {
-                home.join(".ato").join("store").join(from)
+                capsule_core::common::paths::ato_path_or_workspace_tmp("store").join(from)
             };
 
             if !store_path.exists() {

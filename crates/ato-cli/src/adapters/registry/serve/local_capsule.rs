@@ -611,8 +611,7 @@ pub(super) async fn handle_delete_local_capsule(
 }
 
 pub(super) fn process_log_path(id: &str) -> PathBuf {
-    let home = capsule_core::common::paths::home_dir_or_workspace_tmp();
-    home.join(".ato").join("logs").join(format!("{id}.log"))
+    capsule_core::common::paths::ato_path_or_workspace_tmp(format!("logs/{id}.log"))
 }
 
 pub(super) fn read_process_log_lines(path: &Path, tail: usize) -> Vec<String> {

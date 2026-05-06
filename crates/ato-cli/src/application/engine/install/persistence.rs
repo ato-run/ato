@@ -50,9 +50,7 @@ pub(crate) fn persist_installed_artifact(
     content_hash: &str,
 ) -> Result<PathBuf> {
     let store_root = output_dir.unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(DEFAULT_STORE_DIR)
+        capsule_core::common::paths::ato_store_dir()
     });
     let install_dir = store_root.join(publisher).join(slug).join(version);
     std::fs::create_dir_all(&install_dir).with_context(|| {

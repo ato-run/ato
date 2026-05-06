@@ -326,12 +326,8 @@ fn fingerprint_target(raw_target: &str, target: Option<&str>) -> String {
 }
 
 fn saved_target_env_path(fingerprint: &str) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("failed to resolve home directory for env cache")?;
-    Ok(home
-        .join(".ato")
-        .join("env")
-        .join("targets")
-        .join(format!("{fingerprint}.env")))
+    capsule_core::common::paths::ato_path(format!("env/targets/{fingerprint}.env"))
+        .context("failed to resolve ato home for env cache")
 }
 
 fn load_env_file(path: &std::path::Path) -> Result<Vec<(String, String)>> {
