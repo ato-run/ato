@@ -50,7 +50,8 @@ test_version_format() {
 # Automated: ~/.ato/ structure exists after install
 # ---------------------------------------------------------------------------
 test_ato_home_structure() {
-    local ato_home="${ATO_HOME:-$HOME/.ato}"
+    local ato_home
+    ato_home="$(ato_home_path)"
     if [ -d "$ato_home" ]; then
         pass "~/.ato/ directory exists"
     else

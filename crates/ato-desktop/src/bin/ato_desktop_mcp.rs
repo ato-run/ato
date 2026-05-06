@@ -6,10 +6,12 @@
 /// Usage:
 ///   ato-desktop-mcp [--socket <path>]
 ///
-/// If --socket is omitted, the socket path is read from ~/.ato/run/ato-desktop-current.json.
+/// If --socket is omitted, the socket path is read from ${ATO_HOME:-~/.ato}/run/ato-desktop-current.json.
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -82,11 +84,8 @@ fn parse_socket_arg(args: &[String]) -> Option<PathBuf> {
 }
 
 fn discover_socket() -> PathBuf {
-    let home = dirs_home();
-    let current_file = home
-        .join(".ato")
-        .join("run")
-        .join("ato-desktop-current.json");
+    let run_dir = ato_path_or_workspace_tmp("run");
+    let current_file = run_dir.join("ato-desktop-current.json");
     if let Ok(data) = std::fs::read_to_string(&current_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
             if let Some(path) = v.get("socket").and_then(|s| s.as_str()) {
@@ -95,7 +94,6 @@ fn discover_socket() -> PathBuf {
         }
     }
     // Fallback: first matching socket in run dir.
-    let run_dir = home.join(".ato").join("run");
     if let Ok(entries) = std::fs::read_dir(&run_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -107,12 +105,6 @@ fn discover_socket() -> PathBuf {
     }
     // Last resort default.
     run_dir.join("ato-desktop.sock")
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 // ── MCP handlers ──────────────────────────────────────────────────────────────
@@ -130,6 +122,70 @@ fn handle_initialize(id: serde_json::Value) -> serde_json::Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discover_socket;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn discover_socket_uses_ato_home_run_dir() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join("isolated-ato-home");
+        let fake_home = temp.path().join("real-home");
+        let _ato_home = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let _home = EnvVarGuard::set_path("HOME", &fake_home);
+
+        std::fs::create_dir_all(ato_home.join("run")).expect("create run dir");
+        std::fs::create_dir_all(fake_home.join(".ato/run")).expect("create fake home run dir");
+
+        let isolated_socket = ato_home.join("run/ato-desktop-isolated.sock");
+        let leaked_socket = fake_home.join(".ato/run/ato-desktop-real.sock");
+
+        std::fs::write(
+            ato_home.join("run/ato-desktop-current.json"),
+            format!("{{\"socket\":\"{}\"}}", isolated_socket.display()),
+        )
+        .expect("write isolated discovery file");
+        std::fs::write(
+            fake_home.join(".ato/run/ato-desktop-current.json"),
+            format!("{{\"socket\":\"{}\"}}", leaked_socket.display()),
+        )
+        .expect("write leaked discovery file");
+
+        assert_eq!(discover_socket(), isolated_socket);
+    }
 }
 
 fn handle_tools_list(id: serde_json::Value) -> serde_json::Value {

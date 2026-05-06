@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+use capsule_core::common::paths::ato_path;
 
 /// Outcome of [`try_install`] — surfaced to the UI as a toast.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,11 +41,7 @@ pub enum InstallOutcome {
 /// first-launch install prompt (regardless of whether the user
 /// accepted). Lives at `~/.ato/desktop/cli-install-prompted`.
 pub fn first_launch_prompt_marker() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not resolve home directory")?;
-    Ok(home
-        .join(".ato")
-        .join("desktop")
-        .join("cli-install-prompted"))
+    ato_path("desktop/cli-install-prompted").context("could not resolve ato home directory")
 }
 
 pub fn first_launch_prompt_already_shown() -> bool {

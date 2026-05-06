@@ -278,11 +278,7 @@ fn default_socket_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ATO_SOCKET_DIR") {
         return PathBuf::from(dir);
     }
-    dirs::home_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".ato")
-        .join("run")
-        .join("capsule-ipc")
+    capsule_core::common::paths::ato_path_or_workspace_tmp("run/capsule-ipc")
 }
 
 #[cfg(test)]

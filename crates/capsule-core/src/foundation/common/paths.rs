@@ -67,6 +67,20 @@ pub fn nacelle_home_dir_or_workspace_tmp() -> PathBuf {
     nacelle_home_dir().unwrap_or_else(|_| home_dir_or_workspace_tmp().join(".ato"))
 }
 
+/// Returns a path inside the canonical ato home directory.
+///
+/// `relative` must be a path relative to the ato root, for example `run` or
+/// `desktop/webcontext`.
+pub fn ato_path(relative: impl AsRef<Path>) -> Result<PathBuf> {
+    Ok(nacelle_home_dir()?.join(relative.as_ref()))
+}
+
+/// Returns a best-effort path inside the canonical ato home directory without
+/// ever falling back to `/tmp`.
+pub fn ato_path_or_workspace_tmp(relative: impl AsRef<Path>) -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join(relative.as_ref())
+}
+
 /// Returns the toolchain cache directory.
 ///
 /// Layout: `~/.ato/toolchains`
@@ -271,10 +285,40 @@ pub fn path_contains_workspace_internal_subtree(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
+        ato_path, path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
         WORKSPACE_FALLBACK_HOME_DIR,
     };
-    use std::path::Path;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn detects_workspace_state_dir_components() {
@@ -354,5 +398,18 @@ mod tests {
             layout.root.join("workspace/source")
         );
         assert_eq!(layout.deps, layout.root.join("deps"));
+    }
+
+    #[test]
+    fn ato_path_respects_ato_home_override() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join("isolated-ato-home");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+
+        assert_eq!(
+            ato_path("run/ato-desktop-current.json").expect("ato path"),
+            PathBuf::from(&ato_home).join("run/ato-desktop-current.json")
+        );
     }
 }
