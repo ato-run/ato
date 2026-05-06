@@ -1,4 +1,5 @@
 pub mod command;
+pub mod policy;
 pub mod screenshot;
 pub mod transport;
 
@@ -10,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use command::PendingAutomationRequest;
-use transport::{NotifyFn, PendingQueue};
+use transport::{ActivePaneSnapshot, NotifyFn, PendingQueue};
 
 /// Thread-safe automation host. Owned by `WebViewManager`.
 /// Clone is cheap — all shared state is behind `Arc`.
@@ -27,6 +28,12 @@ pub struct AutomationHost {
     /// Set to `true` by the socket listener or WaitFor retry when a new request
     /// is pushed. The GPUI foreground polling task reads and clears this flag.
     pub(crate) has_pending: Arc<AtomicBool>,
+    /// Snapshot of the GPUI active pane id, updated by `WebViewManager` whenever
+    /// the active pane changes. Read by the socket listener at request enqueue
+    /// time so MCP `pane_id=0` resolves against the pane the caller saw, not the
+    /// pane that happens to be active when the GPUI tick eventually picks the
+    /// request up (#67).
+    active_pane: ActivePaneSnapshot,
 }
 
 impl AutomationHost {
@@ -35,6 +42,7 @@ impl AutomationHost {
             pending: Arc::new(Mutex::new(Vec::new())),
             page_loaded_panes: Arc::new(Mutex::new(HashSet::new())),
             has_pending: Arc::new(AtomicBool::new(false)),
+            active_pane: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -42,12 +50,13 @@ impl AutomationHost {
     pub fn start(&self) -> Option<PathBuf> {
         let pending = Arc::clone(&self.pending);
         let has_pending = Arc::clone(&self.has_pending);
+        let active_pane = Arc::clone(&self.active_pane);
 
         let notify: NotifyFn = Arc::new(move || {
             has_pending.store(true, Ordering::Relaxed);
         });
 
-        match transport::start_socket_listener(pending, notify) {
+        match transport::start_socket_listener(pending, notify, active_pane) {
             Ok(path) => {
                 tracing::info!(socket = %path.display(), "automation socket listening");
                 Some(path)
@@ -56,6 +65,14 @@ impl AutomationHost {
                 warn!("automation socket start failed: {e}");
                 None
             }
+        }
+    }
+
+    /// Update the active-pane snapshot used by the socket listener to resolve
+    /// `pane_id=0` at request-enqueue time.
+    pub fn set_active_pane(&self, pane_id: Option<usize>) {
+        if let Ok(mut guard) = self.active_pane.lock() {
+            *guard = pane_id;
         }
     }
 

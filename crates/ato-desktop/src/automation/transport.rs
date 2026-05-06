@@ -2,7 +2,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use serde_json::Value;
@@ -11,9 +10,11 @@ use tracing::{debug, error};
 use super::command::{
     AutomationCommand, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PendingAutomationRequest,
 };
+use super::policy::{AUTOMATION_CONNECTION_IO_TIMEOUT, AUTOMATION_DISPATCH_TIMEOUT};
 
 pub type PendingQueue = Arc<Mutex<Vec<PendingAutomationRequest>>>;
 pub type NotifyFn = Arc<dyn Fn() + Send + Sync + 'static>;
+pub type ActivePaneSnapshot = Arc<Mutex<Option<usize>>>;
 
 /// Returns the socket path for this process.
 pub fn socket_path() -> PathBuf {
@@ -30,12 +31,85 @@ fn dirs_runtime() -> PathBuf {
     ato_path_or_workspace_tmp("run")
 }
 
+/// Best-effort liveness check for a unix process. Returns `true` when `kill(pid, 0)`
+/// succeeds OR fails with `EPERM` (process exists but we can't signal it). Only a
+/// hard `ESRCH` is treated as dead — anything else (including transient errors)
+/// errs on the side of "still alive" so we don't reap a live socket by mistake.
+#[cfg(unix)]
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 performs error checking only; no signal is delivered.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    let errno = std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(0);
+    errno != libc::ESRCH
+}
+
+/// Extract `<pid>` from `ato-desktop-<pid>.sock`. Returns `None` for any other shape.
+fn parse_socket_filename_pid(name: &str) -> Option<u32> {
+    let stem = name.strip_prefix("ato-desktop-")?.strip_suffix(".sock")?;
+    stem.parse::<u32>().ok()
+}
+
+/// Walk the run directory and remove `ato-desktop-<pid>.sock` files whose PID is
+/// no longer alive. Skips the current process's own socket. Idempotent and best
+/// effort — failures only surface as debug log lines (#68).
+#[cfg(unix)]
+fn reap_orphan_sockets(run_dir: &std::path::Path) {
+    use std::fs;
+
+    let entries = match fs::read_dir(run_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let self_pid = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = parse_socket_filename_pid(name_str) else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        if pid_is_alive(pid) {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(e) = fs::remove_file(&path) {
+            debug!(
+                "automation socket orphan reap failed for {}: {e}",
+                path.display()
+            );
+        } else {
+            debug!(
+                "automation socket orphan reaped: {} (pid {pid} dead)",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Start the Unix socket listener in a background thread.
 /// Writes socket path to `~/.ato/run/ato-desktop-current.json` for discovery.
 ///
 /// `notify`: called each time a new request is pushed to `pending`, to wake the GPUI loop.
+/// `active_pane`: snapshot updated by `WebViewManager` so MCP `pane_id=0` requests
+/// resolve at enqueue time (#67).
 #[cfg(unix)]
-pub fn start_socket_listener(pending: PendingQueue, notify: NotifyFn) -> std::io::Result<PathBuf> {
+pub fn start_socket_listener(
+    pending: PendingQueue,
+    notify: NotifyFn,
+    active_pane: ActivePaneSnapshot,
+) -> std::io::Result<PathBuf> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
@@ -43,6 +117,12 @@ pub fn start_socket_listener(pending: PendingQueue, notify: NotifyFn) -> std::io
     let path = socket_path();
     let run_dir = path.parent().unwrap().to_path_buf();
     fs::create_dir_all(&run_dir)?;
+
+    // Garbage collect orphan sockets from previous PIDs before we publish our own
+    // discovery file — otherwise the MCP fallback enumeration in
+    // `ato_desktop_mcp::discover_socket` can pick a stale socket from a crashed
+    // instance (#68).
+    reap_orphan_sockets(&run_dir);
 
     // Remove stale socket if present.
     if path.exists() {
@@ -71,8 +151,9 @@ pub fn start_socket_listener(pending: PendingQueue, notify: NotifyFn) -> std::io
                     Ok(stream) => {
                         let pending = Arc::clone(&pending);
                         let notify = Arc::clone(&notify);
+                        let active_pane = Arc::clone(&active_pane);
                         std::thread::spawn(move || {
-                            handle_connection(stream, pending, notify);
+                            handle_connection(stream, pending, notify, active_pane);
                         });
                     }
                     Err(e) => {
@@ -89,7 +170,7 @@ pub fn start_socket_listener(pending: PendingQueue, notify: NotifyFn) -> std::io
 
 #[cfg(test)]
 mod tests {
-    use super::current_instance_file;
+    use super::{current_instance_file, parse_socket_filename_pid, pid_is_alive};
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -134,12 +215,61 @@ mod tests {
             PathBuf::from(&ato_home).join("run/ato-desktop-current.json")
         );
     }
+
+    #[test]
+    fn parse_socket_filename_pid_accepts_canonical_shape() {
+        assert_eq!(parse_socket_filename_pid("ato-desktop-12345.sock"), Some(12345));
+        assert_eq!(parse_socket_filename_pid("ato-desktop-1.sock"), Some(1));
+    }
+
+    #[test]
+    fn parse_socket_filename_pid_rejects_non_pid_shapes() {
+        assert_eq!(parse_socket_filename_pid("ato-desktop.sock"), None);
+        assert_eq!(parse_socket_filename_pid("ato-desktop-current.json"), None);
+        assert_eq!(parse_socket_filename_pid("ato-desktop-foo.sock"), None);
+        assert_eq!(parse_socket_filename_pid("ato-desktop--1.sock"), None);
+        assert_eq!(parse_socket_filename_pid("other-12345.sock"), None);
+    }
+
+    #[test]
+    fn pid_is_alive_self_pid_returns_true() {
+        assert!(pid_is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_is_alive_pid_zero_returns_false() {
+        assert!(!pid_is_alive(0));
+    }
+
+    #[test]
+    fn reap_orphan_sockets_removes_dead_pid_socket_only() {
+        use std::fs;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path();
+        let self_pid = std::process::id();
+
+        let live = dir.join(format!("ato-desktop-{self_pid}.sock"));
+        // pid 0 is guaranteed-dead per pid_is_alive.
+        let dead = dir.join("ato-desktop-0.sock");
+        let unrelated = dir.join("other-1.sock");
+
+        fs::write(&live, b"").unwrap();
+        fs::write(&dead, b"").unwrap();
+        fs::write(&unrelated, b"").unwrap();
+
+        super::reap_orphan_sockets(dir);
+
+        assert!(live.exists(), "self socket must survive");
+        assert!(!dead.exists(), "dead-pid socket must be reaped");
+        assert!(unrelated.exists(), "non-matching files must be left alone");
+    }
 }
 
 #[cfg(not(unix))]
 pub fn start_socket_listener(
     _pending: PendingQueue,
     _notify: NotifyFn,
+    _active_pane: ActivePaneSnapshot,
 ) -> std::io::Result<PathBuf> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -152,9 +282,10 @@ fn handle_connection(
     stream: std::os::unix::net::UnixStream,
     pending: PendingQueue,
     notify: NotifyFn,
+    active_pane: ActivePaneSnapshot,
 ) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(AUTOMATION_CONNECTION_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(AUTOMATION_CONNECTION_IO_TIMEOUT));
 
     let mut writer = stream.try_clone().ok();
     let reader = BufReader::new(stream);
@@ -171,10 +302,10 @@ fn handle_connection(
             continue;
         }
 
-        let (id, response_json) = match dispatch_request(&line, &pending, &notify) {
+        let (id, response_json) = match dispatch_request(&line, &pending, &notify, &active_pane) {
             Ok(rx) => {
-                // Block waiting for GPUI to process the request (max 35 s).
-                match rx.recv_timeout(Duration::from_secs(35)) {
+                // Block waiting for GPUI to process the request.
+                match rx.recv_timeout(AUTOMATION_DISPATCH_TIMEOUT) {
                     Ok(Ok(value)) => {
                         let id = extract_id(&line);
                         (
@@ -226,6 +357,7 @@ fn dispatch_request(
     line: &str,
     pending: &PendingQueue,
     notify: &NotifyFn,
+    active_pane: &ActivePaneSnapshot,
 ) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
     let rpc: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -245,11 +377,21 @@ fn dispatch_request(
     };
 
     let id = rpc.id.clone().unwrap_or(Value::Null);
-    let pane_id = rpc
+    // pane_id=0 (the MCP default) means "active pane". Snapshot the active
+    // pane *now* — at request-enqueue time — so a UI focus change between
+    // enqueue and dispatch can't redirect the request to a different pane (#67).
+    // If no active pane is recorded yet, fall through with 0 and let the
+    // dispatcher surface "no active pane".
+    let raw_pane_id = rpc
         .params
         .get("pane_id")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
+    let pane_id = if raw_pane_id == 0 {
+        active_pane.lock().ok().and_then(|g| *g).unwrap_or(0)
+    } else {
+        raw_pane_id
+    };
 
     let command = match parse_command(&rpc.method, &rpc.params) {
         Ok(cmd) => cmd,
