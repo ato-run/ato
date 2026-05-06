@@ -387,6 +387,7 @@ pub(super) fn start_runtime_session(
             resolution,
             manifest_path,
             plan,
+            raw_manifest,
             notes,
         );
     }
@@ -583,6 +584,7 @@ fn start_orchestration_runtime_session(
     resolution: &super::resolve::HandleResolution,
     manifest_path: &Path,
     plan: &capsule_core::router::ManifestData,
+    raw_manifest: &str,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
     use crate::application::pipeline::executor::PhaseStageTimer;
@@ -608,6 +610,16 @@ fn start_orchestration_runtime_session(
         .clone()
         .unwrap_or_else(|| leaf_runtime.clone());
     let leaf_name = leaf.name.clone();
+
+    // Surface missing dep credential env vars (PG_PASSWORD etc.) as
+    // `MissingRequiredEnv` BEFORE we spawn the supervisor. The supervised
+    // `ato run` would also fail on missing PG_PASSWORD, but only after a
+    // full provisioning cycle (~30s) and the typed envelope would land in
+    // the supervisor's log file rather than this process's stderr — Desktop
+    // can't surface its MissingConfig modal from there. This preflight
+    // mirrors the single-target session-start path that the d4fc2662 fix
+    // wired through `setup_session_dependency_contracts`.
+    preflight_orchestration_dep_credentials(plan, manifest_path, raw_manifest)?;
 
     // Pass the original capsule handle (e.g. `capsule://github.com/...`) to
     // the supervisor — NOT the manifest's directory. The session-start path
@@ -776,6 +788,95 @@ fn start_orchestration_runtime_session(
     std::mem::forget(child);
 
     Ok(session_info_from_stored(session))
+}
+
+/// Walk every `[dependencies.<alias>].credentials = "{{env.X}}"` template
+/// in the orchestration manifest and surface missing env vars (e.g.
+/// `PG_PASSWORD`) as a typed `MissingRequiredEnv` BEFORE we spawn the
+/// supervisor. Mirrors `preflight_session_dep_credentials` but reads the
+/// manifest directly instead of going through the lockfile — orchestration
+/// mode delegates lockfile generation to the supervised `ato run`, so we
+/// don't want to provision a redundant lockfile here just to discover a
+/// missing credential.
+///
+/// Without this preflight, the supervisor would catch the missing env,
+/// but its typed envelope only reaches its own log file (we hand off
+/// stdout/stderr directly to a file so the supervisor survives our exit).
+/// Desktop's MissingConfig modal has no path to that envelope, so the
+/// user sees a generic "process exited before readiness" instead of the
+/// field-by-field config prompt the single-target path produces.
+fn preflight_orchestration_dep_credentials(
+    plan: &capsule_core::router::ManifestData,
+    manifest_path: &Path,
+    raw_manifest: &str,
+) -> Result<()> {
+    use capsule_core::execution_plan::error::AtoExecutionError;
+    use capsule_core::foundation::types::{ConfigField, ConfigKind, TemplateExpr, TemplateSegment};
+    use capsule_core::lockfile::manifest_external_capsule_dependencies;
+
+    let manifest_value: toml::Value = toml::from_str(raw_manifest).with_context(|| {
+        format!(
+            "failed to parse manifest at {} for orchestration preflight",
+            manifest_path.display()
+        )
+    })?;
+    let capsule_dependencies = manifest_external_capsule_dependencies(&manifest_value)
+        .context("failed to read consumer dependency declarations for orchestration preflight")?;
+
+    let mut missing_keys: Vec<String> = Vec::new();
+    let mut missing_schema: Vec<ConfigField> = Vec::new();
+    let mut seen_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in &capsule_dependencies {
+        if entry.contract.is_none() {
+            continue;
+        }
+        for (cred_key, template) in &entry.credentials {
+            for segment in &template.segments {
+                let TemplateSegment::Expr(TemplateExpr::Env(name)) = segment else {
+                    continue;
+                };
+                let name = name.clone();
+                if std::env::var(&name).is_ok_and(|value| !value.is_empty()) {
+                    continue;
+                }
+                if !seen_missing.insert(name.clone()) {
+                    continue;
+                }
+                missing_keys.push(name.clone());
+                let label = format!(
+                    "dep '{}'.credentials.{} → {{env.{}}}",
+                    entry.alias, cred_key, name
+                );
+                missing_schema.push(ConfigField {
+                    name: name.clone(),
+                    label: Some(label),
+                    description: None,
+                    kind: ConfigKind::Secret,
+                    default: None,
+                    placeholder: None,
+                });
+            }
+        }
+    }
+
+    if missing_keys.is_empty() {
+        return Ok(());
+    }
+
+    let target = plan.selected_target_label();
+    let message = format!(
+        "missing required environment variables for dependency credentials of target '{}': {} (set them before launching the session)",
+        target,
+        missing_keys.join(", ")
+    );
+    Err(AtoExecutionError::missing_required_env(
+        message,
+        missing_keys,
+        missing_schema,
+        Some(target),
+    )
+    .into())
 }
 
 /// Pick the leaf service of the orchestration dependency graph — the one
