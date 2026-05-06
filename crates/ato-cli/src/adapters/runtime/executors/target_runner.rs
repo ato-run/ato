@@ -232,8 +232,7 @@ pub fn prepare_target_execution(
 
     if !options.defer_consent {
         let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
-        let has_authoritative_lock = prepared.authoritative_lock.is_some()
-            || !runtime_decision.plan.lock_path.as_os_str().is_empty();
+        let has_authoritative_lock = has_execution_lock_authority(&runtime_decision.plan, prepared);
         let guard_result = guard::evaluate_for_mode_with_authority(
             &execution_plan,
             &guard_manifest_dir,
@@ -263,8 +262,7 @@ pub fn prepare_target_execution(
     // guard rejects sessions that just provisioned successfully (issue
     // hit by ato-desktop's `capsule://` flow when `defer_consent = true`).
     let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
-    let has_authoritative_lock = prepared.authoritative_lock.is_some()
-        || !runtime_decision.plan.lock_path.as_os_str().is_empty();
+    let has_authoritative_lock = has_execution_lock_authority(&runtime_decision.plan, prepared);
     let guard_result = guard::evaluate_for_mode_with_authority(
         &execution_plan,
         &guard_manifest_dir,
@@ -282,6 +280,12 @@ pub fn prepare_target_execution(
         guard_result,
         launch_ctx,
     })
+}
+
+fn has_execution_lock_authority(plan: &ManifestData, prepared: &PreparedRunContext) -> bool {
+    prepared.authoritative_lock.is_some()
+        || prepared.compatibility_legacy_lock.is_some()
+        || !plan.lock_path.as_os_str().is_empty()
 }
 
 fn is_transient_provider_workspace(plan: &ManifestData) -> bool {
@@ -426,8 +430,8 @@ mod tests {
     use capsule_core::lockfile::{CapsuleLock, LockMeta};
     use capsule_core::router::{self, ExecutionProfile};
     use std::collections::HashMap;
-    use std::path::PathBuf;
-    use tempfile::tempdir;
+    use std::path::{Path, PathBuf};
+    use tempfile::{tempdir, TempDir};
 
     #[test]
     fn injected_env_satisfies_required_env() {
@@ -589,6 +593,107 @@ from = "./missing-service"
             .expect_err("missing required IPC import should fail");
 
         assert!(err.to_string().contains("Required IPC import 'greeter'"));
+    }
+
+    fn workspace_tempdir(name: &str) -> TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".ato")
+            .join("test-scratch");
+        std::fs::create_dir_all(&root).expect("create workspace .ato/test-scratch");
+        tempfile::Builder::new()
+            .prefix(name)
+            .tempdir_in(root)
+            .expect("workspace tempdir")
+    }
+
+    #[tokio::test]
+    async fn prepare_target_execution_accepts_compatibility_lock_for_source_node_tier1() {
+        let temp_dir = workspace_tempdir("source-node-tier1-");
+        let manifest_path = temp_dir.path().join("capsule.toml");
+        let web_dir = temp_dir.path().join("web");
+        std::fs::create_dir_all(&web_dir).expect("create web dir");
+        std::fs::write(temp_dir.path().join("package-lock.json"), "{}\n")
+            .expect("write root package lock");
+        std::fs::write(web_dir.join("package-lock.json"), "{}\n").expect("write package lock");
+        std::fs::write(web_dir.join("server.js"), "console.log('ok');\n").expect("write entry");
+        let manifest_text = r#"
+schema_version = "0.3"
+name = "node-tier-one"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+runtime_version = "20.19.5"
+working_dir = "web"
+run = "node server.js"
+"#;
+        std::fs::write(&manifest_path, manifest_text).expect("write manifest");
+
+        let raw_manifest: toml::Value = toml::from_str(manifest_text).expect("parse manifest");
+        let bridge = capsule_core::router::CompatManifestBridge::from_manifest_value(&raw_manifest)
+            .expect("compat bridge");
+        let compat_input = capsule_core::router::CompatProjectInput::from_bridge(
+            temp_dir.path().to_path_buf(),
+            bridge,
+        )
+        .expect("compat input");
+        let lock_path = capsule_core::contract::lockfile::ensure_lockfile_for_compat_input(
+            &compat_input,
+            Arc::new(CliReporter::new(false)),
+            false,
+        )
+        .await
+        .expect("ensure compatibility lock");
+        let lock: CapsuleLock =
+            serde_json::from_slice(&std::fs::read(&lock_path).expect("read compatibility lock"))
+                .expect("parse compatibility lock");
+
+        let decision = router::route_manifest_with_state_overrides_and_validation_mode(
+            &manifest_path,
+            ExecutionProfile::Dev,
+            Some("web"),
+            HashMap::new(),
+            capsule_core::types::ValidationMode::Strict,
+        )
+        .expect("route manifest");
+        let prepared = PreparedRunContext {
+            authoritative_lock: None,
+            lock_path: None,
+            workspace_root: temp_dir.path().to_path_buf(),
+            effective_state: None,
+            execution_override: None,
+            bridge_manifest: DerivedBridgeManifest::new(raw_manifest),
+            validation_mode: capsule_core::types::ValidationMode::Strict,
+            engine_override_declared: false,
+            compatibility_legacy_lock: Some(CompatibilityLegacyLockContext {
+                manifest_path,
+                path: lock_path,
+                lock,
+            }),
+        };
+
+        let execution = prepare_target_execution(
+            &decision.plan,
+            &prepared,
+            RuntimeLaunchContext::empty(),
+            &TargetLaunchOptions {
+                enforcement: "strict".to_string(),
+                sandbox_mode: true,
+                dangerously_skip_permissions: false,
+                assume_yes: true,
+                preview_mode: false,
+                defer_consent: true,
+            },
+        )
+        .expect("source/node Tier1 should accept compatibility lock authority");
+
+        assert!(matches!(
+            execution.tier,
+            capsule_core::execution_plan::model::ExecutionTier::Tier1
+        ));
     }
 
     #[test]
