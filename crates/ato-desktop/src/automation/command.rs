@@ -5,6 +5,8 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::policy::MCP_IMPLICIT_PAGE_LOAD_TIMEOUT;
+
 // ── JSON-RPC 2.0 wire types ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -121,10 +123,14 @@ impl PendingAutomationRequest {
         command: AutomationCommand,
         tx: Sender<Result<Value, String>>,
     ) -> Self {
-        let wait_deadline = if let AutomationCommand::WaitFor { timeout_ms, .. } = &command {
-            Some(Instant::now() + std::time::Duration::from_millis(*timeout_ms))
-        } else {
-            None
+        // WaitFor carries an explicit caller-controlled deadline; everything
+        // else gets the implicit page-load grace so a fast `navigate -> click`
+        // from MCP doesn't race the page load (#67).
+        let wait_deadline = match &command {
+            AutomationCommand::WaitFor { timeout_ms, .. } => {
+                Some(Instant::now() + std::time::Duration::from_millis(*timeout_ms))
+            }
+            _ => Some(Instant::now() + MCP_IMPLICIT_PAGE_LOAD_TIMEOUT),
         };
         Self {
             pane_id,
