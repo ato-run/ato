@@ -370,8 +370,27 @@ pub(super) fn start_runtime_session(
     plan: &capsule_core::router::ManifestData,
     raw_manifest: &str,
     launch: &capsule_core::launch_spec::LaunchSpec,
+    target_was_explicit: bool,
     mut notes: Vec<String>,
 ) -> Result<SessionInfo> {
+    // When the manifest declares `[services]` orchestration AND the caller
+    // didn't pin a single `--target`, defer to `ato run` as a supervisor.
+    // Background: Desktop calls `ato app session start <handle>` without
+    // `--target`, the resolver falls back to `default_target` (typically the
+    // backend), and the WebView ends up showing the API instead of the UI.
+    // Honouring orchestration mode here picks the user-facing leaf service
+    // (the one nothing else `depends_on`) for the WebView while letting
+    // `ato run` bring up dep contracts + sibling services in topo order.
+    if plan.is_orchestration_mode() && !target_was_explicit {
+        return start_orchestration_runtime_session(
+            handle,
+            resolution,
+            manifest_path,
+            plan,
+            notes,
+        );
+    }
+
     let display_strategy = display_strategy_for_runtime(plan);
     if matches!(display_strategy, CapsuleDisplayStrategy::Unsupported) {
         anyhow::bail!(
@@ -549,6 +568,262 @@ pub(super) fn start_runtime_session(
     }
 
     Ok(session_info_from_stored(session))
+}
+
+/// Spawn `ato run` as a supervisor process for `[services]`-mode capsules,
+/// then bind the WebView session to the orchestration's leaf service (the
+/// service no other service `depends_on`).
+///
+/// `ato run` itself owns dep-contract lifecycle, sibling-service startup,
+/// and topological readiness ordering. We just wait for the leaf service's
+/// HTTP port to come up and record the supervisor PID so `ato app session
+/// stop` can SIGTERM the whole tree.
+fn start_orchestration_runtime_session(
+    handle: &str,
+    resolution: &super::resolve::HandleResolution,
+    manifest_path: &Path,
+    plan: &capsule_core::router::ManifestData,
+    mut notes: Vec<String>,
+) -> Result<SessionInfo> {
+    use crate::application::pipeline::executor::PhaseStageTimer;
+    use crate::application::pipeline::hourglass::HourglassPhase;
+
+    let orchestration = plan
+        .resolve_services()
+        .context("failed to resolve [services] orchestration plan")?;
+    let leaf = pick_orchestration_leaf_service(&orchestration)?;
+    let leaf_target_label = leaf.runtime.runtime().target.clone();
+    let leaf_port = leaf.runtime.runtime().port.ok_or_else(|| {
+        anyhow::anyhow!(
+            "orchestration leaf service '{}' (target '{}') has no port; cannot bind WebView",
+            leaf.name,
+            leaf_target_label
+        )
+    })?;
+    let leaf_runtime = leaf.runtime.runtime().runtime.clone();
+    let leaf_driver = leaf
+        .runtime
+        .runtime()
+        .driver
+        .clone()
+        .unwrap_or_else(|| leaf_runtime.clone());
+    let leaf_name = leaf.name.clone();
+
+    // Pass the original capsule handle (e.g. `capsule://github.com/...`) to
+    // the supervisor — NOT the manifest's directory. The session-start path
+    // resolves the handle into `~/.ato/tmp/gh-run/<...>/capsule.toml`, but
+    // that directory lives under WORKSPACE_STATE_DIR and the input
+    // resolver rejects it as "Workspace-local internal state path is not an
+    // authoritative input". Re-passing the handle lets the supervisor go
+    // through the normal cached github resolver.
+    let supervisor_input = handle.to_string();
+    let ato_bin = std::env::current_exe()
+        .context("failed to resolve current `ato` binary path for orchestration supervisor")?;
+
+    let session_root = session_root()?;
+    fs::create_dir_all(&session_root)
+        .with_context(|| format!("failed to create session root {}", session_root.display()))?;
+
+    // Open the session log file BEFORE spawning so we can route the
+    // supervisor's stdout/stderr directly into it via `Stdio::from(file)`.
+    // We deliberately avoid `Stdio::piped()` + `attach_process_logs`'s
+    // copy-thread approach: when this `ato app session start` process
+    // exits, those threads die, the pipes become broken, and the
+    // supervisor's next write triggers SIGPIPE — killing the entire
+    // orchestration. Direct file handoff lets the kernel forward the
+    // supervisor's output without our process being in the loop.
+    let provisional_log_path = session_root.join("orchestration-supervisor.log");
+    let stdout_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&provisional_log_path)
+        .with_context(|| {
+            format!(
+                "failed to open orchestration log file {}",
+                provisional_log_path.display()
+            )
+        })?;
+    let stderr_file = stdout_file.try_clone().with_context(|| {
+        format!(
+            "failed to clone orchestration log handle {}",
+            provisional_log_path.display()
+        )
+    })?;
+
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_orchestration_supervisor");
+    let mut cmd = Command::new(&ato_bin);
+    cmd.arg("run")
+        .arg("-y")
+        // Source-runtime targets require either --sandbox or
+        // --dangerously-skip-permissions before they can execute. Desktop's
+        // session-start path treats the user's "Open" click as the trust
+        // gesture, so we mirror the `--sandbox` enforcement that the
+        // single-target path applies via `prepare_target_execution`.
+        .arg("--sandbox")
+        .arg(&supervisor_input)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "failed to spawn `ato run` orchestration supervisor for {}",
+            supervisor_input
+        )
+    })?;
+    timer.finish_ok();
+
+    let session_id = format!("ato-desktop-session-{}", child.id());
+    let log_path = session_root.join(format!("{}.log", session_id));
+    // Rename the provisional log to its final, pid-stamped name now that we
+    // know the supervisor's PID. If rename fails (race with the supervisor
+    // already writing), fall back to keeping the provisional path in the
+    // session record so the user still has a discoverable log.
+    let log_path = match fs::rename(&provisional_log_path, &log_path) {
+        Ok(()) => log_path,
+        Err(_) => provisional_log_path,
+    };
+
+    let timer = PhaseStageTimer::start(HourglassPhase::Execute, "wait_orchestration_ready");
+    let ready = wait_for_http_ready(&mut child, leaf_port, "/", session_ready_timeout(plan));
+    timer.finish_ok();
+    if let Err(err) = ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!(
+            "orchestration leaf service '{}' (port {}) failed to become ready: {}. See logs at {}",
+            leaf_name,
+            leaf_port,
+            err,
+            log_path.display()
+        );
+    }
+
+    let local_url = format!("http://127.0.0.1:{}/", leaf_port);
+    notes.push(format!(
+        "Orchestration mode: launched `ato run` as supervisor; WebView bound to leaf service '{}' (target='{}', port={}).",
+        leaf_name, leaf_target_label, leaf_port
+    ));
+
+    let runtime = CapsuleRuntimeDescriptor {
+        target_label: leaf_target_label.clone(),
+        runtime: Some(leaf_runtime),
+        driver: Some(leaf_driver.clone()),
+        language: None,
+        port: Some(leaf_port),
+    };
+
+    let process_manager = ProcessManager::new()?;
+    let process_info = ProcessInfo {
+        id: session_id.clone(),
+        name: session_name(plan, "capsule-session"),
+        pid: child.id() as i32,
+        workload_pid: None,
+        status: ProcessStatus::Ready,
+        runtime: runtime
+            .runtime
+            .clone()
+            .unwrap_or_else(|| "source".to_string()),
+        start_time: SystemTime::now(),
+        manifest_path: Some(manifest_path.to_path_buf()),
+        scoped_id: None,
+        target_label: Some(leaf_target_label.clone()),
+        requested_port: Some(leaf_port),
+        log_path: Some(log_path.clone()),
+        ready_at: Some(SystemTime::now()),
+        last_event: Some("ready".to_string()),
+        last_error: None,
+        exit_code: None,
+    };
+    process_manager.write_pid(&process_info)?;
+
+    let session = StoredSessionInfo {
+        session_id: session_id.clone(),
+        handle: handle.to_string(),
+        normalized_handle: resolution.normalized_handle.clone(),
+        canonical_handle: resolution.canonical_handle.clone(),
+        trust_state: resolution.trust_state.clone(),
+        source: resolution.source.clone(),
+        restricted: resolution.restricted,
+        snapshot: resolution.snapshot.clone(),
+        runtime,
+        display_strategy: CapsuleDisplayStrategy::WebUrl,
+        pid: child.id() as i32,
+        log_path: log_path.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        target_label: leaf_target_label,
+        notes,
+        guest: None,
+        web: Some(WebSessionDisplay {
+            local_url: local_url.clone(),
+            healthcheck_url: local_url,
+            served_by: leaf_driver,
+        }),
+        terminal: None,
+        service: None,
+        // The supervised `ato run` owns dep-contract lifecycle internally;
+        // we don't persist a sibling snapshot here. Killing the supervisor
+        // PID cascades through its own teardown path.
+        dependency_contracts: None,
+        schema_version: None,
+        launch_digest: None,
+        process_start_time_unix_ms: None,
+    };
+    write_session_record(&session_root, &session)?;
+
+    // Detach the supervisor: drop the Child handle so we don't reap or
+    // signal it on this scope's exit. `ato app session stop <id>` will
+    // SIGTERM the recorded PID when the user closes the pane.
+    std::mem::forget(child);
+
+    Ok(session_info_from_stored(session))
+}
+
+/// Pick the leaf service of the orchestration dependency graph — the one
+/// no other service `depends_on`. For typical app manifests (e.g. backend
+/// + frontend with `web depends_on main`), this is the user-facing UI.
+///
+/// If multiple leaves exist, prefer one whose target driver is `node` /
+/// runtime is `web` (front-end candidates), then fall back to the
+/// alphabetically last name.
+fn pick_orchestration_leaf_service(
+    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
+) -> Result<&capsule_core::foundation::types::ResolvedService> {
+    use std::collections::HashSet;
+
+    let mut depended: HashSet<&str> = HashSet::new();
+    for service in &orchestration.services {
+        for dep in &service.depends_on {
+            depended.insert(dep.as_str());
+        }
+    }
+    let leaves: Vec<&capsule_core::foundation::types::ResolvedService> = orchestration
+        .services
+        .iter()
+        .filter(|service| !depended.contains(service.name.as_str()))
+        .collect();
+
+    match leaves.len() {
+        0 => anyhow::bail!(
+            "orchestration plan has no leaf service — every service is depended on by another (cycle?)"
+        ),
+        1 => Ok(leaves[0]),
+        _ => {
+            if let Some(web_leaf) = leaves.iter().find(|service| {
+                let target = service.runtime.runtime();
+                target
+                    .driver
+                    .as_deref()
+                    .is_some_and(|driver| driver.eq_ignore_ascii_case("node"))
+                    || target.runtime.eq_ignore_ascii_case("web")
+            }) {
+                return Ok(*web_leaf);
+            }
+            Ok(*leaves
+                .iter()
+                .max_by_key(|service| service.name.clone())
+                .expect("non-empty leaves vec"))
+        }
+    }
 }
 
 pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInfo {
