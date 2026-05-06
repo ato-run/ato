@@ -28,7 +28,6 @@ use std::os::windows::fs::symlink_dir;
 
 pub(crate) use filesystem::*;
 
-const DEFAULT_FETCHES_DIR: &str = ".ato/fetches";
 const FETCH_ARTIFACT_DIR: &str = "artifact";
 const FETCH_METADATA_FILE: &str = "fetch.json";
 const FETCH_SOURCE_ARTIFACT_FILE: &str = "artifact.capsule";
@@ -44,10 +43,8 @@ const DEFAULT_FINALIZE_TOOL: &str = "codesign";
 const DEFAULT_MACOS_LAUNCHER_DIR: &str = "Applications";
 const DEFAULT_LINUX_DESKTOP_ENTRY_DIR: &str = ".local/share/applications";
 const DEFAULT_LINUX_BIN_DIR: &str = ".local/bin";
-const PROJECTIONS_DIR: &str = ".ato/native-delivery/projections";
 const PROJECTION_KIND_SYMLINK: &str = "symlink";
 const PROJECTION_KIND_LINUX_DESKTOP_ENTRY: &str = "linux-desktop-entry";
-const DEFAULT_DERIVED_APPS_DIR: &str = ".ato/apps";
 const LINUX_PROJECTION_EXEC_SEARCH_MAX_DEPTH: usize = 3;
 
 #[derive(Debug, Serialize)]

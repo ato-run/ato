@@ -151,13 +151,7 @@ fn share_workspace_dir(input: &str) -> Result<PathBuf> {
     let mut hasher = DefaultHasher::new();
     input.hash(&mut hasher);
     let hash = hasher.finish();
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .map_err(|_| CapsuleError::Config("HOME not set".into()))?;
-    Ok(home
-        .join(".ato")
-        .join("apps")
-        .join("share-runs")
+    Ok(crate::common::paths::ato_path_or_workspace_tmp("apps/share-runs")
         .join(format!("{hash:016x}")))
 }
 

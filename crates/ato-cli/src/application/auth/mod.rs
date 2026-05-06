@@ -40,7 +40,6 @@ pub(super) const GITHUB_APP_INSTALL_TIMEOUT_SECS: u64 = 5 * 60;
 pub(super) const GITHUB_APP_INSTALL_POLL_SECS: u64 = 3;
 pub(super) const GITHUB_APP_INSTALL_NOTICE_INTERVAL_SECS: u64 = 12;
 pub(super) const GITHUB_APP_INSTALL_TROUBLESHOOT_AFTER_SECS: u64 = 45;
-pub(super) const LEGACY_CREDENTIALS_DIR: &str = ".ato";
 pub(super) const LEGACY_CREDENTIALS_FILE: &str = "credentials.json";
 pub(super) const CANONICAL_CREDENTIALS_DIR: &str = "ato";
 pub(super) const CANONICAL_CREDENTIALS_FILE: &str = "credentials.toml";
@@ -85,10 +84,9 @@ pub struct Credentials {
 pub struct AuthManager {
     pub(super) credentials_path: PathBuf,
     pub(super) legacy_credentials_path: PathBuf,
-    /// Home directory used by the shared credential layer
-    /// (`AuthStore`/`AgeFileBackend`). Defaults to the user's real home in
-    /// production; overridable in tests so each temp dir gets its own age
-    /// identity and credential layout.
+    /// Canonical ATO_HOME root used by the shared credential layer
+    /// (`AuthStore`/`AgeFileBackend`). Overridable in tests so each temp dir
+    /// gets its own isolated age identity and credential layout.
     pub(super) age_home: PathBuf,
     /// Eagerly-constructed `AuthStore`. Cached so the in-process
     /// `MemoryBackend` survives across `resolve_*` / `persist_*` calls — every
