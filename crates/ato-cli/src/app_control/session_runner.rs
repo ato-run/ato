@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use capsule_core::launch_spec::{derive_launch_spec, LaunchSpec};
+use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::router::ManifestData;
 
 use crate::application::build_materialization as bm;
@@ -34,16 +34,15 @@ use crate::application::pipeline::executor::{
     HourglassPhaseRunner, PhaseAnnotation, PhaseStageTimer,
 };
 use crate::application::pipeline::hourglass::HourglassPhase;
+use crate::application::pipeline::phases::run::preflight_selected_target_environment;
 use crate::executors::launch_context::RuntimeLaunchContext;
-use crate::executors::target_runner::preflight_required_environment_variables;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, resolve_local_plan, HandleResolution};
+use super::resolve::{build_resolution, HandleResolution};
 use super::session::{
-    orchestration_leaf_target_label, redirect_stdout_to_stderr, resolve_session_launch_plan,
-    restore_stdout, start_guest_session, start_orchestration_session_supervisor,
-    start_runtime_session, SessionInfo,
+    redirect_stdout_to_stderr, resolve_session_launch_plan, restore_stdout, start_guest_session,
+    start_orchestration_session_supervisor, start_runtime_session, SessionInfo,
 };
 
 pub(super) struct SessionStartPhaseRunner<'a> {
@@ -63,6 +62,7 @@ pub(super) struct SessionStartPhaseRunner<'a> {
     // Set by Build phase
     build_observation: Option<bm::BuildObservation>,
     build_decision_kind: Option<bm::BuildResultKind>,
+    orchestration_supervisor_mode: bool,
 
     // Set by Execute phase (App Session Materialization).
     /// `true` when Execute returned an envelope by reusing an existing
@@ -93,6 +93,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             launch_ctx: RuntimeLaunchContext::empty(),
             build_observation: None,
             build_decision_kind: None,
+            orchestration_supervisor_mode: false,
             execute_reused: false,
             execute_prior_kind: None,
             session_info: None,
@@ -103,41 +104,25 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let resolution = build_resolution(self.handle, self.target_label, None)?;
         let (manifest_path, mut plan, mut launch, mut notes) =
             resolve_session_launch_plan(self.handle, self.target_label)?;
-
-        if self.target_label.is_none() {
-            if let Some(leaf_target) = orchestration_leaf_target_label(&plan)? {
-                if leaf_target != plan.selected_target_label() {
-                    let (rerouted_plan, _guest, rerouted_notes) =
-                        resolve_local_plan(&manifest_path, Some(&leaf_target))?;
-                    let rerouted_launch =
-                        derive_launch_spec(&rerouted_plan).with_context(|| {
-                            format!(
-                            "failed to derive launch spec for orchestration leaf target '{}' in {}",
-                            leaf_target,
-                            manifest_path.display()
-                        )
-                        })?;
-                    notes.extend(rerouted_notes);
-                    notes.push(format!(
-                        "Orchestration mode: selected leaf target '{}' for Desktop session.",
-                        leaf_target
-                    ));
-                    plan = rerouted_plan;
-                    launch = rerouted_launch;
-                }
-            }
-        }
+        let orchestration_supervisor_mode =
+            self.target_label.is_none() && plan.is_orchestration_mode();
 
         // Phase Y option 2: re-anchor the registry-installed capsule onto a
         // session-local hardlink projection so the launch cannot mutate the
         // shared install dir at `~/.ato/runtimes/<scoped>/<version>/`.
         // Local capsules (manifest path outside the runtimes tree) keep
         // their original workspace_root so user edits stay live.
-        let manifest_path = match maybe_project_to_session(&manifest_path, &mut plan, &mut launch) {
-            Ok(maybe_path) => maybe_path.unwrap_or(manifest_path),
-            Err(err) => {
-                eprintln!("ATO-WARN source projection failed; falling back to install dir: {err}");
-                manifest_path
+        let manifest_path = if orchestration_supervisor_mode {
+            manifest_path
+        } else {
+            match maybe_project_to_session(&manifest_path, &mut plan, &mut launch) {
+                Ok(maybe_path) => maybe_path.unwrap_or(manifest_path),
+                Err(err) => {
+                    eprintln!(
+                        "ATO-WARN source projection failed; falling back to install dir: {err}"
+                    );
+                    manifest_path
+                }
             }
         };
 
@@ -148,7 +133,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
         // `start_session`: no IPC bindings, no extra injected env. The check
         // falls back to OS env / manifest env entries — which is what the
         // spawned child will actually receive.
-        preflight_required_environment_variables(&plan, &self.launch_ctx)?;
+        preflight_selected_target_environment(&plan, &self.launch_ctx)?;
 
         self.resolution = Some(resolution);
         self.manifest_path = Some(manifest_path);
@@ -156,10 +141,16 @@ impl<'a> SessionStartPhaseRunner<'a> {
         self.launch = Some(launch);
         self.raw_manifest = Some(raw_manifest);
         self.notes = notes;
+        self.orchestration_supervisor_mode = orchestration_supervisor_mode;
         Ok(())
     }
 
     async fn run_build(&mut self) -> Result<()> {
+        if self.orchestration_supervisor_mode {
+            self.build_decision_kind = Some(bm::BuildResultKind::NotApplicable);
+            return Ok(());
+        }
+
         let plan = self
             .plan
             .as_ref()
@@ -399,19 +390,20 @@ impl<'a> SessionStartPhaseRunner<'a> {
         raw_manifest: &str,
         launch: &LaunchSpec,
     ) -> Result<SessionInfo> {
-        if self.target_label.is_none() && plan.is_orchestration_mode() {
+        let manifest_value: toml::Value = toml::from_str(raw_manifest)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+
+        if self.orchestration_supervisor_mode {
             return start_orchestration_session_supervisor(
                 self.handle,
                 resolution,
                 manifest_path,
                 plan,
-                raw_manifest,
+                &manifest_value,
                 self.notes.clone(),
             );
         }
 
-        let manifest_value: toml::Value = toml::from_str(raw_manifest)
-            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
         let guest = parse_guest_contract(
             &manifest_value,
             manifest_path
@@ -436,7 +428,6 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 plan,
                 raw_manifest,
                 launch,
-                self.target_label.is_some(),
                 self.notes.clone(),
             )
         }

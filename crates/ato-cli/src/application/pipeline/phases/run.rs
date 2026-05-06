@@ -1044,6 +1044,111 @@ pub(crate) fn preflight_dependency_contract_manifest_env(
     )
 }
 
+pub(crate) fn preflight_selected_target_environment(
+    plan: &capsule_core::router::ManifestData,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+) -> Result<()> {
+    target_runner::preflight_required_environment_variables(plan, launch_ctx)
+}
+
+pub(crate) fn preflight_orchestration_session_environment(
+    plan: &capsule_core::router::ManifestData,
+    manifest_value: &toml::Value,
+    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+    host_env: &dyn HostEnv,
+    action: &str,
+) -> Result<()> {
+    preflight_orchestration_service_required_env(
+        plan,
+        orchestration,
+        launch_ctx,
+        host_env,
+        action,
+    )?;
+    preflight_dependency_contract_manifest_env(plan, manifest_value, host_env, action)
+}
+
+fn preflight_orchestration_service_required_env(
+    plan: &capsule_core::router::ManifestData,
+    orchestration: &capsule_core::foundation::types::OrchestrationPlan,
+    launch_ctx: &crate::executors::launch_context::RuntimeLaunchContext,
+    host_env: &dyn HostEnv,
+    action: &str,
+) -> Result<()> {
+    let launch_env = launch_ctx.merged_env();
+    let mut missing_keys: Vec<String> = Vec::new();
+    let mut missing_schema: Vec<ConfigField> = Vec::new();
+    let mut seen_missing = std::collections::HashSet::new();
+
+    for service in &orchestration.services {
+        let runtime = service.runtime.runtime();
+        let base_env = runtime_overrides::merged_env(runtime.env.clone());
+        for name in &runtime.required_env {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if launch_env
+                .get(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if base_env
+                .get(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if host_env
+                .get(name)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if !seen_missing.insert(name.to_string()) {
+                continue;
+            }
+
+            missing_keys.push(name.to_string());
+            missing_schema.push(ConfigField {
+                name: name.to_string(),
+                label: Some(format!(
+                    "service '{}'.target '{}' required_env {}",
+                    service.name, runtime.target, name
+                )),
+                description: None,
+                kind: ConfigKind::Secret,
+                default: None,
+                placeholder: None,
+            });
+        }
+    }
+
+    if missing_keys.is_empty() {
+        return Ok(());
+    }
+
+    let target = plan.selected_target_label();
+    let message = format!(
+        "missing required environment variables for orchestration services of target '{}': {} (set them before {})",
+        target,
+        missing_keys.join(", "),
+        action
+    );
+    Err(AtoExecutionError::missing_required_env(
+        message,
+        missing_keys,
+        missing_schema,
+        Some(target),
+    )
+    .into())
+}
+
 pub(crate) async fn setup_dependency_contracts_launch_context(
     plan: &capsule_core::router::ManifestData,
     prepared: &mut PreparedRunContext,
@@ -2773,7 +2878,8 @@ where
         }
     }
 
-    let consent_already_granted = crate::consent_store::has_consent(&execution_plan)?;
+    let consent_already_granted =
+        request.dangerously_skip_permissions || crate::consent_store::has_consent(&execution_plan)?;
     if !consent_already_granted {
         if use_progressive_ui {
             crate::progressive_ui::render_execution_consent_summary(
