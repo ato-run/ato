@@ -81,6 +81,9 @@ ureq = "2.12.1"
 url = "2.5.4"
 wry = { version = "0.55.0", features = ["protocol", "devtools"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6.4"
