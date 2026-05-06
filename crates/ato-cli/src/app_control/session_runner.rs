@@ -400,6 +400,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 plan,
                 raw_manifest,
                 launch,
+                self.target_label.is_some(),
                 self.notes.clone(),
             )
         }
