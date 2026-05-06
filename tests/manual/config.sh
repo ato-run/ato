@@ -17,15 +17,17 @@ mkdir -p "$ATO_TEST_TMP"
 setup_isolated_ato_env() {
     [ "${ATO_TEST_HERMETIC:-1}" = "1" ] || return 0
 
-    if [ -z "${ATO_TEST_ENV_ROOT:-}" ]; then
+    if [ "${ATO_TEST_REUSE_ENV_ROOT:-0}" = "1" ] && [ -n "${ATO_TEST_ENV_ROOT:-}" ]; then
+        :
+    else
         ATO_TEST_ENV_ROOT="$(mktemp -d "$ATO_TEST_TMP/env.XXXXXX")"
-        export ATO_TEST_ENV_ROOT
     fi
+    export ATO_TEST_ENV_ROOT
 
-    export ATO_HOME="${ATO_HOME:-$ATO_TEST_ENV_ROOT/ato-home}"
+    export ATO_HOME="$ATO_TEST_ENV_ROOT/ato-home"
     export HOME="$ATO_TEST_ENV_ROOT/home"
-    export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$ATO_TEST_ENV_ROOT/xdg-config}"
-    export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$ATO_TEST_ENV_ROOT/xdg-cache}"
+    export XDG_CONFIG_HOME="$ATO_TEST_ENV_ROOT/xdg-config"
+    export XDG_CACHE_HOME="$ATO_TEST_ENV_ROOT/xdg-cache"
     unset ATO_DESKTOP_SESSION_ROOT
     unset DESKY_SESSION_ROOT
 
