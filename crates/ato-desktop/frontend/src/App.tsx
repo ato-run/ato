@@ -1868,31 +1868,75 @@ function renderCapsuleDetail(
             <div className="id-info">
               <div className="id-title-row">
                 <h1 className="id-title">{title}</h1>
-                <span className="badge verified">
-                  <span className="iconify" data-icon="lucide:shield-check"></span> Verified
-                </span>
+                {/* #42: trust badge tone derived from real host data.
+                    `restricted` capsules render as red; `Trusted` (host-confirmed)
+                    renders as green; everything else (untrusted / unknown) renders
+                    as neutral. The historical hardcoded "Verified" badge is gone —
+                    we never had verification for v0.5.0. */}
+                {detail?.restricted ? (
+                  <span className="badge danger" title="Restricted by host trust policy">
+                    <span className="iconify" data-icon="lucide:shield-alert"></span> Restricted
+                  </span>
+                ) : detail?.trustLabel === "Trusted" ? (
+                  <span className="badge verified" title="Trust state confirmed by host">
+                    <span className="iconify" data-icon="lucide:shield-check"></span> Trusted
+                  </span>
+                ) : detail?.trustLabel ? (
+                  <span className="badge neutral" title="Trust state reported by host">
+                    <span className="iconify" data-icon="lucide:shield"></span> {detail.trustLabel}
+                  </span>
+                ) : null}
               </div>
               <div className="id-meta">
-                <span>{detail?.versionLabel ?? "v1.4.0"}</span>
+                {/* #42: drop the v1.4.0 fallback — the host sends the real
+                    string (which may already be "unversioned"). */}
+                <span>{detail?.versionLabel ?? "—"}</span>
                 <span>•</span>
-                <a href="#" style={{ color: "var(--text-muted)", textDecoration: "none" }}>
-                  {detail?.trustLabel ?? "@kyotori"}
-                </a>
-                <span>•</span>
-                <span className="badge neutral" style={{ fontSize: "9px", padding: "2px 4px", background: "transparent", border: "none" }}>
-                  Tier 2
+                {/* #42: publisher / handle uses real canonicalHandle (or
+                    handle) — never the hardcoded @kyotori. */}
+                <span style={{ color: "var(--text-muted)" }}>
+                  {detail?.canonicalHandle ?? detail?.handle ?? "—"}
                 </span>
+                {/* #42: removed the hardcoded "Tier 2" pill. Real runtime
+                    tier is not surfaced for v0.5.0; v0.6.0 wires it to the
+                    host snapshot. */}
               </div>
             </div>
           </div>
+          {/* #43: header action buttons.
+              - "Open Browser" is wired when the host actually exposes a
+                local URL; otherwise the button is disabled with a tooltip
+                that explains why (instead of toasting a fake URL).
+              - "Restart" / "Stop" need a host IPC channel that does not
+                exist in v0.5.0. Disabled with "Coming in v0.6.0" so the
+                UI does not pretend the capsule was restarted/stopped when
+                in fact nothing happened. v0.6.0 wires them through the
+                same IPC track as the settings tabs (#49). */}
           <div className="global-actions">
-            <button className="btn ghost icon-only" title="Open Browser" onClick={() => toast("Opening http://localhost:5000")}>
+            <button
+              className="btn ghost icon-only"
+              title={detail?.localUrl ? `Open ${detail.localUrl} in your default browser` : "No local URL exposed by this capsule"}
+              disabled={!detail?.localUrl}
+              onClick={() => {
+                if (detail?.localUrl) {
+                  window.open(detail.localUrl, "_blank", "noopener,noreferrer");
+                }
+              }}
+            >
               <span className="iconify" data-icon="lucide:external-link"></span>
             </button>
-            <button className="btn" title="Restart" onClick={() => toast("Restarting capsule...")}>
+            <button
+              className="btn"
+              title="Restart — coming in v0.6.0 (host IPC not yet wired)"
+              disabled
+            >
               <span className="iconify" data-icon="lucide:rotate-cw"></span>
             </button>
-            <button className="btn danger" onClick={() => toast("Stopping capsule...")}>
+            <button
+              className="btn danger"
+              title="Stop — coming in v0.6.0 (host IPC not yet wired)"
+              disabled
+            >
               <span className="iconify" data-icon="lucide:square"></span> Stop
             </button>
           </div>
