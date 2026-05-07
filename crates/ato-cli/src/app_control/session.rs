@@ -45,6 +45,8 @@ use super::resolve::resolve_local_plan;
 const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
+const DESKTOP_PARENT_PID_ENV: &str = "ATO_DESKTOP_PARENT_PID";
+const DESKTOP_PARENT_START_TIME_ENV: &str = "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS";
 /// Resolve the readiness budget for `wait_for_http_ready` from the
 /// manifest's `startup_timeout` (per-target → global → 60s default).
 /// The previous code path used a hardcoded 10s ceiling and silently
@@ -182,6 +184,13 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     let info = runner
         .session_info
         .ok_or_else(|| anyhow::anyhow!("session start pipeline did not populate session info"))?;
+
+    if let Err(err) = maybe_spawn_parent_death_watcher(&info.session_id) {
+        eprintln!(
+            "ATO-WARN failed to start parent-death watcher for {}: {}",
+            info.session_id, err
+        );
+    }
 
     if json {
         println!(
@@ -1764,15 +1773,21 @@ fn stop_recorded_dependency_contracts(
     Ok(true)
 }
 
+fn dependency_sidecar_has_providers(
+    snapshot: Option<&crate::runtime::process::DependencyContractSessionSnapshot>,
+) -> bool {
+    snapshot.is_some_and(|snapshot| !snapshot.providers.is_empty())
+}
+
 pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     let process_manager = ProcessManager::new()?;
     let session_path = session_root()?.join(format!("{session_id}.json"));
     let session_record = read_session_record(&session_path);
-    let has_dependency_sidecar = process_manager
+    let dependency_sidecar = process_manager
         .read_dependency_session_snapshot(session_id)
         .ok()
-        .flatten()
-        .is_some();
+        .flatten();
+    let sidecar_has_providers = dependency_sidecar_has_providers(dependency_sidecar.as_ref());
 
     let mut stop_error = None;
     let mut stopped = match process_manager.stop_process(session_id, true) {
@@ -1782,9 +1797,12 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             false
         }
     };
-    if !has_dependency_sidecar {
+    if !sidecar_has_providers || !stopped {
         match stop_recorded_dependency_contracts(session_record.as_ref(), true) {
             Ok(record_stopped) => {
+                if record_stopped {
+                    let _ = process_manager.delete_pid(session_id);
+                }
                 stopped |= record_stopped;
             }
             Err(err) => {
@@ -1840,6 +1858,72 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         println!("Session was not active: {session_id}");
     }
     Ok(())
+}
+
+pub fn watch_parent_and_stop_session(
+    session_id: &str,
+    parent_pid: u32,
+    parent_start_time_unix_ms: Option<u64>,
+    poll_interval: Duration,
+) -> Result<()> {
+    while desktop_parent_process_matches(parent_pid, parent_start_time_unix_ms) {
+        std::thread::sleep(poll_interval);
+    }
+
+    stop_session(session_id, false).with_context(|| {
+        format!("failed to stop session {session_id} after ato-desktop parent exited")
+    })
+}
+
+fn maybe_spawn_parent_death_watcher(session_id: &str) -> Result<()> {
+    let Some(parent_pid) = std::env::var(DESKTOP_PARENT_PID_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return Ok(());
+    };
+    if parent_pid == 0 {
+        return Ok(());
+    }
+
+    let parent_start_time = std::env::var(DESKTOP_PARENT_START_TIME_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    let ato_bin = std::env::current_exe().context("failed to resolve current ato executable")?;
+    let mut command = Command::new(ato_bin);
+    command
+        .args(["app", "session", "watch-parent", session_id, "--parent-pid"])
+        .arg(parent_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(start_time) = parent_start_time {
+        command
+            .arg("--parent-start-time-unix-ms")
+            .arg(start_time.to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let _child = command.spawn().context("failed to spawn watcher process")?;
+    Ok(())
+}
+
+fn desktop_parent_process_matches(parent_pid: u32, expected_start_time: Option<u64>) -> bool {
+    if parent_pid == 0 || !ato_session_core::process::pid_is_alive(parent_pid) {
+        return false;
+    }
+
+    match expected_start_time {
+        Some(expected) => ato_session_core::process::process_start_time_unix_ms(parent_pid)
+            .map(|actual| actual == expected)
+            .unwrap_or(false),
+        None => true,
+    }
 }
 
 /// Thin wrapper around `ato_session_core::session_root` so existing
@@ -2154,12 +2238,17 @@ mod tests {
     #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_sidecar_is_missing() {
         struct EnvGuard {
+            ato_home: Option<String>,
             home: Option<String>,
             session_root: Option<String>,
         }
 
         impl Drop for EnvGuard {
             fn drop(&mut self) {
+                match &self.ato_home {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
                 match &self.home {
                     Some(value) => std::env::set_var("HOME", value),
                     None => std::env::remove_var("HOME"),
@@ -2175,9 +2264,11 @@ mod tests {
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
         let _guard = EnvGuard {
+            ato_home: std::env::var("ATO_HOME").ok(),
             home: std::env::var("HOME").ok(),
             session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
         };
+        std::env::set_var("ATO_HOME", temp.path());
         std::env::set_var("HOME", temp.path());
         std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
 
@@ -2264,6 +2355,140 @@ mod tests {
         assert!(consumer.try_wait().expect("consumer wait").is_some());
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
+        assert!(ProcessManager::new()
+            .expect("process manager after stop")
+            .read_dependency_session_snapshot(&session_id)
+            .expect("read dependency session after stop")
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
+    fn stop_session_uses_record_dependency_contracts_when_pid_file_is_missing() {
+        struct EnvGuard {
+            ato_home: Option<String>,
+            home: Option<String>,
+            session_root: Option<String>,
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.ato_home {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+                match &self.home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.session_root {
+                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
+                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = EnvGuard {
+            ato_home: std::env::var("ATO_HOME").ok(),
+            home: std::env::var("HOME").ok(),
+            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
+        };
+        std::env::set_var("ATO_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+
+        let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
+        let session_id = "ato-desktop-session-missing-pid".to_string();
+        ProcessManager::new()
+            .expect("process manager")
+            .write_dependency_session_snapshot(
+                &session_id,
+                &crate::runtime::process::DependencyContractSessionSnapshot {
+                    session_id: session_id.clone(),
+                    consumer_pid: 999_999_999,
+                    providers: Vec::new(),
+                },
+            )
+            .expect("write empty sidecar");
+
+        write_session_record(
+            &session_root,
+            &StoredSessionInfo {
+                session_id: session_id.clone(),
+                handle: "capsule://example/demo".to_string(),
+                normalized_handle: "capsule://example/demo".to_string(),
+                canonical_handle: Some("capsule://example/demo".to_string()),
+                trust_state: TrustState::Untrusted,
+                source: Some("registry".to_string()),
+                restricted: false,
+                snapshot: None,
+                runtime: CapsuleRuntimeDescriptor {
+                    target_label: "web".to_string(),
+                    runtime: Some("source".to_string()),
+                    driver: None,
+                    language: None,
+                    port: None,
+                },
+                display_strategy: CapsuleDisplayStrategy::WebUrl,
+                pid: 999_999_999,
+                log_path: session_root.join("session.log").display().to_string(),
+                manifest_path: temp.path().join("capsule.toml").display().to_string(),
+                target_label: "web".to_string(),
+                notes: vec![],
+                guest: None,
+                web: Some(WebSessionDisplay {
+                    local_url: "http://127.0.0.1:9999/".to_string(),
+                    healthcheck_url: "http://127.0.0.1:9999/".to_string(),
+                    served_by: "ato".to_string(),
+                }),
+                terminal: None,
+                service: None,
+                dependency_contracts: Some(StoredDependencyContracts {
+                    consumer_pid: 999_999_999,
+                    providers: vec![StoredDependencyProvider {
+                        alias: "db".to_string(),
+                        pid: provider.id() as i32,
+                        state_dir: temp.path().join("state/db"),
+                        resolved: "capsule://github.com/Koh0920/ato-postgres@main".to_string(),
+                        allocated_port: Some(5432),
+                        log_path: Some(temp.path().join("db.log")),
+                        runtime_export_keys: vec!["DATABASE_URL".to_string()],
+                    }],
+                }),
+                orchestration_services: None,
+                schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+                launch_digest: Some("digest".repeat(8)),
+                process_start_time_unix_ms: None,
+            },
+        )
+        .expect("write session record");
+
+        stop_session(&session_id, true).expect("stop session");
+
+        assert!(provider.try_wait().expect("provider wait").is_some());
+        assert!(!session_root.join(format!("{}.json", session_id)).exists());
+        assert!(ProcessManager::new()
+            .expect("process manager after stop")
+            .read_dependency_session_snapshot(&session_id)
+            .expect("read dependency session after stop")
+            .is_none());
+    }
+
+    #[test]
+    fn desktop_parent_process_matcher_rejects_dead_pid() {
+        assert!(!desktop_parent_process_matches(999_999_999, None));
+    }
+
+    #[test]
+    fn desktop_parent_process_matcher_accepts_current_pid() {
+        let pid = std::process::id();
+        let start_time = ato_session_core::process::process_start_time_unix_ms(pid);
+        assert!(desktop_parent_process_matches(pid, start_time));
     }
 
     /// PR-D: `stop_recorded_orchestration_services` walks the persisted
