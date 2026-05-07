@@ -1273,9 +1273,7 @@ impl DesktopShell {
             if let Err(error) = self.state.grant_secret_to_capsule(&handle, &key) {
                 self.state.push_activity(
                     crate::state::ActivityTone::Error,
-                    format!(
-                        "Failed to grant secret '{key}' to {handle}: {error}"
-                    ),
+                    format!("Failed to grant secret '{key}' to {handle}: {error}"),
                 );
                 return;
             }

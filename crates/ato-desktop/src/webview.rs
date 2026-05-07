@@ -819,6 +819,22 @@ impl WebViewManager {
                     req.send(Ok(serde_json::json!({ "ok": true })));
                     continue;
                 }
+                SetCapsuleSecrets {
+                    handle,
+                    secrets,
+                    clear_pending_config,
+                } => {
+                    let outcome =
+                        apply_capsule_secrets(state, handle, secrets, *clear_pending_config);
+                    match outcome {
+                        Ok(applied) => req.send(Ok(serde_json::json!({
+                            "ok": true,
+                            "applied": applied,
+                        }))),
+                        Err(message) => req.send(Err(message)),
+                    };
+                    continue;
+                }
                 _ => {}
             }
 
@@ -3968,6 +3984,49 @@ fn mime_for_path(path: &Path) -> &'static str {
 
 // ── Automation command dispatch ───────────────────────────────────────────────
 
+/// Apply a batch of secrets for `handle` and (optionally) clear an open
+/// `pending_config` modal pointing at the same handle so the next render
+/// re-arms the launch.
+///
+/// Returns the keys that were applied (in input order) on success. On the
+/// first persist failure, returns `Err(message)` — earlier secrets that
+/// already wrote successfully stay in `secrets.json`, which matches the
+/// modal Save handler's behaviour (it also bails on first error after
+/// surfacing it). The caller turns this into a JSON-RPC error so MCP
+/// callers can distinguish a failed save from a successful one.
+pub(crate) fn apply_capsule_secrets(
+    state: &mut AppState,
+    handle: &str,
+    secrets: &[(String, String)],
+    clear_pending_config: bool,
+) -> Result<Vec<String>, String> {
+    let mut applied = Vec::with_capacity(secrets.len());
+    for (key, value) in secrets {
+        if let Err(error) = state.add_secret(key.clone(), value.clone()) {
+            return Err(format!("failed to save secret '{key}': {error}"));
+        }
+        if let Err(error) = state.grant_secret_to_capsule(handle, key) {
+            return Err(format!(
+                "failed to grant secret '{key}' to {handle}: {error}"
+            ));
+        }
+        applied.push(key.clone());
+    }
+
+    if clear_pending_config {
+        let matches = state
+            .pending_config
+            .as_ref()
+            .map(|p| p.handle == handle)
+            .unwrap_or(false);
+        if matches {
+            state.clear_pending_config();
+        }
+    }
+
+    Ok(applied)
+}
+
 /// Execute a single automation command against a live WebView.
 /// Called from `WebViewManager::dispatch_automation_requests` on the GPUI main thread.
 fn dispatch_automation_command(
@@ -4213,7 +4272,9 @@ fn dispatch_automation_command(
             req.send(Ok(serde_json::json!({ "ok": true })));
         }
         // Handled in dispatch_automation_requests before reaching here.
-        ListPanes | FocusPane { .. } | OpenUrl { .. } => unreachable!(),
+        ListPanes | FocusPane { .. } | OpenUrl { .. } | SetCapsuleSecrets { .. } => {
+            unreachable!()
+        }
     }
 }
 
@@ -4583,5 +4644,134 @@ mod tests {
         let dev_base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
 
         assert!(!allow_host_panel_navigation(&target, Some(&dev_base)));
+    }
+
+    // ── apply_capsule_secrets (used by automation MCP `set_capsule_secrets`) ──
+    //
+    // These tests pin the contract that the MCP path is wire-compatible with
+    // the modal Save handler in `ui/mod.rs::save_pending_config`. They share
+    // an env_lock because save_secrets reads ATO_HOME, and parallel tests
+    // would otherwise see each other's tempdir.
+    mod apply_capsule_secrets {
+        use super::*;
+        use crate::state::PendingConfigRequest;
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, OnceLock};
+
+        fn env_lock() -> MutexGuard<'static, ()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("env lock")
+        }
+
+        struct EnvVarGuard {
+            key: &'static str,
+            previous: Option<OsString>,
+        }
+
+        impl EnvVarGuard {
+            fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+                let previous = std::env::var_os(key);
+                std::env::set_var(key, value);
+                Self { key, previous }
+            }
+        }
+
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                if let Some(value) = &self.previous {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+
+        fn isolated_state() -> (tempfile::TempDir, EnvVarGuard, AppState) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let ato_home = temp.path().join("ato-home");
+            std::fs::create_dir_all(ato_home.join("run")).expect("run dir");
+            let guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+            // load_secrets / load_config / load_capsule_configs read under
+            // ATO_HOME — initial() returns a state with no secrets pre-set.
+            let state = AppState::initial();
+            (temp, guard, state)
+        }
+
+        fn pending(handle: &str) -> PendingConfigRequest {
+            PendingConfigRequest {
+                handle: handle.to_string(),
+                target: None,
+                fields: Vec::new(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn persists_each_secret_grants_to_handle_and_returns_keys_in_order() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+
+            let secrets = vec![
+                ("PG_PASSWORD".to_string(), "pgpw".to_string()),
+                ("SECRET_KEY".to_string(), "sk".to_string()),
+            ];
+
+            let applied =
+                apply_capsule_secrets(&mut state, "github.com/Koh0920/WasedaP2P", &secrets, true)
+                    .expect("apply");
+
+            assert_eq!(applied, vec!["PG_PASSWORD", "SECRET_KEY"]);
+
+            let granted = state
+                .secret_store
+                .secrets_for_capsule("github.com/Koh0920/WasedaP2P");
+            let mut keys: Vec<&str> = granted.iter().map(|e| e.key.as_str()).collect();
+            keys.sort();
+            assert_eq!(keys, vec!["PG_PASSWORD", "SECRET_KEY"]);
+        }
+
+        #[test]
+        fn clears_pending_config_when_handle_matches_and_flag_is_true() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.set_pending_config(pending("h"));
+
+            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], true)
+                .expect("apply");
+
+            assert!(state.pending_config.is_none(), "pending_config must clear");
+        }
+
+        #[test]
+        fn leaves_pending_config_intact_when_flag_is_false() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.set_pending_config(pending("h"));
+
+            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], false)
+                .expect("apply");
+
+            assert!(
+                state.pending_config.is_some(),
+                "pending_config must persist when flag=false"
+            );
+        }
+
+        #[test]
+        fn leaves_pending_config_intact_when_handle_mismatches() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.set_pending_config(pending("other"));
+
+            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], true)
+                .expect("apply");
+
+            assert!(
+                state.pending_config.is_some(),
+                "modal for a different handle must not be dismissed"
+            );
+        }
     }
 }
