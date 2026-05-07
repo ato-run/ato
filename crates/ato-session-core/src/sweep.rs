@@ -272,10 +272,7 @@ fn sweep_socket_files(run_dir: &Path, now: SystemTime, grace: Duration) -> Resul
         //    another user, and the (record-exists) imposter case still
         //    falls through above.
         let session_record_path = run_dir.join(format!("ato-desktop-session-{pid}.pid"));
-        if !session_record_path.exists()
-            && pid_is_alive(pid)
-            && current_user_owns_process(pid)
-        {
+        if !session_record_path.exists() && pid_is_alive(pid) && current_user_owns_process(pid) {
             continue;
         }
         if !path_is_older_than(&path, now, grace) {
