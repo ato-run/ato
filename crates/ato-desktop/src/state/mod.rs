@@ -1,6 +1,6 @@
 pub(crate) mod persistence;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -860,6 +860,37 @@ pub struct PendingConfigRequest {
     pub original_secrets: Vec<SecretEntry>,
 }
 
+/// Mirrors `PendingConfigRequest` for the E302
+/// `execution_plan_consent_required` flow. Carries the full identity
+/// tuple — `(scoped_id, version, target_label, policy_segment_hash,
+/// provisioning_policy_hash)` — so the Approve handler can call back
+/// to `ato internal consent approve-execution-plan` with the same
+/// values the CLI emitted, plus a pre-rendered summary for the modal
+/// body. The desktop never derives any of these from local state;
+/// every value originates in the CLI envelope.
+#[derive(Clone, Debug)]
+pub struct PendingConsentRequest {
+    /// The capsule handle the user asked to launch — re-fed into
+    /// `resolve_and_start_capsule` after Approve.
+    pub handle: String,
+    /// `plan.consent.key.scoped_id`
+    pub scoped_id: String,
+    /// `plan.consent.key.version`
+    pub version: String,
+    /// `plan.consent.key.target_label`
+    pub target_label: String,
+    /// `plan.consent.policy_segment_hash`
+    pub policy_segment_hash: String,
+    /// `plan.consent.provisioning_policy_hash`
+    pub provisioning_policy_hash: String,
+    /// Pre-rendered plan summary from the CLI envelope, displayed
+    /// as-is in the modal body.
+    pub summary: String,
+    /// Snapshot of secrets passed to the original `start_capsule`
+    /// call so the post-Approve retry uses the same input.
+    pub original_secrets: Vec<SecretEntry>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveWebPane {
     pub workspace_id: WorkspaceId,
@@ -957,6 +988,19 @@ pub struct AppState {
     /// renderer that reads from this field and writes back via
     /// `AppState::add_secret`. Cleared by `AppState::clear_pending_config`.
     pub pending_config: Option<PendingConfigRequest>,
+    /// Set when a guest launch fails with E302
+    /// `execution_plan_consent_required`. The consent modal renderer
+    /// reads from this field; the Approve handler calls
+    /// `ato internal consent approve-execution-plan` and clears it via
+    /// `AppState::clear_pending_consent`, after which
+    /// `ensure_pending_local_launch` re-arms the launch.
+    pub pending_consent: Option<PendingConsentRequest>,
+    /// Handles for which a post-Approve retry has already been
+    /// consumed. If a second E302 surfaces for the same handle in the
+    /// same session, the desktop must not re-open the modal — it
+    /// surfaces a fatal activity entry instead. Reset on Cancel /
+    /// successful launch.
+    pub consent_retry_consumed: HashSet<String>,
     pub theme_mode: ThemeMode,
     pub desktop_auth: DesktopAuthState,
     /// Set when the user requests Quit so the shell can render a
@@ -1084,6 +1128,8 @@ impl AppState {
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
             pending_config: None,
+            pending_consent: None,
+            consent_retry_consumed: HashSet::new(),
             theme_mode: ThemeMode::Light,
             desktop_auth: DesktopAuthState {
                 status: DesktopAuthStatus::SignedOut,
@@ -1270,6 +1316,8 @@ impl AppState {
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
             pending_config: None,
+            pending_consent: None,
+            consent_retry_consumed: HashSet::new(),
             theme_mode: ThemeMode::Light, // synced below from config
             desktop_auth: DesktopAuthState {
                 status: DesktopAuthStatus::SignedOut,
@@ -1380,6 +1428,47 @@ impl AppState {
     /// or Cancel handler).
     pub fn clear_pending_config(&mut self) {
         self.pending_config = None;
+    }
+
+    /// Install a pending consent request (overwriting any prior one).
+    /// Called by the orchestrator drain path when a launch fails with
+    /// E302 `execution_plan_consent_required`. The consent modal
+    /// observes this field and renders when `Some`.
+    pub fn set_pending_consent(&mut self, request: PendingConsentRequest) {
+        self.pending_consent = Some(request);
+    }
+
+    /// Clear the pending consent request (called from the modal's
+    /// Approve or Cancel handler). Approve additionally records the
+    /// handle in `consent_retry_consumed` via
+    /// `mark_consent_retry_consumed` so a second E302 for the same
+    /// handle in the same session does NOT re-open the modal.
+    pub fn clear_pending_consent(&mut self) {
+        self.pending_consent = None;
+    }
+
+    /// Record that a post-Approve retry has been consumed for `handle`.
+    /// If the next launch still trips E302 for the same handle, the
+    /// caller (drain path / modal handler) MUST surface a fatal
+    /// activity entry instead of re-opening the modal.
+    pub fn mark_consent_retry_consumed(&mut self, handle: &str) {
+        self.consent_retry_consumed.insert(handle.to_string());
+    }
+
+    /// Whether the post-Approve retry budget has already been spent
+    /// for `handle`. Reset implicitly on Cancel (we drop the modal
+    /// and mark the pane LaunchFailed) and on a successful launch
+    /// (the pane leaves Launching, so the retry loop is moot).
+    pub fn consent_retry_already_consumed(&self, handle: &str) -> bool {
+        self.consent_retry_consumed.contains(handle)
+    }
+
+    /// Reset the per-handle consent-retry budget. Called when a
+    /// launch for `handle` succeeds OR when the user dismisses the
+    /// modal — both states leave the launch in a definite state, so
+    /// any future E302 should be treated as a fresh occurrence.
+    pub fn reset_consent_retry_budget(&mut self, handle: &str) {
+        self.consent_retry_consumed.remove(handle);
     }
 
     /// Remove a secret and persist to disk (#57).

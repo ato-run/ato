@@ -41,14 +41,29 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
     }
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        return Err(AtoExecutionError::from_ato_error(AtoError::ExecutionContractInvalid {
-            message: "ExecutionPlan consent missing in non-interactive mode. Seed consent from an interactive run first; --yes does not bypass execution consent.".to_string(),
-            hint: Some(
-                "対話モードで一度 Execution Plan を確認して承認を保存してから再実行してください。".to_string(),
-            ),
-            field: Some("execution_plan.consent".to_string()),
-            service: None,
-        }));
+        // Non-TTY caller — emit the typed `execution_plan_consent_required`
+        // envelope so a UI shell (today: ato-desktop) can render an
+        // approval modal directly from the carried summary + key, then
+        // call back to `ato internal consent approve-execution-plan`.
+        // The wire code stays `ATO_ERR_EXECUTION_CONTRACT_INVALID`; the
+        // `details.reason` discriminator is what newer consumers route
+        // on. Older consumers keep classifying this as a generic
+        // execution-contract error and fall through to the existing
+        // fatal-toast path.
+        return Err(AtoExecutionError::from_ato_error(
+            AtoError::ExecutionPlanConsentRequired {
+                message: "ExecutionPlan consent required for this capsule. Approve via the desktop modal or a TTY prompt before retrying.".to_string(),
+                hint: Some(
+                    "Desktop の承認モーダル、または TTY 上で対話的に承認してから再実行してください。".to_string(),
+                ),
+                scoped_id: plan.consent.key.scoped_id.clone(),
+                version: plan.consent.key.version.clone(),
+                target_label: plan.consent.key.target_label.clone(),
+                policy_segment_hash: plan.consent.policy_segment_hash.clone(),
+                provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+                summary: consent_summary(plan),
+            },
+        ));
     }
 
     prompt_consent(plan)?;
@@ -117,6 +132,42 @@ pub fn consent_summary(plan: &ExecutionPlan) -> String {
         plan.consent.policy_segment_hash,
         plan.consent.provisioning_policy_hash,
     )
+}
+
+/// Append a consent record built from approval parameters that
+/// originated on a UI shell (today: ato-desktop's E302 consent modal,
+/// or the matching MCP tool). This is the *write* counterpart to the
+/// `ExecutionPlanConsentRequired` envelope: `consent_store.rs` owns
+/// every consent-file write, including those triggered by the desktop,
+/// so that ATO_HOME resolution, file locking, and unix-mode enforcement
+/// stay in one place.
+///
+/// The five identity fields must match exactly what shipped in the
+/// most recent `execution_plan_consent_required` envelope for the
+/// capsule — `(scoped_id, version, target_label, policy_segment_hash,
+/// provisioning_policy_hash)`. Idempotent: if the matching record is
+/// already present, no new line is appended (mirrors `record_consent`).
+pub fn approve_execution_plan_consent(
+    scoped_id: &str,
+    version: &str,
+    target_label: &str,
+    policy_segment_hash: &str,
+    provisioning_policy_hash: &str,
+) -> Result<(), AtoExecutionError> {
+    let store = ConsentStore::new()?;
+    let record = ConsentRecord {
+        scoped_id: scoped_id.to_string(),
+        version: version.to_string(),
+        target_label: target_label.to_string(),
+        policy_segment_hash: policy_segment_hash.to_string(),
+        provisioning_policy_hash: provisioning_policy_hash.to_string(),
+        approved_at: String::new(),
+    };
+    if store.is_consented(&record)? {
+        return Ok(());
+    }
+    store.append_consent(record)?;
+    Ok(())
 }
 
 pub fn seed_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
@@ -392,6 +443,116 @@ mod tests {
         let plan = sample_plan();
 
         assert!(is_zero_permission_plan(&plan));
+    }
+
+    /// Wrapper around `sample_plan()` that flips the plan into a
+    /// non-zero-permission state, so `has_consent` actually opens the
+    /// store and `require_consent` exercises the TTY gate.
+    fn non_trivial_plan() -> ExecutionPlan {
+        let mut plan = sample_plan();
+        plan.runtime
+            .policy
+            .network
+            .allow_hosts
+            .push("api.example.com".to_string());
+        plan
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn require_consent_non_tty_emits_execution_plan_consent_required() {
+        // Cargo's test runner closes stdin/stdout TTYs, so this
+        // exercises the non-TTY branch without us having to fake one.
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+        let err = require_consent(&plan, false).expect_err("must emit consent envelope");
+
+        // The envelope (and exec error) keeps the wire code stable —
+        // newer consumers route on details.reason, but the error code
+        // and name remain ATO_ERR_EXECUTION_CONTRACT_INVALID / E302.
+        let snapshot = format!("{err:?}");
+        assert!(
+            snapshot.contains("ExecutionPlanConsentRequired")
+                || snapshot.contains("execution_plan_consent_required"),
+            "expected the new variant to surface, got: {snapshot}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn approve_execution_plan_consent_is_idempotent() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        // First call writes a record.
+        approve_execution_plan_consent("publisher/app", "1.0.0", "cli", "blake3:aaa", "blake3:bbb")
+            .expect("first approve");
+        let consent_file = home
+            .path()
+            .join(".ato")
+            .join("consent")
+            .join(CONSENT_FILE_NAME);
+        let after_first = std::fs::read_to_string(&consent_file).expect("read consent file");
+        let lines_after_first = after_first.lines().count();
+        assert!(
+            lines_after_first >= 1,
+            "expected at least one record after first approve: {after_first:?}"
+        );
+
+        // Second call must be a no-op — same identity tuple is already
+        // consented.
+        approve_execution_plan_consent("publisher/app", "1.0.0", "cli", "blake3:aaa", "blake3:bbb")
+            .expect("second approve");
+        let after_second = std::fs::read_to_string(&consent_file).expect("read consent file");
+        assert_eq!(
+            after_second.lines().count(),
+            lines_after_first,
+            "second approve must NOT append a duplicate record"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn approve_execution_plan_consent_satisfies_subsequent_has_consent() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+
+        // No consent yet → has_consent must be false.
+        assert!(
+            !has_consent(&plan).expect("has_consent before approve"),
+            "non-trivial plan must not start consented"
+        );
+
+        approve_execution_plan_consent(
+            &plan.consent.key.scoped_id,
+            &plan.consent.key.version,
+            &plan.consent.key.target_label,
+            &plan.consent.policy_segment_hash,
+            &plan.consent.provisioning_policy_hash,
+        )
+        .expect("approve via plumbing surface");
+
+        // After the plumbing surface writes the record, the regular
+        // `has_consent` path (used by `require_consent`) must agree.
+        // This is the contract that lets the desktop's modal flow work:
+        // approve via plumbing → re-launch sees the record → no E302.
+        assert!(
+            has_consent(&plan).expect("has_consent after approve"),
+            "approve_execution_plan_consent must satisfy has_consent"
+        );
     }
 
     #[test]

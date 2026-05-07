@@ -248,6 +248,30 @@ pub enum AtoError {
         field: Option<String>,
         service: Option<String>,
     },
+    /// E302 with `details.reason = "execution_plan_consent_required"` —
+    /// emitted when the CLI cannot prompt for ExecutionPlan consent
+    /// (no TTY) but the calling shell can. The full consent key and
+    /// policy digests ride along in `details` so a UI shell (today:
+    /// ato-desktop) can render an approval modal without a second
+    /// CLI round-trip and then call back to `ato internal consent
+    /// approve-execution-plan` with these exact values.
+    ///
+    /// Wire code stays `ATO_ERR_EXECUTION_CONTRACT_INVALID` so older
+    /// consumers still classify this as an execution-contract error;
+    /// the `reason` discriminator is what newer consumers route on.
+    ExecutionPlanConsentRequired {
+        message: String,
+        hint: Option<String>,
+        scoped_id: String,
+        version: String,
+        target_label: String,
+        policy_segment_hash: String,
+        provisioning_policy_hash: String,
+        /// Pre-rendered human-readable plan summary (e.g.
+        /// `consent_summary(plan)` output). Carried inline so the
+        /// desktop can populate the modal with no second CLI call.
+        summary: String,
+    },
     RuntimeNotResolved {
         message: String,
         hint: Option<String>,
@@ -394,11 +418,13 @@ impl AtoError {
                 name: "security_policy_violation",
                 phase: AtoErrorPhase::Execution,
             },
-            Self::ExecutionContractInvalid { .. } => ErrorKind {
-                code: "E302",
-                name: "execution_contract_invalid",
-                phase: AtoErrorPhase::Execution,
-            },
+            Self::ExecutionContractInvalid { .. } | Self::ExecutionPlanConsentRequired { .. } => {
+                ErrorKind {
+                    code: "E302",
+                    name: "execution_contract_invalid",
+                    phase: AtoErrorPhase::Execution,
+                }
+            }
             Self::RuntimeNotResolved { .. } => ErrorKind {
                 code: "E303",
                 name: "runtime_not_resolved",
@@ -459,6 +485,7 @@ impl AtoError {
             | Self::StorageNoSpace { message, .. }
             | Self::SecurityPolicyViolation { message, .. }
             | Self::ExecutionContractInvalid { message, .. }
+            | Self::ExecutionPlanConsentRequired { message, .. }
             | Self::RuntimeNotResolved { message, .. }
             | Self::SandboxUnavailable { message, .. }
             | Self::RuntimeLaunchFailed { message, .. }
@@ -491,6 +518,7 @@ impl AtoError {
             | Self::StorageNoSpace { hint, .. }
             | Self::SecurityPolicyViolation { hint, .. }
             | Self::ExecutionContractInvalid { hint, .. }
+            | Self::ExecutionPlanConsentRequired { hint, .. }
             | Self::RuntimeNotResolved { hint, .. }
             | Self::SandboxUnavailable { hint, .. }
             | Self::RuntimeLaunchFailed { hint, .. }
@@ -521,6 +549,7 @@ impl AtoError {
                 | Self::AuthRequired { .. }
                 | Self::TlsBootstrapRequired { .. }
                 | Self::TlsBootstrapFailed { .. }
+                | Self::ExecutionPlanConsentRequired { .. }
         )
     }
 
@@ -542,7 +571,9 @@ impl AtoError {
             Self::SecurityPolicyViolation { resource, .. } => {
                 resource.as_deref().or(Some("policy"))
             }
-            Self::ExecutionContractInvalid { .. } => Some("contract"),
+            Self::ExecutionContractInvalid { .. } | Self::ExecutionPlanConsentRequired { .. } => {
+                Some("contract")
+            }
             Self::RuntimeNotResolved { .. } => Some("runtime"),
             Self::SandboxUnavailable { .. } => Some("sandbox"),
             Self::RuntimeLaunchFailed { backend, .. } => backend.as_deref().or(Some("runtime")),
@@ -565,6 +596,7 @@ impl AtoError {
             Self::TlsBootstrapRequired { binding, .. }
             | Self::TlsBootstrapFailed { binding, .. } => binding.as_deref(),
             Self::SecurityPolicyViolation { blocked_host, .. } => blocked_host.as_deref(),
+            Self::ExecutionPlanConsentRequired { target_label, .. } => Some(target_label),
             Self::RuntimeNotResolved { runtime, .. } => runtime.as_deref(),
             Self::SandboxUnavailable { backend, .. } => backend.as_deref(),
             _ => None,
@@ -640,6 +672,23 @@ impl AtoError {
             Self::ExecutionContractInvalid { field, service, .. } => {
                 Some(json!({ "field": field, "service": service }))
             }
+            Self::ExecutionPlanConsentRequired {
+                scoped_id,
+                version,
+                target_label,
+                policy_segment_hash,
+                provisioning_policy_hash,
+                summary,
+                ..
+            } => Some(json!({
+                "reason": "execution_plan_consent_required",
+                "scoped_id": scoped_id,
+                "version": version,
+                "target_label": target_label,
+                "policy_segment_hash": policy_segment_hash,
+                "provisioning_policy_hash": provisioning_policy_hash,
+                "summary": summary,
+            })),
             Self::RuntimeNotResolved { runtime, .. } => Some(json!({ "runtime": runtime })),
             Self::SandboxUnavailable { backend, .. } => Some(json!({ "backend": backend })),
             Self::RuntimeLaunchFailed {

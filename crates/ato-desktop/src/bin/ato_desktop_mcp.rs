@@ -284,6 +284,26 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_includes_approve_execution_plan_consent_with_required_handle() {
+        let tools: serde_json::Value =
+            serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
+        let arr = tools.as_array().expect("array");
+        let entry = arr
+            .iter()
+            .find(|t| {
+                t.get("name").and_then(|v| v.as_str()) == Some("approve_execution_plan_consent")
+            })
+            .expect("approve_execution_plan_consent registered");
+        let required = entry
+            .get("inputSchema")
+            .and_then(|s| s.get("required"))
+            .and_then(|r| r.as_array())
+            .expect("required[]");
+        let names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"handle"), "handle required");
+    }
+
+    #[test]
     fn map_tool_passes_through_secrets_and_handle() {
         let args = serde_json::json!({
             "handle": "github.com/Koh0920/WasedaP2P",
@@ -327,6 +347,25 @@ mod tests {
     fn map_tool_set_capsule_secrets_rejects_missing_handle() {
         let args = serde_json::json!({"secrets": {"K": "v"}});
         let err = super::map_tool_to_command("set_capsule_secrets", &args).unwrap_err();
+        assert!(err.contains("'handle'"), "expected handle error: {err}");
+    }
+
+    #[test]
+    fn map_tool_approve_consent_passes_handle_through() {
+        let args = serde_json::json!({"handle": "capsule://github.com/Koh0920/WasedaP2P"});
+        let (method, params) =
+            super::map_tool_to_command("approve_execution_plan_consent", &args).expect("map");
+        assert_eq!(method, "approve_execution_plan_consent");
+        assert_eq!(
+            params.get("handle").and_then(|v| v.as_str()),
+            Some("capsule://github.com/Koh0920/WasedaP2P")
+        );
+    }
+
+    #[test]
+    fn map_tool_approve_consent_rejects_missing_handle() {
+        let args = serde_json::json!({});
+        let err = super::map_tool_to_command("approve_execution_plan_consent", &args).unwrap_err();
         assert!(err.contains("'handle'"), "expected handle error: {err}");
     }
 
@@ -500,6 +539,13 @@ fn map_tool_to_command(
             }
             ("set_capsule_secrets", params)
         }
+        "approve_execution_plan_consent" => {
+            let handle = s("handle")?;
+            (
+                "approve_execution_plan_consent",
+                serde_json::json!({ "handle": handle }),
+            )
+        }
         other => return Err(format!("unknown tool: {other}")),
     };
 
@@ -612,5 +658,6 @@ static TOOLS: &str = r#"[
   {"name":"browser_verify_element_visible","description":"Checks whether the element with the given ref is visible.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref"]}},
   {"name":"browser_tabs","description":"Lists all open WebView panes with their IDs.","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"browser_tab_focus","description":"Focuses a specific WebView pane by ID.","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":["pane_id"]}},
-  {"name":"set_capsule_secrets","description":"Persist one or more secrets for a capsule handle, grant them to that handle, and (default) dismiss any open `missing_required_env` (E103) modal so the launch re-arms with the freshly stored secrets. Mirrors the modal Save handler — disk-write failures (e.g. ~/.ato/secrets.json mode/parent-dir errors) are returned as MCP errors instead of being silently swallowed.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_config / launch state (e.g. 'github.com/Koh0920/WasedaP2P')."},"secrets":{"type":"object","description":"Map of env-var-name → secret value (strings only).","additionalProperties":{"type":"string"}},"clear_pending_config":{"type":"boolean","description":"If true (default), clears AppState.pending_config when its handle matches, re-arming the launch."}},"required":["handle","secrets"]}}
+  {"name":"set_capsule_secrets","description":"Persist one or more secrets for a capsule handle, grant them to that handle, and (default) dismiss any open `missing_required_env` (E103) modal so the launch re-arms with the freshly stored secrets. Mirrors the modal Save handler — disk-write failures (e.g. ~/.ato/secrets.json mode/parent-dir errors) are returned as MCP errors instead of being silently swallowed.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_config / launch state (e.g. 'github.com/Koh0920/WasedaP2P')."},"secrets":{"type":"object","description":"Map of env-var-name → secret value (strings only).","additionalProperties":{"type":"string"}},"clear_pending_config":{"type":"boolean","description":"If true (default), clears AppState.pending_config when its handle matches, re-arming the launch."}},"required":["handle","secrets"]}},
+  {"name":"approve_execution_plan_consent","description":"Approve the open ExecutionPlan consent modal for `handle`. Goes through the same handler as the UI's Approve button — `apply_capsule_consent` invokes `ato internal consent approve-execution-plan` (CLI owns the JSONL append; desktop never writes the consent file directly), records the per-handle retry-once budget, and clears `pending_consent` so `ensure_pending_local_launch` re-arms the launch on the next render. Errors surface as MCP errors when no matching pending_consent exists or the CLI write fails — the modal is left open so the caller can retry.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_consent (the same handle the user typed in the omnibar / ato-desktop opened, e.g. 'capsule://github.com/Koh0920/WasedaP2P')."}},"required":["handle"]}}
 ]"#;

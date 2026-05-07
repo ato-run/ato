@@ -315,6 +315,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_approve_execution_plan_consent_round_trips_handle() {
+        let params = serde_json::json!({"handle": "capsule://github.com/Koh0920/WasedaP2P"});
+        let cmd = super::parse_command("approve_execution_plan_consent", &params).expect("parse");
+        match cmd {
+            super::AutomationCommand::ApproveExecutionPlanConsent { handle } => {
+                assert_eq!(handle, "capsule://github.com/Koh0920/WasedaP2P");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_command_approve_execution_plan_consent_rejects_missing_handle() {
+        let params = serde_json::json!({});
+        let err = super::parse_command("approve_execution_plan_consent", &params).unwrap_err();
+        assert!(err.contains("'handle'"), "expected handle error: {err}");
+    }
+
+    #[test]
     fn reap_orphan_sockets_removes_dead_pid_socket_only() {
         use std::fs;
         let temp = tempfile::tempdir().expect("tempdir");
@@ -564,6 +583,9 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
                 clear_pending_config,
             })
         }
+        "approve_execution_plan_consent" => Ok(AutomationCommand::ApproveExecutionPlanConsent {
+            handle: s("handle")?,
+        }),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")
