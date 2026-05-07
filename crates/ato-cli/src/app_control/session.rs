@@ -176,6 +176,34 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     // diagnostic stream stays distinguishable from `ato run`.
     use crate::application::pipeline::consumer::ConsumerRunPipeline;
 
+    // #80: sweep stale PID/socket records from `~/.ato/run/` BEFORE we
+    // write our own. Reaps:
+    //   - `<id>.pid` files for processes that have exited (existing
+    //     `cleanup_dead_processes_with_details` behavior, just hooked
+    //     here on session start instead of only on `ato ps`).
+    //   - `*.sock.txt` artifacts left behind by older socket-discovery
+    //     code paths.
+    // ato-desktop's own `*.sock` files are reaped by its automation
+    // transport layer (#68) before binding, so the two cleanups are
+    // complementary and not redundant. Failures are best-effort —
+    // logged via tracing and never abort session start.
+    if let Ok(pm) = ProcessManager::new() {
+        match pm.sweep_run_dir_orphans() {
+            Ok(report) => {
+                if report.pid_files_removed > 0 || report.sockets_removed > 0 {
+                    tracing::debug!(
+                        pid_files = report.pid_files_removed,
+                        sockets = report.sockets_removed,
+                        "session start sweep removed stale run-dir entries"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "session start sweep failed (best-effort)");
+            }
+        }
+    }
+
     let mut runner =
         super::session_runner::SessionStartPhaseRunner::new(handle, target_label, json);
     let pipeline = ConsumerRunPipeline::standard();
