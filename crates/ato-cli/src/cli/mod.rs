@@ -6,6 +6,7 @@ pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;
 mod inspect;
+mod internal;
 mod ipc;
 mod key;
 mod package;
@@ -30,6 +31,8 @@ pub(crate) use config::{
 };
 #[allow(unused_imports)]
 pub(crate) use inspect::InspectCommands;
+#[allow(unused_imports)]
+pub(crate) use internal::{ConsentInternalCommands, InternalCommands};
 #[allow(unused_imports)]
 pub(crate) use ipc::IpcCommands;
 #[allow(unused_imports)]
