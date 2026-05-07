@@ -1,4 +1,17 @@
+use std::collections::HashSet;
+use std::time::{Duration, SystemTime};
+
 use super::*;
+
+const DEFAULT_GITHUB_RUN_CHECKOUT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const OWNER_MARKER_FILE: &str = ".ato-owner.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GithubRunCheckoutOwner {
+    owner_pid: u32,
+    #[serde(default)]
+    owner_start_time_unix_ms: Option<u64>,
+}
 
 pub(crate) fn github_checkout_root() -> Result<PathBuf> {
     // Use the global ato home directory rather than a CWD-relative .ato/tmp path.
@@ -16,6 +29,231 @@ pub(crate) fn github_checkout_root() -> Result<PathBuf> {
         )
     })?;
     Ok(root)
+}
+
+pub(crate) fn github_run_checkout_root() -> Result<PathBuf> {
+    let root = capsule_core::common::paths::nacelle_home_dir()
+        .context("Failed to resolve Ato home directory for GitHub run")?
+        .join("tmp")
+        .join("gh-run");
+    std::fs::create_dir_all(&root).with_context(|| {
+        format!(
+            "Failed to create transient GitHub run root: {}",
+            root.display()
+        )
+    })?;
+    Ok(root)
+}
+
+pub(crate) fn remove_github_run_checkout(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "Failed to remove transient GitHub run checkout: {}",
+                path.display()
+            )
+        }),
+    }
+}
+
+pub(crate) fn write_github_run_checkout_owner_marker(path: &Path) -> Result<()> {
+    let marker_path = path.join(OWNER_MARKER_FILE);
+    // This marker is transient runtime metadata for GC safety only.
+    // It lives inside the relocated checkout so the sweep can preserve
+    // live workspaces even when process records are briefly unavailable.
+    let owner = GithubRunCheckoutOwner {
+        owner_pid: std::process::id(),
+        owner_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
+    };
+    let bytes = serde_json::to_vec_pretty(&owner)
+        .context("Failed to serialize transient GitHub run checkout owner marker")?;
+    std::fs::write(&marker_path, bytes).with_context(|| {
+        format!(
+            "Failed to write transient GitHub run checkout owner marker: {}",
+            marker_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn sweep_stale_github_run_checkouts_best_effort() {
+    let root = match github_run_checkout_root() {
+        Ok(root) => root,
+        Err(error) => {
+            debug!(error = %error, "skipping transient GitHub run checkout sweep");
+            return;
+        }
+    };
+
+    if let Err(error) = sweep_stale_github_run_checkouts_in(
+        &root,
+        SystemTime::now(),
+        DEFAULT_GITHUB_RUN_CHECKOUT_TTL,
+    ) {
+        debug!(
+            root = %root.display(),
+            error = %error,
+            "transient GitHub run checkout sweep failed"
+        );
+    }
+}
+
+pub(crate) fn sweep_stale_github_run_checkouts_in(
+    root: &Path,
+    now: SystemTime,
+    ttl: Duration,
+) -> Result<usize> {
+    if !root.exists() {
+        return Ok(0);
+    }
+
+    let active_roots = active_github_run_checkout_roots(root);
+    let mut removed = 0;
+    for entry in std::fs::read_dir(root).with_context(|| {
+        format!(
+            "Failed to read GitHub run checkout root: {}",
+            root.display()
+        )
+    })? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                debug!(error = %error, "skipping unreadable GitHub run checkout entry");
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "skipping GitHub run checkout with unreadable type");
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        if active_roots.contains(&path) || github_run_checkout_owner_is_alive(&path) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "skipping GitHub run checkout with unreadable metadata");
+                continue;
+            }
+        };
+        if !github_run_checkout_is_stale(&metadata, now, ttl) {
+            continue;
+        }
+        match remove_github_run_checkout(&path) {
+            Ok(()) => removed += 1,
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to sweep stale GitHub run checkout")
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn github_run_checkout_is_stale(
+    metadata: &std::fs::Metadata,
+    now: SystemTime,
+    ttl: Duration,
+) -> bool {
+    let Some(timestamp) = metadata.modified().ok() else {
+        return false;
+    };
+    now.duration_since(timestamp)
+        .map(|age| age >= ttl)
+        .unwrap_or(false)
+}
+
+fn active_github_run_checkout_roots(root: &Path) -> HashSet<PathBuf> {
+    let process_manager = match crate::runtime::process::ProcessManager::new() {
+        Ok(process_manager) => process_manager,
+        Err(error) => {
+            debug!(error = %error, "failed to open process manager for GitHub run checkout sweep");
+            return HashSet::new();
+        }
+    };
+
+    let processes = match process_manager.list_processes() {
+        Ok(processes) => processes,
+        Err(error) => {
+            debug!(error = %error, "failed to list processes for GitHub run checkout sweep");
+            return HashSet::new();
+        }
+    };
+
+    processes
+        .into_iter()
+        .filter(|process| process.status.is_active())
+        .filter_map(|process| process.manifest_path)
+        .filter_map(|manifest_path| github_run_checkout_root_for_manifest(root, &manifest_path))
+        .collect()
+}
+
+fn github_run_checkout_root_for_manifest(root: &Path, manifest_path: &Path) -> Option<PathBuf> {
+    manifest_path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.parent() == Some(root))
+        .map(Path::to_path_buf)
+}
+
+pub(crate) fn github_run_checkout_owner_is_alive(path: &Path) -> bool {
+    let marker_path = path.join(OWNER_MARKER_FILE);
+    let bytes = match std::fs::read(&marker_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            debug!(path = %marker_path.display(), error = %error, "failed to read GitHub run checkout owner marker");
+            return false;
+        }
+    };
+    let owner: GithubRunCheckoutOwner = match serde_json::from_slice(&bytes) {
+        Ok(owner) => owner,
+        Err(error) => {
+            debug!(path = %marker_path.display(), error = %error, "failed to parse GitHub run checkout owner marker");
+            return false;
+        }
+    };
+    if !pid_is_alive(owner.owner_pid) {
+        return false;
+    }
+
+    let Some(expected_start_time) = owner.owner_start_time_unix_ms else {
+        return false;
+    };
+
+    ato_session_core::process::process_start_time_unix_ms(owner.owner_pid)
+        .is_some_and(|live_start_time| live_start_time == expected_start_time)
+}
+
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .is_some_and(|errno| errno == libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    // On unsupported platforms we fall back to TTL + active-process
+    // reverse lookup rather than preserving every marker forever.
+    false
 }
 
 /// Returns the GitHub API base URL for repository archive downloads.
