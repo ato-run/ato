@@ -291,6 +291,7 @@ impl DesktopShell {
         });
         let launcher_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search, command, or ask AI…"));
+        ato_session_core::sweep::sweep_startup_runtime_artifacts_best_effort();
         match cleanup_stale_capsule_sessions() {
             Ok(notes) => {
                 for note in notes {

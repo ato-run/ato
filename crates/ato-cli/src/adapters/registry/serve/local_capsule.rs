@@ -341,6 +341,8 @@ pub(super) async fn handle_run_local_capsule(
         status: ProcessStatus::Running,
         runtime: "ato-run".to_string(),
         start_time: std::time::SystemTime::now(),
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(child.id()),
+        workload_os_start_time_unix_ms: None,
         manifest_path: Some(run_target.clone()),
         scoped_id: Some(scoped_id.clone()),
         target_label: effective_target.clone(),

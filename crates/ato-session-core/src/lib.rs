@@ -19,6 +19,7 @@ pub mod healthcheck;
 pub mod process;
 pub mod record;
 pub mod store;
+pub mod sweep;
 pub mod validate;
 
 pub use record::{

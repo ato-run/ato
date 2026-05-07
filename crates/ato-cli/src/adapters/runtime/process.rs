@@ -20,6 +20,18 @@ pub struct ProcessInfo {
     pub status: ProcessStatus,
     pub runtime: String,
     pub start_time: SystemTime,
+    /// OS-reported start time of `pid` (ms since UNIX epoch), captured at
+    /// registration. Distinct from `start_time` (which is registration
+    /// wall-clock time and used for uptime / display) — this field is the
+    /// canonical comparator for `ato-session-core`'s startup orphan sweep
+    /// to defeat PID reuse. `None` on platforms without OS-query support
+    /// or when the OS query fails.
+    #[serde(default)]
+    pub os_start_time_unix_ms: Option<u64>,
+    /// Same shape as `os_start_time_unix_ms` but for `workload_pid`. `None`
+    /// when `workload_pid` is `None` or the OS query is unsupported.
+    #[serde(default)]
+    pub workload_os_start_time_unix_ms: Option<u64>,
     #[serde(default)]
     pub manifest_path: Option<PathBuf>,
     #[serde(default)]
@@ -810,6 +822,8 @@ mod tests {
             status: ProcessStatus::Running,
             runtime: "nacelle".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: Some(PathBuf::from("/path/to/capsule.toml")),
             scoped_id: Some("dev/test".to_string()),
             target_label: Some("default".to_string()),
@@ -851,6 +865,8 @@ mod tests {
             status: ProcessStatus::Stopped,
             runtime: "nacelle".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: None,
             scoped_id: None,
             target_label: None,
@@ -890,6 +906,8 @@ mod tests {
             status: ProcessStatus::Ready,
             runtime: "nacelle".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: None,
             scoped_id: None,
             target_label: Some("app".to_string()),
@@ -935,6 +953,8 @@ mod tests {
             status: ProcessStatus::Stopped,
             runtime: "nacelle".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: Some(gh_workspace.join("capsule.toml")),
             scoped_id: None,
             target_label: Some("app".to_string()),
@@ -1038,6 +1058,8 @@ mod tests {
             status: ProcessStatus::Ready,
             runtime: "source/node [host-fallback]".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: Some(PathBuf::from("/workspace/capsule.toml")),
             scoped_id: Some("typicode/json-server".to_string()),
             target_label: Some("app".to_string()),
@@ -1073,6 +1095,8 @@ mod tests {
             status: ProcessStatus::Running,
             runtime: "host".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: None,
             scoped_id: Some("dev/demo".to_string()),
             target_label: None,
@@ -1091,6 +1115,8 @@ mod tests {
             status: ProcessStatus::Stopped,
             runtime: "host".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: None,
             scoped_id: Some("dev/other".to_string()),
             target_label: None,
@@ -1173,6 +1199,8 @@ mod tests {
             status: ProcessStatus::Running,
             runtime: "source/node [host-fallback]".to_string(),
             start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: None,
             scoped_id: Some("typicode/json-server".to_string()),
             target_label: Some("app".to_string()),

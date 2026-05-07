@@ -3,6 +3,20 @@
 //! platforms the helpers fail closed (i.e. answer "treat as stale") so
 //! the caller falls through to the spawn path.
 
+#[cfg(unix)]
+pub fn current_user_owns_process(pid: u32) -> bool {
+    process_owner_uid(pid).is_some_and(|uid| uid == unsafe { libc::geteuid() as u32 })
+}
+
+#[cfg(not(unix))]
+pub fn current_user_owns_process(_pid: u32) -> bool {
+    true
+}
+
+pub fn process_owner_uid(pid: u32) -> Option<u32> {
+    platform::process_owner_uid(pid)
+}
+
 /// Returns `true` when a process with the given PID is alive.
 ///
 /// On Unix this calls `kill(pid, 0)` which is a no-op signal that only
@@ -12,20 +26,44 @@
 /// is owned by the same user that runs `ato-desktop`, so this rarely
 /// matters.
 ///
-/// On non-Unix this is a stub that returns `true`. Callers should pair
-/// this with `process_start_time_unix_ms` (which returns `None` on
-/// non-Unix) to defeat OS PID reuse.
 #[cfg(unix)]
 pub fn pid_is_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    if pid == 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .is_some_and(|errno| errno != libc::ESRCH)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let filter = format!("PID eq {pid}");
+    let output = match std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return true,
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid_token = format!(",\"{pid}\",");
+    stdout.lines().any(|line| line.contains(&pid_token))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn pid_is_alive(_pid: u32) -> bool {
-    // Conservative: assume alive on non-Unix so the caller's
-    // start_time check (which is None on non-Unix) is what actually
-    // gates reuse.
-    true
+    false
 }
 
 /// Best-effort process creation time (milliseconds since UNIX epoch).
@@ -56,7 +94,7 @@ mod platform {
         _pbi_xstatus: u32,
         _pbi_pid: u32,
         _pbi_ppid: u32,
-        _pbi_uid: u32,
+        pbi_uid: u32,
         _pbi_gid: u32,
         _pbi_ruid: u32,
         _pbi_rgid: u32,
@@ -77,7 +115,7 @@ mod platform {
 
     const PROC_PIDTBSDINFO: c_int = 3;
 
-    pub(super) fn process_start_time_unix_ms(pid: u32) -> Option<u64> {
+    fn read_proc_bsdinfo(pid: u32) -> Option<ProcBsdinfo> {
         let mut info = std::mem::MaybeUninit::<ProcBsdinfo>::uninit();
         let size = std::mem::size_of::<ProcBsdinfo>() as c_int;
         let bytes = unsafe {
@@ -92,10 +130,18 @@ mod platform {
         if bytes != size {
             return None;
         }
-        let info = unsafe { info.assume_init() };
+        Some(unsafe { info.assume_init() })
+    }
+
+    pub(super) fn process_start_time_unix_ms(pid: u32) -> Option<u64> {
+        let info = read_proc_bsdinfo(pid)?;
         let secs = info.pbi_start_tvsec;
         let usecs = info.pbi_start_tvusec;
         secs.checked_mul(1_000)?.checked_add(usecs / 1_000)
+    }
+
+    pub(super) fn process_owner_uid(pid: u32) -> Option<u32> {
+        Some(read_proc_bsdinfo(pid)?.pbi_uid)
     }
 }
 
@@ -139,6 +185,14 @@ mod platform {
         let frac_ms = ((starttime_jiffies % clk_tck) * 1_000) / clk_tck;
         unix_secs.checked_mul(1_000)?.checked_add(frac_ms)
     }
+
+    pub(super) fn process_owner_uid(pid: u32) -> Option<u32> {
+        let status = fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+        status.lines().find_map(|line| {
+            let rest = line.strip_prefix("Uid:")?;
+            rest.split_whitespace().next()?.parse().ok()
+        })
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -148,6 +202,10 @@ mod platform {
         // the reuse path treat any record as "PID-reuse-detected"
         // which is the safe default — the caller falls through to
         // spawn.
+        None
+    }
+
+    pub(super) fn process_owner_uid(_pid: u32) -> Option<u32> {
         None
     }
 }
@@ -184,5 +242,11 @@ mod tests {
         let a = process_start_time_unix_ms(std::process::id()).expect("a");
         let b = process_start_time_unix_ms(std::process::id()).expect("b");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn current_user_owns_self_process() {
+        assert!(current_user_owns_process(std::process::id()));
     }
 }
