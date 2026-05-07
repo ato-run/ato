@@ -4,6 +4,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{
+    atomic::{AtomicBool, Ordering},
     mpsc::{Receiver, TryRecvError},
     Arc, Mutex as StdMutex,
 };
@@ -41,6 +42,40 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const OCI_STOP_TIMEOUT_SECS: i64 = 5;
+
+/// Process-wide flag set by entry points that reserve stdout
+/// exclusively for a structured envelope (today: `ato app session
+/// start --json`, which the desktop spawns and parses as a
+/// `SessionStartEnvelope`). When set, the orchestration stream
+/// pumpers route service stdout to the parent's **stderr** with the
+/// usual `[<service>] ` prefix instead of stdout, so the envelope
+/// JSON is the only thing on the parent's stdout.
+///
+/// `ato run` foreground use is unaffected — it never sets this flag,
+/// so service output continues to render on the user's terminal as
+/// before. The flag is process-local and never read by external code.
+static REDIRECT_SERVICE_STDOUT_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// Engage the stdout redirection described on
+/// [`REDIRECT_SERVICE_STDOUT_TO_STDERR`]. Idempotent; safe to call
+/// from any thread before orchestration setup begins. Has no effect
+/// once the pumper threads have already been spawned for a given
+/// session.
+pub fn redirect_service_stdout_to_stderr_for_envelope_mode(active: bool) {
+    REDIRECT_SERVICE_STDOUT_TO_STDERR.store(active, Ordering::Relaxed);
+}
+
+/// Public read of the envelope-mode flag. Used by sibling code paths
+/// (e.g. the orchestration reporter constructor) that have to take
+/// the same routing decision as `spawn_prefixed_stream` /
+/// `print_prefixed_chunk` to keep stdout pure for the envelope JSON.
+pub fn redirect_service_stdout_to_stderr_for_envelope_mode_active() -> bool {
+    service_stdout_should_route_to_stderr()
+}
+
+fn service_stdout_should_route_to_stderr() -> bool {
+    REDIRECT_SERVICE_STDOUT_TO_STDERR.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorOptions {
@@ -1309,6 +1344,14 @@ fn spawn_prefixed_stream(
     service_name: &str,
     stderr: bool,
 ) -> JoinHandle<std::io::Result<()>> {
+    // Honor the process-wide envelope-mode redirect: when the parent
+    // CLI is emitting a structured envelope on stdout (e.g.
+    // `ato app session start --json` spawned by the desktop), service
+    // stdout must NOT contaminate the JSON stream. Service stderr
+    // already goes to the parent's stderr regardless. See
+    // [`redirect_service_stdout_to_stderr_for_envelope_mode`] for
+    // the why.
+    let stderr = stderr || service_stdout_should_route_to_stderr();
     let name = service_name.to_string();
     thread::spawn(move || -> std::io::Result<()> {
         let Some(stream) = stream else {
@@ -1341,7 +1384,12 @@ fn spawn_prefixed_stream(
 
 fn print_prefixed_chunk(service_name: &str, chunk: &OciLogChunk) -> Result<()> {
     let prefix = format!("[{}] ", service_name);
-    if chunk.stderr {
+    // Same envelope-mode redirect rule as `spawn_prefixed_stream` —
+    // see its body for the rationale. OCI services land here through
+    // a different code path but the stdout-contamination risk is the
+    // same.
+    let route_to_stderr = chunk.stderr || service_stdout_should_route_to_stderr();
+    if route_to_stderr {
         let mut writer = std::io::stderr();
         writer.write_all(prefix.as_bytes())?;
         writer.write_all(&chunk.message)?;
@@ -1740,5 +1788,39 @@ target = "db"
                 false,
             )]
         );
+    }
+
+    /// Regression for #106: `ato app session start --json` reserves
+    /// stdout for the SessionStartEnvelope. The orchestrator stream
+    /// pumper must therefore route service stdout to the parent's
+    /// stderr while the envelope-mode flag is set, so the captured
+    /// stdout doesn't contain `[main] ...` lines that break JSON
+    /// parsing.
+    ///
+    /// Pre-fix, `service_stdout_should_route_to_stderr` did not exist;
+    /// `spawn_prefixed_stream` always wrote to stdout when its `stderr`
+    /// arg was false. Post-fix, the static flag OR'd into the local
+    /// `stderr` variable forces stderr routing.
+    ///
+    /// We test the gate function directly because driving an actual
+    /// pumper requires a `Read` stream + thread join and is covered
+    /// end-to-end by the #92 verification harness on a clean
+    /// `ATO_HOME`.
+    #[test]
+    fn envelope_mode_flag_round_trips() {
+        // The flag is process-wide; serialize the test against itself
+        // by setting + clearing within this single test. Other tests
+        // in this module never touch the flag.
+        super::redirect_service_stdout_to_stderr_for_envelope_mode(false);
+        assert!(!super::service_stdout_should_route_to_stderr());
+
+        super::redirect_service_stdout_to_stderr_for_envelope_mode(true);
+        assert!(super::service_stdout_should_route_to_stderr());
+
+        // Restore so subsequent tests (and the binary's tests across
+        // `cargo test` invocations on the same process) are not
+        // pinned to envelope mode.
+        super::redirect_service_stdout_to_stderr_for_envelope_mode(false);
+        assert!(!super::service_stdout_should_route_to_stderr());
     }
 }
