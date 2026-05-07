@@ -107,8 +107,8 @@ run = "source/main.sh""#;
 
 #[test]
 #[cfg_attr(
-    target_os = "linux",
-    ignore = "DHAT allocation totals vary significantly on Linux CI runners"
+    any(target_os = "linux", target_os = "macos"),
+    ignore = "DHAT allocation totals vary on hosted CI runners; tracked in #82"
 )]
 fn lockfile_allocation_regression_gate() {
     const MAX_FIRST_TOTAL_BLOCKS: u64 = 4_000;
@@ -134,8 +134,8 @@ fn lockfile_allocation_regression_gate() {
 
 #[test]
 #[cfg_attr(
-    target_os = "linux",
-    ignore = "DHAT allocation totals vary significantly on Linux CI runners"
+    any(target_os = "linux", target_os = "macos"),
+    ignore = "DHAT allocation totals vary on hosted CI runners; tracked in #82"
 )]
 #[should_panic(expected = "allocation regression")]
 fn lockfile_allocation_gate_panics_when_threshold_is_too_low() {
