@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 // these names without prefix.
 pub(crate) use ato_session_core::{
     write_session_record_atomic, GuestSessionDisplay, ServiceBackgroundDisplay,
-    StoredDependencyContracts, StoredDependencyProvider, StoredSessionInfo, TerminalSessionDisplay,
-    WebSessionDisplay,
+    StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
+    StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
 };
 use capsule_core::ato_lock;
 use capsule_core::handle::{
@@ -358,6 +358,7 @@ pub(super) fn start_guest_session(
         terminal: None,
         service: None,
         dependency_contracts: None,
+        orchestration_services: None,
         // App Session Materialization: filled in by run_execute after spawn
         // succeeds (start_time helper takes the freshly-spawned PID + the
         // launch_digest computed before the lock was acquired). Leaving them
@@ -528,6 +529,9 @@ pub(super) fn start_runtime_session(
             runtime_process.child.id() as i32,
             dep_contracts.as_ref(),
         ),
+        // Single-target session (no `[services]`); orchestration_services
+        // is populated only by start_orchestration_session_in_process.
+        orchestration_services: None,
         // App Session Materialization: see note on the guest variant above.
         schema_version: None,
         launch_digest: None,
@@ -793,12 +797,19 @@ pub(super) fn start_orchestration_session_in_process(
         }),
         terminal: None,
         service: None,
-        // PR-C captures only the [dependencies.<alias>] subset here. PR-D
-        // extends the persisted graph to include the [services] orchestration
-        // (currently held alive by `mem::forget(detached)` below).
+        // [dependencies.<alias>] subset — same as single-target session.
         dependency_contracts: dependency_contracts_for_session_record(
             leaf_local_pid,
             dep_contracts.as_ref(),
+        ),
+        // [services] graph subset (#73 PR-D). Persisted so `stop_session`
+        // (and the parent-death watcher from PR-B) can tear services down
+        // after the wrapper process exits — the OS keeps the underlying
+        // OCI containers / spawned children alive as orphans, but only
+        // this record holds the container_ids / pids needed to stop them.
+        orchestration_services: orchestration_services_for_session_record(
+            std::process::id() as i32,
+            &detached.services,
         ),
         schema_version: None,
         launch_digest: None,
@@ -1000,6 +1011,10 @@ pub(super) fn start_orchestration_session_supervisor(
         terminal: None,
         service: None,
         dependency_contracts: None,
+        // Legacy supervisor path: the nested `ato run` child owns the
+        // service lifecycle, so this wrapper has no DetachedServiceSnapshot
+        // to persist. Reachable only via ATO_LEGACY_SUPERVISOR=1.
+        orchestration_services: None,
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
@@ -1057,6 +1072,43 @@ fn pick_orchestration_leaf_service(
                 .expect("non-empty leaves vec"))
         }
     }
+}
+
+/// Project a Vec of `DetachedServiceSnapshot` (from
+/// `executors::orchestrator::execute_until_ready_and_detach`) into the
+/// persisted `StoredOrchestrationServices` shape (#73 PR-D, closes #28
+/// phase 2).
+///
+/// Returns `None` when there are no services — keeps the JSON lean for
+/// non-orchestration sessions (which call this with an empty slice if
+/// they end up here at all).
+///
+/// `wrapper_pid` should be the PID of the wrapper process that
+/// materialized the orchestration graph (`std::process::id()` at the
+/// call site). It is recorded so `stop_session` can defend against
+/// PID reuse when validating the record.
+fn orchestration_services_for_session_record(
+    wrapper_pid: i32,
+    snapshots: &[crate::executors::orchestrator::DetachedServiceSnapshot],
+) -> Option<StoredOrchestrationServices> {
+    if snapshots.is_empty() {
+        return None;
+    }
+    let services = snapshots
+        .iter()
+        .map(|s| StoredOrchestrationService {
+            name: s.name.clone(),
+            target_label: s.target_label.clone(),
+            local_pid: s.local_pid.map(|p| p as i32),
+            container_id: s.container_id.clone(),
+            host_ports: s.host_ports.iter().map(|(h, c)| (*h, *c)).collect(),
+            published_port: s.published_port,
+        })
+        .collect();
+    Some(StoredOrchestrationServices {
+        wrapper_pid,
+        services,
+    })
 }
 
 fn dependency_contracts_for_session_record(
@@ -1537,6 +1589,135 @@ fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// Tear down the `[services]` graph subset persisted on the session record
+/// (#73 PR-D, closes #28 phase 2). Counterpart of
+/// `stop_recorded_dependency_contracts` for orchestration capsules.
+///
+/// Iterates `services` in reverse insertion order (i.e. reverse-topological
+/// because `start_orchestration_session_in_process` records them in start
+/// order) and stops each one:
+///   - OCI services (`container_id` set): `stop_container` with a short
+///     timeout, then `remove_container`. Idempotent — already-gone
+///     containers are silently absorbed by Bollard.
+///   - Local services (`local_pid` set): SIGTERM (or SIGKILL when `force`),
+///     swallowing ESRCH the same way `terminate_process` in `process.rs`
+///     does.
+///
+/// Returns `Ok(true)` if any service was actively stopped this call.
+/// Errors during teardown are logged via `eprintln!` and do not abort the
+/// loop — `stop_session` must keep going so subsequent services don't
+/// leak just because one OCI daemon roundtrip failed.
+fn stop_recorded_orchestration_services(
+    record: Option<&StoredSessionInfo>,
+    force: bool,
+) -> Result<bool> {
+    let Some(record) = record else {
+        return Ok(false);
+    };
+    let Some(snapshot) = record.orchestration_services.as_ref() else {
+        return Ok(false);
+    };
+    if snapshot.services.is_empty() {
+        return Ok(false);
+    }
+
+    // Lazy OCI client: only build if we actually have an OCI service.
+    // Avoids spinning up a tokio runtime + bollard handshake for the
+    // common case of a fully-managed (local-only) orchestration capsule.
+    let has_oci = snapshot.services.iter().any(|s| s.container_id.is_some());
+    let oci_runtime = if has_oci {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => Some(rt),
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN failed to build tokio runtime for orchestration teardown: {err}"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let oci_client = oci_runtime.as_ref().and_then(|_| {
+        match capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default() {
+            Ok(c) => Some(c),
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN failed to connect to OCI engine for orchestration teardown: {err}"
+                );
+                None
+            }
+        }
+    });
+
+    let mut any_stopped = false;
+    // Reverse-topological: services were started by ServicePhaseCoordinator
+    // in topological order, so reverse iteration is the correct teardown
+    // order (consumers before providers).
+    for service in snapshot.services.iter().rev() {
+        if let Some(container_id) = service.container_id.as_deref() {
+            let (Some(rt), Some(client)) = (oci_runtime.as_ref(), oci_client.as_ref()) else {
+                eprintln!(
+                    "ATO-WARN orchestration service '{}' has container_id but no OCI client; skipping",
+                    service.name
+                );
+                continue;
+            };
+            // Short timeout: the daemon will SIGKILL the container if it
+            // doesn't exit gracefully within the budget. 5s matches the
+            // `OCI_STOP_TIMEOUT_SECS` constant in `executors::orchestrator`.
+            use capsule_core::runtime::oci::OciRuntimeClient as _;
+            match rt.block_on(client.stop_container(container_id, 5)) {
+                Ok(()) => any_stopped = true,
+                Err(err) => {
+                    eprintln!(
+                        "ATO-WARN failed to stop OCI container {} for service '{}': {}",
+                        container_id, service.name, err
+                    );
+                }
+            }
+            if let Err(err) = rt.block_on(client.remove_container(container_id, force)) {
+                eprintln!(
+                    "ATO-WARN failed to remove OCI container {} for service '{}': {}",
+                    container_id, service.name, err
+                );
+            }
+        } else if let Some(pid) = service.local_pid {
+            if pid <= 0 {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+                let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
+                if ret == 0 {
+                    any_stopped = true;
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        eprintln!(
+                            "ATO-WARN failed to signal local service '{}' (pid {}): {}",
+                            service.name, pid, err
+                        );
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (pid, force);
+                eprintln!(
+                    "ATO-WARN local orchestration service teardown is unix-only; service '{}' (pid {}) was left running",
+                    service.name, pid
+                );
+            }
+        }
+    }
+    Ok(any_stopped)
+}
+
 fn stop_recorded_dependency_contracts(
     record: Option<&StoredSessionInfo>,
     force: bool,
@@ -1610,6 +1791,21 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
                 if stop_error.is_none() {
                     stop_error = Some(err);
                 }
+            }
+        }
+    }
+    // Orchestration `[services]` graph teardown (#73 PR-D, closes #28
+    // phase 2). Independent of the dep-contract sidecar — orchestration
+    // sessions persist their services subset on the record and there is
+    // no sidecar form. `force=true` matches the dep-contract path's
+    // behavior on `stop_session`.
+    match stop_recorded_orchestration_services(session_record.as_ref(), true) {
+        Ok(record_stopped) => {
+            stopped |= record_stopped;
+        }
+        Err(err) => {
+            if stop_error.is_none() {
+                stop_error = Some(err);
             }
         }
     }
@@ -2055,6 +2251,7 @@ mod tests {
                         runtime_export_keys: vec!["DATABASE_URL".to_string()],
                     }],
                 }),
+                orchestration_services: None,
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
@@ -2067,5 +2264,107 @@ mod tests {
         assert!(consumer.try_wait().expect("consumer wait").is_some());
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
+    }
+
+    /// PR-D: `stop_recorded_orchestration_services` walks the persisted
+    /// `[services]` graph subset in reverse-topological order and stops
+    /// each managed (local-pid) service. OCI services are not exercised
+    /// here because hosted CI runners don't have a Docker daemon; that
+    /// path is verified manually via the desktop integration suite.
+    ///
+    /// The helper is exercised directly (not through `stop_session`) to
+    /// avoid the env-touching test isolation gap tracked in #82.
+    #[cfg(unix)]
+    #[test]
+    fn stop_recorded_orchestration_services_kills_managed_pids_in_reverse_order() {
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // Two long-running sleeps to stand in for a managed `[services]`
+        // graph (db started first, web second; teardown should hit web
+        // before db).
+        let mut db = Command::new("sleep").arg("30").spawn().expect("db");
+        let mut web = Command::new("sleep").arg("30").spawn().expect("web");
+
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-orch".to_string(),
+            handle: "capsule://example/orch".to_string(),
+            normalized_handle: "capsule://example/orch".to_string(),
+            canonical_handle: Some("capsule://example/orch".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: std::process::id() as i32,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: None,
+            orchestration_services: Some(StoredOrchestrationServices {
+                wrapper_pid: std::process::id() as i32,
+                services: vec![
+                    StoredOrchestrationService {
+                        name: "db".to_string(),
+                        target_label: "db".to_string(),
+                        local_pid: Some(db.id() as i32),
+                        container_id: None,
+                        host_ports: BTreeMap::new(),
+                        published_port: Some(5432),
+                    },
+                    StoredOrchestrationService {
+                        name: "web".to_string(),
+                        target_label: "web".to_string(),
+                        local_pid: Some(web.id() as i32),
+                        container_id: None,
+                        host_ports: BTreeMap::new(),
+                        published_port: Some(5173),
+                    },
+                ],
+            }),
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
+            .expect("teardown helper");
+        assert!(
+            stopped,
+            "helper must report it stopped at least one service"
+        );
+
+        // Both sleeps must be killed. We poll briefly: SIGKILL is delivered
+        // synchronously by the kernel but `try_wait` in user space sees the
+        // exit only after the next reaping pass. 1 second is overkill on
+        // any sane host but tolerates loaded CI runners — without this
+        // poll the assertion races SIGKILL delivery the same way #82's
+        // sibling test does (avoid that landmine).
+        for _ in 0..40 {
+            let db_done = db.try_wait().expect("db wait").is_some();
+            let web_done = web.try_wait().expect("web wait").is_some();
+            if db_done && web_done {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        // Defense: clean up any survivors so the test process doesn't leak
+        // children even on assertion failure.
+        let _ = db.kill();
+        let _ = web.kill();
+        panic!("orchestration services were not stopped within 1s after teardown");
     }
 }
