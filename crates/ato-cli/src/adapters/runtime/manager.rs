@@ -388,8 +388,25 @@ where
     F: std::future::Future<Output = capsule_core::Result<PathBuf>> + Send + 'static,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return tokio::task::block_in_place(|| {
-            let _ = handle;
+        // We're already inside a Tokio runtime. The actual async work
+        // is run on a fresh OS thread + nested current_thread runtime
+        // so we don't try to nest a `block_on` on the outer runtime
+        // (which would deadlock the current_thread flavor and is
+        // forbidden anyway). The only flavor-dependent question is
+        // whether we wrap the `.join()` in `block_in_place`:
+        //
+        // * MultiThread — wrap in `block_in_place` so other tasks on
+        //   the runtime can keep making progress on sibling worker
+        //   threads while this caller blocks on `.join()`.
+        // * CurrentThread — DO NOT wrap. `block_in_place` panics on
+        //   the current_thread flavor, and the v0.5.0 orchestration
+        //   retry path (#81 PR-C in-process refactor + #76
+        //   parent-death watcher's pinned runtime) runs on
+        //   current_thread. Calling `.join()` directly stalls the
+        //   single worker for the duration of the runtime download —
+        //   acceptable here because the calling code is already
+        //   synchronously awaiting the binary.
+        let do_fetch = move || -> Result<PathBuf> {
             std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -401,7 +418,11 @@ where
             })
             .join()
             .map_err(|_| anyhow::anyhow!("runtime fetch thread panicked"))?
-        });
+        };
+        return match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(do_fetch),
+            _ => do_fetch(),
+        };
     }
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -794,5 +815,56 @@ mod tests {
         assert!(boundary
             .missing_on_path_message()
             .contains("host-local 'uv' tool on PATH"));
+    }
+
+    /// Regression for #104: `block_on_runtime_fetch` must not panic
+    /// when called from a current_thread Tokio runtime. The v0.5.0
+    /// orchestration retry path (introduced by #81 PR-C in-process
+    /// refactor and pinned by #76 parent-death watcher's
+    /// `std::mem::forget(runtime_handle)`) runs on current_thread,
+    /// and the original implementation called
+    /// `tokio::task::block_in_place` unconditionally — which panics
+    /// on the current_thread flavor with `can call blocking only
+    /// when running on the multi-threaded runtime`.
+    ///
+    /// This test pins the "no panic" guarantee directly. We pass a
+    /// future that errors out (`Err`) — we don't actually need a
+    /// runtime download to test the dispatch logic. Pre-fix, this
+    /// test panicked at the `block_in_place` call before the future
+    /// was even polled. Post-fix, the error returns cleanly through
+    /// the `do_fetch()` path on the CurrentThread branch.
+    #[test]
+    fn block_on_runtime_fetch_does_not_panic_on_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current_thread runtime");
+
+        let outcome = runtime.block_on(async {
+            // Run `block_on_runtime_fetch` from inside the current_thread
+            // runtime by hopping to a blocking task — `Handle::try_current`
+            // inside the helper will see the outer runtime, take the
+            // "inside a runtime" branch, and (post-fix) skip
+            // `block_in_place` because the flavor is CurrentThread.
+            tokio::task::spawn_blocking(|| {
+                block_on_runtime_fetch(async {
+                    capsule_core::Result::<std::path::PathBuf>::Err(
+                        capsule_core::CapsuleError::Runtime("stub".to_string()),
+                    )
+                })
+            })
+            .await
+            .expect("spawn_blocking joins")
+        });
+
+        // The future intentionally returned an error; what matters is
+        // that we got a Result back at all (no panic). The original
+        // bug surfaced as a panic during dispatch, never reaching the
+        // future.
+        assert!(
+            outcome.is_err(),
+            "stub future was supposed to return Err; instead got Ok({:?})",
+            outcome.ok()
+        );
     }
 }
