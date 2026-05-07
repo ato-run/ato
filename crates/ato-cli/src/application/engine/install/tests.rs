@@ -779,6 +779,8 @@ async fn github_run_sweep_preserves_checkout_referenced_by_active_process() {
             status: crate::runtime::process::ProcessStatus::Ready,
             runtime: "shell".to_string(),
             start_time: SystemTime::now(),
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
             manifest_path: Some(manifest_path),
             scoped_id: None,
             target_label: None,
