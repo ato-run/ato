@@ -8,8 +8,10 @@ use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::publish_ci::build_capsule_artifact as build_publish_capsule_artifact;
 #[cfg(target_os = "macos")]
 use crate::reporters::CliReporter;
+use filetime::{set_file_mtime, FileTime};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header::HOST, HeaderMap, StatusCode};
@@ -663,6 +665,202 @@ fn github_checkout_root_is_outside_workspace_internal_subtree() {
         "github_checkout_root() must not be inside a workspace internal subtree; got: {}",
         root.display()
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_checkout_root_uses_current_ato_home_tmp_root() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+
+    let root = github_run_checkout_root().expect("gh-run root");
+    assert_eq!(root, ato_home.join("tmp").join("gh-run"));
+    assert!(root.exists());
+}
+
+#[test]
+fn github_run_success_cleanup_removes_transient_tree() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let checkout = temp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("src")).expect("mkdir checkout");
+    std::fs::write(checkout.join("src/main.js"), b"console.log('ok');").expect("write file");
+
+    remove_github_run_checkout(&checkout).expect("remove checkout");
+
+    assert!(!checkout.exists());
+    remove_github_run_checkout(&checkout).expect("remove remains idempotent");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_sweep_removes_stale_tree_older_than_ttl() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+    let root = github_run_checkout_root().expect("gh-run root");
+    let stale = root.join("stale-checkout");
+    std::fs::create_dir_all(&stale).expect("mkdir stale checkout");
+
+    let removed = sweep_stale_github_run_checkouts_in(
+        &root,
+        SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+        Duration::from_secs(24 * 60 * 60),
+    )
+    .expect("sweep stale checkouts");
+
+    assert_eq!(removed, 1);
+    assert!(!stale.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_sweep_preserves_fresh_tree_within_grace_period() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+    let root = github_run_checkout_root().expect("gh-run root");
+    let fresh = root.join("fresh-checkout");
+    std::fs::create_dir_all(&fresh).expect("mkdir fresh checkout");
+
+    let removed = sweep_stale_github_run_checkouts_in(
+        &root,
+        SystemTime::now() + Duration::from_secs(60),
+        Duration::from_secs(24 * 60 * 60),
+    )
+    .expect("sweep fresh checkouts");
+
+    assert_eq!(removed, 0);
+    assert!(fresh.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_sweep_preserves_checkout_with_live_owner_marker() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+    let root = github_run_checkout_root().expect("gh-run root");
+    let active = root.join("active-owner-checkout");
+    std::fs::create_dir_all(&active).expect("mkdir active checkout");
+    write_github_run_checkout_owner_marker(&active).expect("write owner marker");
+
+    let removed = sweep_stale_github_run_checkouts_in(
+        &root,
+        SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+        Duration::from_secs(24 * 60 * 60),
+    )
+    .expect("sweep owner-preserved checkout");
+
+    assert_eq!(removed, 0);
+    assert!(active.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_sweep_preserves_checkout_referenced_by_active_process() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+    let root = github_run_checkout_root().expect("gh-run root");
+    let active = root.join("active-process-checkout");
+    let manifest_path = active.join("nested").join("capsule.toml");
+    std::fs::create_dir_all(manifest_path.parent().expect("manifest parent"))
+        .expect("mkdir active checkout");
+    std::fs::write(&manifest_path, "schema_version = \"0.3\"\n").expect("write manifest");
+
+    let process_manager = crate::runtime::process::ProcessManager::new().expect("process manager");
+    process_manager
+        .write_pid(&crate::runtime::process::ProcessInfo {
+            id: "gh-run-live".to_string(),
+            name: "gh-run-live".to_string(),
+            pid: std::process::id() as i32,
+            workload_pid: None,
+            status: crate::runtime::process::ProcessStatus::Ready,
+            runtime: "shell".to_string(),
+            start_time: SystemTime::now(),
+            manifest_path: Some(manifest_path),
+            scoped_id: None,
+            target_label: None,
+            requested_port: None,
+            log_path: None,
+            ready_at: None,
+            last_event: None,
+            last_error: None,
+            exit_code: None,
+        })
+        .expect("write active process record");
+
+    let removed = sweep_stale_github_run_checkouts_in(
+        &root,
+        SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+        Duration::from_secs(24 * 60 * 60),
+    )
+    .expect("sweep active-process checkout");
+
+    assert_eq!(removed, 0);
+    assert!(active.exists());
+    process_manager
+        .delete_pid("gh-run-live")
+        .expect("cleanup pid record");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_sweep_does_not_preserve_owner_marker_with_mismatched_start_time() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+    let root = github_run_checkout_root().expect("gh-run root");
+    let stale = root.join("stale-reused-pid-checkout");
+    std::fs::create_dir_all(&stale).expect("mkdir stale checkout");
+    set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale checkout");
+
+    let bogus_owner = serde_json::json!({
+        "owner_pid": std::process::id(),
+        "owner_start_time_unix_ms": 1_u64,
+    });
+    std::fs::write(
+        stale.join(".ato-owner.json"),
+        serde_json::to_vec_pretty(&bogus_owner).expect("serialize bogus owner marker"),
+    )
+    .expect("write bogus owner marker");
+
+    let removed = sweep_stale_github_run_checkouts_in(
+        &root,
+        SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+        Duration::from_secs(24 * 60 * 60),
+    )
+    .expect("sweep reused-pid checkout");
+
+    assert_eq!(removed, 1);
+    assert!(!stale.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_run_owner_marker_requires_matching_start_time() {
+    let _env_lock = acquire_test_env_lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ato_home = temp.path().join("ato-home");
+    let _ato_home_guard = EnvVarGuard::set("ATO_HOME", Some(ato_home.to_string_lossy().as_ref()));
+    let root = github_run_checkout_root().expect("gh-run root");
+    let active = root.join("active-checkout");
+    let reused = root.join("reused-checkout");
+    std::fs::create_dir_all(&active).expect("mkdir active checkout");
+    std::fs::create_dir_all(&reused).expect("mkdir reused checkout");
+    write_github_run_checkout_owner_marker(&active).expect("write owner marker");
+    std::fs::write(
+        reused.join(".ato-owner.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "owner_pid": std::process::id(),
+            "owner_start_time_unix_ms": 1_u64,
+        }))
+        .expect("serialize bogus owner marker"),
+    )
+    .expect("write bogus owner marker");
+
+    assert!(github_run_checkout_owner_is_alive(&active));
+    assert!(!github_run_checkout_owner_is_alive(&reused));
 }
 
 #[test]
