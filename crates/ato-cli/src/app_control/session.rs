@@ -47,6 +47,27 @@ const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
 const DESKTOP_PARENT_PID_ENV: &str = "ATO_DESKTOP_PARENT_PID";
 const DESKTOP_PARENT_START_TIME_ENV: &str = "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS";
+
+/// Build a reporter for orchestration-session helpers. In envelope
+/// mode (set by `start_session(json=true)` on the orchestrator's
+/// stream-pumper redirect flag), notifications must NOT go to stdout
+/// — `stdout` is reserved for the SessionStartEnvelope JSON the
+/// caller (today: ato-desktop) parses. `CliReporter::new_run(false)`
+/// is the existing constructor that pins TextReporter to **stderr**
+/// (already used by `ato run` foreground for the same reason).
+///
+/// Outside envelope mode (interactive `ato app session start` from a
+/// terminal), keep the historical stdout-going TextReporter so
+/// notifications surface alongside the human-readable summary
+/// printed by `print_session_info`.
+fn make_orchestration_reporter() -> CliReporter {
+    if crate::adapters::runtime::executors::orchestrator::redirect_service_stdout_to_stderr_for_envelope_mode_active() {
+        CliReporter::new_run(false)
+    } else {
+        CliReporter::new(false)
+    }
+}
+
 /// Resolve the readiness budget for `wait_for_http_ready` from the
 /// manifest's `startup_timeout` (per-target → global → 60s default).
 /// The previous code path used a hardcoded 10s ceiling and silently
@@ -164,6 +185,24 @@ impl SessionInfo {
 // `ato-cli`.
 
 pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
+    // Reserve stdout for the SessionStartEnvelope when the caller
+    // asked for JSON. Without this, the orchestrator's stream pumper
+    // (`adapters/runtime/executors/orchestrator.rs::spawn_prefixed_stream`)
+    // writes service stdout (`[main] ...` / `[web] ...`) onto the
+    // parent's stdout while the orchestration ramps up, so the
+    // captured stdout becomes
+    //   `[main] ...service output...\n{...envelope...}`
+    // which fails JSON parsing at column 2 (`m` of `[main]`). The
+    // desktop, which spawns `ato app session start --json`, then
+    // reports `failed to parse session start response: expected
+    // value at line 1 column 2` and the launch dead-ends.
+    //
+    // The redirect routes service stdout to the parent's stderr
+    // (with the same `[<service>] ` prefix), so the JSON envelope
+    // is the only thing on stdout. `ato run` foreground use is
+    // unaffected — it never sets this flag.
+    crate::adapters::runtime::executors::orchestrator::redirect_service_stdout_to_stderr_for_envelope_mode(json);
+
     // Drive the same Hourglass pipeline `ato run` uses, with a
     // `SessionStartPhaseRunner` that swaps Execute for session-specific
     // spawn + ProcessManager registration. Install resolves the handle,
@@ -669,7 +708,7 @@ pub(super) fn start_orchestration_session_in_process(
         )
     })?;
 
-    let reporter = Arc::new(CliReporter::new(false));
+    let reporter = Arc::new(make_orchestration_reporter());
     let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root);
     let mut prepared = PreparedRunContext {
         authoritative_lock,
@@ -1350,7 +1389,7 @@ fn prepare_session_execution(
     plan: &capsule_core::router::ManifestData,
     raw_manifest: &str,
 ) -> Result<PreparedSessionExecution> {
-    let reporter = Arc::new(CliReporter::new(false));
+    let reporter = Arc::new(make_orchestration_reporter());
     let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root);
     let mut prepared = PreparedRunContext {
         authoritative_lock,
