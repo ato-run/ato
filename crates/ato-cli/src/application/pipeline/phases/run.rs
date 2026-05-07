@@ -204,6 +204,17 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) enforcement: String,
     pub(crate) sandbox_mode: bool,
     pub(crate) dangerously_skip_permissions: bool,
+    /// Single carrier for the run/session unsafe gate (#73 PR-C).
+    /// Computed once at the entry point as
+    /// `dangerously_skip_permissions || env CAPSULE_ALLOW_UNSAFE == "1"`,
+    /// so downstream code reads the request rather than the env directly
+    /// or relying on argv injection into a child supervisor. Currently set
+    /// at construction time; PR-D migrates the existing env / argv readers
+    /// inside the run pipeline (`source.rs`, `node_compat.rs`, `deno.rs`,
+    /// `target_runner.rs`) to consume this field instead, at which point
+    /// the field becomes load-bearing.
+    #[allow(dead_code)] // PR-C: written; consumed in PR-D.
+    pub(crate) allow_unsafe: bool,
     pub(crate) compatibility_fallback: Option<String>,
     pub(crate) provider_toolchain_requested: ProviderToolchain,
     pub(crate) explicit_commit: Option<String>,
@@ -1744,7 +1755,7 @@ where
         .with_injected_mounts(provisioning_outcome.additional_mounts);
 
     if let Some(shadow_workspace) = provisioning_outcome.shadow_workspace.as_ref() {
-        if let Some(attempt) = attempt.as_deref_mut() {
+        if let Some(attempt) = attempt.as_mut() {
             let mut scope = attempt.cleanup_scope();
             scope.register_remove_dir(shadow_workspace.root_dir.clone());
         }
@@ -4078,6 +4089,7 @@ url = "http://127.0.0.1:8787/health"
             enforcement: "strict".to_string(),
             sandbox_mode: true,
             dangerously_skip_permissions: false,
+            allow_unsafe: false,
             compatibility_fallback: None,
             provider_toolchain_requested: crate::ProviderToolchain::Auto,
             explicit_commit: None,

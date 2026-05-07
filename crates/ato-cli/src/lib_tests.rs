@@ -1544,3 +1544,78 @@ fn github_manual_intervention_returns_e104_for_lockfile_failure() {
         .expect("ato execution error");
     assert_eq!(execution_err.name, "dependency_lock_missing");
 }
+
+// ---------------------------------------------------------------------------
+// #73 PR-C: Canonical LaunchSessionCore / remove opaque supervisor
+// ---------------------------------------------------------------------------
+
+/// `start_orchestration_session_supervisor` historically translated
+/// `CAPSULE_ALLOW_UNSAFE=1` into an explicit `--dangerously-skip-permissions`
+/// argv on the spawned `ato run` child. PR-C removed that injection: the
+/// in-process orchestration path carries the gate through the request types
+/// and the legacy supervisor inherits the env var directly, so no spawned
+/// child should be invoked with that argv from session.rs.
+///
+/// This is a source-string assertion rather than a behavioral test because
+/// the only way to reach the legacy supervisor in PR-C is to set
+/// `ATO_LEGACY_SUPERVISOR=1` and spawn a child `ato run`; unit tests cannot
+/// observe that argv without an integration harness.
+#[test]
+fn pr_c_session_does_not_inject_dangerously_skip_permissions_into_supervisor_argv() {
+    let session_rs = include_str!("app_control/session.rs");
+    assert!(
+        !session_rs.contains("cmd.arg(\"--dangerously-skip-permissions\")"),
+        "session.rs must not inject --dangerously-skip-permissions argv into a spawned supervisor; \
+         the unsafe gate is carried via env inheritance and ConsumerRunRequest.allow_unsafe (#73 PR-C)."
+    );
+}
+
+/// `orchestration_supervisor_ready_timeout` (the 180s readiness floor) was
+/// removed in PR-C. Both the in-process orchestration path and the legacy
+/// supervisor fallback now use `session_ready_timeout`, which honors the
+/// manifest's per-target `startup_timeout`.
+#[test]
+fn pr_c_session_no_longer_defines_orchestration_supervisor_ready_timeout() {
+    let session_rs = include_str!("app_control/session.rs");
+    assert!(
+        !session_rs.contains("fn orchestration_supervisor_ready_timeout("),
+        "session.rs must not define orchestration_supervisor_ready_timeout; \
+         the 180s readiness floor was removed in #73 PR-C in favor of session_ready_timeout."
+    );
+}
+
+/// `legacy_supervisor_enabled` is the only switch from the normal in-process
+/// path to the legacy nested-`ato run` supervisor. Tested through the
+/// pure-logic helper (`legacy_supervisor_enabled_for_value`) to avoid
+/// racing other env-mutating tests in the crate.
+#[test]
+fn pr_c_legacy_supervisor_env_gate_only_accepts_literal_one() {
+    use crate::app_control::session_runner::legacy_supervisor_enabled_for_value;
+    assert!(
+        !legacy_supervisor_enabled_for_value(None),
+        "absence of ATO_LEGACY_SUPERVISOR must keep the in-process path",
+    );
+    assert!(
+        legacy_supervisor_enabled_for_value(Some("1")),
+        "ATO_LEGACY_SUPERVISOR=1 must select the legacy supervisor fallback",
+    );
+    // Non-"1" values must not flip the gate (avoid accidental enablement
+    // from "true", "yes", etc., which the rest of the codebase does not
+    // accept either).
+    for v in ["true", "yes", "0", "", "TRUE", "y"] {
+        assert!(
+            !legacy_supervisor_enabled_for_value(Some(v)),
+            "non-\"1\" value {v:?} must not select the legacy supervisor fallback",
+        );
+    }
+}
+
+/// The two orchestrator entry points (`execute_with_client` for foreground
+/// `ato run` and `execute_until_ready_and_detach` for session start) must
+/// remain distinct public symbols (#73 PR-C). If either is removed or
+/// renamed, this `use` stops compiling.
+#[test]
+fn pr_c_orchestrator_detach_and_foreground_entry_points_remain_public() {
+    #[allow(unused_imports)]
+    use crate::executors::orchestrator::{execute_until_ready_and_detach, execute_with_client};
+}
