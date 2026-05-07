@@ -56,6 +56,8 @@ actions!(
         DenyPermissionPrompt,
         SaveConfigForm,
         CancelConfigForm,
+        ApproveConsentForm,
+        CancelConsentForm,
         ToggleRouteMetadataPopover,
         ToggleDevConsole,
         ToggleAutoDevtools,

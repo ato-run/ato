@@ -506,7 +506,10 @@ fn map_ato_error_code(error: &AtoError) -> AtoErrorCode {
         AtoError::StorageNoSpace { .. } => AtoErrorCode::AtoErrStorageNoSpace,
         AtoError::ArtifactIntegrityFailure { .. } => AtoErrorCode::AtoErrArtifactIntegrityFailure,
         AtoError::SecurityPolicyViolation { .. } => AtoErrorCode::AtoErrSecurityPolicyViolation,
-        AtoError::ExecutionContractInvalid { .. } => AtoErrorCode::AtoErrExecutionContractInvalid,
+        AtoError::ExecutionContractInvalid { .. }
+        | AtoError::ExecutionPlanConsentRequired { .. } => {
+            AtoErrorCode::AtoErrExecutionContractInvalid
+        }
         AtoError::RuntimeNotResolved { .. } => AtoErrorCode::AtoErrRuntimeNotResolved,
         AtoError::SandboxUnavailable { .. } => AtoErrorCode::AtoErrCompatHardware,
         AtoError::RuntimeLaunchFailed { .. } => AtoErrorCode::AtoErrRuntimeLaunchFailed,

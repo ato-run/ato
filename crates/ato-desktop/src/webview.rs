@@ -48,8 +48,8 @@ use crate::orchestrator::{
 };
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest, ShellMode,
-    WebSessionState,
+    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest,
+    PendingConsentRequest, ShellMode, WebSessionState,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
 use crate::ui::share::{resolve_share_icon, web_favicon_origin, ShareIconSource};
@@ -275,11 +275,26 @@ impl Drop for ManagedWebView {
 struct PendingLaunch {
     pane_id: usize,
     route_key: String,
+    /// Mirrors the `handle` argument of the originating
+    /// `ensure_pending_local_launch` call. Carried alongside
+    /// `route_key` so the disconnect-fallback path in the drain can
+    /// still produce a `PendingLaunchResult` whose `handle` field is
+    /// authoritative — the receiver only sees the worker's own
+    /// `PendingLaunchResult`, never the queue entry.
+    handle: String,
     receiver: Receiver<PendingLaunchResult>,
 }
 
 struct PendingLaunchResult {
     route_key: String,
+    /// Original handle this launch was queued under (mirrors the
+    /// `handle` arg of `ensure_pending_local_launch`). Used by the
+    /// drain path to reset the per-handle consent retry budget on a
+    /// successful launch — the previous payload model derived the
+    /// handle from the resulting `session` only on the success path,
+    /// which gave the consent retry-once gate no anchor in the
+    /// `Err(MissingConsent { handle, .. })` branch.
+    handle: String,
     /// Carries either the live session or a typed `LaunchError`. The
     /// `MissingConfig` variant must reach `drain_pending_launches`
     /// intact so the modal can be populated — collapsing to `String`
@@ -835,6 +850,16 @@ impl WebViewManager {
                     };
                     continue;
                 }
+                ApproveExecutionPlanConsent { handle } => {
+                    match apply_capsule_consent(state, handle) {
+                        Ok(()) => req.send(Ok(serde_json::json!({
+                            "ok": true,
+                            "approved_handle": handle,
+                        }))),
+                        Err(message) => req.send(Err(message)),
+                    };
+                    continue;
+                }
                 _ => {}
             }
 
@@ -1118,6 +1143,7 @@ impl WebViewManager {
                         pending.pane_id,
                         PendingLaunchResult {
                             route_key: pending.route_key.clone(),
+                            handle: pending.handle.clone(),
                             session: Err(LaunchError::Other(
                                 "guest session worker disconnected before completion".to_string(),
                             )),
@@ -1150,6 +1176,12 @@ impl WebViewManager {
 
             match completed.session {
                 Ok(session) => {
+                    // A successful launch retires any retry-once budget
+                    // recorded against this handle: a future E302 (e.g.
+                    // after a policy-segment-hash change) should get a
+                    // fresh modal, not a fatal toast.
+                    state.reset_consent_retry_budget(&completed.handle);
+
                     let is_web_url = session.display_strategy == CapsuleDisplayStrategy::WebUrl;
                     let is_terminal_stream =
                         session.display_strategy == CapsuleDisplayStrategy::TerminalStream;
@@ -1374,6 +1406,57 @@ impl WebViewManager {
                         original_secrets,
                     });
                 }
+                Err(LaunchError::MissingConsent {
+                    handle,
+                    scoped_id,
+                    version,
+                    target_label,
+                    policy_segment_hash,
+                    provisioning_policy_hash,
+                    summary,
+                    original_secrets,
+                }) => {
+                    // Retry-once policy: if the user already approved
+                    // once for this handle this session and we still
+                    // got E302, something is structurally wrong (CLI
+                    // didn't see the record we just appended). Fall
+                    // through to a fatal toast rather than re-open the
+                    // modal — that would loop the user.
+                    if state.consent_retry_already_consumed(&handle) {
+                        error!(
+                            pane_id,
+                            handle = %handle,
+                            "consent re-required after approve; surfacing fatal (no modal loop)"
+                        );
+                        state.sync_web_session_state(active.pane_id, WebSessionState::LaunchFailed);
+                        state.push_activity(
+                            ActivityTone::Error,
+                            format!(
+                                "Failed to start guest session: ExecutionPlan consent was re-requested for '{handle}' after approval. Re-launch from the omnibar to retry."
+                            ),
+                        );
+                        // Reset the budget so a manual re-launch starts
+                        // from a clean state.
+                        state.reset_consent_retry_budget(&handle);
+                    } else {
+                        info!(
+                            pane_id,
+                            handle = %handle,
+                            target = %target_label,
+                            "guest session needs ExecutionPlan consent; surfacing modal"
+                        );
+                        state.set_pending_consent(PendingConsentRequest {
+                            handle,
+                            scoped_id,
+                            version,
+                            target_label,
+                            policy_segment_hash,
+                            provisioning_policy_hash,
+                            summary,
+                            original_secrets,
+                        });
+                    }
+                }
                 Err(LaunchError::Other(message)) => {
                     error!(pane_id, error = %message, "guest session failed");
                     // Use LaunchFailed (not Closed) to prevent ensure_pending_local_launch
@@ -1422,6 +1505,16 @@ impl WebViewManager {
             }
         }
 
+        // Same gate, mirror for E302 consent: if the consent modal is
+        // open for THIS handle, the user is mid-decision. The Approve
+        // handler clears `pending_consent` and marks the retry budget;
+        // both branches collapse this guard on the next render.
+        if let Some(pending) = &state.pending_consent {
+            if pending.handle == handle {
+                return;
+            }
+        }
+
         info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -1448,6 +1541,7 @@ impl WebViewManager {
             PendingLaunch {
                 pane_id,
                 route_key: route_key.clone(),
+                handle: handle.clone(),
                 receiver,
             },
         );
@@ -1463,6 +1557,7 @@ impl WebViewManager {
             // structured payload survives the channel.
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
+                handle: handle.clone(),
                 session: resolve_and_start_guest(&handle, &secrets, &plain_configs).inspect_err(
                     |err| {
                         error!(handle = %handle, error = %err, "guest session launch failed");
@@ -3982,6 +4077,49 @@ fn mime_for_path(path: &Path) -> &'static str {
 
 /// Decode a standard base64 string into bytes.
 
+// ── Apply helpers (shared between UI handlers and MCP tool dispatch) ─────────
+
+/// Approve the pending ExecutionPlan consent for `handle`: invoke
+/// `ato internal consent approve-execution-plan` (the CLI writer
+/// owns the JSONL append), mark the per-handle retry-once budget as
+/// consumed, and clear `AppState::pending_consent` so
+/// `ensure_pending_local_launch` re-arms the launch on the next
+/// render. Used by:
+///
+/// - the UI's `ApproveConsentForm` action handler, and
+/// - the `approve_execution_plan_consent` MCP tool.
+///
+/// The two callers share this helper so the user-facing surface and
+/// the automation surface go through the same code path. If the CLI
+/// invocation fails, the modal stays open and the budget is NOT
+/// consumed (the user can retry the same Approve).
+pub(crate) fn apply_capsule_consent(state: &mut AppState, handle: &str) -> Result<(), String> {
+    let request = state
+        .pending_consent
+        .as_ref()
+        .filter(|r| r.handle == handle)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "no pending ExecutionPlan consent matches handle '{handle}' \
+                 (the modal is either closed or pinned to a different handle)"
+            )
+        })?;
+
+    crate::orchestrator::approve_execution_plan_consent(
+        &request.scoped_id,
+        &request.version,
+        &request.target_label,
+        &request.policy_segment_hash,
+        &request.provisioning_policy_hash,
+    )
+    .map_err(|err| format!("failed to record consent: {err:#}"))?;
+
+    state.mark_consent_retry_consumed(handle);
+    state.clear_pending_consent();
+    Ok(())
+}
+
 // ── Automation command dispatch ───────────────────────────────────────────────
 
 /// Apply a batch of secrets for `handle` and (optionally) clear an open
@@ -4272,7 +4410,11 @@ fn dispatch_automation_command(
             req.send(Ok(serde_json::json!({ "ok": true })));
         }
         // Handled in dispatch_automation_requests before reaching here.
-        ListPanes | FocusPane { .. } | OpenUrl { .. } | SetCapsuleSecrets { .. } => {
+        ListPanes
+        | FocusPane { .. }
+        | OpenUrl { .. }
+        | SetCapsuleSecrets { .. }
+        | ApproveExecutionPlanConsent { .. } => {
             unreachable!()
         }
     }
@@ -4771,6 +4913,55 @@ mod tests {
             assert!(
                 state.pending_config.is_some(),
                 "modal for a different handle must not be dismissed"
+            );
+        }
+    }
+
+    // ── apply_capsule_consent (UI handler + MCP automation share path) ───
+    //
+    // These tests exercise the routing logic in `apply_capsule_consent`
+    // — the handle-match check, the "no pending consent" error path,
+    // and the success-path side effects on AppState. The actual CLI
+    // invocation (`ato internal consent approve-execution-plan`) is
+    // out of unit-test scope: it lives in `crate::orchestrator::
+    // approve_execution_plan_consent`, gated behind `resolve_ato_binary`,
+    // and is covered by an integration test (`tests/...`) that drives
+    // the full plumbing surface.
+    mod apply_capsule_consent {
+        use super::*;
+        use crate::state::PendingConsentRequest;
+
+        fn pending(handle: &str) -> PendingConsentRequest {
+            PendingConsentRequest {
+                handle: handle.to_string(),
+                scoped_id: "publisher/app".to_string(),
+                version: "1.0.0".to_string(),
+                target_label: "app".to_string(),
+                policy_segment_hash: "blake3:aaa".to_string(),
+                provisioning_policy_hash: "blake3:bbb".to_string(),
+                summary: "Capsule: publisher/app@1.0.0".to_string(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn errors_when_no_pending_consent_matches_handle() {
+            let mut state = AppState::initial();
+            // No pending_consent at all.
+            let err = apply_capsule_consent(&mut state, "any-handle").unwrap_err();
+            assert!(
+                err.contains("no pending ExecutionPlan consent"),
+                "expected no-match error, got: {err}"
+            );
+
+            // Pending consent for a *different* handle must also reject —
+            // approving by accident would leak consent to a capsule the
+            // user never reviewed.
+            state.set_pending_consent(pending("other-handle"));
+            let err = apply_capsule_consent(&mut state, "wrong-handle").unwrap_err();
+            assert!(
+                err.contains("no pending ExecutionPlan consent"),
+                "handle mismatch must error, got: {err}"
             );
         }
     }

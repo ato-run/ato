@@ -114,6 +114,12 @@ pub enum AutomationCommand {
         secrets: Vec<(String, String)>,
         clear_pending_config: bool,
     },
+    /// Approve the open ExecutionPlan consent modal for `handle`.
+    /// Goes through `webview::apply_capsule_consent`, which is the
+    /// same code path the UI's `ApproveConsentForm` action handler
+    /// uses — guaranteeing automation tests exercise the production
+    /// approval flow rather than a side door.
+    ApproveExecutionPlanConsent { handle: String },
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────

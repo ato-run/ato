@@ -29,16 +29,16 @@ use self::sidebar::{
 use crate::logging::TARGET_FAVICON;
 
 use crate::app::{
-    AllowPermissionForSession, AllowPermissionOnce, BrowserBack, BrowserForward, BrowserReload,
-    CancelAuthHandoff, CancelConfigForm, CancelQuit, CheckForUpdates, CloseTask, ConfirmQuitClear,
-    ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
-    FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
-    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
-    OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
-    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
-    SelectRouteMetadataTab, SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit,
-    SignInToAtoRun, SignOut, SplitPane, ToggleAutoDevtools, ToggleDevConsole,
-    ToggleRouteMetadataPopover, ToggleTheme,
+    AllowPermissionForSession, AllowPermissionOnce, ApproveConsentForm, BrowserBack,
+    BrowserForward, BrowserReload, CancelAuthHandoff, CancelConfigForm, CancelConsentForm,
+    CancelQuit, CheckForUpdates, CloseTask, ConfirmQuitClear, ConfirmQuitKeep, CycleHandle,
+    DenyPermissionPrompt, DismissTransient, ExpandSplit, FocusCommandBar, InstallCapsuleUpdate,
+    MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
+    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
+    OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
+    PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab,
+    SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
+    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -274,6 +274,11 @@ pub struct DesktopShell {
     /// survives across re-renders. Dropped when `pending_config`
     /// returns to `None`.
     config_modal: Option<modals::config_form::ConfigModal>,
+    /// E302 consent modal. Read-only snapshot of
+    /// `state.pending_consent`; rebuilt when the underlying request's
+    /// identity tuple changes. Dropped when `pending_consent` returns
+    /// to `None`.
+    consent_modal: Option<modals::consent_form::ConsentModal>,
 }
 
 impl DesktopShell {
@@ -400,6 +405,7 @@ impl DesktopShell {
             update_check_rx: None,
             capsule_update_rx,
             config_modal: None,
+            consent_modal: None,
         }
     }
 
@@ -1179,6 +1185,95 @@ impl DesktopShell {
         }
     }
 
+    /// Reconcile `self.consent_modal` with `state.pending_consent`.
+    /// Mirror of `sync_config_modal` for the E302 consent flow. The
+    /// modal is read-only (no `InputState`), so the snapshot is just
+    /// the request itself; we still rebuild on identity drift so the
+    /// rendered hashes never lag behind the live request.
+    fn sync_consent_modal(&mut self) {
+        match (&self.state.pending_consent, &self.consent_modal) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                self.consent_modal = None;
+            }
+            (Some(req), None) => {
+                self.consent_modal = Some(modals::consent_form::ConsentModal::new(req.clone()));
+            }
+            (Some(req), Some(modal)) => {
+                if modal.needs_rebuild(req) {
+                    self.consent_modal = Some(modals::consent_form::ConsentModal::new(req.clone()));
+                }
+            }
+        }
+    }
+
+    /// Handler for `ApproveConsentForm`. Calls
+    /// `apply_capsule_consent` (which routes through
+    /// `ato internal consent approve-execution-plan` on the CLI) and
+    /// — on success — clears `pending_consent`, marks the per-handle
+    /// retry budget consumed, and lets the next render re-arm the
+    /// launch via `ensure_pending_local_launch`. On failure, the modal
+    /// stays open with an activity entry; the user can click Approve
+    /// again to retry the CLI call.
+    fn on_approve_consent_form(
+        &mut self,
+        _: &ApproveConsentForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.consent_modal.as_ref() else {
+            return;
+        };
+        let handle = modal.request.handle.clone();
+        match crate::webview::apply_capsule_consent(&mut self.state, &handle) {
+            Ok(()) => {
+                self.state.push_activity(
+                    ActivityTone::Info,
+                    format!("Approved ExecutionPlan consent for {handle}; relaunching…"),
+                );
+            }
+            Err(message) => {
+                self.state.push_activity(
+                    ActivityTone::Error,
+                    format!("Failed to record consent for {handle}: {message}"),
+                );
+                // Leave modal open so the user can retry.
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Handler for `CancelConsentForm`. Drops the pending consent and
+    /// marks the active web pane as `LaunchFailed` so
+    /// `ensure_pending_local_launch` won't immediately re-fire and
+    /// re-trip the same E302. The user reopens the launch by
+    /// re-entering the handle in the omnibar — Cancel does NOT count
+    /// against the retry-once budget.
+    fn on_cancel_consent_form(
+        &mut self,
+        _: &CancelConsentForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.consent_modal.as_ref() else {
+            return;
+        };
+        let handle = modal.request.handle.clone();
+        self.state.clear_pending_consent();
+        self.state.reset_consent_retry_budget(&handle);
+        if let Some(active) = self.state.active_web_pane() {
+            let pane_id = active.pane_id;
+            self.state
+                .sync_web_session_state(pane_id, crate::state::WebSessionState::LaunchFailed);
+        }
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!("Cancelled ExecutionPlan consent for {handle}."),
+        );
+        cx.notify();
+    }
+
     /// Handler for the `SaveConfigForm` action emitted by the modal's
     /// "Save & Launch" button. Walks the form, persists each field
     /// according to its kind, clears `pending_config`, and lets the
@@ -1494,6 +1589,7 @@ impl Render for DesktopShell {
         self.poll_update_check();
         self.poll_capsule_updates();
         self.sync_config_modal(window, cx);
+        self.sync_consent_modal();
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
@@ -1507,6 +1603,7 @@ impl Render for DesktopShell {
         // modal) is invisible until we toggle the WebView off.
         let hide_for_overlay = (command_bar && !omnibar_suggestions.is_empty())
             || self.state.pending_config.is_some()
+            || self.state.pending_consent.is_some()
             || self.state.active_permission_prompt().is_some()
             || self.state.pending_quit_confirmation
             || self.state.route_metadata_popover_open
@@ -1575,6 +1672,18 @@ impl Render for DesktopShell {
                             modal, &theme,
                         ))
                     })
+                    .when(self.consent_modal.is_some(), |this| {
+                        // Same guard model as the config modal: only
+                        // render once both AppState's `pending_consent`
+                        // AND the local snapshot have populated.
+                        let modal = self
+                            .consent_modal
+                            .as_ref()
+                            .expect("consent_modal checked above");
+                        this.child(modals::consent_form::render_consent_modal_overlay(
+                            modal, &theme,
+                        ))
+                    })
                     .when(self.state.route_metadata_popover_open, |this| {
                         this.child(render_route_metadata_popover(&self.state, &theme))
                     })
@@ -1638,6 +1747,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_deny_permission_prompt))
             .on_action(cx.listener(Self::on_save_config_form))
             .on_action(cx.listener(Self::on_cancel_config_form))
+            .on_action(cx.listener(Self::on_approve_consent_form))
+            .on_action(cx.listener(Self::on_cancel_consent_form))
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_open_latest_release_page))
             .on_action(cx.listener(Self::on_open_external_link))

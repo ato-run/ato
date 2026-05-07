@@ -9,3 +9,4 @@
 //! shell.
 
 pub(super) mod config_form;
+pub(super) mod consent_form;
