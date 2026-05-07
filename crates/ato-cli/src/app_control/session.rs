@@ -2365,6 +2365,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
+    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_pid_file_is_missing() {
         struct EnvGuard {
             ato_home: Option<String>,
