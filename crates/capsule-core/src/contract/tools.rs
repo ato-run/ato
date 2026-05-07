@@ -349,11 +349,7 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
             use flate2::read::GzDecoder;
             use tar::Archive;
             let file = fs::File::open(archive_path).map_err(|e| {
-                CapsuleError::Pack(format!(
-                    "Failed to open {}: {}",
-                    archive_path.display(),
-                    e
-                ))
+                CapsuleError::Pack(format!("Failed to open {}: {}", archive_path.display(), e))
             })?;
             Archive::new(GzDecoder::new(file))
                 .unpack(dest)
@@ -397,8 +393,7 @@ fn write_shim(
             }
             #[cfg(windows)]
             {
-                let body =
-                    format!("@echo off\r\n\"{node_quoted}\" \"{target_quoted}\" %*\r\n");
+                let body = format!("@echo off\r\n\"{node_quoted}\" \"{target_quoted}\" %*\r\n");
                 fs::write(shim_path, body).map_err(|e| {
                     CapsuleError::Pack(format!(
                         "Failed to write shim {}: {}",
@@ -440,9 +435,8 @@ fn write_executable(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|e| CapsuleError::Pack(format!("Failed to stat shim {}: {}", path.display(), e)))?
         .permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(path, perms).map_err(|e| {
-        CapsuleError::Pack(format!("Failed to chmod shim {}: {}", path.display(), e))
-    })
+    fs::set_permissions(path, perms)
+        .map_err(|e| CapsuleError::Pack(format!("Failed to chmod shim {}: {}", path.display(), e)))
 }
 
 #[cfg(test)]

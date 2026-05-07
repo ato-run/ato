@@ -1173,9 +1173,7 @@ fn bootstrap_state_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    capsule_core::common::paths::ato_path_or_workspace_tmp(
-        "apps/ato-desktop/bootstrap-state.json",
-    )
+    capsule_core::common::paths::ato_path_or_workspace_tmp("apps/ato-desktop/bootstrap-state.json")
 }
 
 /// Pre-rename bootstrap-state location. Returned only when the canonical

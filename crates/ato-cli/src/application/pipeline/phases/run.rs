@@ -1755,7 +1755,7 @@ where
         .with_injected_mounts(provisioning_outcome.additional_mounts);
 
     if let Some(shadow_workspace) = provisioning_outcome.shadow_workspace.as_ref() {
-        if let Some(attempt) = attempt.as_deref_mut() {
+        if let Some(attempt) = attempt.as_mut() {
             let mut scope = attempt.cleanup_scope();
             scope.register_remove_dir(shadow_workspace.root_dir.clone());
         }

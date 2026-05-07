@@ -80,24 +80,6 @@ pub async fn execute(
     .await
 }
 
-/// Execution mode for the orchestrator (#73 PR-C).
-///
-/// `ForegroundMonitorUntilExit` is the historical `ato run` path: services
-/// are started, readiness is awaited, and the call blocks in
-/// `monitor_until_exit` until the orchestration exits.
-///
-/// `DetachAfterReady` is the session-start path: services are started and
-/// readiness is awaited, then control returns to the caller along with
-/// `RunningServices` so the wrapper (e.g. `start_orchestration_session_in_process`)
-/// owns the lifecycle handoff. The caller is responsible for keeping the
-/// returned handle alive (currently via `mem::forget`; PR-D replaces this
-/// with a registered `BackgroundSessionOwner`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OrchestratorExecutionMode {
-    ForegroundMonitorUntilExit,
-    DetachAfterReady,
-}
-
 /// Public summary of a running orchestration service, sufficient for the
 /// session layer to record provider lifecycle without holding the internal
 /// `RunningService` directly. PR-D consumes this when populating
@@ -151,7 +133,6 @@ where
         options,
         attempt,
         client,
-        OrchestratorExecutionMode::ForegroundMonitorUntilExit,
     )
     .await?;
 
@@ -187,14 +168,7 @@ where
     C: OciRuntimeClient + Clone + Send + Sync + 'static,
 {
     let (running, _orchestration, network_name, _client) = start_until_ready_with_client(
-        plan,
-        prepared,
-        reporter,
-        launch_ctx,
-        options,
-        attempt,
-        client,
-        OrchestratorExecutionMode::DetachAfterReady,
+        plan, prepared, reporter, launch_ctx, options, attempt, client,
     )
     .await?;
 
@@ -214,7 +188,11 @@ where
 ///
 /// Returns `(running_services, orchestration_plan, network_name, client_arc)`
 /// so the foreground caller can immediately enter `monitor_until_exit` and
-/// the detach caller can build a public snapshot.
+/// the detach caller can build a public snapshot. The mode is observable
+/// only at the public call sites (`execute_with_client`, `execute_until_ready_and_detach`),
+/// which differ in what they do *after* this returns; this shared startup
+/// path itself behaves identically in both modes, so the mode is not
+/// threaded as a parameter.
 async fn start_until_ready_with_client<C>(
     plan: &ManifestData,
     prepared: &PreparedRunContext,
@@ -223,7 +201,6 @@ async fn start_until_ready_with_client<C>(
     options: &OrchestratorOptions,
     attempt: Option<&mut PipelineAttemptContext>,
     client: C,
-    _mode: OrchestratorExecutionMode,
 ) -> Result<(
     HashMap<String, RunningService>,
     OrchestrationPlan,

@@ -58,9 +58,7 @@ use super::session::{
 pub(crate) const LEGACY_SUPERVISOR_ENV: &str = "ATO_LEGACY_SUPERVISOR";
 
 pub(crate) fn legacy_supervisor_enabled() -> bool {
-    legacy_supervisor_enabled_for_value(
-        std::env::var(LEGACY_SUPERVISOR_ENV).ok().as_deref(),
-    )
+    legacy_supervisor_enabled_for_value(std::env::var(LEGACY_SUPERVISOR_ENV).ok().as_deref())
 }
 
 /// Pure-logic helper extracted so tests can verify the gate without
@@ -152,8 +150,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let resolution = build_resolution(self.handle, self.target_label, None)?;
         let (manifest_path, mut plan, mut launch, mut notes) =
             resolve_session_launch_plan(self.handle, self.target_label)?;
-        let is_orchestration =
-            self.target_label.is_none() && plan.is_orchestration_mode();
+        let is_orchestration = self.target_label.is_none() && plan.is_orchestration_mode();
 
         // Phase Y option 2: re-anchor the registry-installed capsule onto a
         // session-local hardlink projection so the launch cannot mutate the

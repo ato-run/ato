@@ -612,7 +612,9 @@ pub(crate) fn digest_dir_name(digest: &str) -> Result<String> {
 }
 
 pub(crate) fn fetches_root() -> Result<PathBuf> {
-    Ok(capsule_core::common::paths::ato_path_or_workspace_tmp("fetches"))
+    Ok(capsule_core::common::paths::ato_path_or_workspace_tmp(
+        "fetches",
+    ))
 }
 
 pub(crate) fn derived_apps_root(scoped_id: &str, parent_digest: &str) -> Result<PathBuf> {

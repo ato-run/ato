@@ -637,10 +637,22 @@ pub(super) fn start_orchestration_session_in_process(
         compatibility_legacy_lock: None,
     };
 
-    let runtime_handle = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create runtime for orchestration session start")?;
+    // Runtime that hosts both `block_on` calls AND the long-lived tokio tasks
+    // spawned during `execute_until_ready_and_detach` (per-service `exit_task`
+    // for local services, `log_task` for OCI services). Those tasks are
+    // referenced by the `RunningService` values inside `detached.inner` below
+    // and must outlive this function — `mem::forget(detached)` alone is not
+    // enough, because dropping a `current_thread` runtime cancels in-flight
+    // tasks. We `Box::leak` the runtime so the worker thread keeps the
+    // tokio tasks alive for the rest of the process. PR-D replaces this leak
+    // with a `BackgroundSessionOwner` that owns both the runtime and the
+    // detached services and is dropped from `stop_session`.
+    let runtime_handle: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to create runtime for orchestration session start")?,
+    ));
 
     let mut launch_ctx =
         runtime_handle.block_on(resolve_launch_context(plan, &prepared, &reporter))?;
@@ -796,14 +808,25 @@ pub(super) fn start_orchestration_session_in_process(
 
     // Lifecycle handoff (#73 PR-C → PR-D).
     //
-    // Both `dep_contracts` and `detached` own background processes/threads
-    // that must outlive this function. PR-D replaces these `mem::forget`
-    // calls with a `BackgroundSessionOwner` registered into ProcessManager
-    // so `stop_session` can drop them in reverse-topological order. Until
-    // that lands, providers are stoppable through the dependency-session
-    // sidecar fallback added in PR-B (`stop_process` reads the snapshot
-    // when the PID file is missing) and the orchestration graph is held
-    // alive by the forget below.
+    // Three things must outlive this function for the session to keep
+    // running:
+    //
+    //   1. `runtime_handle` — the tokio runtime that hosts the spawned
+    //      `exit_task` / `log_task` for every running service. Already
+    //      `Box::leak`'d above; the worker thread therefore lives for the
+    //      rest of the process.
+    //   2. `detached` — owns the `RunningService` values (each holding a
+    //      `Child`, log threads, lifecycle event channels, and JoinHandles
+    //      backed by the leaked runtime). `mem::forget` keeps the OS-level
+    //      processes/threads alive.
+    //   3. `dep_contracts` — owns the `RunningGraph` for top-level
+    //      `[dependencies.<alias>]`. Same reasoning as `detached`.
+    //
+    // PR-D replaces all three leaks with a `BackgroundSessionOwner`
+    // registered into ProcessManager so `stop_session` can drop them in
+    // reverse-topological order. Until that lands, providers are stoppable
+    // through the dependency-session sidecar fallback added in PR-B
+    // (`stop_process` reads the snapshot when the PID file is missing).
     if let Some(g) = dep_contracts {
         std::mem::forget(g);
     }

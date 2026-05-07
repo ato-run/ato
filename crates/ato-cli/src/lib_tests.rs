@@ -1610,16 +1610,12 @@ fn pr_c_legacy_supervisor_env_gate_only_accepts_literal_one() {
     }
 }
 
-/// Smoke test for the orchestrator detach API surface (#73 PR-C). The two
-/// modes must remain distinct enum variants so future call sites cannot
-/// silently default into one or the other; the foreground variant continues
-/// to be used by `ato run` orchestration mode and the detach variant by
-/// `start_orchestration_session_in_process`.
+/// The two orchestrator entry points (`execute_with_client` for foreground
+/// `ato run` and `execute_until_ready_and_detach` for session start) must
+/// remain distinct public symbols (#73 PR-C). If either is removed or
+/// renamed, this `use` stops compiling.
 #[test]
-fn pr_c_orchestrator_execution_modes_are_distinct() {
-    use crate::executors::orchestrator::OrchestratorExecutionMode;
-    assert_ne!(
-        OrchestratorExecutionMode::ForegroundMonitorUntilExit,
-        OrchestratorExecutionMode::DetachAfterReady,
-    );
+fn pr_c_orchestrator_detach_and_foreground_entry_points_remain_public() {
+    #[allow(unused_imports)]
+    use crate::executors::orchestrator::{execute_until_ready_and_detach, execute_with_client};
 }
