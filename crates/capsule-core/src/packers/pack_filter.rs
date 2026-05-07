@@ -244,6 +244,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         })
         .expect("filter");
@@ -288,6 +290,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         })
         .expect("filter");
@@ -328,6 +332,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         };
         manifest.pack = Some(PackConfig {
@@ -374,6 +380,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         };
         manifest.pack = Some(PackConfig {
@@ -418,6 +426,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         };
         manifest.pack = Some(PackConfig {
@@ -469,6 +479,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         };
         manifest.pack = Some(PackConfig {
@@ -514,6 +526,8 @@ mod tests {
             contracts: Default::default(),
             workspace: None,
             distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
             foundation_requirements: None,
         })
         .expect("filter")

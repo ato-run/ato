@@ -64,6 +64,10 @@ pub struct CapsuleLock {
     pub allowlist: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capsule_dependencies: Vec<LockedCapsuleDependency>,
+    /// Resolved tool-capsule dependencies (#71). Map from manifest alias to
+    /// the exact resolved capsule, platform artifact, hash, and exports.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_capsules: BTreeMap<String, LockedToolCapsule>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub injected_data: HashMap<String, LockedInjectedData>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,6 +207,160 @@ pub struct LockedCapsuleDependency {
     pub sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_url: Option<String>,
+}
+
+/// Resolved tool-capsule dependency (#71).
+///
+/// Lockfile-side representation of a `[tool_dependencies.<alias>]` entry.
+/// Manifests carry the version constraint; this struct carries the exact
+/// resolved identity, the per-platform artifact, its hash, and the exports
+/// the materializer must project into the sandbox and bind to env vars.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedToolCapsule {
+    /// Fully-resolved capsule URL with exact version pin.
+    pub resolved: String,
+    /// Resolved platform key (e.g. `darwin-arm64`).
+    pub platform: String,
+    /// Hex-encoded sha256 of the artifact archive (`sha256:` prefix optional).
+    pub artifact_hash: String,
+    /// Where to fetch the artifact when it is not already in the local store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_url: Option<String>,
+    /// Exports declared by the resolved tool capsule.
+    #[serde(default)]
+    pub exports: LockedToolExports,
+    /// Explicit env-var bindings carried over from the manifest's
+    /// `[tool_dependencies.<alias>.bind_env]` map. Required so the
+    /// materializer can inject env vars without re-reading the manifest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bind_env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedToolExports {
+    /// Binary exports: alias → relative path under the tool root.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub binaries: BTreeMap<String, String>,
+    /// Path exports: alias → relative path under the tool root.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub paths: BTreeMap<String, String>,
+}
+
+impl LockedToolCapsule {
+    /// Compute the env-var bindings that should be injected into a provider
+    /// process consuming this tool capsule.
+    ///
+    /// `alias` is the manifest's `[tool_dependencies.<alias>]` key. `projected_root`
+    /// is the absolute path where this tool capsule's tree has been projected for
+    /// the current run (typically `<run-root>/tools/<alias>`).
+    ///
+    /// Explicit `bind_env` entries win; export names not present there fall back
+    /// to the convention `ATO_TOOL_<ALIAS_UPPER>_<EXPORT_UPPER>` (with hyphens
+    /// replaced by underscores). Binary and path exports are merged into the same
+    /// env-var namespace.
+    pub fn env_bindings(&self, alias: &str, projected_root: &Path) -> Vec<(String, PathBuf)> {
+        let mut bindings: Vec<(String, PathBuf)> = Vec::new();
+        for (export, rel) in self
+            .exports
+            .binaries
+            .iter()
+            .chain(self.exports.paths.iter())
+        {
+            let env_name = self
+                .bind_env
+                .get(export)
+                .cloned()
+                .unwrap_or_else(|| default_tool_env_var(alias, export));
+            bindings.push((env_name, projected_root.join(rel)));
+        }
+        bindings
+    }
+}
+
+fn default_tool_env_var(alias: &str, export: &str) -> String {
+    format!(
+        "ATO_TOOL_{}_{}",
+        normalize_env_token(alias),
+        normalize_env_token(export)
+    )
+}
+
+fn normalize_env_token(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == '-' {
+                '_'
+            } else {
+                c.to_ascii_uppercase()
+            }
+        })
+        .collect()
+}
+
+/// Conflict raised when two tool-capsule entries map distinct projected paths
+/// onto the same env-var name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolEnvConflict {
+    pub env_name: String,
+    pub first_alias: String,
+    pub first_path: PathBuf,
+    pub second_alias: String,
+    pub second_path: PathBuf,
+}
+
+impl std::fmt::Display for ToolEnvConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tool env-var '{}' is bound by both tool_dependencies.{} -> {} and tool_dependencies.{} -> {}",
+            self.env_name,
+            self.first_alias,
+            self.first_path.display(),
+            self.second_alias,
+            self.second_path.display(),
+        )
+    }
+}
+
+impl std::error::Error for ToolEnvConflict {}
+
+/// Compute the full env-var bindings the provider launcher must inject for all
+/// tool capsules recorded in `lock`, given the per-run layout.
+///
+/// Each tool capsule is projected at `<layout.tools>/<alias>` and exports its
+/// declared binaries and paths through env vars (explicit `bind_env`, or the
+/// `ATO_TOOL_<ALIAS>_<EXPORT>` fallback). Conflicts across aliases that target
+/// the same env-var are surfaced as `ToolEnvConflict` rather than silently
+/// shadowed.
+pub fn tool_capsule_env_bindings(
+    lock: &CapsuleLock,
+    layout: &crate::common::paths::AtoRunLayout,
+) -> std::result::Result<BTreeMap<String, PathBuf>, ToolEnvConflict> {
+    let mut out: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut owners: BTreeMap<String, String> = BTreeMap::new();
+    for (alias, entry) in &lock.tool_capsules {
+        let projected_root = layout.tool_dir(alias);
+        for (env_name, path) in entry.env_bindings(alias, &projected_root) {
+            if let Some(existing_path) = out.get(&env_name) {
+                if existing_path != &path {
+                    return Err(ToolEnvConflict {
+                        env_name: env_name.clone(),
+                        first_alias: owners
+                            .get(&env_name)
+                            .cloned()
+                            .unwrap_or_else(|| "<unknown>".to_string()),
+                        first_path: existing_path.clone(),
+                        second_alias: alias.clone(),
+                        second_path: path,
+                    });
+                }
+            } else {
+                owners.insert(env_name.clone(), alias.clone());
+                out.insert(env_name, path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1555,6 +1713,7 @@ async fn finalize_lockfile_from_draft(
         },
         allowlist,
         capsule_dependencies,
+        tool_capsules: BTreeMap::new(),
         injected_data: HashMap::new(),
         tools,
         runtimes: if runtimes.python.is_none() && runtimes.node.is_none() && runtimes.deno.is_none()
