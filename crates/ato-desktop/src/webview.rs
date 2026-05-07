@@ -1417,22 +1417,29 @@ impl WebViewManager {
                     original_secrets,
                 }) => {
                     // Retry-once policy: if the user already approved
-                    // once for this handle this session and we still
-                    // got E302, something is structurally wrong (CLI
-                    // didn't see the record we just appended). Fall
-                    // through to a fatal toast rather than re-open the
-                    // modal — that would loop the user.
-                    if state.consent_retry_already_consumed(&handle) {
+                    // once for this (handle, target_label) this session
+                    // and we still got E302 for the same target,
+                    // something is structurally wrong (CLI didn't see
+                    // the record we just appended). Fall through to a
+                    // fatal toast rather than re-open the modal — that
+                    // would loop the user.
+                    //
+                    // Different `target_label` under the same handle
+                    // (multi-target orchestration capsule) does NOT
+                    // trip the budget: each target's ExecutionPlan
+                    // consents separately, with its own policy hashes.
+                    if state.consent_retry_already_consumed(&handle, &target_label) {
                         error!(
                             pane_id,
                             handle = %handle,
+                            target = %target_label,
                             "consent re-required after approve; surfacing fatal (no modal loop)"
                         );
                         state.sync_web_session_state(active.pane_id, WebSessionState::LaunchFailed);
                         state.push_activity(
                             ActivityTone::Error,
                             format!(
-                                "Failed to start guest session: ExecutionPlan consent was re-requested for '{handle}' after approval. Re-launch from the omnibar to retry."
+                                "Failed to start guest session: ExecutionPlan consent was re-requested for '{handle}' (target {target_label}) after approval. Re-launch from the omnibar to retry."
                             ),
                         );
                         // Reset the budget so a manual re-launch starts
@@ -4115,7 +4122,7 @@ pub(crate) fn apply_capsule_consent(state: &mut AppState, handle: &str) -> Resul
     )
     .map_err(|err| format!("failed to record consent: {err:#}"))?;
 
-    state.mark_consent_retry_consumed(handle);
+    state.mark_consent_retry_consumed(handle, &request.target_label);
     state.clear_pending_consent();
     Ok(())
 }
@@ -4963,6 +4970,42 @@ mod tests {
                 err.contains("no pending ExecutionPlan consent"),
                 "handle mismatch must error, got: {err}"
             );
+        }
+
+        /// Regression for the v0.5.0 per-target budget bug surfaced
+        /// by #92 verification: a multi-target orchestration capsule
+        /// (WasedaP2P → app + web) trips one E302 per target, each
+        /// with its own policy hashes. Approving target=app must NOT
+        /// poison the budget for target=web on the same handle.
+        #[test]
+        fn retry_budget_is_per_target_not_per_handle() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+
+            // No budget consumed at the start.
+            assert!(!state.consent_retry_already_consumed(handle, "app"));
+            assert!(!state.consent_retry_already_consumed(handle, "web"));
+
+            // Approving target=app marks ONLY (handle, "app") as
+            // consumed. (handle, "web") is still untouched — its
+            // E302 must still surface the modal next time.
+            state.mark_consent_retry_consumed(handle, "app");
+            assert!(state.consent_retry_already_consumed(handle, "app"));
+            assert!(
+                !state.consent_retry_already_consumed(handle, "web"),
+                "web budget must NOT be poisoned by app's approve"
+            );
+
+            // Now approve target=web too.
+            state.mark_consent_retry_consumed(handle, "web");
+            assert!(state.consent_retry_already_consumed(handle, "app"));
+            assert!(state.consent_retry_already_consumed(handle, "web"));
+
+            // Reset (e.g. on Cancel or successful launch) clears
+            // ALL targets under the handle.
+            state.reset_consent_retry_budget(handle);
+            assert!(!state.consent_retry_already_consumed(handle, "app"));
+            assert!(!state.consent_retry_already_consumed(handle, "web"));
         }
     }
 }
