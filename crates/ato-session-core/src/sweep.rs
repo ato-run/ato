@@ -356,19 +356,64 @@ fn sweep_session_records(session_root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
+/// A record is "alive" — and therefore must be retained by the startup
+/// sweep — if **any** of the processes it points to is still running.
+///
+/// The legacy check used `record.pid` only, which is the wrapper / leaf
+/// pid recorded at session start. For in-process orchestration sessions
+/// (#73 PR-C), that pid is often a shell wrapper (`npm run dev`,
+/// `uv run`) that has since exited — leaving its child (vite, uvicorn)
+/// as an orphan still bound to the leaf port. Using only `record.pid`
+/// caused those records to be swept here, hiding the still-running
+/// services from `ato app session stop` and breaking #108.
+///
+/// We now consider the record alive if any of these is true:
+///   1. `record.pid` is alive and ours (legacy invariant).
+///   2. Any `orchestration_services.services[*].local_pid` is alive
+///      and ours (#73 PR-D persists these).
+///   3. Any `dependency_contracts.providers[*].pid` is alive and ours.
+///
+/// `current_user_owns_process` is required so a re-used pid belonging to
+/// a different user cannot keep a stale record pinned. The
+/// `process_start_time_unix_ms` cross-check is preserved on the legacy
+/// `record.pid` path because it's the only pid for which we record a
+/// start time. For the auxiliary pids (orchestration / dep contracts)
+/// we accept "alive + ours" without start-time validation — losing one
+/// teardown pass to a pid-reuse coincidence is preferable to losing the
+/// teardown pass that would actually kill an orphan listener.
 fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
-    let pid = match i32_to_pid(record.pid) {
-        Some(pid) => pid,
-        None => return false,
-    };
-    if !pid_is_alive(pid) || !current_user_owns_process(pid) {
-        return false;
+    if let Some(pid) = i32_to_pid(record.pid) {
+        if pid_is_alive(pid) && current_user_owns_process(pid) {
+            let start_time_matches = match record.process_start_time_unix_ms {
+                Some(expected) => {
+                    process_start_time_unix_ms(pid).is_some_and(|live| live == expected)
+                }
+                None => true,
+            };
+            if start_time_matches {
+                return true;
+            }
+        }
     }
-    match record.process_start_time_unix_ms {
-        Some(expected_start_time) => process_start_time_unix_ms(pid)
-            .is_some_and(|live_start_time| live_start_time == expected_start_time),
-        None => true,
+    if let Some(snapshot) = record.orchestration_services.as_ref() {
+        for service in &snapshot.services {
+            if let Some(pid) = service.local_pid.and_then(i32_to_pid) {
+                if pid_is_alive(pid) && current_user_owns_process(pid) {
+                    return true;
+                }
+            }
+        }
     }
+    if let Some(snapshot) = record.dependency_contracts.as_ref() {
+        for provider in &snapshot.providers {
+            if let Some(pid) = i32_to_pid(provider.pid) {
+                if pid_is_alive(pid) && current_user_owns_process(pid) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -747,6 +792,155 @@ mod tests {
         assert_eq!(report.removed_session_records, 1);
         assert!(!record_path.exists());
         assert!(!log_path.exists());
+    }
+
+    /// #108 regression: under PR-C in-process orchestration, the
+    /// wrapper that ran `ato app session start` exits successfully
+    /// after detaching the workload runtime. `record.pid` is therefore
+    /// dead by the time the sweep runs, but `orchestration_services`
+    /// still points at the live workload pids that survived. Sweeping
+    /// the record here would hide those workloads from
+    /// `ato app session stop`, leaking them on the leaf port.
+    #[test]
+    fn sweep_keeps_session_record_when_orchestration_services_pid_is_alive() {
+        use crate::record::{StoredOrchestrationService, StoredOrchestrationServices};
+
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.session_root).expect("session root");
+
+        // The "live workload" is just the test process itself — its
+        // pid is guaranteed alive and ours for the duration of the
+        // sweep call.
+        let self_pid = std::process::id() as i32;
+        let log_path = temp.path().join("orch.log");
+        fs::write(&log_path, "log").expect("log");
+
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-orch".to_string(),
+            handle: "capsule://example/orch".to_string(),
+            normalized_handle: "capsule://example/orch".to_string(),
+            canonical_handle: None,
+            trust_state: TrustState::Trusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            // record.pid mimics the wrapper that already exited.
+            pid: 999_999_999,
+            log_path: log_path.display().to_string(),
+            manifest_path: "capsule.toml".to_string(),
+            target_label: "web".to_string(),
+            notes: Vec::new(),
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: None,
+            orchestration_services: Some(StoredOrchestrationServices {
+                wrapper_pid: 999_999_999,
+                services: vec![StoredOrchestrationService {
+                    name: "web".to_string(),
+                    target_label: "web".to_string(),
+                    local_pid: Some(self_pid),
+                    container_id: None,
+                    host_ports: std::collections::BTreeMap::new(),
+                    published_port: Some(5173),
+                }],
+            }),
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+        let record_path = options.session_root.join("ato-desktop-session-orch.json");
+        fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        assert_eq!(report.removed_session_records, 0);
+        assert!(
+            record_path.exists(),
+            "record must be retained while any orchestration_services pid is alive"
+        );
+        assert!(log_path.exists());
+    }
+
+    /// Same shape as the previous test but for `dependency_contracts` —
+    /// when the wrapper has exited but a dep-contract provider (e.g.
+    /// postgres) is still alive, the record must be retained so
+    /// `stop_session` can find the provider on the next `ato` invocation.
+    #[test]
+    fn sweep_keeps_session_record_when_dependency_contract_pid_is_alive() {
+        use crate::record::{StoredDependencyContracts, StoredDependencyProvider};
+
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.session_root).expect("session root");
+        let self_pid = std::process::id() as i32;
+        let log_path = temp.path().join("dep.log");
+        fs::write(&log_path, "log").expect("log");
+
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-dep".to_string(),
+            handle: "capsule://example/dep".to_string(),
+            normalized_handle: "capsule://example/dep".to_string(),
+            canonical_handle: None,
+            trust_state: TrustState::Trusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "default".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::TerminalStream,
+            pid: 999_999_999,
+            log_path: log_path.display().to_string(),
+            manifest_path: "capsule.toml".to_string(),
+            target_label: "default".to_string(),
+            notes: Vec::new(),
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 999_999_999,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: self_pid,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/postgres@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: Vec::new(),
+                }],
+            }),
+            orchestration_services: None,
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+        let record_path = options.session_root.join("ato-desktop-session-dep.json");
+        fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        assert_eq!(report.removed_session_records, 0);
+        assert!(
+            record_path.exists(),
+            "record must be retained while any dependency_contract provider pid is alive"
+        );
+        assert!(log_path.exists());
     }
 
     #[test]
