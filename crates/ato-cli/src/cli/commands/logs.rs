@@ -186,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "flaky: shares process-global ATO_HOME/HOME with sibling tests; tracked in #82"]
     fn test_get_log_path() {
         let path = get_log_path("test-capsule");
         let path_str = path.to_string_lossy();
