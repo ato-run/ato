@@ -1335,7 +1335,9 @@ pub enum ValidationError {
     InvalidStateBinding(String, String),
     #[error("type='tool' capsule must declare at least one [platforms.<os>-<arch>] entry")]
     ToolMissingPlatforms,
-    #[error("Invalid platforms key '{0}': expected '<os>-<arch>' (e.g. darwin-arm64, linux-x86_64)")]
+    #[error(
+        "Invalid platforms key '{0}': expected '<os>-<arch>' (e.g. darwin-arm64, linux-x86_64)"
+    )]
     ToolInvalidPlatformKey(String),
     #[error("platforms.{0}.artifact must be a non-empty filename or URL")]
     ToolMissingArtifact(String),
@@ -1419,8 +1421,12 @@ pub(crate) fn is_valid_relative_export_path(s: &str) -> bool {
     if path.is_absolute() {
         return false;
     }
-    path.components()
-        .all(|c| !matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
+    path.components().all(|c| {
+        !matches!(
+            c,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    })
 }
 
 pub(crate) fn is_valid_env_var_name(s: &str) -> bool {

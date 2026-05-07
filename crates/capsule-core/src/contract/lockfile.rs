@@ -260,7 +260,12 @@ impl LockedToolCapsule {
     /// env-var namespace.
     pub fn env_bindings(&self, alias: &str, projected_root: &Path) -> Vec<(String, PathBuf)> {
         let mut bindings: Vec<(String, PathBuf)> = Vec::new();
-        for (export, rel) in self.exports.binaries.iter().chain(self.exports.paths.iter()) {
+        for (export, rel) in self
+            .exports
+            .binaries
+            .iter()
+            .chain(self.exports.paths.iter())
+        {
             let env_name = self
                 .bind_env
                 .get(export)

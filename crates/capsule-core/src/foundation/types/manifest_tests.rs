@@ -2532,9 +2532,7 @@ type = "tool"
 fn test_validate_tool_capsule_rejects_invalid_platform_key() {
     let toml = TOOL_CAPSULE_TOML.replace("darwin-arm64", "macos-aarch64");
     let manifest = CapsuleManifest::from_toml(&toml).unwrap();
-    let errors = manifest
-        .validate()
-        .expect_err("bad platform key must fail");
+    let errors = manifest.validate().expect_err("bad platform key must fail");
     assert!(errors.iter().any(|e| matches!(
         e,
         ValidationError::ToolInvalidPlatformKey(key) if key == "macos-aarch64"
@@ -2647,8 +2645,7 @@ version = ">=16,<17"
   initdb = "ATO_TOOL_INITDB"
   pg_isready = "ATO_TOOL_PG_ISREADY"
 "#;
-    let manifest =
-        CapsuleManifest::from_toml(toml).expect("parse provider with tool dependencies");
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse provider with tool dependencies");
     let dep = manifest
         .tool_dependencies
         .get("postgres")

@@ -1228,10 +1228,17 @@ fn lockfile_serializes_tool_capsule_entries() {
     assert!(json.contains("\"ATO_TOOL_INITDB\""));
 
     let parsed: CapsuleLock = serde_json::from_str(&json).unwrap();
-    let postgres = parsed.tool_capsules.get("postgres").expect("postgres entry");
+    let postgres = parsed
+        .tool_capsules
+        .get("postgres")
+        .expect("postgres entry");
     assert_eq!(postgres.platform, "darwin-arm64");
     assert_eq!(
-        postgres.exports.binaries.get("pg_isready").map(String::as_str),
+        postgres
+            .exports
+            .binaries
+            .get("pg_isready")
+            .map(String::as_str),
         Some("bin/pg_isready")
     );
     assert_eq!(
@@ -1277,11 +1284,13 @@ fn locked_tool_capsule_env_bindings_use_explicit_map() {
     // Explicit bind_env wins where present.
     assert_eq!(
         map.get("ATO_TOOL_INITDB").map(|p| p.as_path()),
-        Some(std::path::Path::new("/runs/run-1/tools/postgres/bin/initdb"))
+        Some(std::path::Path::new(
+            "/runs/run-1/tools/postgres/bin/initdb"
+        ))
     );
     assert_eq!(
         map.get("ATO_TOOL_POSTGRES_ROOT").map(|p| p.as_path()),
-        Some(std::path::Path::new("/runs/run-1/tools/postgres/.").into())
+        Some(std::path::Path::new("/runs/run-1/tools/postgres/."))
     );
     // Falls back to ATO_TOOL_<ALIAS>_<EXPORT> for unbound exports.
     assert_eq!(
@@ -1313,7 +1322,10 @@ fn locked_tool_capsule_env_bindings_normalize_hyphens() {
     let (name, path) = &bindings[0];
     // Hyphens in alias and export normalize to underscores in env-var names.
     assert_eq!(name, "ATO_TOOL_MY_TOOL_MULTI_WORD");
-    assert_eq!(path, std::path::Path::new("/runs/run-1/tools/my-tool/bin/multi-word"));
+    assert_eq!(
+        path,
+        std::path::Path::new("/runs/run-1/tools/my-tool/bin/multi-word")
+    );
 }
 
 #[test]
@@ -1343,10 +1355,7 @@ fn tool_capsule_env_bindings_merges_across_aliases() {
             artifact_hash: "sha256:def".to_string(),
             artifact_url: None,
             exports: LockedToolExports {
-                binaries: BTreeMap::from([(
-                    "redis-cli".to_string(),
-                    "bin/redis-cli".to_string(),
-                )]),
+                binaries: BTreeMap::from([("redis-cli".to_string(), "bin/redis-cli".to_string())]),
                 paths: BTreeMap::new(),
             },
             bind_env: BTreeMap::new(),
@@ -1359,11 +1368,17 @@ fn tool_capsule_env_bindings_merges_across_aliases() {
 
     assert_eq!(
         bindings.get("ATO_TOOL_INITDB").map(|p| p.as_path()),
-        Some(std::path::Path::new("/runs/run-1/tools/postgres/bin/initdb"))
+        Some(std::path::Path::new(
+            "/runs/run-1/tools/postgres/bin/initdb"
+        ))
     );
     assert_eq!(
-        bindings.get("ATO_TOOL_REDIS_REDIS_CLI").map(|p| p.as_path()),
-        Some(std::path::Path::new("/runs/run-1/tools/redis/bin/redis-cli"))
+        bindings
+            .get("ATO_TOOL_REDIS_REDIS_CLI")
+            .map(|p| p.as_path()),
+        Some(std::path::Path::new(
+            "/runs/run-1/tools/redis/bin/redis-cli"
+        ))
     );
     assert_eq!(bindings.len(), 2);
 }
