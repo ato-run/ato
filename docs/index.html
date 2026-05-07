@@ -4,34 +4,385 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ato Docs</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-simple-dark.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230b0b10'/><text x='50%25' y='50%25' text-anchor='middle' dominant-baseline='central' font-family='ui-monospace,SFMono-Regular,Menlo,monospace' font-size='38' font-weight='600' fill='%238b7cf6'>A</text></svg>">
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem('theme');
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = saved === 'light' || saved === 'dark' ? saved : (prefersDark ? 'dark' : 'light');
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-simple.css">
   <style>
     :root {
-      --theme-color: #7c6af7;
-      --base-font-size: 15px;
-      --sidebar-width: 280px;
-      --sidebar-nav-link-color--active: var(--theme-color);
+      --base-font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --code-font-family: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      --base-font-size: 15.5px;
+      --base-line-height: 1.65;
+      --content-max-width: 860px;
+      --sidebar-width: 300px;
+      --sidebar-border-width: 0;
       --sidebar-nav-link-text-decoration--active: none;
       --sidebar-nav-link-font-weight--active: 600;
+      --link-color: var(--theme-color);
+      --link-color--hover: var(--theme-color-secondary);
+      --sidebar-nav-link-color--active: var(--theme-color);
+      --blockquote-border-color: var(--theme-color);
+      --sidebar-name-color: var(--base-color);
+    }
+
+    /* Light theme — text and theme color paired */
+    [data-theme="light"] {
+      color-scheme: light;
+      --theme-color: #6d57e6;
+      --theme-color-secondary: #5a45c9;
+      --base-background-color: #ffffff;
+      --base-color: #2a2a30;
+      --heading-color: #0b0b10;
+      --sidebar-background: #fafafa;
+      --sidebar-nav-link-color: #5a5a68;
+      --sidebar-heading-color: #6e6e7a;
+      --blockquote-background: rgba(109, 87, 230, 0.08);
+      --blockquote-color: #3a3a44;
+      --code-block-bg: #f6f6fa;
+      --code-inline-bg: rgba(0, 0, 0, 0.06);
+      --code-inline-color: #2a2a30;
+      /* docsify-themeable official names */
+      --code-inline-background: rgba(0, 0, 0, 0.06);
+      --code-theme-background: #f6f6fa;
+      --code-theme-text: #2a2a30;
+      --border-color: rgba(0, 0, 0, 0.08);
+      --link-underline: rgba(109, 87, 230, 0.4);
+      --copy-button-bg: rgba(109, 87, 230, 0.12);
+      --copy-button-color: #5a45c9;
+      --search-input-bg: #ffffff;
+      --search-input-color: #2a2a30;
+      --search-result-heading-color: #0b0b10;
+      --search-result-item-color: #2a2a30;
+      --table-row-odd-bg: #f6f6fa;
+      --table-cell-border-color: rgba(0, 0, 0, 0.08);
+      --notice-color: #2a2a30;
+      --kbd-color: #2a2a30;
+      --kbd-background: #f0f0f5;
+      --kbd-border: 1px solid rgba(0, 0, 0, 0.12);
+      --toggle-button-bg: #ffffff;
+      --toggle-button-color: #2a2a30;
+    }
+
+    /* Dark theme — text and theme color paired */
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --theme-color: #8b7cf6;
+      --theme-color-secondary: #a899ff;
+      --base-background-color: #0b0b10;
+      --base-color: #d8d8e0;
+      --heading-color: #f2f2f6;
+      --sidebar-background: #0b0b10;
+      --sidebar-nav-link-color: #9a9aa8;
+      --sidebar-heading-color: #6e6e7a;
+      --blockquote-background: rgba(139, 124, 246, 0.08);
+      --blockquote-color: #c8c8d2;
+      --code-block-bg: #0e0e15;
+      --code-inline-bg: rgba(255, 255, 255, 0.08);
+      --code-inline-color: #e6e6ec;
+      /* docsify-themeable official names */
+      --code-inline-background: rgba(255, 255, 255, 0.08);
+      --code-theme-background: #0e0e15;
+      --code-theme-text: #d8d8e0;
+      --border-color: rgba(255, 255, 255, 0.08);
+      --link-underline: rgba(139, 124, 246, 0.4);
+      --copy-button-bg: rgba(139, 124, 246, 0.16);
+      --copy-button-color: #a899ff;
+      --search-input-bg: #0e0e15;
+      --search-input-color: #d8d8e0;
+      --search-result-heading-color: #f2f2f6;
+      --search-result-item-color: #d8d8e0;
+      --table-row-odd-bg: #0e0e15;
+      --table-cell-border-color: rgba(255, 255, 255, 0.08);
+      --notice-color: #d8d8e0;
+      --kbd-color: #e6e6ec;
+      --kbd-background: #1a1a22;
+      --kbd-border: 1px solid rgba(255, 255, 255, 0.12);
+      --toggle-button-bg: #0e0e15;
+      --toggle-button-color: #d8d8e0;
+    }
+
+    body {
+      background: var(--base-background-color);
+      color: var(--base-color);
+    }
+
+    .app-name a,
+    .app-name-link {
+      font-family: var(--code-font-family);
+      letter-spacing: -0.02em;
+      font-weight: 600;
+      color: var(--base-color);
+    }
+
+    .sidebar,
+    aside.sidebar {
+      background: var(--sidebar-background);
+      color: var(--base-color);
     }
 
     .sidebar-nav li > p {
-      font-size: 0.72em;
+      font-size: 0.7em;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #888;
-      margin: 1.4em 0 0.4em;
+      letter-spacing: 0.12em;
+      color: var(--sidebar-heading-color);
+      margin: 1.6em 0 0.5em;
       padding: 0;
     }
+
+    .sidebar-nav a {
+      color: var(--sidebar-nav-link-color);
+    }
+    .sidebar-nav li.active > a,
+    .sidebar-nav a:hover {
+      color: var(--theme-color);
+    }
+
+    .markdown-section,
+    .markdown-section p,
+    .markdown-section li,
+    .markdown-section td,
+    .markdown-section th,
+    .markdown-section strong,
+    .markdown-section em {
+      color: var(--base-color);
+    }
+
+    .markdown-section h1,
+    .markdown-section h2,
+    .markdown-section h3,
+    .markdown-section h4,
+    .markdown-section h5,
+    .markdown-section h6 {
+      color: var(--heading-color);
+    }
+
+    .markdown-section h1 {
+      letter-spacing: -0.035em;
+      font-size: 2.5rem;
+      font-weight: 700;
+    }
+
+    .markdown-section h2 {
+      letter-spacing: -0.02em;
+      margin-top: 2.4rem;
+      font-weight: 650;
+    }
+
+    .markdown-section h3 {
+      letter-spacing: -0.01em;
+      margin-top: 1.8rem;
+    }
+
+    .markdown-section blockquote {
+      border-left: 3px solid var(--theme-color);
+      background: var(--blockquote-background);
+      padding: 0.8rem 1rem;
+      color: var(--blockquote-color);
+      font-style: normal;
+    }
+
+    .markdown-section blockquote p,
+    .markdown-section blockquote strong {
+      font-style: normal;
+      color: var(--blockquote-color);
+    }
+
+    .markdown-section code {
+      border-radius: 6px;
+      font-size: 0.92em;
+    }
+
+    /* Inline code — per-theme overrides to win against theme-simple.css specificity */
+    [data-theme="light"] .markdown-section code,
+    [data-theme="light"] .markdown-section :not(pre) > code {
+      background: rgba(0, 0, 0, 0.06);
+      color: #2a2a30;
+    }
+    [data-theme="dark"] .markdown-section code,
+    [data-theme="dark"] .markdown-section :not(pre) > code {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e6e6ec;
+    }
+
+    .markdown-section pre {
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+    }
+
+    [data-theme="light"] .markdown-section pre,
+    [data-theme="light"] .markdown-section pre[data-lang] {
+      background: #f6f6fa;
+    }
+    [data-theme="light"] .markdown-section pre > code,
+    [data-theme="light"] .markdown-section pre code {
+      background: transparent;
+      color: #2a2a30;
+    }
+    [data-theme="dark"] .markdown-section pre,
+    [data-theme="dark"] .markdown-section pre[data-lang] {
+      background: #0e0e15;
+    }
+    [data-theme="dark"] .markdown-section pre > code,
+    [data-theme="dark"] .markdown-section pre code {
+      background: transparent;
+      color: #d8d8e0;
+    }
+
+    .markdown-section a {
+      color: var(--theme-color);
+      text-decoration: none;
+      border-bottom: 1px solid var(--link-underline);
+    }
+
+    .markdown-section a:hover {
+      color: var(--theme-color-secondary);
+      border-bottom-color: var(--theme-color);
+    }
+
+    .markdown-section hr {
+      border: 0;
+      border-top: 1px solid var(--border-color);
+      margin: 2.4rem 0;
+    }
+
+    .markdown-section table {
+      color: var(--base-color);
+    }
+    .markdown-section table th,
+    .markdown-section table td {
+      border: 1px solid var(--table-cell-border-color);
+      color: var(--base-color);
+    }
+    .markdown-section table tr:nth-child(2n) {
+      background: var(--table-row-odd-bg);
+    }
+
+    .markdown-section kbd {
+      color: var(--kbd-color);
+      background: var(--kbd-background);
+      border: var(--kbd-border);
+    }
+
+    .docsify-copy-code-button {
+      font-family: var(--code-font-family);
+      font-size: 0.78em;
+      letter-spacing: 0.04em;
+      background: var(--copy-button-bg) !important;
+      color: var(--copy-button-color) !important;
+    }
+
+    /* Search plugin — explicit per-theme rules so the input is always legible */
+    [data-theme="light"] .sidebar .search input,
+    [data-theme="light"] .search input[type="search"],
+    [data-theme="light"] .search input {
+      background: #ffffff !important;
+      color: #2a2a30 !important;
+      border: 1px solid rgba(0, 0, 0, 0.12) !important;
+    }
+    [data-theme="dark"] .sidebar .search input,
+    [data-theme="dark"] .search input[type="search"],
+    [data-theme="dark"] .search input {
+      background: #0e0e15 !important;
+      color: #e6e6ec !important;
+      border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    }
+    [data-theme="light"] .search input::placeholder { color: #8a8a96 !important; }
+    [data-theme="dark"] .search input::placeholder { color: #6e6e7a !important; }
+
+    [data-theme="light"] .search .clear-button svg { fill: #5a5a68 !important; }
+    [data-theme="dark"] .search .clear-button svg { fill: #9a9aa8 !important; }
+
+    [data-theme="light"] .search .results-panel {
+      background: #ffffff !important;
+      color: #2a2a30 !important;
+    }
+    [data-theme="dark"] .search .results-panel {
+      background: #0b0b10 !important;
+      color: #d8d8e0 !important;
+    }
+    [data-theme="light"] .search .matching-post { border-bottom: 1px solid rgba(0, 0, 0, 0.08) !important; }
+    [data-theme="dark"] .search .matching-post { border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important; }
+
+    [data-theme="light"] .search .matching-post h2,
+    [data-theme="light"] .search h2.search-title { color: #0b0b10 !important; }
+    [data-theme="dark"] .search .matching-post h2,
+    [data-theme="dark"] .search h2.search-title { color: #f2f2f6 !important; }
+
+    [data-theme="light"] .search .matching-post p,
+    [data-theme="light"] .search p.search-keyword { color: #2a2a30 !important; }
+    [data-theme="dark"] .search .matching-post p,
+    [data-theme="dark"] .search p.search-keyword { color: #d8d8e0 !important; }
+
+    .search .matching-post em,
+    .search p.search-keyword em {
+      color: var(--theme-color) !important;
+      font-style: normal;
+      font-weight: 600;
+    }
+
+    /* Theme toggle button — anchored to the sidebar bottom-left to avoid the GitHub corner ribbon */
+    .theme-toggle {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 20;
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      background: var(--toggle-button-bg);
+      color: var(--toggle-button-color);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      line-height: 1;
+      transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease;
+    }
+    .theme-toggle:hover {
+      color: var(--theme-color);
+      border-color: var(--theme-color);
+    }
+    .theme-toggle .icon-sun { display: none; }
+    .theme-toggle .icon-moon { display: inline; }
+    [data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
+    [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
   </style>
 </head>
 <body>
+  <button class="theme-toggle" id="theme-toggle" aria-label="Toggle color theme" title="Toggle color theme" type="button">
+    <span class="icon-sun" aria-hidden="true">☀</span>
+    <span class="icon-moon" aria-hidden="true">☾</span>
+  </button>
   <div id="app"></div>
   <script>
+    (function () {
+      var btn = document.getElementById('theme-toggle');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        var current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+        var next = current === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        try { localStorage.setItem('theme', next); } catch (e) {}
+      });
+    })();
+  </script>
+  <script>
     window.$docsify = {
-      name: "📦 Ato Docs",
+      name: "Ato",
       nameLink: "#/",
       repo: "https://github.com/ato-run/ato",
       homepage: "README.md",
