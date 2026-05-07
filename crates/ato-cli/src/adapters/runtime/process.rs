@@ -458,6 +458,103 @@ impl ProcessManager {
         Ok(true)
     }
 
+    /// Sweep orphaned files in `~/.ato/run/` left behind by previous
+    /// process instances (#80). Run on every binary startup BEFORE
+    /// writing this process's own records, so a fresh `ato-desktop` or
+    /// `ato` does not inherit a directory full of pids/sockets/sock-txt
+    /// files that point at PIDs no longer alive.
+    ///
+    /// Three classes of files are reaped:
+    ///
+    /// 1. **PID files** (`<id>.pid`) — delegated to the existing
+    ///    `cleanup_dead_processes_with_details`, which already validates
+    ///    pid+identity and tears down the dependency session sidecar.
+    /// 2. **Socket files** (`*.sock`) — parsed from filenames like
+    ///    `ato-desktop-<pid>.sock`. If the embedded `<pid>` is not
+    ///    alive AND the file's mtime is older than `socket_grace`, the
+    ///    socket is removed. The grace window keeps a rapid ato-desktop
+    ///    restart from racing its own outgoing socket.
+    /// 3. **Socket TXT artifacts** (`*.sock.txt`) — same logic as
+    ///    sockets; left over from earlier socket-discovery code paths.
+    ///
+    /// Errors per-entry are absorbed (logged via `tracing::debug`) so a
+    /// single permission-denied file does not abort the rest of the
+    /// sweep — the goal is "clean what we can on this startup", not
+    /// transactional consistency.
+    ///
+    /// Concurrency: this method does not take a lock. The PID file
+    /// path uses identity matching (pid + start_time) inside
+    /// `cleanup_dead_processes_with_details`, so deleting another
+    /// running ato process's pid file is impossible. Socket files are
+    /// keyed by `<pid>` so the alive-check defends against the same
+    /// race. v0.5.0 deliberately does not relocate sockets to the OS
+    /// runtime dir (#73 v0.6.0 work); a startup-only sweep is the
+    /// minimum reliable cleanup we can do at the current path.
+    pub fn sweep_run_dir_orphans(&self) -> Result<RunDirSweepReport> {
+        let socket_grace = Duration::from_secs(30);
+        let mut report = RunDirSweepReport::default();
+
+        // Class 1: stale PID files (re-uses existing helper).
+        match self.cleanup_dead_processes_with_details() {
+            Ok(cleaned) => report.pid_files_removed = cleaned.len(),
+            Err(error) => {
+                tracing::debug!(error = %error, "sweep_run_dir_orphans: pid sweep failed");
+            }
+        }
+
+        // Class 2 & 3: orphaned sockets / sock-txt artifacts.
+        let entries = match fs::read_dir(&self.run_dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::debug!(error = %error, run_dir = %self.run_dir.display(), "sweep_run_dir_orphans: cannot read run dir");
+                return Ok(report);
+            }
+        };
+        let now = SystemTime::now();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Match `*.sock` and `*.sock.txt` only. Other extensions
+            // (.pid handled above; runtime files we don't manage) are
+            // skipped.
+            let is_socket = name.ends_with(".sock") || name.ends_with(".sock.txt");
+            if !is_socket {
+                continue;
+            }
+            let Some(pid) = parse_socket_pid(name) else {
+                continue;
+            };
+            if is_process_alive(pid) {
+                continue;
+            }
+            // Grace window: only reap sockets older than 30s to avoid
+            // racing a sibling ato-desktop that just spawned and is
+            // about to bind.
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(error) => {
+                    tracing::debug!(path = %path.display(), error = %error, "sweep_run_dir_orphans: stat failed");
+                    continue;
+                }
+            };
+            let mtime = metadata.modified().ok();
+            let age = mtime.and_then(|t| now.duration_since(t).ok());
+            if age.is_some_and(|a| a < socket_grace) {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => report.sockets_removed += 1,
+                Err(error) => {
+                    tracing::debug!(path = %path.display(), error = %error, "sweep_run_dir_orphans: socket remove failed");
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
     pub fn cleanup_dead_processes_with_details(&self) -> Result<Vec<ProcessInfo>> {
         let mut cleaned = Vec::new();
         for entry in fs::read_dir(&self.run_dir)
@@ -492,6 +589,28 @@ impl ProcessManager {
 
         Ok(cleaned)
     }
+}
+
+/// Result of a single `sweep_run_dir_orphans` call (#80). Returned so
+/// the caller can surface counts on a debug log line and tests can
+/// assert behavior without diffing the on-disk directory.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RunDirSweepReport {
+    pub pid_files_removed: usize,
+    pub sockets_removed: usize,
+}
+
+/// Parse the embedded `<pid>` from a `*.sock` / `*.sock.txt` filename.
+/// Filenames follow `ato-desktop-<pid>.sock` (and the `.sock.txt`
+/// variant left behind by the earlier socket-discovery code path).
+/// Returns `None` for files that don't match the convention so we
+/// don't accidentally reap unrelated artifacts.
+fn parse_socket_pid(name: &str) -> Option<i32> {
+    let stem = name
+        .strip_suffix(".sock.txt")
+        .or_else(|| name.strip_suffix(".sock"))?;
+    let pid_part = stem.rsplit_once('-').map(|(_, p)| p)?;
+    pid_part.parse::<i32>().ok().filter(|p| *p > 0)
 }
 
 fn transient_workspace_for_pid_file(pid_path: &Path) -> Option<PathBuf> {
@@ -773,6 +892,73 @@ impl Default for ProcessManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_socket_pid_handles_real_filenames() {
+        // Standard `*.sock` form left by ato-desktop.
+        assert_eq!(parse_socket_pid("ato-desktop-12345.sock"), Some(12345));
+        // `*.sock.txt` form from the earlier socket-discovery code path.
+        assert_eq!(parse_socket_pid("ato-desktop-99.sock.txt"), Some(99));
+        // session-pid files have a different shape (session-<pid>.pid)
+        // and are NOT reaped by the socket sweep — they go through the
+        // pid-file branch.
+        assert_eq!(parse_socket_pid("ato-desktop-session-42.pid"), None);
+        // Non-matching: no trailing -<pid>, weird suffix, zero pid.
+        assert_eq!(parse_socket_pid("just.sock"), None);
+        assert_eq!(parse_socket_pid("ato-desktop-abc.sock"), None);
+        assert_eq!(parse_socket_pid("ato-desktop-0.sock"), None);
+        // We only handle .sock / .sock.txt — .lock / .json must not match.
+        assert_eq!(parse_socket_pid("ato-desktop-1.lock"), None);
+    }
+
+    #[test]
+    fn sweep_run_dir_orphans_reaps_dead_socket_past_grace_period() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let pm = ProcessManager {
+            run_dir: run_dir.clone(),
+        };
+
+        // Pid 1 always exists on unix (init); do NOT use it. Pid that
+        // certainly doesn't exist on any reasonable system: 2^31 - 1.
+        let dead_pid = i32::MAX;
+        let stale_socket = run_dir.join(format!("ato-desktop-{dead_pid}.sock"));
+        fs::write(&stale_socket, b"").expect("write stale socket");
+
+        // Make the socket older than the 30s grace window.
+        let one_hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        let _ = filetime::set_file_mtime(
+            &stale_socket,
+            filetime::FileTime::from_system_time(one_hour_ago),
+        );
+
+        let report = pm.sweep_run_dir_orphans().expect("sweep");
+        assert_eq!(report.sockets_removed, 1);
+        assert!(!stale_socket.exists());
+    }
+
+    #[test]
+    fn sweep_run_dir_orphans_preserves_recent_socket_within_grace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let pm = ProcessManager {
+            run_dir: run_dir.clone(),
+        };
+
+        // Dead pid + fresh mtime → kept (defends against rapid restart
+        // race where the new process binds the socket within the
+        // first 30s after the old one exits).
+        let dead_pid = i32::MAX;
+        let fresh_socket = run_dir.join(format!("ato-desktop-{dead_pid}.sock"));
+        fs::write(&fresh_socket, b"").expect("write fresh socket");
+        // mtime defaults to "now" on write — explicitly leave it.
+
+        let report = pm.sweep_run_dir_orphans().expect("sweep");
+        assert_eq!(report.sockets_removed, 0);
+        assert!(fresh_socket.exists());
+    }
 
     #[test]
     fn test_process_status_display() {
