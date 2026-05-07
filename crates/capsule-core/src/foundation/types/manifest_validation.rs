@@ -100,6 +100,7 @@ impl CapsuleManifest {
         }
 
         let is_v03_library = schema_is_v03 && self.capsule_type == CapsuleType::Library;
+        let is_tool = self.capsule_type == CapsuleType::Tool;
         let named_targets = self
             .targets
             .as_ref()
@@ -117,10 +118,72 @@ impl CapsuleManifest {
                 "capsule type 'job' must not declare top-level port".to_string(),
             ));
         }
-        if !is_v03_library && self.default_target.trim().is_empty() {
+
+        if is_tool {
+            if self.platforms.is_empty() {
+                errors.push(ValidationError::ToolMissingPlatforms);
+            }
+            for (platform_key, artifact) in &self.platforms {
+                if !is_valid_platform_key(platform_key) {
+                    errors.push(ValidationError::ToolInvalidPlatformKey(
+                        platform_key.clone(),
+                    ));
+                }
+                if artifact.artifact.trim().is_empty() {
+                    errors.push(ValidationError::ToolMissingArtifact(platform_key.clone()));
+                }
+                if !is_valid_sha256(&artifact.sha256) {
+                    errors.push(ValidationError::ToolInvalidArtifactSha256(
+                        platform_key.clone(),
+                    ));
+                }
+            }
+            if let Some(exports) = &self.exports {
+                for (alias, path) in &exports.binaries {
+                    if !is_valid_relative_export_path(path) {
+                        errors.push(ValidationError::ToolExportPathInvalid {
+                            kind: "binaries",
+                            alias: alias.clone(),
+                            path: path.clone(),
+                        });
+                    }
+                }
+                for (alias, path) in &exports.paths {
+                    if !is_valid_relative_export_path(path) {
+                        errors.push(ValidationError::ToolExportPathInvalid {
+                            kind: "paths",
+                            alias: alias.clone(),
+                            path: path.clone(),
+                        });
+                    }
+                }
+            }
+            if self.services.as_ref().is_some_and(|s| !s.is_empty()) {
+                errors.push(ValidationError::ToolMustNotDeclareServices);
+            }
+            if !self.dependencies.is_empty() {
+                errors.push(ValidationError::ToolMustNotDeclareServiceDependencies);
+            }
+        } else if !self.platforms.is_empty() {
+            errors.push(ValidationError::PlatformsRequiresToolType);
+        }
+
+        for (alias, spec) in &self.tool_dependencies {
+            for (export, env_name) in &spec.bind_env {
+                if !is_valid_env_var_name(env_name) {
+                    errors.push(ValidationError::ToolDependencyInvalidEnvVar {
+                        alias: alias.clone(),
+                        export: export.clone(),
+                        env_name: env_name.clone(),
+                    });
+                }
+            }
+        }
+
+        if !is_v03_library && !is_tool && self.default_target.trim().is_empty() {
             errors.push(ValidationError::MissingDefaultTarget);
         }
-        if !is_v03_library && named_targets.is_empty() {
+        if !is_v03_library && !is_tool && named_targets.is_empty() {
             errors.push(ValidationError::MissingTargets);
         } else if !self.default_target.trim().is_empty()
             && !named_targets.contains_key(self.default_target.trim())
@@ -1270,6 +1333,34 @@ pub enum ValidationError {
     InvalidState(String, String),
     #[error("Invalid state binding for service '{0}': {1}")]
     InvalidStateBinding(String, String),
+    #[error("type='tool' capsule must declare at least one [platforms.<os>-<arch>] entry")]
+    ToolMissingPlatforms,
+    #[error(
+        "Invalid platforms key '{0}': expected '<os>-<arch>' (e.g. darwin-arm64, linux-x86_64)"
+    )]
+    ToolInvalidPlatformKey(String),
+    #[error("platforms.{0}.artifact must be a non-empty filename or URL")]
+    ToolMissingArtifact(String),
+    #[error("platforms.{0}.sha256 must be 64 hex characters")]
+    ToolInvalidArtifactSha256(String),
+    #[error("exports.{kind}.{alias} = '{path}' must be a relative path under the tool root (no '/', no '..')")]
+    ToolExportPathInvalid {
+        kind: &'static str,
+        alias: String,
+        path: String,
+    },
+    #[error("type='tool' capsule must not declare [services]")]
+    ToolMustNotDeclareServices,
+    #[error("type='tool' capsule must not declare [dependencies] (use [tool_dependencies] for nested tool capsules)")]
+    ToolMustNotDeclareServiceDependencies,
+    #[error("[platforms] is only valid on type='tool' capsules")]
+    PlatformsRequiresToolType,
+    #[error("tool_dependencies.{alias}.bind_env.{export} = '{env_name}' is not a valid POSIX env-var name")]
+    ToolDependencyInvalidEnvVar {
+        alias: String,
+        export: String,
+        env_name: String,
+    },
 }
 
 pub(crate) fn is_kebab_case(s: &str) -> bool {
@@ -1309,6 +1400,44 @@ pub(crate) fn is_valid_mount_path(path: &str) -> bool {
                 Component::ParentDir | Component::CurDir | Component::Prefix(_)
             )
         })
+}
+
+pub(crate) fn is_valid_platform_key(s: &str) -> bool {
+    let Some((os, arch)) = s.split_once('-') else {
+        return false;
+    };
+    matches!(os, "darwin" | "linux" | "windows") && matches!(arch, "arm64" | "x86_64")
+}
+
+pub(crate) fn is_valid_sha256(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+pub(crate) fn is_valid_relative_export_path(s: &str) -> bool {
+    if s.trim().is_empty() {
+        return false;
+    }
+    let path = Path::new(s);
+    if path.is_absolute() {
+        return false;
+    }
+    path.components().all(|c| {
+        !matches!(
+            c,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    })
+}
+
+pub(crate) fn is_valid_env_var_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn infer_source_driver(target: &NamedTarget) -> Option<String> {
