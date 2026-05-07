@@ -76,7 +76,8 @@ pub fn sweep_startup_runtime_artifacts(
 
     let mut report = StartupSweepReport::default();
     report.removed_pid_files += sweep_pid_files(&options.run_dir)?;
-    report.removed_sockets += sweep_socket_files(&options.run_dir, options.now, options.socket_grace)?;
+    report.removed_sockets +=
+        sweep_socket_files(&options.run_dir, options.now, options.socket_grace)?;
     report.removed_session_records += sweep_session_records(&options.session_root)?;
     report.removed_run_dirs += sweep_run_dirs(&options.runs_dir, options.now, options.run_dir_ttl)?;
     Ok(report)
@@ -146,7 +147,9 @@ fn sweep_pid_files(run_dir: &Path) -> Result<usize> {
         match fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => debug!(path = %path.display(), error = %error, "failed to remove stale pid file"),
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to remove stale pid file")
+            }
         }
     }
     Ok(removed)
@@ -172,7 +175,8 @@ fn pid_record_process_is_alive(pid: i32, recorded_start_time: Option<SystemTime>
     let Some(expected_start_time) = recorded_start_time.and_then(system_time_to_unix_ms) else {
         return false;
     };
-    process_start_time_unix_ms(pid).is_some_and(|live_start_time| live_start_time == expected_start_time)
+    process_start_time_unix_ms(pid)
+        .is_some_and(|live_start_time| live_start_time == expected_start_time)
 }
 
 fn sweep_socket_files(run_dir: &Path, now: SystemTime, grace: Duration) -> Result<usize> {
@@ -197,13 +201,16 @@ fn sweep_socket_files(run_dir: &Path, now: SystemTime, grace: Duration) -> Resul
         let Some(pid) = parse_desktop_socket_pid(name) else {
             continue;
         };
-        if pid == std::process::id() || pid_is_alive(pid) || !path_is_older_than(&path, now, grace) {
+        if pid == std::process::id() || pid_is_alive(pid) || !path_is_older_than(&path, now, grace)
+        {
             continue;
         }
         match fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => debug!(path = %path.display(), error = %error, "failed to remove stale socket file"),
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to remove stale socket file")
+            }
         }
     }
     Ok(removed)
@@ -255,7 +262,9 @@ fn sweep_session_records(session_root: &Path) -> Result<usize> {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => debug!(path = %path.display(), error = %error, "failed to remove stale session record"),
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to remove stale session record")
+            }
         }
     }
     Ok(removed)
@@ -270,9 +279,8 @@ fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
         return false;
     }
     match record.process_start_time_unix_ms {
-        Some(expected_start_time) => {
-            process_start_time_unix_ms(pid).is_some_and(|live_start_time| live_start_time == expected_start_time)
-        }
+        Some(expected_start_time) => process_start_time_unix_ms(pid)
+            .is_some_and(|live_start_time| live_start_time == expected_start_time),
         None => true,
     }
 }
@@ -319,7 +327,9 @@ fn sweep_run_dirs(runs_dir: &Path, now: SystemTime, ttl: Duration) -> Result<usi
         match fs::remove_dir_all(&path) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => debug!(path = %path.display(), error = %error, "failed to remove stale run dir"),
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to remove stale run dir")
+            }
         }
     }
     Ok(removed)
@@ -355,7 +365,11 @@ fn system_time_to_unix_ms(time: SystemTime) -> Option<u64> {
 }
 
 fn path_is_older_than(path: &Path, now: SystemTime, duration: Duration) -> bool {
-    let Some(modified) = path.metadata().and_then(|metadata| metadata.modified()).ok() else {
+    let Some(modified) = path
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+    else {
         return false;
     };
     now.duration_since(modified)
