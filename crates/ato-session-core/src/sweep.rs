@@ -84,9 +84,19 @@ pub fn sweep_startup_runtime_artifacts(
     };
 
     let mut report = StartupSweepReport::default();
-    report.removed_pid_files += sweep_pid_files(&options.run_dir)?;
+    // Order matters: socket_files needs to see the matching
+    // `ato-desktop-session-<pid>.pid` records BEFORE pid_files removes
+    // start-time-mismatched (PID-reuse imposter) ones. Without this
+    // ordering, `sweep_socket_files` would see "record missing" for
+    // both legitimate cases (live ato-desktop never wrote a session
+    // record under its own PID) and imposter cases (record was just
+    // removed by pid_files), forcing one of them to misbehave. See
+    // the regression test
+    // `sweep_preserves_socket_for_live_pid_without_matching_session_record`
+    // for the live-desktop scenario surfaced by #92 verification.
     report.removed_sockets +=
         sweep_socket_files(&options.run_dir, options.now, options.socket_grace)?;
+    report.removed_pid_files += sweep_pid_files(&options.run_dir)?;
     report.removed_session_records += sweep_session_records(&options.session_root)?;
     report.removed_run_dirs += sweep_run_dirs(&options.runs_dir, options.now, options.run_dir_ttl)?;
     Ok(report)
@@ -239,10 +249,33 @@ fn sweep_socket_files(run_dir: &Path, now: SystemTime, grace: Duration) -> Resul
         // record so PID reuse cannot pin a stale socket: if the recorded
         // start_time disagrees with the live process's start_time the
         // record is treated as dead and the socket falls through to the
-        // grace check. Sockets without a matching record are orphans (the
-        // owning desktop never wrote a pid file or it was already cleaned)
-        // and are also subject to the grace check.
+        // grace check.
         if matching_pid_record_is_alive(run_dir, pid) {
+            continue;
+        }
+        // Two distinct fall-through cases reach this point:
+        //
+        // 1. A `ato-desktop-session-<pid>.pid` record exists but the
+        //    recorded start_time mismatches — that's a PID-reuse imposter,
+        //    and the socket really is stale. Keep the original behaviour
+        //    (fall through to the grace check below).
+        // 2. NO record exists for this pid. The original v0.5.0 sweep (#85)
+        //    treated this as orphan, but that reaped the live ato-desktop's
+        //    own automation socket on every `ato session start`: the
+        //    desktop binds `ato-desktop-<pid>.sock` itself, while the
+        //    session pid file is written by the spawned CLI under a
+        //    *different* PID — so the desktop's socket never has a
+        //    matching record. Defensively, if no record exists AND the
+        //    bare PID is alive AND owned by the current user, preserve
+        //    the socket. PID reuse is still defended against because
+        //    `current_user_owns_process` rejects sockets reused by
+        //    another user, and the (record-exists) imposter case still
+        //    falls through above.
+        let session_record_path = run_dir.join(format!("ato-desktop-session-{pid}.pid"));
+        if !session_record_path.exists()
+            && pid_is_alive(pid)
+            && current_user_owns_process(pid)
+        {
             continue;
         }
         if !path_is_older_than(&path, now, grace) {
@@ -621,6 +654,53 @@ mod tests {
 
         assert_eq!(report.removed_sockets, 0);
         assert!(sock_path.exists());
+    }
+
+    /// Regression for the v0.5.0 #85 bug surfaced by #92 verification:
+    /// the desktop's automation socket `ato-desktop-<pid>.sock` was reaped
+    /// by the CLI's session-start sweep because no
+    /// `ato-desktop-session-<pid>.pid` record exists for the desktop's
+    /// own PID — sessions are spawned by the CLI under a different PID,
+    /// so `matching_pid_record_is_alive` returned false for the live
+    /// desktop and the socket fell through to the grace-check removal.
+    ///
+    /// Pre-fix, this test would remove the socket after the grace
+    /// window. Post-fix, the bare `pid_is_alive(pid)` defensive check
+    /// preserves it.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn sweep_preserves_socket_for_live_pid_without_matching_session_record() {
+        let temp = tempdir().expect("tempdir");
+        let mut options = options(temp.path());
+        // Push `now` past the grace window so the only thing keeping the
+        // socket alive is the bare-pid defense added in this fix.
+        options.now = SystemTime::now() + Duration::from_secs(3_600);
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+
+        // Spawn a real workload — its PID is alive and owned by the
+        // current user, but no `ato-desktop-session-<pid>.pid` record
+        // exists for it (matching the desktop-binds-socket-but-no-
+        // session-yet shape from production).
+        let mut workload = std::process::Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .expect("spawn workload");
+        let live_pid = workload.id();
+        let sock_path = options.run_dir.join(format!("ato-desktop-{live_pid}.sock"));
+        fs::write(&sock_path, "").expect("sock");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+        let _ = workload.kill();
+        let _ = workload.wait();
+
+        assert_eq!(
+            report.removed_sockets, 0,
+            "live-PID socket without session record must NOT be reaped"
+        );
+        assert!(
+            sock_path.exists(),
+            "socket file must survive when its owner is alive"
+        );
     }
 
     #[test]
