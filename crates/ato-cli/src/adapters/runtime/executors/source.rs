@@ -10,8 +10,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tracing::debug;
@@ -941,23 +941,23 @@ fn sweep_stale_nacelle_manifests_on_startup_best_effort(dir: &Path) {
 
     let swept_dirs = SWEPT_DIRS.get_or_init(|| Mutex::new(HashSet::new()));
     let should_sweep = {
-        let mut swept_dirs = swept_dirs.lock().expect("nacelle sweep dirs mutex poisoned");
+        let mut swept_dirs = swept_dirs
+            .lock()
+            .expect("nacelle sweep dirs mutex poisoned");
         swept_dirs.insert(dir.to_path_buf())
     };
     if !should_sweep {
         return;
     }
 
-    if let Err(error) = sweep_stale_nacelle_manifests_in(dir, SystemTime::now(), NACELLE_MANIFEST_TTL) {
+    if let Err(error) =
+        sweep_stale_nacelle_manifests_in(dir, SystemTime::now(), NACELLE_MANIFEST_TTL)
+    {
         debug!(dir = %dir.display(), error = %error, "failed to sweep stale nacelle manifests");
     }
 }
 
-fn sweep_stale_nacelle_manifests_in(
-    dir: &Path,
-    now: SystemTime,
-    ttl: Duration,
-) -> Result<usize> {
+fn sweep_stale_nacelle_manifests_in(dir: &Path, now: SystemTime, ttl: Duration) -> Result<usize> {
     if !dir.exists() {
         return Ok(0);
     }
@@ -990,7 +990,9 @@ fn sweep_stale_nacelle_manifests_in(
         match fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => debug!(path = %path.display(), error = %error, "failed to remove stale nacelle manifest"),
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to remove stale nacelle manifest")
+            }
         }
     }
     Ok(removed)
@@ -1000,11 +1002,7 @@ fn is_nacelle_manifest_path(path: &Path) -> bool {
     parse_nacelle_manifest_owner(path).is_some()
 }
 
-fn nacelle_manifest_is_stale(
-    metadata: &std::fs::Metadata,
-    now: SystemTime,
-    ttl: Duration,
-) -> bool {
+fn nacelle_manifest_is_stale(metadata: &std::fs::Metadata, now: SystemTime, ttl: Duration) -> bool {
     let Some(modified) = metadata.modified().ok() else {
         return false;
     };
@@ -1016,7 +1014,9 @@ fn nacelle_manifest_is_stale(
 fn current_nacelle_manifest_owner() -> NacelleManifestOwner {
     NacelleManifestOwner {
         pid: std::process::id(),
-        start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(std::process::id()),
+        start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
     }
 }
 
@@ -1744,8 +1744,7 @@ mod tests {
             current_nacelle_manifest_owner(),
             42,
         ));
-        fs::write(&active_manifest, "schema_version = \"0.3\"\n")
-            .expect("write active manifest");
+        fs::write(&active_manifest, "schema_version = \"0.3\"\n").expect("write active manifest");
         set_file_mtime(&active_manifest, FileTime::from_unix_time(1, 0))
             .expect("age active manifest");
 
@@ -1808,7 +1807,10 @@ mod tests {
 
         let normalized_path = write_normalized_manifest(&plan, &[], &[]).expect("write manifest");
 
-        assert!(!stale.exists(), "stale manifest should be swept before write");
+        assert!(
+            !stale.exists(),
+            "stale manifest should be swept before write"
+        );
         assert!(normalized_path.exists());
     }
 
