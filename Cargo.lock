@@ -407,6 +407,7 @@ dependencies = [
  "dirs 5.0.1",
  "ed25519-dalek",
  "expectrl",
+ "filetime",
  "flate2",
  "fs2",
  "futures",

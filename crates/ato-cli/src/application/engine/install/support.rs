@@ -28,6 +28,11 @@ use crate::{
     DEFAULT_RUN_REGISTRY_URL,
 };
 
+use super::github_archive::{
+    github_run_checkout_root, sweep_stale_github_run_checkouts_best_effort,
+    write_github_run_checkout_owner_marker,
+};
+
 pub(crate) async fn resolve_installed_capsule_archive(
     scoped_ref: &install::ScopedCapsuleRef,
     registry: Option<&str>,
@@ -146,6 +151,18 @@ pub(crate) fn maybe_keep_failed_github_checkout(
             "⚠️  Kept failed GitHub checkout for debugging: {}",
             kept_checkout.display()
         );
+    }
+}
+
+fn cleanup_successful_github_checkout_best_effort(checkout_dir: &Path) {
+    match std::fs::remove_dir_all(checkout_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => debug!(
+            path = %checkout_dir.display(),
+            error = %error,
+            "failed to remove successful GitHub checkout"
+        ),
     }
 }
 
@@ -792,6 +809,7 @@ pub(crate) async fn resolve_run_target_or_install(
             });
         }
         install::provider_target::ParsedRunTarget::GitHubRepository(repository) => {
+            sweep_stale_github_run_checkouts_best_effort();
             if provider_toolchain != ProviderToolchain::Auto {
                 anyhow::bail!(
                     "`--via {}` is only supported for provider-backed targets in this MVP. Use `ato run pypi:<package> -- ...` or `ato run npm:<package> -- ...`.",
@@ -1125,16 +1143,7 @@ pub(crate) async fn resolve_run_target_or_install(
 }
 
 fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
-    let transient_root = capsule_core::common::paths::nacelle_home_dir()
-        .context("Failed to resolve Ato home directory for GitHub run")?
-        .join("tmp")
-        .join("gh-run");
-    std::fs::create_dir_all(&transient_root).with_context(|| {
-        format!(
-            "Failed to create transient GitHub run root: {}",
-            transient_root.display()
-        )
-    })?;
+    let transient_root = github_run_checkout_root()?;
 
     let checkout_name = checkout_root
         .file_name()
@@ -1170,6 +1179,7 @@ fn relocate_github_run_checkout(checkout_root: &Path) -> Result<PathBuf> {
             destination.display()
         )
     })?;
+    write_github_run_checkout_owner_marker(&destination)?;
     Ok(destination)
 }
 
@@ -1660,6 +1670,7 @@ pub(crate) async fn install_github_repository(
     explicit_commit: Option<String>,
 ) -> Result<install::InstallResult> {
     const MAX_GITHUB_DRAFT_RETRIES: u8 = 3;
+    sweep_stale_github_run_checkouts_best_effort();
     ensure_supported_github_auto_fix_mode(auto_fix_mode)?;
     let invocation_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let use_progressive_ui = !json && crate::progressive_ui::can_use_progressive_ui(false);
@@ -2234,6 +2245,8 @@ pub(crate) async fn install_github_repository(
 
     if result.is_err() {
         maybe_keep_failed_github_checkout(&mut checkout, keep_failed_artifacts, json);
+    } else {
+        cleanup_successful_github_checkout_best_effort(&checkout.checkout_dir);
     }
 
     result
@@ -2598,6 +2611,12 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, previous }
         }
+
+        fn set_value(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -2642,6 +2661,63 @@ mod tests {
         );
         assert!(relocated.join("capsule.toml").exists());
         assert!(!checkout_root.exists());
+        assert!(relocated.join(".ato-owner.json").exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn resolve_run_target_or_install_sweeps_stale_github_run_checkouts_before_download() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ato_home = temp.path().join(".ato");
+        let gh_run_root = ato_home.join("tmp").join("gh-run");
+        let stale = gh_run_root.join("stale-checkout");
+        let fresh = gh_run_root.join("fresh-checkout");
+        std::fs::create_dir_all(&stale).expect("create stale checkout");
+        std::fs::create_dir_all(&fresh).expect("create fresh checkout");
+        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale checkout");
+
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let _github_api_guard =
+            EnvVarGuard::set_value("ATO_GITHUB_API_BASE_URL", "http://127.0.0.1:9");
+
+        let _error = resolve_run_target_or_install(
+            PathBuf::from("github.com/octocat/nope"),
+            true,
+            ProviderToolchain::Auto,
+            Some("deadbeef".to_string()),
+            false,
+            None,
+            false,
+            None,
+            Arc::new(crate::adapters::output::reporters::CliReporter::new_run(
+                false,
+            )),
+        )
+        .await
+        .expect_err("fake GitHub API should fail after startup sweep");
+        assert!(
+            !stale.exists(),
+            "stale gh-run checkout should be swept before download"
+        );
+        assert!(fresh.exists(), "fresh gh-run checkout should be preserved");
+    }
+
+    #[test]
+    fn cleanup_successful_github_checkout_best_effort_removes_checkout_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let checkout_dir = temp.path().join("checkout");
+        std::fs::create_dir_all(&checkout_dir).expect("create checkout");
+        std::fs::write(
+            checkout_dir.join("capsule.toml"),
+            "schema_version = \"0.3\"\n",
+        )
+        .expect("write manifest");
+
+        cleanup_successful_github_checkout_best_effort(&checkout_dir);
+
+        assert!(!checkout_dir.exists());
     }
 
     fn write_installed_capsule(
