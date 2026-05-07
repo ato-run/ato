@@ -526,6 +526,14 @@ pub struct CapsuleManifest {
     #[serde(default)]
     pub targets: Option<TargetsConfig>,
 
+    /// Platform-specific artifacts for `type = "tool"` capsules.
+    ///
+    /// Each `[platforms.<os>-<arch>]` entry declares the relocatable archive
+    /// ato fetches and verifies when resolving this tool capsule on the
+    /// matching host. Only meaningful when `capsule_type == Tool`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub platforms: BTreeMap<String, ToolPlatformArtifact>,
+
     /// Explicit exported surfaces such as one-shot CLI tools.
     #[serde(default)]
     pub exports: Option<CapsuleExports>,
@@ -539,6 +547,14 @@ pub struct CapsuleManifest {
     /// Capsule dependency contracts consumed by this capsule.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, DependencySpec>,
+
+    /// Tool-capsule dependencies consumed by this capsule.
+    ///
+    /// Lifecycle is strictly resolve → materialize → project into sandbox →
+    /// inject env. There is no start, stop, or readiness wait — the dependency
+    /// artifact is an immutable executable tree, not a running service.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_dependencies: BTreeMap<String, ToolDependencySpec>,
 
     /// Manifest top-level required environment variable names. Per
     /// `CAPSULE_DEPENDENCY_CONTRACTS.md` §5.2, this is the resolution scope for
@@ -1165,6 +1181,17 @@ pub struct TargetsConfig {
 pub struct CapsuleExports {
     #[serde(default)]
     pub cli: HashMap<String, CliExportSpec>,
+
+    /// Tool-capsule binary exports (alias → path relative to tool root).
+    /// Populated only on `type = "tool"` capsules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub binaries: BTreeMap<String, String>,
+
+    /// Tool-capsule path exports (alias → path relative to tool root).
+    /// Populated only on `type = "tool"` capsules; intended for non-binary
+    /// surfaces such as `lib_dir`, `share_dir`, or the tool root itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub paths: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1175,6 +1202,45 @@ pub struct CliExportSpec {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Platform-specific artifact entry for `type = "tool"` capsules.
+///
+/// Each `[platforms.<os>-<arch>]` table names a relocatable archive ato
+/// fetches and verifies when materializing the tool capsule on a matching
+/// host. The `<os>-<arch>` key follows the same `<os>-<arch>` form as
+/// `requirements.platform` (e.g. `darwin-arm64`, `linux-x86_64`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolPlatformArtifact {
+    /// Archive filename or absolute URL (e.g. `postgresql-16.4-darwin-arm64.tar.zst`).
+    pub artifact: String,
+    /// Hex-encoded SHA-256 of the archive bytes.
+    pub sha256: String,
+}
+
+/// Consumer-side tool-dependency declaration.
+///
+/// Tool dependencies share resolution machinery with `[dependencies]`, but
+/// their lifecycle is strictly resolve → materialize → project → inject env;
+/// there is no start, stop, or readiness wait. The artifact is an immutable
+/// executable tree, not a running service.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDependencySpec {
+    /// Reference to the tool capsule.
+    #[serde(rename = "ref")]
+    pub capsule_ref: CapsuleUrl,
+
+    /// Optional version constraint that supplements the version pinned in
+    /// `ref`. Manifests carry the constraint; the lockfile records the
+    /// exact resolved version. Example: `">=16,<17"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+
+    /// Explicit export-name → env-var-name map. Takes precedence over the
+    /// default convention `ATO_TOOL_<ALIAS>_<EXPORT>` so providers can avoid
+    /// collisions across tool capsules sharing common export names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bind_env: BTreeMap<String, String>,
 }
 
 /// v0.2 named target definition under [targets.<label>].
