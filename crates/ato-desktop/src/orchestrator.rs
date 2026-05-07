@@ -208,6 +208,35 @@ pub enum LaunchError {
         /// a concurrent SecretStore mutation can't corrupt the retry.
         original_secrets: Vec<SecretEntry>,
     },
+    /// The CLI aborted with E302 carrying
+    /// `details.reason = "execution_plan_consent_required"` — the
+    /// capsule has not yet been consented and we're running without a
+    /// TTY. Carries the consent key + summary so `webview.rs` can
+    /// populate `AppState::pending_consent` and the modal Approve
+    /// handler can call back to `ato internal consent
+    /// approve-execution-plan` with the same identity tuple.
+    MissingConsent {
+        /// Original handle the user asked to launch — re-fed into
+        /// `resolve_and_start_capsule` after the modal Approve.
+        handle: String,
+        /// `plan.consent.key.scoped_id`
+        scoped_id: String,
+        /// `plan.consent.key.version`
+        version: String,
+        /// `plan.consent.key.target_label`
+        target_label: String,
+        /// `plan.consent.policy_segment_hash`
+        policy_segment_hash: String,
+        /// `plan.consent.provisioning_policy_hash`
+        provisioning_policy_hash: String,
+        /// Pre-rendered plan summary from the CLI envelope, suitable
+        /// for direct display in the modal body.
+        summary: String,
+        /// Snapshot of secrets passed to the original
+        /// `start_capsule` call, so the post-Approve retry uses
+        /// exactly the same input.
+        original_secrets: Vec<SecretEntry>,
+    },
     /// Any other failure — opaque string suitable for direct display.
     Other(String),
 }
@@ -225,6 +254,9 @@ impl std::fmt::Display for LaunchError {
         match self {
             Self::MissingConfig { handle, .. } => {
                 write!(f, "guest launch needs configuration for '{handle}'")
+            }
+            Self::MissingConsent { handle, .. } => {
+                write!(f, "guest launch needs ExecutionPlan consent for '{handle}'")
             }
             Self::Other(message) => f.write_str(message),
         }
@@ -699,6 +731,29 @@ fn start_capsule(
                     }
                 }
             }
+
+            // E302 with the `execution_plan_consent_required` reason —
+            // route to the consent modal flow. Generic E302 (no
+            // `reason` discriminator) intentionally falls through to
+            // the Other(opaque) path so unrelated execution-contract
+            // errors keep their existing fatal-toast behaviour.
+            let is_execution_contract = event.name.as_deref() == Some("execution_contract_invalid")
+                || event.code == "ATO_ERR_EXECUTION_CONTRACT_INVALID"
+                || event.code == "E302";
+            if is_execution_contract {
+                if let Some(details) = event.consent_required_details() {
+                    return Err(LaunchError::MissingConsent {
+                        handle: handle.to_string(),
+                        scoped_id: details.scoped_id,
+                        version: details.version,
+                        target_label: details.target_label,
+                        policy_segment_hash: details.policy_segment_hash,
+                        provisioning_policy_hash: details.provisioning_policy_hash,
+                        summary: details.summary,
+                        original_secrets: secrets.to_vec(),
+                    });
+                }
+            }
         }
 
         let detail = if !stderr.is_empty() {
@@ -719,6 +774,66 @@ fn start_capsule(
     capsule_wire::ccp::enforce_ccp_compat(&envelope, "session_start")
         .map_err(|err| LaunchError::Other(err.to_string()))?;
     Ok(envelope.session)
+}
+
+/// Append an ExecutionPlan consent record by calling
+/// `ato internal consent approve-execution-plan`. The desktop never
+/// writes `executionplan_v1.jsonl` directly — every consent-store
+/// mutation goes through this CLI plumbing surface so ATO_HOME
+/// resolution, file locking, and unix-mode enforcement (0700/0600)
+/// stay owned by `ato-cli::application::auth::consent_store`.
+///
+/// All five identity fields must match exactly what the CLI carried
+/// in the most recent `execution_plan_consent_required` envelope for
+/// the capsule (the same values the desktop stores in
+/// `PendingConsentRequest`).
+pub fn approve_execution_plan_consent(
+    scoped_id: &str,
+    version: &str,
+    target_label: &str,
+    policy_segment_hash: &str,
+    provisioning_policy_hash: &str,
+) -> Result<()> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(
+        bin = %ato_bin.display(),
+        scoped_id, version, target_label,
+        "calling ato internal consent approve-execution-plan"
+    );
+    let output = Command::new(&ato_bin)
+        .args([
+            "internal",
+            "consent",
+            "approve-execution-plan",
+            "--scoped-id",
+            scoped_id,
+            "--version",
+            version,
+            "--target-label",
+            target_label,
+            "--policy-segment-hash",
+            policy_segment_hash,
+            "--provisioning-policy-hash",
+            provisioning_policy_hash,
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke '{}' internal consent approve-execution-plan",
+                ato_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = extract_json_error_message(&stdout)
+            .or_else(|| (!stderr.is_empty()).then(|| stderr.clone()))
+            .or_else(|| (!stdout.is_empty()).then(|| stdout.clone()))
+            .unwrap_or_else(|| format!("exit status {}", output.status));
+        bail!("ato internal consent approve-execution-plan failed: {detail}");
+    }
+    Ok(())
 }
 
 fn run_ato_json<T>(args: &[&str]) -> Result<T>
