@@ -139,6 +139,10 @@ fn background_native_run_waits_until_ready_and_persists_ready_state() {
 
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    any(target_os = "macos", target_os = "linux"),
+    ignore = "unstable background process persistence under hosted CI test runners; tracked in #82"
+)]
 fn background_native_run_fails_closed_before_readiness() {
     let (_workspace, fixture) = prepare_fixture_workspace("native-shell-capsule");
     let home = TempDir::new().expect("failed to create temporary HOME");

@@ -298,7 +298,12 @@ fn plan_falls_back_to_miss_when_manifest_blob_hash_disagrees() {
     write_blob(&env.ato_home(), SAMPLE_BLOB_HASH, &derivation_hash);
 
     let liar = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-    write_ref(&env.ato_home(), &req.ecosystem, &derivation_hash, Some(liar));
+    write_ref(
+        &env.ato_home(),
+        &req.ecosystem,
+        &derivation_hash,
+        Some(liar),
+    );
 
     let plan = SessionDependencyMaterializer::new().plan(&req).unwrap();
     assert!(

@@ -400,18 +400,17 @@ impl ProcessManager {
 
     fn stop_process_tree(&self, info: &ProcessInfo, force: bool) -> Result<bool> {
         let mut stopped = false;
-        if is_process_alive(info.pid) && process_identity_matches(info) {
-            if terminate_process(info.pid, force)? {
-                wait_for_process_exit(info.pid, 10)?;
-                stopped = true;
-            }
+        if is_process_alive(info.pid)
+            && process_identity_matches(info)
+            && terminate_process(info.pid, force)?
+        {
+            wait_for_process_exit(info.pid, 10)?;
+            stopped = true;
         }
         if let Some(workload_pid) = info.workload_pid {
-            if is_process_alive(workload_pid) {
-                if terminate_process(workload_pid, force)? {
-                    wait_for_process_exit(workload_pid, 10)?;
-                    stopped = true;
-                }
+            if is_process_alive(workload_pid) && terminate_process(workload_pid, force)? {
+                wait_for_process_exit(workload_pid, 10)?;
+                stopped = true;
             }
         }
         Ok(stopped)
@@ -468,13 +467,12 @@ impl ProcessManager {
                 if let Some(filename) = path.file_stem() {
                     if let Some(id) = filename.to_str() {
                         if let Ok(info) = self.read_pid(id) {
-                            if !info.status.is_active()
-                                || (info.status.is_active() && !process_info_is_alive(&info))
+                            if (!info.status.is_active()
+                                || (info.status.is_active() && !process_info_is_alive(&info)))
+                                && self.stop_dependency_session(id, false).is_ok()
                             {
-                                if self.stop_dependency_session(id, false).is_ok() {
-                                    let _ = self.delete_pid(id);
-                                    cleaned.push(info);
-                                }
+                                let _ = self.delete_pid(id);
+                                cleaned.push(info);
                             }
                         }
                     }

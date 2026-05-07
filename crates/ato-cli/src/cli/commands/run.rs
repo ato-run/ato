@@ -402,6 +402,12 @@ fn build_consumer_run_request(
         enforcement: args.enforcement.clone(),
         sandbox_mode: args.sandbox_mode,
         dangerously_skip_permissions: args.dangerously_skip_permissions,
+        // Single read of CAPSULE_ALLOW_UNSAFE for the run pipeline (#73 PR-C).
+        // Downstream code must consume `allow_unsafe` from the request rather
+        // than re-reading the env. The historical argv `--dangerously-skip-permissions`
+        // injection into a child supervisor (session.rs) is removed in the same PR.
+        allow_unsafe: args.dangerously_skip_permissions
+            || std::env::var("CAPSULE_ALLOW_UNSAFE").as_deref() == Ok("1"),
         compatibility_fallback: args.compatibility_fallback.clone(),
         provider_toolchain_requested: args.provider_toolchain_requested,
         explicit_commit: args.explicit_commit.clone(),

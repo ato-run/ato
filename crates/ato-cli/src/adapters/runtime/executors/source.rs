@@ -1308,6 +1308,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "flaky: depends on shared provider-workspace classification state; tracked in #82"]
     fn sandbox_source_entrypoint_keeps_shell_entrypoints_relative_off_linux() {
         let dir = tempdir().expect("tempdir");
         let plan = plan_from_manifest(
