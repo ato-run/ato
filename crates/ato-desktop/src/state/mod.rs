@@ -995,12 +995,19 @@ pub struct AppState {
     /// `AppState::clear_pending_consent`, after which
     /// `ensure_pending_local_launch` re-arms the launch.
     pub pending_consent: Option<PendingConsentRequest>,
-    /// Handles for which a post-Approve retry has already been
-    /// consumed. If a second E302 surfaces for the same handle in the
-    /// same session, the desktop must not re-open the modal — it
-    /// surfaces a fatal activity entry instead. Reset on Cancel /
-    /// successful launch.
-    pub consent_retry_consumed: HashSet<String>,
+    /// (handle, target_label) pairs for which a post-Approve retry
+    /// has already been consumed. If a second E302 surfaces for the
+    /// same (handle, target_label) in the same session, the desktop
+    /// must not re-open the modal — it surfaces a fatal activity
+    /// entry instead. Reset on Cancel / successful launch.
+    ///
+    /// Keyed per-target rather than per-handle because consent is
+    /// per-ExecutionPlan: a multi-target orchestration capsule
+    /// (e.g. WasedaP2P with `app` + `web`) trips one E302 per target,
+    /// each with its own policy hashes; per-handle keying would make
+    /// the second target's modal fire as a "consent re-required"
+    /// fatal even though the user has approved nothing for it yet.
+    pub consent_retry_consumed: HashSet<(String, String)>,
     pub theme_mode: ThemeMode,
     pub desktop_auth: DesktopAuthState,
     /// Set when the user requests Quit so the shell can render a
@@ -1447,28 +1454,36 @@ impl AppState {
         self.pending_consent = None;
     }
 
-    /// Record that a post-Approve retry has been consumed for `handle`.
-    /// If the next launch still trips E302 for the same handle, the
-    /// caller (drain path / modal handler) MUST surface a fatal
-    /// activity entry instead of re-opening the modal.
-    pub fn mark_consent_retry_consumed(&mut self, handle: &str) {
-        self.consent_retry_consumed.insert(handle.to_string());
+    /// Record that a post-Approve retry has been consumed for the
+    /// `(handle, target_label)` ExecutionPlan. If the next launch
+    /// trips E302 for the same `(handle, target_label)`, the caller
+    /// (drain path / modal handler) MUST surface a fatal activity
+    /// entry instead of re-opening the modal. A different
+    /// `target_label` for the same handle (multi-target orchestration
+    /// capsule) does NOT trip the budget — each target consents
+    /// separately.
+    pub fn mark_consent_retry_consumed(&mut self, handle: &str, target_label: &str) {
+        self.consent_retry_consumed
+            .insert((handle.to_string(), target_label.to_string()));
     }
 
     /// Whether the post-Approve retry budget has already been spent
-    /// for `handle`. Reset implicitly on Cancel (we drop the modal
-    /// and mark the pane LaunchFailed) and on a successful launch
-    /// (the pane leaves Launching, so the retry loop is moot).
-    pub fn consent_retry_already_consumed(&self, handle: &str) -> bool {
-        self.consent_retry_consumed.contains(handle)
+    /// for `(handle, target_label)`. Reset implicitly on Cancel (we
+    /// drop the modal and mark the pane LaunchFailed) and on a
+    /// successful launch (the pane leaves Launching, so the retry
+    /// loop is moot).
+    pub fn consent_retry_already_consumed(&self, handle: &str, target_label: &str) -> bool {
+        self.consent_retry_consumed
+            .contains(&(handle.to_string(), target_label.to_string()))
     }
 
-    /// Reset the per-handle consent-retry budget. Called when a
-    /// launch for `handle` succeeds OR when the user dismisses the
-    /// modal — both states leave the launch in a definite state, so
-    /// any future E302 should be treated as a fresh occurrence.
+    /// Reset the consent-retry budget for ALL targets under `handle`.
+    /// Called when a launch for `handle` succeeds OR when the user
+    /// dismisses the modal — both states leave the launch in a
+    /// definite state, so any future E302 should be treated as a
+    /// fresh occurrence regardless of which target trips it.
     pub fn reset_consent_retry_budget(&mut self, handle: &str) {
-        self.consent_retry_consumed.remove(handle);
+        self.consent_retry_consumed.retain(|(h, _)| h != handle);
     }
 
     /// Remove a secret and persist to disk (#57).
