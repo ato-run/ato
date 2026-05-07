@@ -1776,22 +1776,36 @@ fn stop_recorded_orchestration_services(
                 );
             }
         } else if let Some(pid) = service.local_pid {
-            if pid <= 0 {
-                continue;
-            }
             #[cfg(unix)]
             {
-                let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-                let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
-                if ret == 0 {
-                    any_stopped = true;
-                } else {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::ESRCH) {
-                        eprintln!(
-                            "ATO-WARN failed to signal local service '{}' (pid {}): {}",
-                            service.name, pid, err
-                        );
+                if pid > 0 {
+                    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+                    let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
+                    if ret == 0 {
+                        any_stopped = true;
+                    } else {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() != Some(libc::ESRCH) {
+                            eprintln!(
+                                "ATO-WARN failed to signal local service '{}' (pid {}): {}",
+                                service.name, pid, err
+                            );
+                        }
+                    }
+                }
+                // Belt-and-suspenders for the wrapper-vs-workload PID gap
+                // (#108): `npm run dev` / `uv run` / shell wrappers spawn
+                // the actual listener as a child, so the recorded
+                // `local_pid` is the wrapper, not the workload. SIGKILL
+                // on the wrapper either silently no-ops (already exited)
+                // or kills only the wrapper, leaving the workload as an
+                // orphan still bound to `published_port`. Look up the
+                // current listener via `lsof` and SIGKILL it; idempotent
+                // (returns false when the port is already free or the
+                // resolved pid matches what we just signaled).
+                if let Some(port) = service.published_port {
+                    if kill_listeners_on_published_port(port, pid, force, &service.name) {
+                        any_stopped = true;
                     }
                 }
             }
@@ -1806,6 +1820,94 @@ fn stop_recorded_orchestration_services(
         }
     }
     Ok(any_stopped)
+}
+
+/// Kill any process currently bound to `port` on `127.0.0.1` whose pid
+/// differs from `recorded_pid` (which the caller already attempted to
+/// signal). Used as the wrapper-vs-workload fallback in
+/// `stop_recorded_orchestration_services` (#108): when ato spawned the
+/// service via `npm run dev` / `uv run` / a shell wrapper, the recorded
+/// `local_pid` is the wrapper and the actual listener is its child.
+/// `lsof -nP -iTCP:<port> -sTCP:LISTEN` is the host-portable way to
+/// resolve the current listener; macOS and Linux both ship it.
+///
+/// Returns `true` iff at least one previously-unsignaled pid was
+/// successfully killed.
+#[cfg(unix)]
+fn kill_listeners_on_published_port(
+    port: u16,
+    recorded_pid: i32,
+    force: bool,
+    service_name: &str,
+) -> bool {
+    let listener_pids = match listener_pids_on_port(port) {
+        Ok(pids) => pids,
+        Err(err) => {
+            eprintln!(
+                "ATO-WARN failed to enumerate listeners on port {} for service '{}': {}",
+                port, service_name, err
+            );
+            return false;
+        }
+    };
+    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
+    let mut killed = false;
+    for pid in listener_pids {
+        if pid as i32 == recorded_pid {
+            // Already handled by the recorded-pid kill above.
+            continue;
+        }
+        let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
+        if ret == 0 {
+            killed = true;
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!(
+                    "ATO-WARN failed to signal port-{} listener (pid {}) for service '{}': {}",
+                    port, pid, service_name, err
+                );
+            }
+        }
+    }
+    killed
+}
+
+/// Best-effort resolve "which pids are listening on TCP `port` on the
+/// loopback right now?" using `lsof`. Returns the parsed pid list (may
+/// be empty if nothing is bound). Limited to TCP / IPv4 LISTEN to match
+/// how managed services bind their sockets — the orchestrator's
+/// readiness probe only ever waits on TCP listeners on 127.0.0.1.
+#[cfg(unix)]
+fn listener_pids_on_port(port: u16) -> Result<Vec<u32>> {
+    // `-t` prints PIDs only (one per line), bypassing the column-parsing
+    // hazard of the default human format.
+    let output = Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{}", port), "-sTCP:LISTEN"])
+        .output()
+        .with_context(|| format!("failed to invoke lsof for port {}", port))?;
+    // `lsof` exits 1 when there are no matches — that is not an error
+    // for our purposes, so only fail on unexpected exit codes.
+    if !output.status.success() && output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "lsof exited {:?} for port {}: {}",
+            output.status.code(),
+            port,
+            stderr.trim()
+        );
+    }
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(pid) = trimmed.parse::<u32>() {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
 }
 
 fn stop_recorded_dependency_contracts(
@@ -2631,7 +2733,17 @@ mod tests {
                         local_pid: Some(db.id() as i32),
                         container_id: None,
                         host_ports: BTreeMap::new(),
-                        published_port: Some(5432),
+                        // `None` deliberately: this test exercises the
+                        // recorded-pid teardown path. The
+                        // published_port fallback in
+                        // `stop_recorded_orchestration_services`
+                        // (#108) would otherwise call `lsof` for
+                        // common dev ports and could SIGKILL whatever
+                        // happens to listen on them on the host (e.g.
+                        // a sibling test, a postgres provider) — see
+                        // the dedicated `..._kills_orphan_listener_..`
+                        // test for the fallback path.
+                        published_port: None,
                     },
                     StoredOrchestrationService {
                         name: "web".to_string(),
@@ -2639,7 +2751,7 @@ mod tests {
                         local_pid: Some(web.id() as i32),
                         container_id: None,
                         host_ports: BTreeMap::new(),
-                        published_port: Some(5173),
+                        published_port: None,
                     },
                 ],
             }),
@@ -2674,5 +2786,334 @@ mod tests {
         let _ = db.kill();
         let _ = web.kill();
         panic!("orchestration services were not stopped within 1s after teardown");
+    }
+
+    /// #108 regression: full `stop_session` path for an in-process
+    /// orchestration session whose recorded `pid` is already dead by the
+    /// time stop is called (the canonical PR-C scenario where the wrapper
+    /// process exits successfully after detaching the workload runtime
+    /// via `Box::leak`). The teardown must fall through to the persisted
+    /// `orchestration_services` subset and still report `stopped:true`.
+    ///
+    /// `#[ignore]` matches the sibling tests above — they mutate
+    /// `ATO_HOME`/`HOME`/`ATO_DESKTOP_SESSION_ROOT` process-globally and
+    /// race with each other on shared CI runners (#82). Run locally
+    /// with `cargo test … -- --ignored`.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    #[ignore = "mutates HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT (#82)"]
+    fn stop_session_kills_orchestration_services_when_recorded_pid_is_dead() {
+        use std::collections::BTreeMap;
+
+        struct EnvGuard {
+            ato_home: Option<String>,
+            home: Option<String>,
+            session_root: Option<String>,
+        }
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.ato_home {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+                match &self.home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.session_root {
+                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
+                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = EnvGuard {
+            ato_home: std::env::var("ATO_HOME").ok(),
+            home: std::env::var("HOME").ok(),
+            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
+        };
+        std::env::set_var("ATO_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+
+        // Stand-ins for the live `[services]` workloads that survived the
+        // wrapper exit (e.g. uvicorn for `app`, vite for `web`). `db` is
+        // started first so reverse-topological teardown hits `web` before
+        // `db`.
+        let mut db = Command::new("sleep").arg("30").spawn().expect("db");
+        let mut web = Command::new("sleep").arg("30").spawn().expect("web");
+
+        // The id was minted from the leaf's pid at session start, but by
+        // the time stop is called that pid is dead — a generic dead pid
+        // here mirrors the same observable state.
+        let dead_recorded_pid: i32 = 999_999_999;
+        let session_id = format!("ato-desktop-session-{}", web.id());
+
+        ProcessManager::new()
+            .expect("process manager")
+            .write_pid(&ProcessInfo {
+                id: session_id.clone(),
+                name: "capsule-session".to_string(),
+                pid: dead_recorded_pid,
+                workload_pid: None,
+                status: ProcessStatus::Running,
+                runtime: "source".to_string(),
+                start_time: SystemTime::now(),
+                os_start_time_unix_ms: None,
+                workload_os_start_time_unix_ms: None,
+                manifest_path: None,
+                scoped_id: None,
+                target_label: Some("web".to_string()),
+                requested_port: Some(5173),
+                log_path: None,
+                ready_at: None,
+                last_event: Some("ready".to_string()),
+                last_error: None,
+                exit_code: None,
+            })
+            .expect("write pid file");
+
+        write_session_record(
+            &session_root,
+            &StoredSessionInfo {
+                session_id: session_id.clone(),
+                handle: "capsule://example/orch".to_string(),
+                normalized_handle: "capsule://example/orch".to_string(),
+                canonical_handle: Some("capsule://example/orch".to_string()),
+                trust_state: TrustState::Untrusted,
+                source: Some("registry".to_string()),
+                restricted: false,
+                snapshot: None,
+                runtime: CapsuleRuntimeDescriptor {
+                    target_label: "web".to_string(),
+                    runtime: Some("source".to_string()),
+                    driver: None,
+                    language: None,
+                    port: Some(5173),
+                },
+                display_strategy: CapsuleDisplayStrategy::WebUrl,
+                pid: dead_recorded_pid,
+                log_path: session_root.join("session.log").display().to_string(),
+                manifest_path: temp.path().join("capsule.toml").display().to_string(),
+                target_label: "web".to_string(),
+                notes: vec![],
+                guest: None,
+                web: Some(WebSessionDisplay {
+                    local_url: "http://127.0.0.1:5173/".to_string(),
+                    healthcheck_url: "http://127.0.0.1:5173/".to_string(),
+                    served_by: "ato".to_string(),
+                }),
+                terminal: None,
+                service: None,
+                dependency_contracts: None,
+                orchestration_services: Some(StoredOrchestrationServices {
+                    wrapper_pid: dead_recorded_pid,
+                    services: vec![
+                        StoredOrchestrationService {
+                            name: "db".to_string(),
+                            target_label: "db".to_string(),
+                            local_pid: Some(db.id() as i32),
+                            container_id: None,
+                            host_ports: BTreeMap::new(),
+                            // See note in the sibling
+                            // `..._kills_managed_pids_in_reverse_order`
+                            // test: deliberately `None` so the
+                            // published_port fallback doesn't reach
+                            // for whatever sibling test happens to
+                            // listen on 5432/5173.
+                            published_port: None,
+                        },
+                        StoredOrchestrationService {
+                            name: "web".to_string(),
+                            target_label: "web".to_string(),
+                            local_pid: Some(web.id() as i32),
+                            container_id: None,
+                            host_ports: BTreeMap::new(),
+                            published_port: None,
+                        },
+                    ],
+                }),
+                schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+                launch_digest: Some("digest".repeat(8)),
+                process_start_time_unix_ms: None,
+            },
+        )
+        .expect("write session record");
+
+        stop_session(&session_id, true).expect("stop session");
+
+        // SIGKILL is delivered by the kernel synchronously, but `try_wait`
+        // sees the exit only after the next reaping pass. Same poll
+        // pattern as `stop_recorded_orchestration_services_kills_managed_pids_in_reverse_order`.
+        for _ in 0..40 {
+            let db_done = db.try_wait().expect("db wait").is_some();
+            let web_done = web.try_wait().expect("web wait").is_some();
+            if db_done && web_done {
+                assert!(
+                    !session_root.join(format!("{}.json", session_id)).exists(),
+                    "stopped session must remove its record file"
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = db.kill();
+        let _ = web.kill();
+        panic!("orchestration services were not stopped within 1s after stop_session");
+    }
+
+    /// #108 wrapper-vs-workload fallback: when ato spawned the service via
+    /// `npm run dev` / `uv run` / a shell wrapper, the wrapper exits or is
+    /// killed but the actual listener (vite/uvicorn) survives as an orphan
+    /// still bound to `published_port`. The teardown helper must then
+    /// resolve the live listener via `lsof` and kill it.
+    ///
+    /// Repro shape:
+    ///   - Recorded `local_pid` is dead (mimics the wrapper having exited).
+    ///   - A live "workload" listens on the recorded `published_port`.
+    ///
+    /// Expected: helper reports `stopped:true` and the workload is killed.
+    ///
+    /// `#[ignore]`d because the test depends on a real `lsof` invocation
+    /// against a kernel-allocated port plus a python3 cold-start, which
+    /// is flaky on a fully-loaded `cargo test` job (the 1200+ siblings
+    /// can starve the python startup past its bind window). Run locally
+    /// or in a serialized lane via `cargo test … -- --ignored`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "depends on lsof + python3 cold-start; flaky under loaded `cargo test`"]
+    fn stop_recorded_orchestration_services_kills_orphan_listener_via_published_port() {
+        use std::collections::BTreeMap;
+        use std::net::TcpListener;
+
+        // Bind a real listener on a kernel-allocated port so `lsof`
+        // resolves it back to our test process. Holding the listener
+        // across the teardown call is fine — the port is what's being
+        // probed, not the FD.
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind workload listener for fallback test");
+        let port = listener.local_addr().expect("listener addr").port();
+
+        // Spawn a child sleep that holds the socket open for `lsof` to
+        // see. We pass the listener fd to the child via a small helper:
+        // `nc -l <port>` is not portable enough across BSD/GNU netcat,
+        // and we'd rather not depend on it. Instead the child process is
+        // a `sh -c` that re-binds the same port (we drop our listener
+        // first so the child can claim it). This avoids needing fd
+        // inheritance plumbing in the test.
+        drop(listener);
+
+        // Use Python's stdlib http.server as the orphan listener: it's
+        // present on every macOS / Linux dev box (the same hosts the
+        // capsule itself runs on) and blocks until killed. Avoids
+        // depending on `nc -l` whose flag set differs between BSD and
+        // GNU netcat.
+        let workload = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import http.server, socketserver; \
+                     socketserver.TCPServer.allow_reuse_address = True; \
+                     httpd = socketserver.TCPServer(('127.0.0.1', {port}), http.server.SimpleHTTPRequestHandler); \
+                     httpd.serve_forever()"
+                ),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn orphan workload");
+        let workload_pid = workload.id();
+
+        // Wait for the listener to bind. The cold-import + bind path is
+        // ~30-80ms on an idle macOS/Linux dev box but balloons under a
+        // saturated `cargo test` job (1200+ siblings competing for the
+        // CPU), so we give python3 up to 10s before treating it as a
+        // setup failure.
+        let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(pids) = listener_pids_on_port(port) {
+                if pids.contains(&workload_pid) {
+                    break;
+                }
+            }
+            if std::time::Instant::now() >= bound_deadline {
+                let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
+                panic!(
+                    "orphan workload (pid {workload_pid}) failed to bind 127.0.0.1:{port} within 10s"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The recorded local_pid is one we know is dead — the very high
+        // pid mirrors the post-wrapper-exit state from the issue.
+        let dead_recorded_pid: i32 = 999_999_999;
+
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-fallback".to_string(),
+            handle: "capsule://example/orch".to_string(),
+            normalized_handle: "capsule://example/orch".to_string(),
+            canonical_handle: Some("capsule://example/orch".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: Some(port),
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: dead_recorded_pid,
+            log_path: format!("/tmp/session-fallback-{port}.log"),
+            manifest_path: format!("/tmp/capsule-fallback-{port}.toml"),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: None,
+            orchestration_services: Some(StoredOrchestrationServices {
+                wrapper_pid: dead_recorded_pid,
+                services: vec![StoredOrchestrationService {
+                    name: "web".to_string(),
+                    target_label: "web".to_string(),
+                    local_pid: Some(dead_recorded_pid),
+                    container_id: None,
+                    host_ports: BTreeMap::new(),
+                    published_port: Some(port),
+                }],
+            }),
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
+            .expect("teardown helper");
+        assert!(
+            stopped,
+            "helper must report it stopped the orphan port-{port} listener via the published_port fallback"
+        );
+
+        // Poll for the workload to actually exit. Same race window as
+        // `stop_recorded_orchestration_services_kills_managed_pids_in_reverse_order`.
+        let mut workload = workload;
+        for _ in 0..40 {
+            if workload.try_wait().expect("workload wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = workload.kill();
+        panic!("orphan workload (pid {workload_pid}) was not killed within 1s");
     }
 }
