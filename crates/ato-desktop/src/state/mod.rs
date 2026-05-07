@@ -1383,10 +1383,7 @@ impl AppState {
     }
 
     /// Remove a secret and persist to disk (#57).
-    pub fn remove_secret(
-        &mut self,
-        key: &str,
-    ) -> Result<(), crate::config::SaveSecretsError> {
+    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::SaveSecretsError> {
         self.secret_store.remove_secret(key);
         crate::config::save_secrets(&self.secret_store)
     }
