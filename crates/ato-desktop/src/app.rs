@@ -1,3 +1,4 @@
+use capsule_core::common::paths::ato_path;
 use gpui::{
     actions, px, size, Action, App, AppContext, AssetSource, Bounds, KeyBinding, SharedString,
     WindowBounds, WindowDecorations, WindowOptions,
@@ -6,7 +7,6 @@ use gpui::{
 use gpui::{Menu, MenuItem, OsAction, SystemMenuType};
 #[cfg(target_os = "macos")]
 use gpui_component::input;
-use capsule_core::common::paths::ato_path;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::PathBuf;

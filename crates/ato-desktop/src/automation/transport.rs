@@ -45,9 +45,7 @@ pub(crate) fn pid_is_alive(pid: u32) -> bool {
     if result == 0 {
         return true;
     }
-    let errno = std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(0);
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     errno != libc::ESRCH
 }
 
@@ -177,7 +175,9 @@ mod tests {
 
     fn env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
     }
 
     struct EnvVarGuard {
@@ -218,7 +218,10 @@ mod tests {
 
     #[test]
     fn parse_socket_filename_pid_accepts_canonical_shape() {
-        assert_eq!(parse_socket_filename_pid("ato-desktop-12345.sock"), Some(12345));
+        assert_eq!(
+            parse_socket_filename_pid("ato-desktop-12345.sock"),
+            Some(12345)
+        );
         assert_eq!(parse_socket_filename_pid("ato-desktop-1.sock"), Some(1));
     }
 
@@ -239,6 +242,76 @@ mod tests {
     #[test]
     fn pid_is_alive_pid_zero_returns_false() {
         assert!(!pid_is_alive(0));
+    }
+
+    #[test]
+    fn parse_command_set_capsule_secrets_defaults_clear_pending_to_true() {
+        let params = serde_json::json!({
+            "handle": "github.com/Koh0920/WasedaP2P",
+            "secrets": { "PG_PASSWORD": "p", "SECRET_KEY": "s" }
+        });
+        let cmd = super::parse_command("set_capsule_secrets", &params).expect("parse");
+        match cmd {
+            super::AutomationCommand::SetCapsuleSecrets {
+                handle,
+                secrets,
+                clear_pending_config,
+            } => {
+                assert_eq!(handle, "github.com/Koh0920/WasedaP2P");
+                assert!(clear_pending_config, "default must be true");
+                let mut keys: Vec<_> = secrets.iter().map(|(k, _)| k.clone()).collect();
+                keys.sort();
+                assert_eq!(keys, vec!["PG_PASSWORD", "SECRET_KEY"]);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_command_set_capsule_secrets_respects_explicit_false() {
+        let params = serde_json::json!({
+            "handle": "h",
+            "secrets": { "K": "v" },
+            "clear_pending_config": false,
+        });
+        let cmd = super::parse_command("set_capsule_secrets", &params).expect("parse");
+        match cmd {
+            super::AutomationCommand::SetCapsuleSecrets {
+                clear_pending_config,
+                ..
+            } => assert!(!clear_pending_config),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_command_set_capsule_secrets_rejects_empty_secrets() {
+        let params = serde_json::json!({"handle": "h", "secrets": {}});
+        let err = super::parse_command("set_capsule_secrets", &params).unwrap_err();
+        assert!(
+            err.contains("at least one"),
+            "expected empty-secrets error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_command_set_capsule_secrets_rejects_non_string_value() {
+        let params = serde_json::json!({"handle": "h", "secrets": {"K": 42}});
+        let err = super::parse_command("set_capsule_secrets", &params).unwrap_err();
+        assert!(
+            err.contains("must be a string"),
+            "expected non-string error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_command_set_capsule_secrets_rejects_missing_handle() {
+        let params = serde_json::json!({"secrets": {"K": "v"}});
+        let err = super::parse_command("set_capsule_secrets", &params).unwrap_err();
+        assert!(
+            err.contains("'handle'"),
+            "expected handle error, got: {err}"
+        );
     }
 
     #[test]
@@ -465,6 +538,32 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         }
         "list_panes" => Ok(AutomationCommand::ListPanes),
         "open_url" => Ok(AutomationCommand::OpenUrl { url: s("url")? }),
+        "set_capsule_secrets" => {
+            let handle = s("handle")?;
+            let secrets_obj = params
+                .get("secrets")
+                .and_then(|v| v.as_object())
+                .ok_or("missing required param 'secrets' (object of key→string)")?;
+            if secrets_obj.is_empty() {
+                return Err("'secrets' must contain at least one entry".into());
+            }
+            let mut secrets = Vec::with_capacity(secrets_obj.len());
+            for (key, value) in secrets_obj {
+                let value_str = value
+                    .as_str()
+                    .ok_or_else(|| format!("secret '{key}' must be a string (got {})", value))?;
+                secrets.push((key.clone(), value_str.to_string()));
+            }
+            let clear_pending_config = params
+                .get("clear_pending_config")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            Ok(AutomationCommand::SetCapsuleSecrets {
+                handle,
+                secrets,
+                clear_pending_config,
+            })
+        }
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")
