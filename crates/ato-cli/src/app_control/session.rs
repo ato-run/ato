@@ -2460,6 +2460,7 @@ mod tests {
                         runtime_export_keys: vec!["DATABASE_URL".to_string()],
                     }],
                 }),
+                orchestration_services: None,
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
