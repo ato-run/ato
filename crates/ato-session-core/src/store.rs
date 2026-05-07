@@ -201,6 +201,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_000_000),
