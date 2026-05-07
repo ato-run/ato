@@ -241,6 +241,8 @@ pub fn main_entry() {
 /// When the binary is invoked without subcommands, this preserves the friendly
 /// help-first UX instead of letting Clap exit through its default error path.
 pub fn run() -> Result<()> {
+    ato_session_core::sweep::sweep_startup_runtime_artifacts_best_effort();
+
     let is_no_args = std::env::args_os().count() == 1;
 
     if is_no_args {
