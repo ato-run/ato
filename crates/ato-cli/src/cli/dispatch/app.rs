@@ -27,6 +27,17 @@ pub(super) fn execute_app_command(command: crate::AppCommands, json_mode: bool) 
             crate::SessionCommands::Stop { session_id, json } => {
                 crate::app_control::stop_session(&session_id, json_mode || json)
             }
+            crate::SessionCommands::WatchParent {
+                session_id,
+                parent_pid,
+                parent_start_time_unix_ms,
+                poll_ms,
+            } => crate::app_control::watch_parent_and_stop_session(
+                &session_id,
+                parent_pid,
+                parent_start_time_unix_ms,
+                std::time::Duration::from_millis(poll_ms.max(50)),
+            ),
         },
         crate::AppCommands::Status { package_id, json } => {
             crate::app_control::status(&package_id, json_mode || json)
