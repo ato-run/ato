@@ -705,6 +705,41 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
+    let session_watch_parent = Cli::try_parse_from([
+        "ato",
+        "app",
+        "session",
+        "watch-parent",
+        "ato-desktop-session-123",
+        "--parent-pid",
+        "4242",
+        "--parent-start-time-unix-ms",
+        "1700000000000",
+        "--poll-ms",
+        "50",
+    ])
+    .expect("parse app session watch-parent");
+    match session_watch_parent.command {
+        Commands::App {
+            command:
+                AppCommands::Session {
+                    command:
+                        SessionCommands::WatchParent {
+                            session_id,
+                            parent_pid,
+                            parent_start_time_unix_ms,
+                            poll_ms,
+                        },
+                },
+        } => {
+            assert_eq!(session_id, "ato-desktop-session-123");
+            assert_eq!(parent_pid, 4242);
+            assert_eq!(parent_start_time_unix_ms, Some(1_700_000_000_000));
+            assert_eq!(poll_ms, 50);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+
     let status = Cli::try_parse_from(["ato", "app", "status", "ato/ato-desktop", "--json"])
         .expect("parse app status");
     match status.command {

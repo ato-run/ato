@@ -612,6 +612,15 @@ fn start_capsule(
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
 
+    let desktop_pid = std::process::id();
+    cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
+    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
+        cmd.env(
+            "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
+            start_time.to_string(),
+        );
+    }
+
     // Inject granted secrets under the schema-supplied env-var name
     // (e.g. `OPENAI_API_KEY`). The legacy `ATO_SECRET_<KEY>` prefix
     // form was removed in CLI v0.5 (see `application/credential/

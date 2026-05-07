@@ -26,7 +26,7 @@ pub(crate) mod session_runner;
 
 pub use latest::fetch_latest;
 pub use resolve::resolve_handle;
-pub use session::{start_session, stop_session};
+pub use session::{start_session, stop_session, watch_parent_and_stop_session};
 
 // App Session Materialization (RFC: APP_SESSION_MATERIALIZATION) consumes a
 // few in-module helpers from session. Re-exported as pub(crate) so the
