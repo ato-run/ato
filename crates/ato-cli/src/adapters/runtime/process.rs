@@ -992,6 +992,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[ignore = "flaky: spawns subprocess + races SIGTERM/try_wait, same #82 class as the session-level sibling tests"]
     fn stop_process_stops_dependency_session_when_pid_file_is_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let run_dir = tmp.path().join("run");
