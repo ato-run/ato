@@ -65,8 +65,9 @@ pub(crate) fn write_github_run_checkout_owner_marker(path: &Path) -> Result<()> 
     // live workspaces even when process records are briefly unavailable.
     let owner = GithubRunCheckoutOwner {
         owner_pid: std::process::id(),
-        owner_start_time_unix_ms:
-            ato_session_core::process::process_start_time_unix_ms(std::process::id()),
+        owner_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
     };
     let bytes = serde_json::to_vec_pretty(&owner)
         .context("Failed to serialize transient GitHub run checkout owner marker")?;

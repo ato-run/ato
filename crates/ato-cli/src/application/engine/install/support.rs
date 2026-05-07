@@ -2709,8 +2709,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let checkout_dir = temp.path().join("checkout");
         std::fs::create_dir_all(&checkout_dir).expect("create checkout");
-        std::fs::write(checkout_dir.join("capsule.toml"), "schema_version = \"0.3\"\n")
-            .expect("write manifest");
+        std::fs::write(
+            checkout_dir.join("capsule.toml"),
+            "schema_version = \"0.3\"\n",
+        )
+        .expect("write manifest");
 
         cleanup_successful_github_checkout_best_effort(&checkout_dir);
 
