@@ -80,6 +80,20 @@ pub(crate) enum SessionCommands {
         #[arg(long)]
         json: bool,
     },
+
+    #[command(
+        hide = true,
+        about = "Watch an ato-desktop parent process and stop a session when it exits"
+    )]
+    WatchParent {
+        session_id: String,
+        #[arg(long = "parent-pid")]
+        parent_pid: u32,
+        #[arg(long = "parent-start-time-unix-ms")]
+        parent_start_time_unix_ms: Option<u64>,
+        #[arg(long = "poll-ms", default_value_t = 500)]
+        poll_ms: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
