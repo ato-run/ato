@@ -99,6 +99,21 @@ pub enum AutomationCommand {
     /// Opens a URL via the app-level omnibar (navigate_to_url).
     /// Works even when no pane is currently active; creates a new pane.
     OpenUrl { url: String },
+    /// Persist one or more secrets for `handle`, grant them to that
+    /// capsule, and (optionally) dismiss any open `pending_config`
+    /// modal targeting the same handle so the launch re-arms with
+    /// the freshly stored secrets.
+    ///
+    /// Mirrors `ui::DesktopShell::save_pending_config` (the modal
+    /// Save handler): values flow through `AppState::add_secret` +
+    /// `AppState::grant_secret_to_capsule`, both of which surface
+    /// `SaveSecretsError` (#88) so a disk-write failure doesn't get
+    /// swallowed.
+    SetCapsuleSecrets {
+        handle: String,
+        secrets: Vec<(String, String)>,
+        clear_pending_config: bool,
+    },
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────
