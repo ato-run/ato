@@ -8,6 +8,7 @@ mod explain_hash;
 mod fetch;
 mod inspect;
 mod install;
+mod internal;
 mod ipc;
 mod key;
 mod package;
@@ -570,6 +571,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         ),
 
         Commands::App { command } => execute_app_command(command, json),
+
+        Commands::Internal { command } => internal::execute_internal_command(command),
 
         Commands::State { command } => state::execute_state_command(command),
 
