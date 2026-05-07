@@ -287,6 +287,8 @@ pub(super) fn start_guest_session(
         status: ProcessStatus::Starting,
         runtime: SESSION_RUNTIME.to_string(),
         start_time: SystemTime::now(),
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(child.id()),
+        workload_os_start_time_unix_ms: None,
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(plan.selected_target_label().to_string()),
@@ -487,6 +489,12 @@ pub(super) fn start_runtime_session(
             .clone()
             .unwrap_or_else(|| "source".to_string()),
         start_time: SystemTime::now(),
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            runtime_process.child.id(),
+        ),
+        workload_os_start_time_unix_ms: runtime_process
+            .workload_pid
+            .and_then(ato_session_core::process::process_start_time_unix_ms),
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(plan.selected_target_label().to_string()),
@@ -770,6 +778,10 @@ pub(super) fn start_orchestration_session_in_process(
             .clone()
             .unwrap_or_else(|| "source".to_string()),
         start_time: SystemTime::now(),
+        os_start_time_unix_ms: u32::try_from(leaf_local_pid)
+            .ok()
+            .and_then(ato_session_core::process::process_start_time_unix_ms),
+        workload_os_start_time_unix_ms: None,
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(leaf_target_label.clone()),
@@ -983,6 +995,8 @@ pub(super) fn start_orchestration_session_supervisor(
             .clone()
             .unwrap_or_else(|| "source".to_string()),
         start_time: SystemTime::now(),
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(child.id()),
+        workload_os_start_time_unix_ms: None,
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(leaf_target_label.clone()),
@@ -2286,6 +2300,8 @@ mod tests {
                 status: ProcessStatus::Running,
                 runtime: "source".to_string(),
                 start_time: SystemTime::now(),
+                os_start_time_unix_ms: None,
+                workload_os_start_time_unix_ms: None,
                 manifest_path: None,
                 scoped_id: None,
                 target_label: Some("web".to_string()),

@@ -140,6 +140,12 @@ fn background_process_info(
         },
         runtime,
         start_time: now,
+        os_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            process.child.id(),
+        ),
+        workload_os_start_time_unix_ms: process
+            .workload_pid
+            .and_then(ato_session_core::process::process_start_time_unix_ms),
         manifest_path: Some(plan.manifest_path.clone()),
         scoped_id,
         target_label: Some(plan.selected_target_label().to_string()),

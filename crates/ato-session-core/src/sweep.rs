@@ -3,7 +3,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -15,6 +15,11 @@ use crate::store::session_root;
 
 const DEFAULT_SOCKET_GRACE: Duration = Duration::from_secs(60);
 const DEFAULT_RUN_DIR_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Fallback retention for `runs/run-*/` whose `session.json` cannot be
+/// reconstructed (missing, unreadable, or unparseable). Without ownership we
+/// cannot verify liveness, so we hold the dir until it is unambiguously old
+/// enough to be a leak rather than an in-flight write.
+const RUN_DIR_LEGACY_TTL_MULTIPLIER: u32 = 2;
 const SWEEP_LOCK_FILE: &str = ".startup-sweep.lock";
 
 #[derive(Debug, Clone)]
@@ -71,6 +76,10 @@ pub fn sweep_startup_runtime_artifacts(
         )
     })?;
     let Some(_guard) = SweepLock::try_acquire(&options.run_dir)? else {
+        debug!(
+            run_dir = %options.run_dir.display(),
+            "startup runtime artifact sweep skipped: another process holds the sweep lock"
+        );
         return Ok(StartupSweepReport::default());
     };
 
@@ -111,8 +120,20 @@ struct PidRecord {
     pid: i32,
     #[serde(default)]
     workload_pid: Option<i32>,
+    /// OS-reported start time (`process_start_time_unix_ms`) of `pid`,
+    /// captured at registration. Compared against a fresh query to defeat
+    /// PID reuse. Absent on legacy records and on platforms where the OS
+    /// query is unsupported; in both cases the sweep falls back to
+    /// "alive AND owned by current user", which keeps liveness intact at
+    /// the cost of weakened reuse defense for that record.
     #[serde(default)]
-    start_time: Option<SystemTime>,
+    os_start_time_unix_ms: Option<u64>,
+    /// Same shape as `os_start_time_unix_ms` but for `workload_pid`. Lets
+    /// the workload arm of the liveness check apply the same PID-reuse
+    /// defense as the main `pid` arm instead of accepting any live owner
+    /// of the recorded numeric `workload_pid`.
+    #[serde(default)]
+    workload_os_start_time_unix_ms: Option<u64>,
 }
 
 fn sweep_pid_files(run_dir: &Path) -> Result<usize> {
@@ -160,11 +181,13 @@ fn pid_record_is_alive(record: &PidRecord) -> bool {
     if record.pid == self_pid || record.workload_pid == Some(self_pid) {
         return true;
     }
-    pid_record_process_is_alive(record.pid, record.start_time)
-        || record.workload_pid.is_some_and(pid_i32_is_alive_same_user)
+    pid_record_process_is_alive(record.pid, record.os_start_time_unix_ms)
+        || record.workload_pid.is_some_and(|workload_pid| {
+            pid_record_process_is_alive(workload_pid, record.workload_os_start_time_unix_ms)
+        })
 }
 
-fn pid_record_process_is_alive(pid: i32, recorded_start_time: Option<SystemTime>) -> bool {
+fn pid_record_process_is_alive(pid: i32, recorded_start_time_ms: Option<u64>) -> bool {
     let pid = match i32_to_pid(pid) {
         Some(pid) => pid,
         None => return false,
@@ -172,11 +195,19 @@ fn pid_record_process_is_alive(pid: i32, recorded_start_time: Option<SystemTime>
     if !pid_is_alive(pid) || !current_user_owns_process(pid) {
         return false;
     }
-    let Some(expected_start_time) = recorded_start_time.and_then(system_time_to_unix_ms) else {
-        return false;
+    // Legacy record (no recorded start_time) or platform without OS-query
+    // support: keep the record so we don't delete a live process's pid
+    // file. PID reuse risk is accepted for these transitional records.
+    let Some(expected_start_time) = recorded_start_time_ms else {
+        return true;
     };
-    process_start_time_unix_ms(pid)
-        .is_some_and(|live_start_time| live_start_time == expected_start_time)
+    match process_start_time_unix_ms(pid) {
+        Some(live_start_time) => live_start_time == expected_start_time,
+        // OS query failed for this PID even though it's alive — treat as
+        // mismatched (fail-closed) so a stale record doesn't get pinned by
+        // a transient query failure when start_time is recorded.
+        None => false,
+    }
 }
 
 fn sweep_socket_files(run_dir: &Path, now: SystemTime, grace: Duration) -> Result<usize> {
@@ -201,8 +232,20 @@ fn sweep_socket_files(run_dir: &Path, now: SystemTime, grace: Duration) -> Resul
         let Some(pid) = parse_desktop_socket_pid(name) else {
             continue;
         };
-        if pid == std::process::id() || pid_is_alive(pid) || !path_is_older_than(&path, now, grace)
-        {
+        if pid == std::process::id() {
+            continue;
+        }
+        // Cross-reference with the matching `ato-desktop-session-<pid>.pid`
+        // record so PID reuse cannot pin a stale socket: if the recorded
+        // start_time disagrees with the live process's start_time the
+        // record is treated as dead and the socket falls through to the
+        // grace check. Sockets without a matching record are orphans (the
+        // owning desktop never wrote a pid file or it was already cleaned)
+        // and are also subject to the grace check.
+        if matching_pid_record_is_alive(run_dir, pid) {
+            continue;
+        }
+        if !path_is_older_than(&path, now, grace) {
             continue;
         }
         match fs::remove_file(&path) {
@@ -222,6 +265,19 @@ fn parse_desktop_socket_pid(name: &str) -> Option<u32> {
         .strip_suffix(".sock")
         .or_else(|| stem.strip_suffix(".sock.txt"))?;
     stem.parse().ok()
+}
+
+fn matching_pid_record_is_alive(run_dir: &Path, pid: u32) -> bool {
+    let record_path = run_dir.join(format!("ato-desktop-session-{pid}.pid"));
+    let raw = match fs::read_to_string(&record_path) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let record: PidRecord = match toml::from_str(&raw) {
+        Ok(record) => record,
+        Err(_) => return false,
+    };
+    pid_record_is_alive(&record)
 }
 
 fn sweep_session_records(session_root: &Path) -> Result<usize> {
@@ -285,7 +341,7 @@ fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 struct RunSessionOwner {
     #[serde(default)]
     pid: Option<i32>,
@@ -316,13 +372,19 @@ fn sweep_run_dirs(runs_dir: &Path, now: SystemTime, ttl: Duration) -> Result<usi
         if !is_run_dir || !path.is_dir() || !path_is_older_than(&path, now, ttl) {
             continue;
         }
-        // Preserve ambiguous or legacy run dirs when ownership cannot be
-        // reconstructed from session.json instead of guessing.
-        let Some(owner) = read_run_dir_owner(&path) else {
-            continue;
-        };
-        if owner_is_alive(owner) {
-            continue;
+        match read_run_dir_owner(&path) {
+            Some(owner) if owner_is_alive(owner) => continue,
+            Some(_) => {} // owner identified and dead → fall through to remove
+            None => {
+                // Ambiguous (missing or unparseable session.json). Hold
+                // until 2× ttl so an in-flight write isn't sniped, but
+                // don't keep forever — a corrupted session.json should not
+                // pin a leaked workspace indefinitely.
+                let legacy_ttl = ttl.saturating_mul(RUN_DIR_LEGACY_TTL_MULTIPLIER);
+                if !path_is_older_than(&path, now, legacy_ttl) {
+                    continue;
+                }
+            }
         }
         match fs::remove_dir_all(&path) {
             Ok(()) => removed += 1,
@@ -348,20 +410,8 @@ fn pid_i32_is_alive(pid: i32) -> bool {
     i32_to_pid(pid).is_some_and(pid_is_alive)
 }
 
-fn pid_i32_is_alive_same_user(pid: i32) -> bool {
-    i32_to_pid(pid)
-        .filter(|pid| current_user_owns_process(*pid))
-        .is_some_and(pid_is_alive)
-}
-
 fn i32_to_pid(pid: i32) -> Option<u32> {
     (pid > 0).then_some(pid as u32)
-}
-
-fn system_time_to_unix_ms(time: SystemTime) -> Option<u64> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 fn path_is_older_than(path: &Path, now: SystemTime, duration: Duration) -> bool {
@@ -394,18 +444,37 @@ mod tests {
         }
     }
 
-    fn write_pid(path: &Path, pid: i32) {
-        #[derive(serde::Serialize)]
-        struct PidRecordFixture {
-            pid: i32,
-            workload_pid: Option<i32>,
-            start_time: SystemTime,
-        }
+    #[derive(serde::Serialize)]
+    struct PidRecordFixture {
+        pid: i32,
+        workload_pid: Option<i32>,
+        os_start_time_unix_ms: Option<u64>,
+        workload_os_start_time_unix_ms: Option<u64>,
+    }
 
+    fn write_pid(path: &Path, pid: i32) {
         let payload = toml::to_string(&PidRecordFixture {
             pid,
             workload_pid: None,
-            start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
+        })
+        .expect("serialize pid file");
+        fs::write(path, payload).expect("write pid file");
+    }
+
+    fn write_pid_with_os_start(
+        path: &Path,
+        pid: i32,
+        os_start_time_unix_ms: Option<u64>,
+        workload_pid: Option<i32>,
+        workload_os_start_time_unix_ms: Option<u64>,
+    ) {
+        let payload = toml::to_string(&PidRecordFixture {
+            pid,
+            workload_pid,
+            os_start_time_unix_ms,
+            workload_os_start_time_unix_ms,
         })
         .expect("serialize pid file");
         fs::write(path, payload).expect("write pid file");
@@ -453,13 +522,6 @@ mod tests {
 
     #[test]
     fn sweep_removes_pid_file_when_start_time_mismatches_live_process() {
-        #[derive(serde::Serialize)]
-        struct PidRecordFixture {
-            pid: i32,
-            workload_pid: Option<i32>,
-            start_time: SystemTime,
-        }
-
         let temp = tempdir().expect("tempdir");
         let options = options(temp.path());
         fs::create_dir_all(&options.run_dir).expect("run dir");
@@ -468,17 +530,79 @@ mod tests {
             .args(["-c", "sleep 60"])
             .spawn()
             .expect("spawn child");
-        let payload = toml::to_string(&PidRecordFixture {
-            pid: child.id() as i32,
-            workload_pid: None,
-            start_time: SystemTime::UNIX_EPOCH,
-        })
-        .expect("serialize pid file");
-        fs::write(&pid_path, payload).expect("write pid file");
+        // Stamp a recorded start_time that cannot match the live child's
+        // (mtime=1ms is unambiguously stale relative to any spawn). On
+        // platforms without OS start_time support this falls back to
+        // "alive + same user" which would *keep* the record — that's
+        // intentional fail-open for legacy/unsupported platforms.
+        write_pid_with_os_start(&pid_path, child.id() as i32, Some(1), None, None);
 
         let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
         let _ = child.kill();
         let _ = child.wait();
+
+        // Only platforms with start_time support exercise this path.
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            assert_eq!(report.removed_pid_files, 1);
+            assert!(!pid_path.exists());
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn sweep_keeps_live_non_self_pid_with_matching_os_start_time() {
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+        let pid_path = options.run_dir.join("live-non-self.pid");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .expect("spawn child");
+        // Allow the OS to register the child before querying its start_time.
+        std::thread::sleep(Duration::from_millis(50));
+        let live_start =
+            process_start_time_unix_ms(child.id()).expect("os start_time available on macOS/Linux");
+        write_pid_with_os_start(&pid_path, child.id() as i32, Some(live_start), None, None);
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(report.removed_pid_files, 0);
+        assert!(pid_path.exists());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn sweep_removes_pid_file_when_workload_start_time_mismatches() {
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+        let pid_path = options.run_dir.join("workload-reused.pid");
+        let self_pid = std::process::id();
+        let mut workload = std::process::Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .expect("spawn workload");
+        // Main pid: a clearly dead PID so it cannot save the record.
+        // Workload pid: a real live process but with a bogus start_time so
+        // the workload arm of pid_record_is_alive treats it as reused.
+        write_pid_with_os_start(
+            &pid_path,
+            999_999_999,
+            Some(0),
+            Some(workload.id() as i32),
+            Some(1),
+        );
+        // Sanity: the workload PID *is* alive, so the test exercises the
+        // start_time mismatch path, not the dead-pid short-circuit.
+        assert!(pid_is_alive(workload.id()));
+        assert_ne!(workload.id(), self_pid);
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+        let _ = workload.kill();
+        let _ = workload.wait();
 
         assert_eq!(report.removed_pid_files, 1);
         assert!(!pid_path.exists());
@@ -536,6 +660,7 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            orchestration_services: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-dead.json");
         fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");
@@ -550,7 +675,10 @@ mod tests {
     #[test]
     fn sweep_removes_stale_run_dir_with_dead_owner_only() {
         let temp = tempdir().expect("tempdir");
-        let options = options(temp.path());
+        // now is +25h: past 1× ttl (so dead-owner runs sweep) but within
+        // 2× ttl (so ambiguous runs are still preserved).
+        let mut options = options(temp.path());
+        options.now = SystemTime::now() + Duration::from_secs(25 * 60 * 60);
         fs::create_dir_all(&options.runs_dir).expect("runs dir");
         let dead_run = options.runs_dir.join("run-dead");
         let ambiguous_run = options.runs_dir.join("run-ambiguous");
@@ -563,5 +691,115 @@ mod tests {
         assert_eq!(report.removed_run_dirs, 1);
         assert!(!dead_run.exists());
         assert!(ambiguous_run.exists());
+    }
+
+    #[test]
+    fn sweep_removes_legacy_run_dir_after_double_ttl() {
+        let temp = tempdir().expect("tempdir");
+        let mut options = options(temp.path());
+        // 49h = past 2× ttl (48h) with margin so the dir's real-time
+        // mtime jitter doesn't push it below the threshold.
+        options.now = SystemTime::now() + Duration::from_secs(49 * 60 * 60);
+        fs::create_dir_all(&options.runs_dir).expect("runs dir");
+        let legacy_run = options.runs_dir.join("run-legacy");
+        fs::create_dir_all(&legacy_run).expect("legacy run");
+        // No session.json — ambiguous owner. Past 2× ttl → swept.
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        assert_eq!(report.removed_run_dirs, 1);
+        assert!(!legacy_run.exists());
+    }
+
+    #[test]
+    fn sweep_keeps_legacy_run_dir_within_double_ttl() {
+        let temp = tempdir().expect("tempdir");
+        let mut options = options(temp.path());
+        // 30h: past 1× ttl but inside 2× ttl (48h).
+        options.now = SystemTime::now() + Duration::from_secs(30 * 60 * 60);
+        fs::create_dir_all(&options.runs_dir).expect("runs dir");
+        let legacy_run = options.runs_dir.join("run-legacy-young");
+        fs::create_dir_all(&legacy_run).expect("legacy run");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        assert_eq!(report.removed_run_dirs, 0);
+        assert!(legacy_run.exists());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn sweep_removes_socket_when_pid_record_has_mismatched_start_time() {
+        // Simulates PID reuse: socket and matching .pid record name PID
+        // 999_999_999 (currently dead). Live socket-bound process check
+        // would have considered it dead and the grace check would have
+        // taken over; here we make sure the cross-reference does not
+        // resurrect the socket via `pid_is_alive` against a reused PID.
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+        let pid_path = options.run_dir.join("ato-desktop-session-999999999.pid");
+        let sock_path = options.run_dir.join("ato-desktop-999999999.sock");
+        write_pid_with_os_start(&pid_path, 999_999_999, Some(1), None, None);
+        fs::write(&sock_path, "").expect("sock");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        // The .pid is dead (pid 999_999_999 isn't alive) → swept.
+        // The socket falls through to grace and is also old enough → swept.
+        assert!(report.removed_pid_files >= 1);
+        assert_eq!(report.removed_sockets, 1);
+        assert!(!pid_path.exists());
+        assert!(!sock_path.exists());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn sweep_removes_socket_when_matching_pid_record_is_a_pid_reuse_imposter() {
+        // Live OS process P holds PID X. A stale .pid record names PID X
+        // with a wrong recorded start_time (PID reuse imposter). Socket
+        // for PID X should NOT be saved by `pid_is_alive(X)` because the
+        // matching .pid record's start_time check fails.
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+        let pid_path = options
+            .run_dir
+            .join(format!("ato-desktop-session-{pid}.pid"));
+        let sock_path = options.run_dir.join(format!("ato-desktop-{pid}.sock"));
+        // Recorded os_start_time = 1ms (clearly different from live).
+        write_pid_with_os_start(&pid_path, pid as i32, Some(1), None, None);
+        fs::write(&sock_path, "").expect("sock");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // .pid is treated as dead by start_time mismatch → swept.
+        // socket loses its cross-reference → falls to grace → swept.
+        assert_eq!(report.removed_sockets, 1);
+        assert!(!sock_path.exists());
+    }
+
+    #[test]
+    fn sweep_removes_orphan_socket_without_matching_pid_record_after_grace() {
+        // No matching ato-desktop-session-<pid>.pid record. Socket falls
+        // through to grace check; with `now = +48h` it is unambiguously
+        // older than grace (60s) so it gets swept.
+        let temp = tempdir().expect("tempdir");
+        let options = options(temp.path());
+        fs::create_dir_all(&options.run_dir).expect("run dir");
+        let sock_path = options.run_dir.join("ato-desktop-999999999.sock");
+        fs::write(&sock_path, "").expect("sock");
+
+        let report = sweep_startup_runtime_artifacts(&options).expect("sweep");
+
+        assert_eq!(report.removed_sockets, 1);
+        assert!(!sock_path.exists());
     }
 }
