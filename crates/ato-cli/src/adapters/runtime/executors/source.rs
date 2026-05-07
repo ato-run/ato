@@ -4,14 +4,16 @@ use anyhow::{Context, Result};
 use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::debug;
 
 use capsule_core::common::paths::{ato_cache_dir, workspace_artifacts_dir};
@@ -36,6 +38,14 @@ use capsule_core::python_runtime::{
 };
 use capsule_core::router::ManifestData;
 use capsule_core::runtime_config;
+
+const NACELLE_MANIFEST_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NacelleManifestOwner {
+    pid: u32,
+    start_time_unix_ms: Option<u64>,
+}
 
 pub struct CapsuleProcess {
     pub child: Child,
@@ -909,20 +919,147 @@ fn write_normalized_manifest(
     // perturb the source_tree_hash observation. The file lifetime is still
     // managed via cleanup_paths.
     let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+    sweep_stale_nacelle_manifests_on_startup_best_effort(&nacelle_dir);
     fs::create_dir_all(&nacelle_dir).with_context(|| {
         format!(
             "Failed to create nacelle manifest dir {}",
             nacelle_dir.display()
         )
     })?;
-    let path = nacelle_dir.join(format!(
-        "nacelle-{}-{}.toml",
-        std::process::id(),
-        rand::thread_rng().gen::<u64>()
+    let owner = current_nacelle_manifest_owner();
+    let path = nacelle_dir.join(format_nacelle_manifest_file_name(
+        owner,
+        rand::thread_rng().gen::<u64>(),
     ));
     fs::write(&path, toml::to_string(&toml::Value::Table(manifest))?)
         .with_context(|| format!("Failed to write normalized manifest: {}", path.display()))?;
     Ok(path)
+}
+
+fn sweep_stale_nacelle_manifests_on_startup_best_effort(dir: &Path) {
+    static SWEPT_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+    let swept_dirs = SWEPT_DIRS.get_or_init(|| Mutex::new(HashSet::new()));
+    let should_sweep = {
+        let mut swept_dirs = swept_dirs
+            .lock()
+            .expect("nacelle sweep dirs mutex poisoned");
+        swept_dirs.insert(dir.to_path_buf())
+    };
+    if !should_sweep {
+        return;
+    }
+
+    if let Err(error) =
+        sweep_stale_nacelle_manifests_in(dir, SystemTime::now(), NACELLE_MANIFEST_TTL)
+    {
+        debug!(dir = %dir.display(), error = %error, "failed to sweep stale nacelle manifests");
+    }
+}
+
+fn sweep_stale_nacelle_manifests_in(dir: &Path, now: SystemTime, ttl: Duration) -> Result<usize> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut removed = 0;
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("Failed to read nacelle manifest dir: {}", dir.display()))?
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                debug!(error = %error, "skipping unreadable nacelle manifest entry");
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !is_nacelle_manifest_path(&path) || nacelle_manifest_owner_is_alive(&path) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "skipping nacelle manifest with unreadable metadata");
+                continue;
+            }
+        };
+        if !metadata.is_file() || !nacelle_manifest_is_stale(&metadata, now, ttl) {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                debug!(path = %path.display(), error = %error, "failed to remove stale nacelle manifest")
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn is_nacelle_manifest_path(path: &Path) -> bool {
+    parse_nacelle_manifest_owner(path).is_some()
+}
+
+fn nacelle_manifest_is_stale(metadata: &std::fs::Metadata, now: SystemTime, ttl: Duration) -> bool {
+    let Some(modified) = metadata.modified().ok() else {
+        return false;
+    };
+    now.duration_since(modified)
+        .map(|age| age >= ttl)
+        .unwrap_or(false)
+}
+
+fn current_nacelle_manifest_owner() -> NacelleManifestOwner {
+    NacelleManifestOwner {
+        pid: std::process::id(),
+        start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
+    }
+}
+
+fn format_nacelle_manifest_file_name(owner: NacelleManifestOwner, nonce: u64) -> String {
+    let start_time = owner.start_time_unix_ms.unwrap_or(0);
+    format!("nacelle-{}-{}-{}.toml", owner.pid, start_time, nonce)
+}
+
+fn parse_nacelle_manifest_owner(path: &Path) -> Option<NacelleManifestOwner> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_prefix("nacelle-")?.strip_suffix(".toml")?;
+    let mut parts = stem.split('-');
+    let pid = parts.next()?.parse().ok()?;
+    let second = parts.next()?;
+    let third = parts.next();
+    if let Some(_nonce) = third {
+        let start_time_unix_ms = second.parse::<u64>().ok().filter(|value| *value > 0);
+        Some(NacelleManifestOwner {
+            pid,
+            start_time_unix_ms,
+        })
+    } else {
+        Some(NacelleManifestOwner {
+            pid,
+            start_time_unix_ms: None,
+        })
+    }
+}
+
+fn nacelle_manifest_owner_is_alive(path: &Path) -> bool {
+    let Some(owner) = parse_nacelle_manifest_owner(path) else {
+        return false;
+    };
+    if owner.pid == 0 || !ato_session_core::process::pid_is_alive(owner.pid) {
+        return false;
+    }
+
+    let Some(expected_start_time) = owner.start_time_unix_ms else {
+        return false;
+    };
+
+    ato_session_core::process::process_start_time_unix_ms(owner.pid)
+        .is_some_and(|live_start_time| live_start_time == expected_start_time)
 }
 
 fn python_runtime_selector_env(
@@ -1206,8 +1343,32 @@ fn extract_exit_code(metrics: &capsule_core::UnifiedMetrics) -> i32 {
 mod tests {
     use super::*;
     use crate::ipc::inject::{IpcContext, SessionActivationMode};
+    use filetime::{set_file_mtime, FileTime};
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn plan_from_manifest(dir: &tempfile::TempDir, manifest: &str, target: &str) -> ManifestData {
         let manifest_path = dir.path().join("capsule.toml");
@@ -1525,6 +1686,132 @@ mod tests {
             .any(|(key, _)| key == "PYTHONDONTWRITEBYTECODE");
 
         assert!(!has_var, "PYTHONDONTWRITEBYTECODE must not be set");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_removes_stale_files() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let stale = dir.join("nacelle-123-456.toml");
+        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep stale nacelle manifests");
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_preserves_fresh_files() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let fresh = dir.join("nacelle-123-789.toml");
+        fs::write(&fresh, "schema_version = \"0.3\"\n").expect("write fresh manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep fresh nacelle manifests");
+
+        assert_eq!(removed, 0);
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_preserves_active_process_manifest() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let active_manifest = dir.join(format_nacelle_manifest_file_name(
+            current_nacelle_manifest_owner(),
+            42,
+        ));
+        fs::write(&active_manifest, "schema_version = \"0.3\"\n").expect("write active manifest");
+        set_file_mtime(&active_manifest, FileTime::from_unix_time(1, 0))
+            .expect("age active manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep active nacelle manifests");
+
+        assert_eq!(removed, 0);
+        assert!(active_manifest.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_rejects_pid_reuse_when_start_time_mismatches() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let stale = dir.join(format!("nacelle-{}-1-77.toml", std::process::id()));
+        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
+        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep mismatched active nacelle manifests");
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn write_normalized_manifest_sweeps_stale_pool_before_new_write() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&nacelle_dir).expect("create nacelle manifest dir");
+        let stale = nacelle_dir.join("nacelle-123-stale.toml");
+        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
+        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale manifest");
+
+        let plan = plan_from_manifest(
+            &temp,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).expect("write manifest");
+
+        assert!(
+            !stale.exists(),
+            "stale manifest should be swept before write"
+        );
+        assert!(normalized_path.exists());
     }
 
     #[test]
