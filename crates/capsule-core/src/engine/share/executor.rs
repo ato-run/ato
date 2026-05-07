@@ -151,8 +151,10 @@ fn share_workspace_dir(input: &str) -> Result<PathBuf> {
     let mut hasher = DefaultHasher::new();
     input.hash(&mut hasher);
     let hash = hasher.finish();
-    Ok(crate::common::paths::ato_path_or_workspace_tmp("apps/share-runs")
-        .join(format!("{hash:016x}")))
+    Ok(
+        crate::common::paths::ato_path_or_workspace_tmp("apps/share-runs")
+            .join(format!("{hash:016x}")),
+    )
 }
 
 /// Run `ato decap <input> --into <workspace>`.

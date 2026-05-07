@@ -302,8 +302,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
             reporter
                 .notify(format!("🏗️  Build [{}]: {}", target_label, command))
                 .await?;
-            let extra_path =
-                ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            let extra_path = ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
             run_lifecycle_shell_command(
                 &target_plan,
                 launch_ctx,
@@ -449,17 +448,21 @@ fn fallback_provision_command_from_manifest(
     let Some(target) = targets.named.get(target_label) else {
         return Ok(None);
     };
-    let driver = target.driver.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let driver = target
+        .driver
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let runtime = target.runtime.trim().to_ascii_lowercase();
     if runtime == "web" && driver == "static" {
         return Ok(None);
     }
     match driver.as_str() {
         "node" => provision_command_from_node_importer(working_dir),
-        "python" => provision_command_from_python_importer(
-            working_dir,
-            target.runtime_version.as_deref(),
-        ),
+        "python" => {
+            provision_command_from_python_importer(working_dir, target.runtime_version.as_deref())
+        }
         "native" => provision_command_from_cargo_importer(working_dir),
         _ => Ok(None),
     }
@@ -587,10 +590,9 @@ fn run_lifecycle_shell_command(
     // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
     // (npm:pkg) that store runtime_version in capsule.toml are handled correctly —
     // `ensure_node_binary` alone requires capsule.lock.json which providers don't create.
-    let managed_node_dir =
-        runtime_manager::ensure_node_binary_with_authority(plan, None)
-            .ok()
-            .and_then(|node_bin| node_bin.parent().map(Path::to_path_buf));
+    let managed_node_dir = runtime_manager::ensure_node_binary_with_authority(plan, None)
+        .ok()
+        .and_then(|node_bin| node_bin.parent().map(Path::to_path_buf));
     let mut path_prefix_dirs: Vec<PathBuf> = Vec::new();
     if let Some(extra) = extra_path {
         path_prefix_dirs.push(extra.to_path_buf());
