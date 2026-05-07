@@ -1256,9 +1256,28 @@ impl DesktopShell {
         // mandatory: `secrets_for_capsule(handle)` filters by grant,
         // so without it the retry would launch with an empty
         // `ATO_SECRET_*` env and trip the same E103.
+        //
+        // #57: surface persist failures to the activity bus instead of
+        // silently swallowing them — without this, the UI would proceed
+        // to "relaunching..." while the secret was never written and
+        // the next launch would trip E103 again with no explanation.
         for (key, value) in secret_writes {
-            self.state.add_secret(key.clone(), value);
-            self.state.grant_secret_to_capsule(&handle, &key);
+            if let Err(error) = self.state.add_secret(key.clone(), value) {
+                self.state.push_activity(
+                    crate::state::ActivityTone::Error,
+                    format!("Failed to save secret '{key}': {error}"),
+                );
+                return;
+            }
+            if let Err(error) = self.state.grant_secret_to_capsule(&handle, &key) {
+                self.state.push_activity(
+                    crate::state::ActivityTone::Error,
+                    format!(
+                        "Failed to grant secret '{key}' to {handle}: {error}"
+                    ),
+                );
+                return;
+            }
         }
 
         // Persist non-secret config under the same handle. There's

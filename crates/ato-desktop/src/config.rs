@@ -610,26 +610,108 @@ pub fn load_secrets() -> SecretStore {
     }
 }
 
-pub fn save_secrets(store: &SecretStore) {
-    let Some(path) = secrets_path() else {
-        warn!("Cannot determine home directory, secrets not saved");
-        return;
-    };
+/// Distinct error type so the UI can surface a precise reason — "your
+/// secret was not saved" is the visible failure, "could not encode JSON"
+/// vs "could not write file" vs "could not chmod 0600" are diagnostic.
+#[derive(Debug, thiserror::Error)]
+pub enum SaveSecretsError {
+    #[error("home directory could not be resolved; secrets not saved")]
+    HomeUnresolvable,
+    #[error("failed to create secret store directory {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to encode secret store as JSON: {0}")]
+    Encode(#[from] serde_json::Error),
+    #[error("failed to write secret store {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to set 0600 permissions on {path}: {source}")]
+    Chmod {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Persist the secret store to `~/.ato/secrets.json` (#55, #57).
+///
+/// On unix the file is written with mode `0o600` (owner read/write only)
+/// via `OpenOptions::mode` so a fresh write never goes through a
+/// world-readable phase, plus an explicit `set_permissions` after for
+/// defense in depth and for files that already exist with looser modes.
+///
+/// Errors are returned, not swallowed, so callers (`AppState::add_secret`
+/// etc.) can surface failure to the UI instead of silently claiming
+/// success while the secret was never persisted (#57).
+pub fn save_secrets(store: &SecretStore) -> Result<(), SaveSecretsError> {
+    let path = secrets_path().ok_or(SaveSecretsError::HomeUnresolvable)?;
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent).map_err(|source| SaveSecretsError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
 
-    match serde_json::to_string_pretty(store) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                warn!(path = %path.display(), error = %e, "Failed to write secret store");
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "Failed to serialize secret store");
-        }
-    }
+    let json = serde_json::to_string_pretty(store)?;
+
+    write_secret_file(&path, json.as_bytes())?;
+    info!(path = %path.display(), "Saved secret store");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), SaveSecretsError> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // Mode 0o600 = owner-only read/write. `OpenOptions::mode` is honored
+    // when the file is being CREATED; if the file already exists with a
+    // looser mode we still need the explicit set_permissions below.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|source| SaveSecretsError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(bytes)
+        .map_err(|source| SaveSecretsError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    // Defense in depth: re-apply 0o600 even when the file pre-existed
+    // with mode 0o644 (the bug this fixes — old secrets.json from before
+    // this change carried world-readable perms).
+    use std::os::unix::fs::PermissionsExt as _;
+    let perms = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, perms).map_err(|source| SaveSecretsError::Chmod {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), SaveSecretsError> {
+    // Windows ACL-based permissioning is out of scope for v0.5.0 — the
+    // file inherits its parent directory's ACL. The error type is the
+    // same shape so callers don't branch on platform.
+    std::fs::write(path, bytes).map_err(|source| SaveSecretsError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
 }
 
 // ── Capsule Config Store (non-secret) ─────────────────────────────────────────
