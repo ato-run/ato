@@ -678,14 +678,8 @@ mod tests {
             .set(&a_key, "auth-token".into(), None, None, None)
             .unwrap();
 
-        assert!(dir
-            .path()
-            .join("credentials/secrets/default.age")
-            .exists());
-        assert!(dir
-            .path()
-            .join("credentials/auth/session.age")
-            .exists());
+        assert!(dir.path().join("credentials/secrets/default.age").exists());
+        assert!(dir.path().join("credentials/auth/session.age").exists());
         assert_eq!(backend.get(&s_key).unwrap(), Some("secret-foo".into()));
         assert_eq!(backend.get(&a_key).unwrap(), Some("auth-token".into()));
     }
