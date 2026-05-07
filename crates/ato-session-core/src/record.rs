@@ -46,6 +46,20 @@ pub struct StoredSessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_contracts: Option<StoredDependencyContracts>,
 
+    /// Embedded `[services]` orchestration snapshot for crash recovery
+    /// (#73 PR-D, closes #28 phase 2). For orchestration capsules, the
+    /// services started by `ServicePhaseCoordinator` are persisted here so
+    /// `ato app session stop <id>` can find their container ids / pids
+    /// after the wrapper process has exited. `None` for non-orchestration
+    /// capsules. Distinct from `dependency_contracts`: `dependency_contracts`
+    /// represents top-level `[dependencies.<alias>]` providers (one per
+    /// alias, started by `dependency_runtime`); `orchestration_services`
+    /// represents `[services.<name>]` siblings inside an orchestration
+    /// capsule (one per service, started by the OCI/source orchestrator).
+    /// Both can coexist on a single record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration_services: Option<StoredOrchestrationServices>,
+
     // App Session Materialization v0 (RFC: APP_SESSION_MATERIALIZATION).
     // All three are `Option` for forward compatibility with schema=1
     // records; a record missing any of them is treated as
@@ -113,6 +127,50 @@ pub struct StoredDependencyProvider {
     pub log_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_export_keys: Vec<String>,
+}
+
+/// `[services]` orchestration graph subset persisted alongside the
+/// session record (#73 PR-D, closes #28 phase 2).
+///
+/// `services` is in topological start order — index 0 is the first
+/// service `ServicePhaseCoordinator` brought up, index N-1 is the last.
+/// `stop_session` iterates this in reverse to tear services down in
+/// reverse-topological order. (Within a single Vec position the OS-level
+/// stop is independent, so concurrent reverse iteration is also valid.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredOrchestrationServices {
+    /// PID of the wrapper process that materialized the orchestration
+    /// graph. Mirrors `StoredDependencyContracts.consumer_pid` for
+    /// consistency with the dep-contract subset; needed by `stop_session`
+    /// to validate that this record was written by a still-known wrapper
+    /// (PID-reuse defense).
+    pub wrapper_pid: i32,
+    /// Services in topological start order.
+    #[serde(default)]
+    pub services: Vec<StoredOrchestrationService>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredOrchestrationService {
+    /// Service name from the manifest (`[services.<name>]`).
+    pub name: String,
+    /// Resolved target label (e.g. `"db"`, `"web"`).
+    pub target_label: String,
+    /// PID for `ResolvedServiceRuntime::Managed` (local) services. `None`
+    /// for OCI-runtime services, which are addressed by `container_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_pid: Option<i32>,
+    /// Container id for `ResolvedServiceRuntime::Oci` services. `None`
+    /// for managed/local services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    /// Host-side port mapping (host_port -> container_port) for OCI
+    /// services. Empty for managed services.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub host_ports: std::collections::BTreeMap<u16, u16>,
+    /// Port the service publishes inside its own runtime, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_port: Option<u16>,
 }
 
 #[cfg(test)]
@@ -227,6 +285,7 @@ mod tests {
                     runtime_export_keys: vec!["DATABASE_URL".to_string()],
                 }],
             }),
+            orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("a".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_000_000),
@@ -245,5 +304,106 @@ mod tests {
                 .map(|provider| provider.alias.as_str()),
             Some("db")
         );
+        assert!(parsed.orchestration_services.is_none());
+    }
+
+    /// PR-D round-trip: a record carrying `orchestration_services` (the
+    /// `[services]` graph subset) survives serde unchanged, both for OCI
+    /// services (with `container_id` + `host_ports`) and managed services
+    /// (with `local_pid`). Both can coexist with `dependency_contracts`
+    /// on a single record.
+    #[test]
+    fn schema_v2_round_trips_orchestration_services_alongside_dep_contracts() {
+        use std::collections::BTreeMap;
+        let mut host_ports = BTreeMap::new();
+        host_ports.insert(54320u16, 5432u16);
+        let original = StoredSessionInfo {
+            session_id: "ato-desktop-session-77".to_string(),
+            handle: "publisher/orch".to_string(),
+            normalized_handle: "publisher/orch".to_string(),
+            canonical_handle: Some("publisher/orch".to_string()),
+            trust_state: TrustState::Trusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: make_runtime(),
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 7777,
+            log_path: "/tmp/x.log".to_string(),
+            manifest_path: "/tmp/manifest.toml".to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: Some(WebSessionDisplay {
+                local_url: "http://127.0.0.1:5173/".to_string(),
+                healthcheck_url: "http://127.0.0.1:5173/".to_string(),
+                served_by: "node".to_string(),
+            }),
+            terminal: None,
+            service: None,
+            dependency_contracts: None,
+            orchestration_services: Some(StoredOrchestrationServices {
+                wrapper_pid: 7777,
+                services: vec![
+                    StoredOrchestrationService {
+                        name: "db".to_string(),
+                        target_label: "db".to_string(),
+                        local_pid: None,
+                        container_id: Some("c0ffee".to_string()),
+                        host_ports,
+                        published_port: Some(5432),
+                    },
+                    StoredOrchestrationService {
+                        name: "web".to_string(),
+                        target_label: "web".to_string(),
+                        local_pid: Some(8888),
+                        container_id: None,
+                        host_ports: BTreeMap::new(),
+                        published_port: Some(5173),
+                    },
+                ],
+            }),
+            schema_version: Some(SCHEMA_VERSION_V2),
+            launch_digest: Some("b".repeat(64)),
+            process_start_time_unix_ms: Some(1_700_000_001_000),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
+
+        let services = parsed
+            .orchestration_services
+            .as_ref()
+            .expect("orchestration_services round-trips");
+        assert_eq!(services.wrapper_pid, 7777);
+        assert_eq!(services.services.len(), 2);
+        // Insertion order preserved (= reverse-topological at teardown).
+        assert_eq!(services.services[0].name, "db");
+        assert_eq!(services.services[0].container_id.as_deref(), Some("c0ffee"));
+        assert_eq!(services.services[0].host_ports.get(&54320), Some(&5432));
+        assert_eq!(services.services[0].local_pid, None);
+        assert_eq!(services.services[1].name, "web");
+        assert_eq!(services.services[1].local_pid, Some(8888));
+        assert_eq!(services.services[1].container_id, None);
+
+        assert!(parsed.dependency_contracts.is_none());
+    }
+
+    /// A schema=1 record with orchestration_services explicitly set to null
+    /// (or absent) must continue to deserialize cleanly.
+    #[test]
+    fn schema_v1_orchestration_services_is_optional() {
+        let json_without = r#"{
+            "session_id": "x", "handle": "h", "normalized_handle": "h",
+            "canonical_handle": null, "trust_state": "untrusted",
+            "source": null, "restricted": false, "snapshot": null,
+            "runtime": {"target_label": "m", "runtime": "node",
+                        "driver": null, "language": null, "port": null},
+            "display_strategy": "web_url",
+            "pid": 1, "log_path": "/x", "manifest_path": "/y",
+            "target_label": "m", "notes": [],
+            "guest": null, "web": null, "terminal": null, "service": null
+        }"#;
+        let parsed: StoredSessionInfo = serde_json::from_str(json_without).expect("parse");
+        assert!(parsed.orchestration_services.is_none());
     }
 }
