@@ -1335,10 +1335,19 @@ impl AppState {
         crate::config::save_config(&self.config);
     }
 
-    /// Add or update a secret and persist to disk.
-    pub fn add_secret(&mut self, key: String, value: String) {
+    /// Add or update a secret and persist to disk (#55, #57).
+    ///
+    /// Returns `Err` if the on-disk write failed; callers MUST surface
+    /// this to the user instead of claiming success — the in-memory
+    /// `secret_store` was updated but the persisted file was not, so the
+    /// secret will be lost on next launch.
+    pub fn add_secret(
+        &mut self,
+        key: String,
+        value: String,
+    ) -> Result<(), crate::config::SaveSecretsError> {
         self.secret_store.add_secret(key, value);
-        crate::config::save_secrets(&self.secret_store);
+        crate::config::save_secrets(&self.secret_store)
     }
 
     /// Set or overwrite a single non-secret config value for a
@@ -1373,22 +1382,33 @@ impl AppState {
         self.pending_config = None;
     }
 
-    /// Remove a secret and persist to disk.
-    pub fn remove_secret(&mut self, key: &str) {
+    /// Remove a secret and persist to disk (#57).
+    pub fn remove_secret(
+        &mut self,
+        key: &str,
+    ) -> Result<(), crate::config::SaveSecretsError> {
         self.secret_store.remove_secret(key);
-        crate::config::save_secrets(&self.secret_store);
+        crate::config::save_secrets(&self.secret_store)
     }
 
-    /// Grant a secret to a capsule and persist.
-    pub fn grant_secret_to_capsule(&mut self, capsule_handle: &str, key: &str) {
+    /// Grant a secret to a capsule and persist (#57).
+    pub fn grant_secret_to_capsule(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), crate::config::SaveSecretsError> {
         self.secret_store.grant_secret(capsule_handle, key);
-        crate::config::save_secrets(&self.secret_store);
+        crate::config::save_secrets(&self.secret_store)
     }
 
-    /// Revoke a secret from a capsule and persist.
-    pub fn revoke_secret_from_capsule(&mut self, capsule_handle: &str, key: &str) {
+    /// Revoke a secret from a capsule and persist (#57).
+    pub fn revoke_secret_from_capsule(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), crate::config::SaveSecretsError> {
         self.secret_store.revoke_secret(capsule_handle, key);
-        crate::config::save_secrets(&self.secret_store);
+        crate::config::save_secrets(&self.secret_store)
     }
 
     pub fn focus_command_bar(&mut self) {
