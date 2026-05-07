@@ -605,13 +605,68 @@ pub(crate) struct RunPipelineState {
 pub(crate) struct DependencyContractGuard {
     graph: Option<RunningGraph>,
     lock: DependencyLock,
+    /// Token for the SIGINT teardown hook registered on construction
+    /// (#24). Removed from the registry on normal `Drop` so the hook
+    /// does not run a second time on top of the in-Drop teardown.
+    sigint_token: Option<crate::application::pipeline::cleanup::DepContractTeardownToken>,
 }
 
 impl DependencyContractGuard {
     fn new(graph: RunningGraph, lock: DependencyLock) -> Self {
+        // #24 SIGINT teardown registration. We capture the per-dep
+        // `(pid, state_dir, alias)` tuples — NOT the `RunningGraph`
+        // itself — and run the same teardown the in-process Drop runs.
+        // Capturing pids/state_dirs is enough because
+        // `teardown_reverse_topological` is purely pid-driven and
+        // `sweep_stale_sentinel` is path-driven. If the happy path
+        // wins (normal exit), `unregister_dep_contract_sigint_teardown`
+        // drops this hook before Drop runs the in-process teardown.
+        let sigint_targets: Vec<crate::application::dependency_runtime::TeardownTarget> = graph
+            .deps()
+            .iter()
+            .rev()
+            .map(
+                |dep| crate::application::dependency_runtime::TeardownTarget {
+                    dep: dep.alias.clone(),
+                    pid: dep.child.id() as i32,
+                    state_dir: dep.state_dir.clone(),
+                    needs: Vec::new(),
+                },
+            )
+            .collect();
+        let token = if sigint_targets.is_empty() {
+            None
+        } else {
+            Some(
+                crate::application::pipeline::cleanup::register_dep_contract_sigint_teardown(
+                    move || {
+                        // Best-effort teardown on Ctrl+C. Errors are
+                        // swallowed because we are about to exit
+                        // anyway; the alternative (pretending we
+                        // didn't try) leaves postmaster.pid stale.
+                        let _ =
+                            crate::application::dependency_runtime::teardown_reverse_topological(
+                                sigint_targets.clone(),
+                                // 5s instead of 10s — Ctrl+C means
+                                // the user is waiting; SIGTERM with a
+                                // tight grace then SIGKILL is the
+                                // right balance.
+                                Duration::from_secs(5),
+                            );
+                        for target in &sigint_targets {
+                            let _ =
+                                crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
+                                    &target.state_dir,
+                                );
+                        }
+                    },
+                ),
+            )
+        };
         Self {
             graph: Some(graph),
             lock,
+            sigint_token: token,
         }
     }
 
@@ -624,6 +679,9 @@ impl DependencyContractGuard {
     }
 
     pub(crate) fn shutdown_now(&mut self) {
+        if let Some(token) = self.sigint_token.take() {
+            crate::application::pipeline::cleanup::unregister_dep_contract_sigint_teardown(token);
+        }
         if let Some(graph) = self.graph.take() {
             let _ = graph.teardown(Duration::from_secs(10));
         }
@@ -638,6 +696,13 @@ impl Drop for DependencyContractGuard {
 
 impl DependencyContractGuard {
     pub(crate) fn detach(mut self) {
+        // The SIGINT hook becomes load-bearing AFTER detach: there is
+        // no longer a Drop owner that will tear down the graph, so we
+        // INTENTIONALLY do not unregister the token. If SIGINT arrives
+        // before the detached process exits, the hook reaps providers.
+        // If the detached process exits cleanly later, the hook is a
+        // no-op that hits ESRCH on already-gone pids.
+        let _ = self.sigint_token.take();
         if let Some(graph) = self.graph.take() {
             std::mem::forget(graph);
         }

@@ -154,13 +154,101 @@ fn sigint_journal() -> &'static Mutex<Option<SharedCleanupJournal>> {
 
 /// Called from the ctrlc handler to clean up in-flight run artifacts.
 /// Best-effort: errors are silently ignored so the process can exit cleanly.
+///
+/// Order matters here: dep-contract teardown FIRST (#24 — provider
+/// processes need to die before we touch their state dirs), THEN
+/// pipeline-attempt artifact cleanup (temp dirs etc.).
 pub(crate) fn run_sigint_cleanup() {
+    drain_dep_contract_teardown_hooks();
     let journal = sigint_journal()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .take();
     if let Some(j) = journal {
         j.unwind();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dep-contract SIGINT teardown registry (#24)
+//
+// `process::exit(130)` from the ctrlc handler skips Drop, so the
+// `DependencyContractGuard::Drop` -> `RunningGraph::teardown` path that
+// would normally kill provider/consumer processes is skipped on Ctrl+C.
+// Without this hook, postgres / consumer / intermediate shells survive
+// the parent and the next `ato run` of the same capsule trips on a
+// stale `<PGDATA>/postmaster.pid`.
+//
+// Each `DependencyContractGuard` registers a teardown closure here on
+// creation and removes it on normal Drop. The closure captures only the
+// per-dep `(pid, state_dir, alias)` tuples needed by
+// `teardown_reverse_topological` + `sweep_stale_sentinel` — NOT the
+// `RunningGraph` itself, which is not `Send` in a way the static
+// registry can hold across threads. SIGINT therefore runs the same
+// teardown the Drop path would have run, just from a different code
+// path.
+// ---------------------------------------------------------------------------
+
+type DepContractTeardownHook = Box<dyn FnOnce() + Send + 'static>;
+
+static SIGINT_DEP_CONTRACT_HOOKS: OnceLock<Mutex<Vec<(u64, DepContractTeardownHook)>>> =
+    OnceLock::new();
+static DEP_CONTRACT_HOOK_NEXT_ID: OnceLock<Mutex<u64>> = OnceLock::new();
+
+fn sigint_dep_contract_hooks() -> &'static Mutex<Vec<(u64, DepContractTeardownHook)>> {
+    SIGINT_DEP_CONTRACT_HOOKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn dep_contract_hook_next_id() -> &'static Mutex<u64> {
+    DEP_CONTRACT_HOOK_NEXT_ID.get_or_init(|| Mutex::new(0))
+}
+
+/// Token returned by `register_dep_contract_sigint_teardown` so the
+/// guard can remove its hook on normal Drop (avoiding a double
+/// teardown on the happy path).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DepContractTeardownToken(u64);
+
+/// Register a teardown closure that runs from the SIGINT handler before
+/// `process::exit`. Returns a token the guard uses to deregister on
+/// normal shutdown so the closure does not run twice.
+pub(crate) fn register_dep_contract_sigint_teardown<F>(action: F) -> DepContractTeardownToken
+where
+    F: FnOnce() + Send + 'static,
+{
+    let mut id_guard = dep_contract_hook_next_id()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let id = *id_guard;
+    *id_guard += 1;
+    drop(id_guard);
+
+    let mut hooks = sigint_dep_contract_hooks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    hooks.push((id, Box::new(action)));
+    DepContractTeardownToken(id)
+}
+
+/// Called from `DependencyContractGuard::Drop` on the happy path so
+/// the closure does not run a second time from SIGINT.
+pub(crate) fn unregister_dep_contract_sigint_teardown(token: DepContractTeardownToken) {
+    let mut hooks = sigint_dep_contract_hooks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    hooks.retain(|(id, _)| *id != token.0);
+}
+
+/// Drain and run every registered teardown closure. Called only from
+/// `run_sigint_cleanup`. Safe to call when no hooks are registered.
+fn drain_dep_contract_teardown_hooks() {
+    let mut hooks = sigint_dep_contract_hooks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let drained: Vec<(u64, DepContractTeardownHook)> = std::mem::take(&mut *hooks);
+    drop(hooks);
+    for (_id, hook) in drained {
+        hook();
     }
 }
 
@@ -401,6 +489,51 @@ mod tests {
             status: CleanupActionStatus::Succeeded,
             detail: None,
         }
+    }
+
+    /// #24 SIGINT teardown: a registered dep-contract hook MUST run
+    /// when `run_sigint_cleanup` fires, and MUST NOT run if the guard
+    /// unregistered it on a happy-path Drop.
+    ///
+    /// `#[serial]` because the registry is a process-global static —
+    /// two parallel tests would race each other's hooks.
+    #[test]
+    #[serial_test::serial(sigint_dep_contract_registry)]
+    fn sigint_dep_contract_hook_runs_on_cleanup() {
+        let counter = Arc::new(Mutex::new(0u32));
+        {
+            let counter = Arc::clone(&counter);
+            let _token = super::register_dep_contract_sigint_teardown(move || {
+                *counter.lock().unwrap() += 1;
+            });
+        }
+        // Token is intentionally dropped without unregister — the hook
+        // should still run on SIGINT.
+        super::run_sigint_cleanup();
+        assert_eq!(*counter.lock().unwrap(), 1);
+
+        // Second SIGINT must be a no-op: drain consumed the hook.
+        super::run_sigint_cleanup();
+        assert_eq!(*counter.lock().unwrap(), 1);
+    }
+
+    #[test]
+    #[serial_test::serial(sigint_dep_contract_registry)]
+    fn sigint_dep_contract_hook_does_not_run_after_unregister() {
+        let counter = Arc::new(Mutex::new(0u32));
+        let token = {
+            let counter = Arc::clone(&counter);
+            super::register_dep_contract_sigint_teardown(move || {
+                *counter.lock().unwrap() += 1;
+            })
+        };
+        super::unregister_dep_contract_sigint_teardown(token);
+        super::run_sigint_cleanup();
+        assert_eq!(
+            *counter.lock().unwrap(),
+            0,
+            "unregistered hook must not run on SIGINT"
+        );
     }
 
     #[test]
