@@ -33,7 +33,10 @@ pub(crate) enum ConsentInternalCommands {
     /// Owns: ATO_HOME resolution, parent-dir 0o700, file 0o600,
     /// JSONL append. The desktop must NOT write the consent file
     /// directly — call this command instead.
-    #[command(hide = true, about = "Append an ExecutionPlan consent record (plumbing)")]
+    #[command(
+        hide = true,
+        about = "Append an ExecutionPlan consent record (plumbing)"
+    )]
     ApproveExecutionPlan {
         /// `plan.consent.key.scoped_id`
         #[arg(long)]

@@ -705,7 +705,10 @@ pub(crate) enum Commands {
         command: AppCommands,
     },
 
-    #[command(hide = true, about = "Plumbing surface for trusted shells (e.g. ato-desktop)")]
+    #[command(
+        hide = true,
+        about = "Plumbing surface for trusted shells (e.g. ato-desktop)"
+    )]
     Internal {
         #[command(subcommand)]
         command: crate::cli::InternalCommands,

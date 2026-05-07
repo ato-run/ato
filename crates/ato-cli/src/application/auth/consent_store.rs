@@ -493,14 +493,8 @@ mod tests {
         let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
 
         // First call writes a record.
-        approve_execution_plan_consent(
-            "publisher/app",
-            "1.0.0",
-            "cli",
-            "blake3:aaa",
-            "blake3:bbb",
-        )
-        .expect("first approve");
+        approve_execution_plan_consent("publisher/app", "1.0.0", "cli", "blake3:aaa", "blake3:bbb")
+            .expect("first approve");
         let consent_file = home
             .path()
             .join(".ato")
@@ -515,14 +509,8 @@ mod tests {
 
         // Second call must be a no-op — same identity tuple is already
         // consented.
-        approve_execution_plan_consent(
-            "publisher/app",
-            "1.0.0",
-            "cli",
-            "blake3:aaa",
-            "blake3:bbb",
-        )
-        .expect("second approve");
+        approve_execution_plan_consent("publisher/app", "1.0.0", "cli", "blake3:aaa", "blake3:bbb")
+            .expect("second approve");
         let after_second = std::fs::read_to_string(&consent_file).expect("read consent file");
         assert_eq!(
             after_second.lines().count(),

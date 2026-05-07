@@ -418,12 +418,13 @@ impl AtoError {
                 name: "security_policy_violation",
                 phase: AtoErrorPhase::Execution,
             },
-            Self::ExecutionContractInvalid { .. }
-            | Self::ExecutionPlanConsentRequired { .. } => ErrorKind {
-                code: "E302",
-                name: "execution_contract_invalid",
-                phase: AtoErrorPhase::Execution,
-            },
+            Self::ExecutionContractInvalid { .. } | Self::ExecutionPlanConsentRequired { .. } => {
+                ErrorKind {
+                    code: "E302",
+                    name: "execution_contract_invalid",
+                    phase: AtoErrorPhase::Execution,
+                }
+            }
             Self::RuntimeNotResolved { .. } => ErrorKind {
                 code: "E303",
                 name: "runtime_not_resolved",

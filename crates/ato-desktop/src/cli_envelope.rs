@@ -54,6 +54,46 @@ pub struct MissingEnvDetailsDto {
     pub target: Option<String>,
 }
 
+/// Sentinel value the desktop matches on to route an E302
+/// (`ATO_ERR_EXECUTION_CONTRACT_INVALID`) envelope to the consent
+/// modal flow specifically. Any other E302 still falls through to
+/// the existing fatal-toast path so unrelated execution-contract
+/// errors keep their behaviour.
+pub const CONSENT_REQUIRED_REASON: &str = "execution_plan_consent_required";
+
+/// `details` payload for the E302 sub-shape emitted by
+/// `ato-cli::application::auth::consent_store::require_consent` when
+/// stdin is non-TTY. Carries the full identity tuple needed to round-
+/// trip back through `ato internal consent approve-execution-plan`,
+/// plus a pre-rendered human-readable summary so the desktop can
+/// populate the modal without a second CLI call.
+///
+/// All fields are required on the wire (the CLI emits them
+/// unconditionally), but they are `#[serde(default)]` so a future CLI
+/// that drops one keeps parsing — `consent_required_details` returns
+/// `None` only on shape errors.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+pub struct ConsentRequiredDetailsDto {
+    /// Discriminator: must equal `CONSENT_REQUIRED_REASON`. Older
+    /// E302 envelopes (without this field) are rejected by
+    /// `consent_required_details` so the caller falls through to the
+    /// generic fatal-toast path.
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub scoped_id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub target_label: String,
+    #[serde(default)]
+    pub policy_segment_hash: String,
+    #[serde(default)]
+    pub provisioning_policy_hash: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
 /// Desktop projection of `apps/ato-cli/src/utils/error.rs::AtoErrorEvent`,
 /// the on-the-wire shape for any `AtoExecutionError` under `--json`. The
 /// desktop only deserializes the fields it needs and keeps `details` as
@@ -83,6 +123,35 @@ impl AtoCliErrorEventDto {
     pub fn missing_env_details(&self) -> Option<MissingEnvDetailsDto> {
         let value = self.details.clone()?;
         serde_json::from_value(value).ok()
+    }
+
+    /// Decode `details` as the consent-required shape. Returns `None`
+    /// unless `details.reason == "execution_plan_consent_required"`
+    /// AND every consent-key field is non-empty — both gates protect
+    /// the caller from routing an unrelated E302 to the consent modal.
+    /// Old E302 envelopes (no `reason` field, generic
+    /// `ExecutionContractInvalid`) intentionally yield `None` here so
+    /// they fall through to the existing fatal-toast path.
+    pub fn consent_required_details(&self) -> Option<ConsentRequiredDetailsDto> {
+        let value = self.details.clone()?;
+        let dto: ConsentRequiredDetailsDto = serde_json::from_value(value).ok()?;
+        if dto.reason.as_deref() != Some(CONSENT_REQUIRED_REASON) {
+            return None;
+        }
+        if dto.scoped_id.is_empty()
+            || dto.version.is_empty()
+            || dto.target_label.is_empty()
+            || dto.policy_segment_hash.is_empty()
+            || dto.provisioning_policy_hash.is_empty()
+        {
+            // A consent envelope with empty identity fields is
+            // structurally broken — we can't round-trip it through the
+            // `internal consent approve-execution-plan` plumbing
+            // either way. Treat as "fall back to fatal toast" rather
+            // than render a modal that can't actually be approved.
+            return None;
+        }
+        Some(dto)
     }
 }
 
@@ -211,5 +280,55 @@ mod tests {
         let line = r#"{"level":"fatal","code":"E103","brand_new_field":42,"experimental":{"foo":"bar"},"details":{"missing_schema":[]}}"#;
         let event = parse_cli_error_event(line).expect("must parse despite unknown fields");
         assert_eq!(event.code, "E103");
+    }
+
+    fn fatal_e302_consent_required_line() -> &'static str {
+        r#"{"level":"fatal","code":"ATO_ERR_EXECUTION_CONTRACT_INVALID","name":"execution_contract_invalid","phase":"execution","classification":"execution","message":"ExecutionPlan consent required for this capsule.","retryable":false,"interactive_resolution":true,"resource":"contract","target":"app","hint":"Desktop の承認モーダル...","details":{"reason":"execution_plan_consent_required","scoped_id":"wasedap2p-backend","version":"0.1.0","target_label":"app","policy_segment_hash":"blake3:aaa","provisioning_policy_hash":"blake3:bbb","summary":"Capsule: wasedap2p-backend@0.1.0\nTarget: app"}}"#
+    }
+
+    #[test]
+    fn parses_consent_required_envelope() {
+        let event = parse_cli_error_event(fatal_e302_consent_required_line())
+            .expect("must parse fatal envelope");
+        let details = event
+            .consent_required_details()
+            .expect("consent details present");
+        assert_eq!(details.reason.as_deref(), Some(CONSENT_REQUIRED_REASON));
+        assert_eq!(details.scoped_id, "wasedap2p-backend");
+        assert_eq!(details.version, "0.1.0");
+        assert_eq!(details.target_label, "app");
+        assert_eq!(details.policy_segment_hash, "blake3:aaa");
+        assert_eq!(details.provisioning_policy_hash, "blake3:bbb");
+        assert!(
+            !details.summary.is_empty(),
+            "summary must be carried inline so no second CLI call is needed"
+        );
+    }
+
+    #[test]
+    fn consent_required_details_returns_none_for_unrelated_e302() {
+        // Generic ExecutionContractInvalid (no `reason` discriminator)
+        // must fall through — the desktop's existing fatal-toast
+        // handler keeps owning these.
+        let line = r#"{"level":"fatal","code":"ATO_ERR_EXECUTION_CONTRACT_INVALID","name":"execution_contract_invalid","details":{"field":"some.other.path","service":null}}"#;
+        let event = parse_cli_error_event(line).expect("must parse envelope");
+        assert!(
+            event.consent_required_details().is_none(),
+            "unrelated E302 must NOT route to the consent modal"
+        );
+    }
+
+    #[test]
+    fn consent_required_details_rejects_empty_identity_fields() {
+        // A consent envelope with empty key fields is not actionable
+        // (we can't round-trip it through approve-execution-plan), so
+        // it must fall back to the fatal-toast path rather than open a
+        // modal we can't satisfy.
+        let line = r#"{"level":"fatal","code":"ATO_ERR_EXECUTION_CONTRACT_INVALID","details":{"reason":"execution_plan_consent_required","scoped_id":"","version":"","target_label":"","policy_segment_hash":"","provisioning_policy_hash":"","summary":""}}"#;
+        let event = parse_cli_error_event(line).expect("must parse envelope");
+        assert!(
+            event.consent_required_details().is_none(),
+            "empty identity fields must NOT yield consent details"
+        );
     }
 }
