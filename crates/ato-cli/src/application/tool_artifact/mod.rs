@@ -29,6 +29,7 @@
 pub(crate) mod download;
 pub(crate) mod error;
 pub(crate) mod manifest;
+pub(crate) mod registry;
 pub(crate) mod store;
 pub(crate) mod unpack;
 
@@ -44,16 +45,28 @@ pub use download::{Downloader, ReqwestDownloader};
 pub use error::ToolArtifactError;
 #[allow(unused_imports)]
 pub use manifest::{host_platform, ToolArtifactManifest};
+#[allow(unused_imports)]
+pub use registry::{known_tool_ids, well_known_tool_artifact};
 
 /// Output of [`resolve_tool_artifact`]. Carries everything the
 /// orchestrator needs to wire `ATO_TOOL_*` env vars and everything the
 /// receipt builder needs to record what was actually used.
+///
+/// The orchestrator currently consumes only `root`/`bin_dir`/`lib_dir`/
+/// `share_dir`/`provides`. `version`/`platform`/`url`/`sha256` are kept
+/// on the struct for the receipt builder (a follow-up to #119) — the
+/// allow attributes acknowledge that they have no current consumer
+/// without losing them from the public surface.
 #[derive(Debug, Clone)]
 pub struct ResolvedToolArtifact {
     pub name: String,
+    #[allow(dead_code)]
     pub version: String,
+    #[allow(dead_code)]
     pub platform: String,
+    #[allow(dead_code)]
     pub url: String,
+    #[allow(dead_code)]
     pub sha256: String,
     /// Top of the unpacked tree on disk.
     pub root: PathBuf,
@@ -134,6 +147,93 @@ pub fn resolve_tool_artifact(
         provides_resolved,
         false,
     ))
+}
+
+/// Resolve every tool ID in `tool_ids` against the built-in registry,
+/// install each via [`resolve_tool_artifact`], and return the
+/// `ATO_TOOL_*` env map that the orchestrator should merge into the
+/// provider's spawn env.
+///
+/// Env keys produced per resolved artifact (all uppercased):
+///
+/// - `ATO_TOOL_<NAME>_ROOT`        — top of the unpacked tree
+/// - `ATO_TOOL_<NAME>_BIN_DIR`     — `<root>/<layout.bin_dir>`
+/// - `ATO_TOOL_<NAME>_LIB_DIR`     — `<root>/<layout.lib_dir>`
+/// - `ATO_TOOL_<NAME>_SHARE_DIR`   — `<root>/<layout.share_dir>`
+/// - `ATO_TOOL_<COMMAND>`          — one per `provides` entry, absolute path
+///
+/// `<NAME>` is the artifact name uppercased with hyphens replaced by
+/// underscores; `<COMMAND>` is each `provides` entry uppercased the
+/// same way. So `name = "postgresql"` and `provides = ["initdb",
+/// "postgres", "pg_ctl"]` produces `ATO_TOOL_POSTGRESQL_*` plus
+/// `ATO_TOOL_INITDB`, `ATO_TOOL_POSTGRES`, `ATO_TOOL_PG_CTL`.
+///
+/// The function does not set `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH`.
+/// Artifacts are expected to be relocatable via `@loader_path` /
+/// `$ORIGIN`; injecting a library-path env would defeat that and
+/// might also be stripped under macOS hardened runtime. Per-platform
+/// artifact validation owns the relocatability check.
+///
+/// Errors propagate from [`resolve_tool_artifact`]. An unknown tool
+/// ID becomes a [`ToolArtifactError::InvalidArtifactManifest`] with a
+/// reason explaining which IDs are supported on this host.
+pub fn resolve_target_tool_env(
+    tool_ids: &[String],
+    ato_home: &Path,
+    downloader: &dyn Downloader,
+) -> Result<std::collections::BTreeMap<String, String>, ToolArtifactError> {
+    let mut out = std::collections::BTreeMap::new();
+    for id in tool_ids {
+        let manifest = registry::well_known_tool_artifact(id).ok_or_else(|| {
+            let supported = registry::known_tool_ids().join(", ");
+            ToolArtifactError::InvalidArtifactManifest {
+                name: id.clone(),
+                reason: format!(
+                    "tool '{id}' has no pinned artifact for this host platform '{}'; known tool ids: [{}]",
+                    host_platform().unwrap_or("unknown"),
+                    supported
+                ),
+            }
+        })?;
+        let resolved = resolve_tool_artifact(&manifest, ato_home, downloader)?;
+        merge_resolved_into_env(&resolved, &mut out);
+    }
+    Ok(out)
+}
+
+fn merge_resolved_into_env(
+    resolved: &ResolvedToolArtifact,
+    out: &mut std::collections::BTreeMap<String, String>,
+) {
+    let prefix = format!("ATO_TOOL_{}", normalize_env_name(&resolved.name));
+    out.insert(format!("{prefix}_ROOT"), resolved.root.display().to_string());
+    out.insert(
+        format!("{prefix}_BIN_DIR"),
+        resolved.bin_dir.display().to_string(),
+    );
+    out.insert(
+        format!("{prefix}_LIB_DIR"),
+        resolved.lib_dir.display().to_string(),
+    );
+    out.insert(
+        format!("{prefix}_SHARE_DIR"),
+        resolved.share_dir.display().to_string(),
+    );
+    for (cmd, path) in &resolved.provides {
+        let key = format!("ATO_TOOL_{}", normalize_env_name(cmd));
+        out.insert(key, path.display().to_string());
+    }
+}
+
+fn normalize_env_name(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' => c.to_ascii_uppercase(),
+            'A'..='Z' | '0'..='9' | '_' => c,
+            '-' | '.' => '_',
+            other => other,
+        })
+        .collect()
 }
 
 fn enforce_platform(manifest: &ToolArtifactManifest) -> Result<(), ToolArtifactError> {
@@ -384,6 +484,58 @@ mod tests {
                 "downloader must not be called on cache hit"
             ))
         }
+    }
+
+    #[test]
+    fn resolve_target_tool_env_emits_expected_keys() {
+        let tmp_src = tempfile::tempdir().unwrap();
+        let archive_bytes = build_synthetic_tar_gz();
+        let archive_path = tmp_src.path().join("demo.tar.gz");
+        std::fs::write(&archive_path, &archive_bytes).unwrap();
+        let url = format!("test-local://{}", archive_path.display());
+        let manifest = make_manifest(url, sha256_hex(&archive_bytes));
+        // Resolve once via the public API to populate the cache, then
+        // hand-merge to verify the env-key shape (resolve_target_tool_env
+        // only knows registry-tools so it can't accept this synthetic
+        // manifest directly — we test merge_resolved_into_env instead).
+        let ato_home = tempfile::tempdir().unwrap();
+        let resolved = resolve_tool_artifact(&manifest, ato_home.path(), &LocalFileDownloader)
+            .expect("resolve");
+        let mut env = std::collections::BTreeMap::new();
+        merge_resolved_into_env(&resolved, &mut env);
+        assert_eq!(env.get("ATO_TOOL_DEMO_ROOT"), Some(&resolved.root.display().to_string()));
+        assert_eq!(env.get("ATO_TOOL_DEMO_BIN_DIR"), Some(&resolved.bin_dir.display().to_string()));
+        assert_eq!(env.get("ATO_TOOL_DEMO_LIB_DIR"), Some(&resolved.lib_dir.display().to_string()));
+        assert_eq!(env.get("ATO_TOOL_DEMO_SHARE_DIR"), Some(&resolved.share_dir.display().to_string()));
+        assert!(env.contains_key("ATO_TOOL_DEMO"));
+        // No DYLD_LIBRARY_PATH / LD_LIBRARY_PATH leaks from this layer.
+        assert!(!env.contains_key("DYLD_LIBRARY_PATH"));
+        assert!(!env.contains_key("LD_LIBRARY_PATH"));
+    }
+
+    #[test]
+    fn resolve_target_tool_env_rejects_unknown_tool_id() {
+        let ato_home = tempfile::tempdir().unwrap();
+        let err = resolve_target_tool_env(
+            &["does-not-exist".to_string()],
+            ato_home.path(),
+            &LocalFileDownloader,
+        )
+        .expect_err("must reject unknown tool id");
+        match err {
+            ToolArtifactError::InvalidArtifactManifest { name, reason } => {
+                assert_eq!(name, "does-not-exist");
+                assert!(reason.contains("known tool ids"));
+            }
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn normalize_env_name_uppercases_and_sanitizes() {
+        assert_eq!(normalize_env_name("postgresql"), "POSTGRESQL");
+        assert_eq!(normalize_env_name("pg_ctl"), "PG_CTL");
+        assert_eq!(normalize_env_name("foo-bar.baz"), "FOO_BAR_BAZ");
     }
 
     /// Real-world AODD anchor: drives the production [`ReqwestDownloader`]
