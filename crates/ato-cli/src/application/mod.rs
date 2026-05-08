@@ -31,5 +31,10 @@ pub(crate) mod share;
 pub(crate) mod source_inference;
 pub(crate) mod source_inventory;
 pub(crate) mod source_projection;
+// Wired into the orchestrator in the follow-up that lands #120 — until
+// then the resolver is reachable only from its own tests, so silence
+// the "never used" warnings rather than re-export it prematurely.
+#[allow(dead_code)]
+pub(crate) mod tool_artifact;
 pub(crate) mod types;
 pub(crate) mod workspace;
