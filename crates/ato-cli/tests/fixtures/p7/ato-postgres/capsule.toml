@@ -11,7 +11,10 @@
 #   name = "data"
 #
 # This is the P7 fixture form: a local directory exercising the new RFC
-# grammar against the real postgres binary on the host.
+# grammar against the real postgres binary. Binaries come from the ato
+# tool artifact resolver (#119/#120) — no host package manager
+# dependency. The canonical capsule lives at github.com/Koh0920/ato-postgres
+# and must stay synchronized with this fixture.
 
 schema_version = "0.3"
 name           = "postgres"
@@ -21,7 +24,7 @@ default_target = "server"
 
 [metadata]
 display_name = "PostgreSQL (capsule provider)"
-description  = "Postgres 14+ exposed as an Ato service@1 provider"
+description  = "Postgres 16 exposed as an Ato service@1 provider"
 author       = "ato"
 
 [targets.server]
@@ -36,16 +39,27 @@ driver   = "native"
 # port=None on the parsed NamedTarget as port="auto").
 run = "./bootstrap.sh {{state.dir}} {{port}} {{credentials.password}}"
 working_dir = "."
+# Declare the postgresql tool artifact. The orchestrator (ato-cli ≥ 0.5.x)
+# resolves this from its built-in registry against an Ato-managed
+# verified download (zonky 16.9.0 darwin-arm64 today; see #119/#120).
+# The provider receives ATO_TOOL_INITDB / POSTGRES / PG_CTL plus
+# ATO_TOOL_POSTGRESQL_{ROOT,BIN_DIR,LIB_DIR,SHARE_DIR}. No host
+# /opt/homebrew or /usr/local dependency.
+tool_artifacts = ["postgresql"]
 
 # Inject the target database name via env so the bootstrap script can
-# decide whether to createdb on first init. The script reads
+# decide whether to create the database on first init. The script reads
 # ATO_PG_DATABASE.
 [targets.server.env]
 ATO_PG_DATABASE = "wasedap2p"
 
 [contracts."service@1"]
 target = "server"
-ready  = { type = "probe", run = "/opt/homebrew/bin/pg_isready -h 127.0.0.1 -p {{port}}", timeout = "90s" }
+# Native "accepting connections" probe — drop-in pg_isready replacement
+# in ato-cli's ready runtime. No host binary lookup; no /opt/homebrew.
+# See ReadyProbeKind::Postgres in crates/ato-cli/src/application/
+# dependency_runtime/ready.rs for the readiness contract.
+ready  = { type = "postgres", host = "127.0.0.1", port = "{{port}}", user = "postgres", database = "postgres", timeout = "30s" }
 
 [contracts."service@1".parameters]
 database = { type = "string", required = true }

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Postgres provider bootstrap for P7 (since [provision] block execution
-# is deferred from v1 MVP, we embed init-or-exec in this wrapper script).
+# Postgres provider bootstrap for P7 + WasedaP2P.
 #
 # Args: $1 = state_dir, $2 = port, $3 = path to credential file
 #
@@ -9,12 +8,38 @@
 # (initdb --pwfile=<path>) and never again — postgres reuses the
 # initialized cluster on subsequent starts. The password file is
 # unlinked by the orchestrator at teardown.
+#
+# Tool binaries come from ato-cli's verified tool artifact resolver
+# (#119/#120). The capsule declares `tool_artifacts = ["postgresql"]`
+# in capsule.toml; ato-cli downloads, verifies, and exposes the
+# resolved paths via env. We require the env vars below — if any are
+# missing, ato-cli is older than 0.5.x and the capsule cannot run on
+# this host.
 
 set -eu
 
 STATE_DIR="$1"
 PORT="$2"
 PWFILE="$3"
+
+require_tool_env() {
+  local var="$1"
+  local val="${!var:-}"
+  if [ -z "$val" ]; then
+    echo "[ato/postgres bootstrap] FATAL: $var is unset." >&2
+    echo "[ato/postgres bootstrap] This capsule requires ato-cli >= 0.5.x with the tool artifact resolver." >&2
+    echo "[ato/postgres bootstrap] Older ato-cli versions injected /opt/homebrew/bin/* directly; that path is removed." >&2
+    exit 78  # EX_CONFIG
+  fi
+  if [ ! -x "$val" ]; then
+    echo "[ato/postgres bootstrap] FATAL: $var=$val is not executable." >&2
+    exit 78
+  fi
+}
+
+require_tool_env ATO_TOOL_INITDB
+require_tool_env ATO_TOOL_POSTGRES
+require_tool_env ATO_TOOL_PG_CTL
 
 PGDATA="${STATE_DIR}/pgdata"
 
@@ -30,7 +55,7 @@ PG_OPTS=(
 
 if [ ! -f "${PGDATA}/PG_VERSION" ]; then
   echo "[ato/postgres bootstrap] initdb at ${PGDATA}" >&2
-  /opt/homebrew/bin/initdb \
+  "${ATO_TOOL_INITDB}" \
     -D "${PGDATA}" \
     --encoding=UTF8 \
     --username=postgres \
@@ -38,24 +63,22 @@ if [ ! -f "${PGDATA}/PG_VERSION" ]; then
     --auth-host=password \
     --pwfile="${PWFILE}" \
     --no-instructions >&2
+
   if [ -n "${ATO_PG_DATABASE:-}" ]; then
-    echo "[ato/postgres bootstrap] creating database ${ATO_PG_DATABASE}" >&2
-    /opt/homebrew/bin/pg_ctl \
-      -D "${PGDATA}" \
-      -l "${PGDATA}/init.log" \
-      -o "-p ${PORT} ${PG_OPTS[*]}" \
-      -w start
-    PGPASSWORD="$(cat "${PWFILE}")" \
-      /opt/homebrew/bin/createdb \
-      -h 127.0.0.1 -p "${PORT}" -U postgres \
-      "${ATO_PG_DATABASE}"
-    /opt/homebrew/bin/pg_ctl -D "${PGDATA}" -m fast stop
+    # zonky's distribution does not ship `createdb` or `psql`. Use
+    # postgres single-user mode (`--single`) to run the CREATE DATABASE
+    # SQL directly against the catalog. Single-user mode is
+    # network-less and authentication-less, intended exactly for
+    # one-shot init like this.
+    echo "[ato/postgres bootstrap] creating database ${ATO_PG_DATABASE} via postgres --single" >&2
+    echo "CREATE DATABASE \"${ATO_PG_DATABASE}\";" | \
+      "${ATO_TOOL_POSTGRES}" --single -D "${PGDATA}" postgres >&2
   fi
   echo "[ato/postgres bootstrap] init complete" >&2
 fi
 
 echo "[ato/postgres bootstrap] starting postgres on 127.0.0.1:${PORT}" >&2
-exec /opt/homebrew/bin/postgres \
+exec "${ATO_TOOL_POSTGRES}" \
   -D "${PGDATA}" \
   -p "${PORT}" \
   "${PG_OPTS[@]}"
