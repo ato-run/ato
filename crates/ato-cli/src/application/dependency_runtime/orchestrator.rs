@@ -501,12 +501,21 @@ fn start_one(
             // surface its own startup error.
             match kill_orphan_provider(&sentinel) {
                 OrphanProviderKillOutcome::NotPresent => {}
-                OrphanProviderKillOutcome::Killed { pid } => {
+                OrphanProviderKillOutcome::KilledByTerm {
+                    pid,
+                    pgroup_signaled,
+                } => {
                     warnings.push(format!(
-                        "killed orphan provider for dep '{alias}' (pid {pid})"
+                        "killed orphan provider for dep '{alias}' (pid {pid}, SIGTERM, pgroup={pgroup_signaled})"
                     ));
-                    // Tiny grace so postgres can flush its postmaster.pid.
-                    std::thread::sleep(Duration::from_millis(200));
+                }
+                OrphanProviderKillOutcome::KilledByKill {
+                    pid,
+                    pgroup_signaled,
+                } => {
+                    warnings.push(format!(
+                        "killed orphan provider for dep '{alias}' (pid {pid}, SIGKILL after SIGTERM grace, pgroup={pgroup_signaled})"
+                    ));
                 }
                 OrphanProviderKillOutcome::KillFailed { pid, detail } => {
                     warnings.push(format!(
@@ -638,6 +647,20 @@ fn start_one(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Spawn the provider into its own process group on Unix so the
+    // sweep path (orphan::kill_orphan_provider) can later reap the
+    // entire tree with `kill(-pgid, ...)` — necessary because postgres'
+    // postmaster forks backends + auxiliary workers under itself.
+    // SIGTERM to just the postmaster pid waits indefinitely for active
+    // sessions to disconnect; killing the whole pgroup short-circuits
+    // that. process_group(0) makes the spawned child its own pgroup
+    // leader (pid == pgid), so the sentinel's `provider_pid` doubles
+    // as the pgid the sweep targets. See ato-run/ato#121.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
     // Provider env: inherit consumer's required_env + provider's static env.
     cmd.env_clear();
     for key in &input.consumer.required_env {
