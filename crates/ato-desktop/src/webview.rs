@@ -2381,8 +2381,12 @@ impl WebViewManager {
 
     /// Explicit Stop for the active pane's underlying session
     /// (RFC: SURFACE_CLOSE_SEMANTICS §6.1 / §6.2). Stops the process,
-    /// removes the session record, and drops any retention entry —
-    /// reopen will go through the cold path.
+    /// removes the session record, drops any retention entry, and
+    /// **evicts the pane's cached WebView** so the next navigate to
+    /// the same capsule URL goes through the Rebuild branch in
+    /// `sync_from_state` (which calls `ensure_pending_local_launch`).
+    /// Without that eviction, `reuse_action` returns `Keep` for the
+    /// unchanged route_key and the launch never re-arms (#112).
     ///
     /// This is the user-initiated path, so the stop is **synchronous**
     /// and any error is surfaced as an activity entry (the user
@@ -2408,7 +2412,7 @@ impl WebViewManager {
         let _ = self.retention.take_by_session_id(&session_id);
         self.stop_log_follower(&session_id);
 
-        match stop_guest_session(&session_id) {
+        let stopped = match stop_guest_session(&session_id) {
             Ok(true) => {
                 tracing::info!(
                     session_id = %session_id,
@@ -2444,9 +2448,47 @@ impl WebViewManager {
                     crate::state::ActivityTone::Error,
                     format!("Failed to stop session for {}: {err}", handle),
                 );
-                false
+                // Stop FAILED — leave the cached view in place so the
+                // caller can retry stop on the same session. Evicting
+                // here would orphan a (still-running) ato-cli session
+                // we'd lose track of.
+                return false;
             }
+        };
+
+        // Stop SUCCEEDED (Ok(true) = process terminated) or the session
+        // was already inactive (Ok(false) = workload was gone before
+        // the call). Mirror the cleanup that the Rebuild branch in
+        // `sync_from_state` runs (`webview.rs:504-509`): drop the
+        // cached WebView, fail any pending automation requests for the
+        // pane, mark the page unloaded.
+        //
+        // Sync `WebSessionState::LaunchFailed` (NOT `Closed`) on the
+        // pane: with the cached view evicted, the next render would
+        // otherwise enter `sync_from_state`'s Rebuild branch and call
+        // `ensure_pending_local_launch` immediately, auto-relaunching
+        // the capsule the user just stopped. The same gate at
+        // `webview.rs:1521-1525` already uses LaunchFailed as the
+        // sentinel that blocks re-fire (the comment at the launch-fail
+        // site reads "Use LaunchFailed (not Closed) to prevent
+        // ensure_pending_local_launch from re-firing"). An explicit
+        // `state.navigate_to_url(<url>)` resets the surface to
+        // `WebSessionState::Resolving`, which clears LaunchFailed and
+        // lets the launch re-arm — that is exactly what the user's
+        // omnibar entry / `browser_navigate` MCP call does, and it is
+        // what #112 needs from this fix.
+        if let Some(_previous) = self.views.remove(&active_pane_id) {
+            self.automation.fail_requests_for_pane(active_pane_id);
+            self.automation.mark_page_unloaded(active_pane_id);
+            tracing::debug!(
+                pane_id = active_pane_id,
+                session_id = %session_id,
+                "stop_active_session: evicted cached WebView so same-URL re-navigate retriggers Rebuild"
+            );
         }
+        state.sync_web_session_state(active_pane_id, WebSessionState::LaunchFailed);
+
+        stopped
     }
 
     /// Drain every retained session and graceful-stop each in a
@@ -4712,6 +4754,34 @@ mod tests {
         assert_eq!(
             reuse_action(7, &existing, "https://example.com/", &next),
             WebViewReuseAction::Rebuild
+        );
+    }
+
+    #[test]
+    fn reuse_action_keeps_same_route_in_same_pane() {
+        // Documents the gate that `stop_active_session` works around by
+        // evicting the cached view (#112): when the user re-navigates to
+        // the exact same capsule URL on the same pane, `reuse_action`
+        // returns `Keep`, not `Rebuild`. Without the post-stop eviction,
+        // that means `ensure_pending_local_launch` is never called and
+        // the relaunch silently no-ops. The fix in `stop_active_session`
+        // removes the entry from `WebViewManager::views` so this test's
+        // gate is bypassed at the call site (`sync_from_state` falls
+        // through to `unwrap_or(WebViewReuseAction::Rebuild)` when the
+        // view is absent).
+        let route = GuestRoute::CapsuleHandle {
+            handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+        };
+        let route_key = route.to_string();
+        let next = active_web_pane(route.clone(), 7);
+
+        assert_eq!(
+            reuse_action(7, &route, &route_key, &next),
+            WebViewReuseAction::Keep,
+            "same-pane same-route navigate must produce Keep — \
+             stop_active_session relies on evicting views[pane_id] \
+             to bypass this branch (#112)"
         );
     }
 
