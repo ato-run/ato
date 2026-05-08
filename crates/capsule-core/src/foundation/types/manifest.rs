@@ -1271,6 +1271,23 @@ pub struct NamedTarget {
     #[serde(default)]
     pub runtime_tools: HashMap<String, String>,
 
+    /// Provider-side host tool artifacts the orchestrator must
+    /// resolve before this target spawns. Each entry is a stable
+    /// tool ID (e.g. `"postgresql"`) understood by ato-cli's
+    /// built-in registry. The orchestrator downloads, verifies, and
+    /// installs each artifact into `<ato_home>/store/tools/...` and
+    /// then injects `ATO_TOOL_*` env vars into this target's
+    /// process.
+    ///
+    /// Example:
+    /// tool_artifacts = ["postgresql"]
+    ///
+    /// Replaces capsule-side dependencies on host package managers
+    /// (e.g. /opt/homebrew/bin/pg_isready). See #119 for the
+    /// downloader contract and #120 for the migration policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_artifacts: Vec<String>,
+
     /// Entrypoint path for the target.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub entrypoint: String,
