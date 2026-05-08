@@ -120,6 +120,22 @@ pub enum AutomationCommand {
     /// uses — guaranteeing automation tests exercise the production
     /// approval flow rather than a side door.
     ApproveExecutionPlanConsent { handle: String },
+    /// Stop the active pane's underlying capsule session.
+    ///
+    /// Exposes `WebViewManager::stop_active_session` — the same
+    /// method dispatched by the `Cmd+Shift+W` keybind
+    /// (`app.rs:285`) and the omnibar "stop session" suggestion
+    /// (`state/mod.rs:1553` → `ui/chrome/mod.rs:350`). Without
+    /// this variant an autonomous agent driving the desktop over
+    /// the automation socket has no way to exercise that code
+    /// path, because both surfaces require GPUI native input that
+    /// the rest of `AutomationCommand` does not represent
+    /// (refs #92 AC-step 6).
+    ///
+    /// Carries no fields: the unit always targets the active pane
+    /// at dispatch time, mirroring the keybind. `pane_id` on the
+    /// JSON-RPC params is ignored.
+    StopActiveSession,
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────
