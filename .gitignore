@@ -37,6 +37,12 @@ samples/tutorial/
 **/.next/
 **/dist/
 
+# Parallel-development worktrees (see CLAUDE.md → "Parallel development with git worktrees").
+# The directory itself is tracked via .worktrees/.gitkeep so it always exists
+# after clone; everything else inside is host-local.
+.worktrees/*
+!.worktrees/.gitkeep
+
 # Test artifacts (generated on every run)
 tests/manual/results/
 tests/test-sandbox/output/
