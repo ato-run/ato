@@ -117,6 +117,13 @@ impl ToolArtifactManifest {
     /// orchestrator-side embedded manifests. The caller is responsible
     /// for treating parse failures as a typed
     /// [`ToolArtifactError::InvalidArtifactManifest`].
+    ///
+    /// Currently only the test suite parses manifests from TOML; the
+    /// production registry constructs them in code (see
+    /// [`crate::application::tool_artifact::registry`]). The function
+    /// stays public so a future capsule-side `[[tool_artifacts.manifest]]`
+    /// table can adopt it without an API churn.
+    #[allow(dead_code)]
     pub fn from_toml(text: &str) -> Result<Self, ToolArtifactError> {
         let manifest: Self = toml::from_str(text).map_err(|e| {
             ToolArtifactError::InvalidArtifactManifest {
