@@ -452,6 +452,21 @@ async fn launch_direct(
     // Prevent child from being killed when nacelle's stdin closes
     cmd.kill_on_drop(false);
 
+    // Put each spawned wrapper in its own process group so the
+    // wrapper IS the pgroup leader and `getpgid(pid) == pid`. The
+    // ato-cli `stop_recorded_orchestration_services` teardown
+    // helper relies on this to do `kill(-pgid, SIGKILL)` and reap
+    // the wrapper + every descendant it spawned (e.g. `python3 -m
+    // uvicorn` under `uv run`) atomically. Without this, the
+    // wrapper inherits its parent's pgid, the negative-pid
+    // pgroup-kill branch is skipped (it would otherwise signal an
+    // unrelated process group), and the wrapper survives as an
+    // init-reparented orphan after the workload listener is killed
+    // by the lsof-published-port fallback (#111). Mirrors the
+    // pattern already used by `manager::supervisor` (`supervisor.rs`
+    // around `cmd.process_group(0);`).
+    cmd.process_group(0);
+
     debug!("Executing direct command (tokio): {:?}", cmd);
 
     // Spawn the process
