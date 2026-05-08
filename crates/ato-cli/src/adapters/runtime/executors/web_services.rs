@@ -118,6 +118,18 @@ impl ServicePhaseRuntime for ServiceStartupRuntime {
             .stderr(Stdio::piped())
             .envs(&env);
 
+        // Spawn the consumer/service into its own process group on
+        // Unix so a parent SIGKILL doesn't strand it as a PID-1
+        // orphan still bound to the consumer port. The session-start
+        // sweep can then `kill(-pid, ...)` the whole tree (uvicorn +
+        // any forked workers) when it sees a stale sentinel pointing
+        // at the consumer's recorded pid. See ato-run/ato#121.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
+
         let mut child = cmd.spawn().with_context(|| {
             format!(
                 "failed to spawn service '{}' with command '{}'",

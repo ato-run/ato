@@ -438,35 +438,61 @@ impl ProcessManager {
         let Some(snapshot) = self.read_dependency_session_snapshot(id)? else {
             return Ok(false);
         };
-        if snapshot.providers.is_empty() {
+        if snapshot.providers.is_empty() && !is_process_alive(snapshot.consumer_pid) {
             return Ok(false);
         }
 
-        let targets = snapshot
-            .providers
-            .iter()
-            .map(
-                |provider| crate::application::dependency_runtime::TeardownTarget {
-                    dep: provider.alias.clone(),
-                    pid: provider.pid,
-                    state_dir: provider.state_dir.clone(),
-                    needs: Vec::new(),
-                },
-            )
-            .collect();
-        let grace = if force {
-            Duration::from_secs(0)
-        } else {
-            Duration::from_secs(10)
-        };
-        let result =
-            crate::application::dependency_runtime::teardown_reverse_topological(targets, grace);
-        for provider in &snapshot.providers {
-            let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
-                &provider.state_dir,
-            );
+        // Reap the orphan consumer first (before tearing down its
+        // providers). Without this the previous session's orphan
+        // consumer (e.g. uvicorn from a SIGKILL'd ato run) keeps
+        // holding the configured port and the next session's app
+        // target either fails to bind or, worse, the next session's
+        // `/docs` probe gets a false-positive ready served by the
+        // orphan. The orchestrator's spawn now uses
+        // `cmd.process_group(0)` (#121), so signaling the negative
+        // pid reaps the consumer's whole subtree (uvicorn + its
+        // worker forks, npm + its node, …) atomically. SIGTERM →
+        // grace → SIGKILL escalates to handle consumers that trap
+        // SIGTERM (e.g. uvicorn waiting for its own startup hook to
+        // finish before honoring shutdown).
+        let consumer_pid = snapshot.consumer_pid;
+        if consumer_pid > 0 && is_process_alive(consumer_pid) {
+            let grace = if force {
+                Duration::from_millis(0)
+            } else {
+                Duration::from_secs(3)
+            };
+            terminate_pgroup_with_escalation(consumer_pid, grace);
         }
-        result.with_context(|| format!("Failed to stop dependency contracts for {id}"))?;
+
+        if !snapshot.providers.is_empty() {
+            let targets = snapshot
+                .providers
+                .iter()
+                .map(
+                    |provider| crate::application::dependency_runtime::TeardownTarget {
+                        dep: provider.alias.clone(),
+                        pid: provider.pid,
+                        state_dir: provider.state_dir.clone(),
+                        needs: Vec::new(),
+                    },
+                )
+                .collect();
+            let grace = if force {
+                Duration::from_secs(0)
+            } else {
+                Duration::from_secs(10)
+            };
+            let result = crate::application::dependency_runtime::teardown_reverse_topological(
+                targets, grace,
+            );
+            for provider in &snapshot.providers {
+                let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
+                    &provider.state_dir,
+                );
+            }
+            result.with_context(|| format!("Failed to stop dependency contracts for {id}"))?;
+        }
         Ok(true)
     }
 
@@ -817,6 +843,65 @@ fn wait_for_process_exit(pid: i32, timeout_secs: u64) -> Result<()> {
         pid,
         timeout_secs
     )
+}
+
+/// SIGTERM the process group rooted at `pid`, wait up to `term_grace`
+/// for it to exit, then SIGKILL the same group. Falls back to
+/// signaling the pid alone on ESRCH/EPERM (legacy snapshots from
+/// before the consumer was spawned with `cmd.process_group(0)`).
+///
+/// Used by the session-start sweep when the recorded consumer pid is
+/// still alive after its parent ato run died (#121). The sweep cannot
+/// trust the consumer to exit on SIGTERM alone — uvicorn/node/etc.
+/// can have lifespan handlers that block shutdown — so the escalation
+/// is mandatory for orphan reap to be reliable.
+#[cfg(unix)]
+fn terminate_pgroup_with_escalation(pid: i32, term_grace: Duration) {
+    if pid <= 0 {
+        return;
+    }
+
+    fn signal_group_or_pid(pid: i32, signal: libc::c_int) -> bool {
+        // pgroup-wide first; on ESRCH/EPERM (no pgroup, or kernel
+        // refused the wide-kill) fall back to pid-only.
+        let res = unsafe { libc::kill(-pid, signal) };
+        if res == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error().raw_os_error();
+        if err == Some(libc::ESRCH) || err == Some(libc::EPERM) {
+            let res = unsafe { libc::kill(pid, signal) };
+            return res == 0;
+        }
+        false
+    }
+
+    let _ = signal_group_or_pid(pid, libc::SIGTERM);
+
+    if term_grace.is_zero() {
+        // Force path — escalate immediately.
+        let _ = signal_group_or_pid(pid, libc::SIGKILL);
+        return;
+    }
+
+    let deadline = std::time::Instant::now() + term_grace;
+    while std::time::Instant::now() < deadline {
+        if !is_process_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if is_process_alive(pid) {
+        let _ = signal_group_or_pid(pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_pgroup_with_escalation(pid: i32, _term_grace: Duration) {
+    // Windows: no process-group concept that maps cleanly. Fall back
+    // to terminating the pid; consumer subtrees on Windows are taken
+    // care of by Job Objects elsewhere.
+    let _ = terminate_process(pid, true);
 }
 
 fn terminate_process(pid: i32, force: bool) -> Result<bool> {
