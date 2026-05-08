@@ -81,6 +81,7 @@ pub struct ResolvedToolArtifact {
     pub provides: BTreeMap<String, PathBuf>,
     /// `true` when this resolve hit the on-disk cache without any
     /// network IO. Useful for receipts and observability.
+    #[allow(dead_code)]
     pub from_cache: bool,
 }
 

@@ -1540,15 +1540,25 @@ version = "1"
     }
 
     fn p7_skip_if_unavailable() -> Option<()> {
-        let pg = std::path::Path::new("/opt/homebrew/bin/postgres");
-        let initdb = std::path::Path::new("/opt/homebrew/bin/initdb");
+        // The migrated fixture (#120) does not depend on
+        // /opt/homebrew anymore — Postgres binaries come from ato's
+        // verified tool artifact resolver. The only remaining
+        // host-platform constraint is that the artifact pin in the
+        // built-in registry covers this host.
+        let host = crate::application::tool_artifact::host_platform();
+        if host != Some("darwin-aarch64") {
+            eprintln!(
+                "[P7] skipping: tool_artifacts(\"postgresql\") pin currently covers darwin-aarch64 only (host: {host:?})"
+            );
+            return None;
+        }
         let root = p7_fixture_root();
         let provider = root.join("ato-postgres/capsule.toml");
         let consumer = root.join("wasedap2p/capsule.toml");
-        if pg.exists() && initdb.exists() && provider.exists() && consumer.exists() {
+        if provider.exists() && consumer.exists() {
             Some(())
         } else {
-            eprintln!("[P7] skipping: missing Postgres or fixtures");
+            eprintln!("[P7] skipping: missing P7 fixture files");
             None
         }
     }
@@ -1682,18 +1692,20 @@ version = "1"
         let scrubbed = redaction.redact(&format!("debug: pw = {pw}"));
         assert!(!scrubbed.contains(&pw), "PG_PASSWORD must be redacted");
 
-        // Confirm postgres really listens via pg_isready against allocated port.
+        // Confirm postgres really listens — independent of the
+        // orchestrator's own native probe that already gated start_all
+        // returning. A bare TCP connect is sufficient: if the
+        // orchestrator's probe passed but the port were not actually
+        // open, that would be a serious orchestrator bug, not a
+        // postgres bug.
         let allocated = graph.deps()[0].allocated_port.expect("allocated_port");
         eprintln!("[P7] allocated port = {}", allocated);
-        let pg_isready = std::process::Command::new("/opt/homebrew/bin/pg_isready")
-            .args(["-h", "127.0.0.1", "-p", &allocated.to_string()])
-            .output()
-            .expect("pg_isready");
-        assert!(
-            pg_isready.status.success(),
-            "pg_isready failed: {}",
-            String::from_utf8_lossy(&pg_isready.stderr)
-        );
+        let stream = std::net::TcpStream::connect_timeout(
+            &format!("127.0.0.1:{allocated}").parse().unwrap(),
+            Duration::from_secs(2),
+        )
+        .expect("post-orchestrator TCP connect to allocated postgres port");
+        drop(stream);
 
         graph
             .teardown(Duration::from_secs(10))
