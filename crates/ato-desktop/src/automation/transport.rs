@@ -334,6 +334,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_stop_active_session_takes_no_args() {
+        let params = serde_json::json!({});
+        let cmd = super::parse_command("stop_active_session", &params).expect("parse");
+        assert!(matches!(cmd, super::AutomationCommand::StopActiveSession));
+    }
+
+    #[test]
+    fn parse_command_stop_active_session_ignores_unknown_params() {
+        // The unit variant deliberately ignores any params (including
+        // `pane_id`) so callers can pass through the same arg shape
+        // they use for browser_* tools. Verify we don't reject extras.
+        let params = serde_json::json!({"pane_id": 7, "ignored": "yes"});
+        let cmd = super::parse_command("stop_active_session", &params).expect("parse");
+        assert!(matches!(cmd, super::AutomationCommand::StopActiveSession));
+    }
+
+    #[test]
     fn reap_orphan_sockets_removes_dead_pid_socket_only() {
         use std::fs;
         let temp = tempfile::tempdir().expect("tempdir");
@@ -586,6 +603,13 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         "approve_execution_plan_consent" => Ok(AutomationCommand::ApproveExecutionPlanConsent {
             handle: s("handle")?,
         }),
+        // Unit variant: ignores all params (including `pane_id`,
+        // which the dispatcher resolves implicitly to the active
+        // pane via `WebViewManager::stop_active_session`). Keeping
+        // the surface argumentless mirrors the keybind / omnibar
+        // entry points, so MCP and UI exit through the exact same
+        // code path (refs #92 AC-step 6).
+        "stop_active_session" => Ok(AutomationCommand::StopActiveSession),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")
