@@ -325,6 +325,32 @@ pub enum ReadyProbe {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout: Option<String>,
     },
+    /// Native Postgres "accepting connections" probe.
+    ///
+    /// The orchestration-layer replacement for spawning `pg_isready`.
+    /// Sends a minimal v3 `StartupMessage` and treats the first
+    /// backend response as the readiness verdict. **Server is up =
+    /// accepting connections; consumer auth correctness is the
+    /// consumer's failure mode, not the provider's.** No password is
+    /// sent. See `ato-cli`'s `ReadyProbeKind::Postgres` for the full
+    /// classification table.
+    Postgres {
+        /// Host to connect to. Templated. Conventionally `127.0.0.1`.
+        host: TemplatedString,
+        /// Port. Templated so capsules can route through `{{port}}`.
+        port: TemplatedString,
+        /// Username for the StartupMessage. Used as a label in server
+        /// logs only — the probe does not authenticate. Defaults to
+        /// `"postgres"` if unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<TemplatedString>,
+        /// Database name for the StartupMessage. Same caveat as `user`.
+        /// Defaults to `"postgres"` if unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        database: Option<TemplatedString>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout: Option<String>,
+    },
     Http {
         url: TemplatedString,
         #[serde(default, skip_serializing_if = "Option::is_none")]
