@@ -175,6 +175,13 @@ pub enum OrchestratorError {
         suggestion: String,
     },
 
+    #[error("dep '{alias}' tool artifact resolution failed: {source}")]
+    ToolArtifact {
+        alias: String,
+        #[source]
+        source: crate::application::tool_artifact::ToolArtifactError,
+    },
+
     #[error("dep '{alias}' orphan detection failed: {source}")]
     Orphan {
         alias: String,
@@ -640,6 +647,30 @@ fn start_one(
     }
     for (k, v) in &target_block.env {
         cmd.env(k, v);
+    }
+    // Resolve any tool artifacts the provider's target declares
+    // (`tool_artifacts = ["postgresql", ...]`) and inject their
+    // ATO_TOOL_* env vars. The resolver downloads the verified
+    // artifact on first use and is a no-op cache hit on subsequent
+    // runs (#119). Failures bubble up as typed orchestrator errors
+    // — the v0.5.x preflight already handles the
+    // host-binary-missing case for legacy probe specs; this layer
+    // handles the new artifact-driven path.
+    if !target_block.tool_artifacts.is_empty() {
+        let downloader =
+            crate::application::tool_artifact::ReqwestDownloader::default();
+        let env_map = crate::application::tool_artifact::resolve_target_tool_env(
+            &target_block.tool_artifacts,
+            &input.ato_home,
+            &downloader,
+        )
+        .map_err(|err| OrchestratorError::ToolArtifact {
+            alias: alias.to_string(),
+            source: err,
+        })?;
+        for (k, v) in env_map {
+            cmd.env(k, v);
+        }
     }
     let mut child = cmd.spawn().map_err(|err| OrchestratorError::SpawnFailed {
         alias: alias.to_string(),
