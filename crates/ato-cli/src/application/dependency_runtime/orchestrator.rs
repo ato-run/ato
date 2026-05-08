@@ -164,6 +164,17 @@ pub enum OrchestratorError {
         source: ReadyError,
     },
 
+    #[error(
+        "dep '{alias}' ready probe expects host tool '{tool}' at {} but it is not installed; {suggestion}",
+        expected_path.display()
+    )]
+    MissingProviderHostTool {
+        alias: String,
+        tool: String,
+        expected_path: PathBuf,
+        suggestion: String,
+    },
+
     #[error("dep '{alias}' orphan detection failed: {source}")]
     Orphan {
         alias: String,
@@ -599,6 +610,16 @@ fn start_one(
         });
     }
 
+    // Resolve the ready probe shape and preflight it before spawning the
+    // provider. The probe spec lives in the contract (not the provider's
+    // run line), so its templated values (`{{state.dir}}`, `{{port}}`)
+    // are already known here. Running this preflight ahead of the spawn
+    // turns "host is missing /opt/homebrew/bin/pg_isready" into a typed
+    // MissingProviderHostTool failure instead of a 90s ready timeout that
+    // also leaves the just-spawned provider behind.
+    let probe_kind = ready_probe_kind(contract, allocated_port, &state_dir)?;
+    preflight_probe_host_tools(alias, &probe_kind)?;
+
     // Spawn provider. cwd = provider_root joined with target_block.working_dir if any.
     let cwd = match target_block.working_dir.as_deref() {
         Some(rel) => provider.provider_root.join(rel),
@@ -645,8 +666,8 @@ fn start_one(
         source: err,
     })?;
 
-    // Ready probe.
-    let probe_kind = ready_probe_kind(contract, allocated_port, &state_dir)?;
+    // Ready probe. `probe_kind` was resolved + preflighted above so the
+    // missing-host-tool case never reaches this loop.
     let timeout = ready_probe_timeout(contract, input.default_ready_timeout);
     wait_for_ready(&probe_kind, timeout, input.ready_probe_interval).map_err(|err| {
         OrchestratorError::Ready {
@@ -883,6 +904,49 @@ fn ready_probe_kind(
                 .to_string(),
         }),
     }
+}
+
+/// Reject `probe`-kind ready specs whose argv[0] is an absolute path that
+/// does not exist on disk before the ready loop starts. Without this
+/// check, a missing host tool (e.g. `/opt/homebrew/bin/pg_isready` on a
+/// host without Homebrew PostgreSQL installed) is reported as the
+/// generic 90 second `ReadyError::Timeout` whose `last_failure` string
+/// happens to contain `spawn ... failed: No such file or directory` —
+/// indistinguishable to Desktop callers from a slow startup.
+///
+/// Bare commands (no `/`) are intentionally **not** preflighted here:
+/// the orchestrator clears the provider's PATH at spawn time, but a
+/// probe with a bare `pg_isready` is still a manifest authoring choice
+/// that the existing `wait_for_ready` retry loop surfaces as a normal
+/// spawn-failure timeout. Adding PATH lookup here would couple the
+/// preflight to the orchestrator's environment policy.
+fn preflight_probe_host_tools(
+    alias: &str,
+    probe_kind: &ReadyProbeKind,
+) -> Result<(), OrchestratorError> {
+    let ReadyProbeKind::Probe { argv } = probe_kind else {
+        return Ok(());
+    };
+    let Some(first) = argv.first() else {
+        return Ok(());
+    };
+    let candidate = Path::new(first);
+    if !candidate.is_absolute() || candidate.exists() {
+        return Ok(());
+    }
+    let tool_name = candidate
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| first.clone());
+    Err(OrchestratorError::MissingProviderHostTool {
+        alias: alias.to_string(),
+        tool: tool_name,
+        expected_path: candidate.to_path_buf(),
+        suggestion: format!(
+            "install '{}' on the host or use a provider/tool capsule version that bundles it, then re-run",
+            candidate.display()
+        ),
+    })
 }
 
 fn ready_probe_timeout(
@@ -1622,5 +1686,189 @@ run = "npm run dev"
         // the missing-target error itself rather than silently empty
         let bogus = topological_dep_order(&consumer, Some("nope")).expect("bogus order");
         assert_eq!(bogus, vec!["db".to_string()]);
+    }
+
+    // ---------- preflight: missing host tool surfaces typed error ----------
+
+    #[test]
+    fn preflight_passes_for_existing_absolute_path() {
+        let kind = ReadyProbeKind::Probe {
+            argv: vec!["/usr/bin/true".to_string(), "--quiet".to_string()],
+        };
+        preflight_probe_host_tools("svc", &kind).expect("must accept existing absolute path");
+    }
+
+    #[test]
+    fn preflight_passes_for_bare_command_name() {
+        // PATH lookup is the orchestrator/spawn layer's concern; preflight
+        // intentionally only validates absolute paths.
+        let kind = ReadyProbeKind::Probe {
+            argv: vec!["pg_isready".to_string()],
+        };
+        preflight_probe_host_tools("svc", &kind).expect("bare names skip preflight");
+    }
+
+    #[test]
+    fn preflight_passes_for_tcp_kind() {
+        let kind = ReadyProbeKind::Tcp {
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+        };
+        preflight_probe_host_tools("svc", &kind).expect("tcp probes have nothing to preflight");
+    }
+
+    #[test]
+    fn preflight_rejects_missing_absolute_host_tool() {
+        // Build a path inside a tempdir that we never create — guaranteed
+        // to be absolute and non-existent on any host.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bogus = tmp.path().join("nope").join("pg_isready");
+        let kind = ReadyProbeKind::Probe {
+            argv: vec![
+                bogus.to_string_lossy().into_owned(),
+                "-h".to_string(),
+                "127.0.0.1".to_string(),
+            ],
+        };
+        let err = preflight_probe_host_tools("db", &kind)
+            .expect_err("missing absolute host tool must be typed");
+        match err {
+            OrchestratorError::MissingProviderHostTool {
+                alias,
+                tool,
+                expected_path,
+                suggestion,
+            } => {
+                assert_eq!(alias, "db");
+                assert_eq!(tool, "pg_isready");
+                assert_eq!(expected_path, bogus);
+                assert!(
+                    suggestion.contains(&bogus.display().to_string()),
+                    "suggestion should reference the missing path, got: {suggestion}"
+                );
+            }
+            other => panic!("expected MissingProviderHostTool, got {other:?}"),
+        }
+    }
+
+    /// End-to-end: a contract whose `ready.run` points at an absolute path
+    /// that doesn't exist must abort `start_all` with the typed
+    /// `MissingProviderHostTool` *before* the ready timeout fires. This
+    /// is the v0.5.x blocker fix: the bug repro previously took 90s and
+    /// surfaced as `ReadyError::Timeout`.
+    #[test]
+    fn start_all_returns_missing_host_tool_when_probe_argv_is_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bogus_probe = tmp.path().join("nope").join("pg_isready");
+        let probe_str = bogus_probe.to_string_lossy().into_owned();
+
+        // Same shape as MOCK_CONSUMER / MOCK_PROVIDER but the probe path
+        // is rewritten to a guaranteed-missing absolute path.
+        let provider_toml = format!(
+            r#"
+schema_version = "0.3"
+name = "mock"
+version = "1.0.0"
+type = "app"
+default_target = "server"
+
+[targets.server]
+runtime = "source"
+driver = "native"
+run = "/bin/sleep 60"
+port = 0
+
+[contracts."service@1"]
+target = "server"
+ready = {{ type = "probe", run = "{probe}", timeout = "5s" }}
+
+[contracts."service@1".parameters]
+mode = {{ type = "string", required = true }}
+
+[contracts."service@1".credentials]
+password = {{ type = "string", required = true }}
+
+[contracts."service@1".identity_exports]
+mode = "{{{{params.mode}}}}"
+
+[contracts."service@1".runtime_exports]
+MODE = "{{{{params.mode}}}}"
+
+[contracts."service@1".state]
+required = true
+version = "1"
+"#,
+            probe = probe_str,
+        );
+
+        let consumer = CapsuleManifest::from_toml(MOCK_CONSUMER).expect("consumer");
+        let provider_manifest = CapsuleManifest::from_toml(&provider_toml).expect("provider");
+
+        let mut providers_for_lock = BTreeMap::new();
+        providers_for_lock.insert(
+            "svc".to_string(),
+            capsule_core::dependency_contracts::ResolvedProviderManifest {
+                requested: "capsule://ato/mock@1".to_string(),
+                resolved: "capsule://ato/mock@sha256:e2e".to_string(),
+                manifest: provider_manifest.clone(),
+            },
+        );
+        let lock = verify_and_lock(DependencyLockInput {
+            consumer: &consumer,
+            providers: providers_for_lock,
+        })
+        .expect("verify_and_lock");
+
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let provider_root = tempfile::tempdir().expect("provider_root");
+        let host_env = MapHostEnv::new(&[("MOCK_PASSWORD", "shh")]);
+        let redaction = Arc::new(RedactionRegistry::new());
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "svc".to_string(),
+            OrchestratorProvider {
+                manifest: provider_manifest,
+                provider_root: provider_root.path().to_path_buf(),
+                resolved: "capsule://ato/mock@sha256:e2e".to_string(),
+            },
+        );
+
+        let started = std::time::Instant::now();
+        let input = OrchestratorInput {
+            lock: &lock,
+            providers,
+            consumer: &consumer,
+            ato_home: ato_home.path().to_path_buf(),
+            parent_package_id: "demo-consumer".to_string(),
+            host_env: &host_env,
+            redaction,
+            session_pid: std::process::id() as i32,
+            // Set the probe timeout much higher than this test's wall-clock
+            // budget so a regression that re-routes through the ready loop
+            // would visibly fail the elapsed-time assertion below.
+            default_ready_timeout: Duration::from_secs(60),
+            ready_probe_interval: Duration::from_millis(20),
+            selected_target: None,
+        };
+        let err = start_all(input).expect_err("must reject missing host tool");
+        let elapsed = started.elapsed();
+
+        match err {
+            OrchestratorError::MissingProviderHostTool {
+                alias,
+                tool,
+                expected_path,
+                ..
+            } => {
+                assert_eq!(alias, "svc");
+                assert_eq!(tool, "pg_isready");
+                assert_eq!(expected_path, bogus_probe);
+            }
+            other => panic!("expected MissingProviderHostTool, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "preflight must short-circuit, but took {elapsed:?}"
+        );
     }
 }
