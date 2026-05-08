@@ -375,6 +375,20 @@ async fn launch_with_sandbox_exec(
 
     debug!("Executing sandbox-exec command: {:?}", cmd);
 
+    // Mirror the dev-mode-async path's pgroup setup (this file's
+    // `cmd.process_group(0)` near `direct spawn (tokio)`): put the
+    // sandbox-exec wrapper into its own process group so it IS the
+    // pgroup leader. Without this, the wrapper inherits nacelle's
+    // pgroup, the cleanup-scope's `kill(-pid, SIGKILL)` branch on
+    // partial-launch failure (ato-run/ato#92, #123) targets a
+    // pgroup it doesn't lead, ESRCH falls through, and only the
+    // wrapper's pid is signaled — leaving the inner `uv run`
+    // wrapper as a PID-1 orphan after sandbox-exec dies. Setting
+    // pgid=pid here lets the same pgroup-wide kill reap
+    // sandbox-exec → uv run → python -m uvicorn atomically.
+    use std::os::unix::process::CommandExt as _;
+    cmd.process_group(0);
+
     // Spawn the process
     let child = cmd.spawn().map_err(|e| RuntimeError::CommandExecution {
         operation: "sandbox-exec spawn".to_string(),
