@@ -219,6 +219,18 @@ pub fn execute_host(
         }
     }
 
+    // Run the host-native consumer in its own process group on Unix
+    // so a parent SIGKILL doesn't strand it as a PID-1 orphan still
+    // bound to the consumer port. Mirrors the change the orchestrator
+    // applies to provider spawns; the session-start sweep (and the
+    // UI-stop pgroup-kill that already lives in session.rs) can then
+    // reap the consumer's subtree atomically. See ato-run/ato#121.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
     let child = cmd
         .spawn()
         .context("Failed to execute host process with --dangerously-skip-permissions")?;
