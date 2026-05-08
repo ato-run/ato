@@ -759,6 +759,11 @@ pub(crate) fn dependency_contract_start_error(
             expected_path.display(),
             suggestion
         ),
+        OrchestratorError::ToolArtifact { alias, source } => anyhow!(
+            "dep '{}' tool artifact resolution failed before provider start: {}",
+            alias,
+            source
+        ),
         other => anyhow::Error::new(other).context(format!(
             "failed to start dependency contracts for target '{}'",
             target_label
