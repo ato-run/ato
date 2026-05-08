@@ -340,6 +340,29 @@ fn kill_process_if_exists(pid: u32) -> Result<(), std::io::Error> {
         return Ok(());
     }
 
+    // Signal the pgroup first (no-op if the pid was not spawned with
+    // process_group(0); ESRCH there is fine). This is the consumer-
+    // orphan reap path for partial-launch failures (#123 cascade): the
+    // service spawn site uses cmd.process_group(0) so the spawned pid
+    // IS the pgid, and a pgroup-wide SIGKILL terminates uv +
+    // python uvicorn + any forked workers in one syscall — preventing
+    // the "uv run" wrapper from surviving its own python child's
+    // earlier death and leaking as a PID-1 orphan after a consent gate
+    // aborts the launch.
+    let pgroup_result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    if pgroup_result != 0 {
+        let pgroup_err = std::io::Error::last_os_error();
+        if !matches!(
+            pgroup_err.raw_os_error(),
+            Some(libc::ESRCH) | Some(libc::EPERM)
+        ) {
+            // Anything other than "no such pgroup" / "permission" is a
+            // real failure — surface it. ESRCH/EPERM falls through to
+            // the pid-only path below as a defensive secondary attempt.
+            return Err(pgroup_err);
+        }
+    }
+
     let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     if result == 0 {
         return Ok(());
