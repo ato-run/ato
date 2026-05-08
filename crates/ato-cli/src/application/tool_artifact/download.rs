@@ -4,9 +4,17 @@
 //! [`sha2::Sha256`] as it is written to disk, so a tampered byte at the
 //! tail of a 30 MB JAR fails the same way as a tampered byte in the
 //! header — no need to re-read the file after writing.
+//!
+//! The production [`ReqwestDownloader`] uses async `reqwest::Client`
+//! and bridges to the sync [`Downloader`] trait through the same
+//! pattern as `block_on_runtime_fetch` (`crates/ato-cli/src/adapters/
+//! runtime/manager.rs`). This avoids `reqwest::blocking::Client` whose
+//! constructor spawns + drops an inner tokio runtime — fatal when the
+//! caller is already inside a tokio runtime, which is exactly where
+//! the orchestrator's `start_one` runs us from.
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -35,27 +43,80 @@ pub struct DownloadOutcome {
     pub sha256_hex: String,
 }
 
-/// Default production downloader. Uses `reqwest::blocking` with TLS
-/// off-by-default for `http://` and rustls for `https://`. No proxy
-/// bypass; tool artifacts are typically Maven Central or GitHub
-/// releases, which do not need internal-network proxy carve-outs.
+/// Default production downloader. Uses async `reqwest::Client`; the
+/// sync [`Downloader::fetch_to`] bridges to it via a fresh
+/// `current_thread` runtime on a dedicated OS thread. This is the
+/// same pattern as `block_on_runtime_fetch`. Avoiding
+/// `reqwest::blocking::Client` is deliberate — that constructor
+/// internally creates and drops a tokio runtime, which panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed"
+/// when called from inside the orchestrator's outer runtime.
+///
+/// No proxy bypass; tool artifacts are typically Maven Central or
+/// GitHub releases, which do not need internal-network proxy
+/// carve-outs.
+#[derive(Clone)]
 pub struct ReqwestDownloader {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl Default for ReqwestDownloader {
     fn default() -> Self {
-        let client = reqwest::blocking::Client::builder()
-            // Tool artifacts are large (30+ MB for postgres). Generous
-            // overall timeout, but keep the connect timeout tight so a
-            // misbehaving CDN fails fast.
+        // reqwest::Client::builder() does NOT spawn an inner runtime,
+        // so this is safe from any context (sync or async).
+        let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
-            .https_only(false) // some mirrors ship over http; manifest validates http(s)
+            .https_only(false)
             .user_agent(concat!("ato-cli/", env!("CARGO_PKG_VERSION")))
             .build()
-            .expect("blocking reqwest client");
+            .expect("async reqwest client");
         Self { client }
+    }
+}
+
+impl ReqwestDownloader {
+    /// Async hot loop that streams the body to disk, hashing as it
+    /// goes. Public so tests can drive it from an existing async
+    /// runtime; production code reaches it through the sync
+    /// [`Downloader::fetch_to`] bridge.
+    pub async fn fetch_to_async(
+        &self,
+        url: String,
+        dest: std::path::PathBuf,
+    ) -> Result<DownloadOutcome, anyhow::Error> {
+        use tokio::io::AsyncWriteExt;
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("HTTP request to {url} failed"))?
+            .error_for_status()
+            .with_context(|| format!("HTTP {url} returned a non-success status"))?;
+        let mut file = tokio::fs::File::create(&dest)
+            .await
+            .with_context(|| format!("create download dest at {}", dest.display()))?;
+        let mut hasher = Sha256::new();
+        let mut bytes_written: u64 = 0;
+        let mut stream = response.bytes_stream();
+        use futures::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .with_context(|| format!("read body chunk from {url}"))?;
+            file.write_all(&chunk)
+                .await
+                .with_context(|| format!("write body to {}", dest.display()))?;
+            hasher.update(&chunk);
+            bytes_written += chunk.len() as u64;
+        }
+        file.flush()
+            .await
+            .context("flush downloaded file")?;
+        Ok(DownloadOutcome {
+            bytes_written,
+            sha256_hex: hex::encode(hasher.finalize()),
+        })
     }
 }
 
@@ -65,37 +126,45 @@ impl Downloader for ReqwestDownloader {
         url: &str,
         dest: &Path,
     ) -> Result<DownloadOutcome, anyhow::Error> {
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .with_context(|| format!("HTTP request to {url} failed"))?
-            .error_for_status()
-            .with_context(|| format!("HTTP {url} returned a non-success status"))?;
-
-        let mut file = File::create(dest)
-            .with_context(|| format!("create download dest at {}", dest.display()))?;
-        let mut hasher = Sha256::new();
-        let mut bytes_written: u64 = 0;
-        let mut buf = [0u8; 64 * 1024];
-        let mut reader: Box<dyn Read> = Box::new(response);
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .with_context(|| format!("read body from {url}"))?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n])
-                .with_context(|| format!("write body to {}", dest.display()))?;
-            hasher.update(&buf[..n]);
-            bytes_written += n as u64;
+        let url = url.to_string();
+        let dest = dest.to_path_buf();
+        let client = self.clone();
+        // We may be inside a tokio runtime (orchestrator path) or not
+        // (CLI sub-command path). In either case we need a fresh
+        // `current_thread` runtime so the body stream is driven to
+        // completion without re-entering the outer runtime, and we
+        // need that runtime to live on a dedicated OS thread so its
+        // Drop happens outside any async context. This mirrors
+        // `block_on_runtime_fetch`.
+        let do_fetch = move || -> Result<DownloadOutcome, anyhow::Error> {
+            std::thread::spawn(move || -> Result<DownloadOutcome, anyhow::Error> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("build tool-artifact downloader runtime")?;
+                runtime.block_on(client.fetch_to_async(url, dest))
+            })
+            .join()
+            .map_err(|_| anyhow!("tool-artifact downloader thread panicked"))?
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => match handle.runtime_flavor() {
+                // Wrap in block_in_place on multi-thread so other
+                // tasks on the outer runtime can keep making progress
+                // on sibling worker threads while this caller blocks
+                // on .join().
+                tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(do_fetch)
+                }
+                // current_thread: don't wrap. block_in_place panics
+                // on that flavor; running join() directly stalls the
+                // single worker for the duration of the download —
+                // acceptable because the caller is already
+                // synchronously awaiting the artifact.
+                _ => do_fetch(),
+            },
+            Err(_) => do_fetch(),
         }
-        file.flush().context("flush downloaded file")?;
-        Ok(DownloadOutcome {
-            bytes_written,
-            sha256_hex: hex::encode(hasher.finalize()),
-        })
     }
 }
 
