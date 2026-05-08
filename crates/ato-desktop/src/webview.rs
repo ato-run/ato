@@ -860,6 +860,30 @@ impl WebViewManager {
                     };
                     continue;
                 }
+                StopActiveSession => {
+                    // Snapshot active session metadata before invoking stop so
+                    // the response can distinguish "no active session"
+                    // (had_active_session=false, stopped=false) from "stop
+                    // failed" (had_active_session=true, stopped=false).
+                    // `WebViewManager::stop_active_session` returns `false`
+                    // for both today (`webview.rs` stop_active_session).
+                    let (had_active_session, session_id_before, handle_before) = self
+                        .active_pane_id
+                        .and_then(|pane_id| self.views.get(&pane_id))
+                        .and_then(|v| v.launched_session.as_ref())
+                        .map(|s| (true, Some(s.session_id.clone()), Some(s.handle.clone())))
+                        .unwrap_or((false, None, None));
+
+                    let stopped = self.stop_active_session(state);
+                    req.send(Ok(serde_json::json!({
+                        "ok": true,
+                        "stopped": stopped,
+                        "had_active_session": had_active_session,
+                        "session_id": session_id_before,
+                        "handle": handle_before,
+                    })));
+                    continue;
+                }
                 _ => {}
             }
 
@@ -4421,7 +4445,8 @@ fn dispatch_automation_command(
         | FocusPane { .. }
         | OpenUrl { .. }
         | SetCapsuleSecrets { .. }
-        | ApproveExecutionPlanConsent { .. } => {
+        | ApproveExecutionPlanConsent { .. }
+        | StopActiveSession => {
             unreachable!()
         }
     }
