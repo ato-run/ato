@@ -747,6 +747,18 @@ pub(crate) fn dependency_contract_start_error(
             key,
             key
         ),
+        OrchestratorError::MissingProviderHostTool {
+            alias,
+            tool,
+            expected_path,
+            suggestion,
+        } => anyhow!(
+            "dep '{}' ready probe expects host tool '{}' at {} but it is not installed on this host. {}",
+            alias,
+            tool,
+            expected_path.display(),
+            suggestion
+        ),
         other => anyhow::Error::new(other).context(format!(
             "failed to start dependency contracts for target '{}'",
             target_label
