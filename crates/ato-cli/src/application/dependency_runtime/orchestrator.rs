@@ -891,6 +891,67 @@ fn ready_probe_kind(
                 })?;
             Ok(ReadyProbeKind::Probe { argv })
         }
+        ReadyProbe::Postgres {
+            host,
+            port: probe_port,
+            user,
+            database,
+            ..
+        } => {
+            let rendered_host = render_runtime_template(
+                "ready.host",
+                host,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                state_dir,
+                port,
+            )?;
+            let rendered_port = render_runtime_template(
+                "ready.port",
+                probe_port,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                state_dir,
+                port,
+            )?;
+            let port_num: u16 =
+                rendered_port
+                    .parse()
+                    .map_err(|err| OrchestratorError::TemplateExpansion {
+                        alias: "<ready>".to_string(),
+                        detail: format!(
+                            "postgres ready.port must parse as u16, got '{rendered_port}': {err}"
+                        ),
+                    })?;
+            let rendered_user = match user {
+                Some(t) => render_runtime_template(
+                    "ready.user",
+                    t,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    state_dir,
+                    port,
+                )?,
+                None => "postgres".to_string(),
+            };
+            let rendered_database = match database {
+                Some(t) => render_runtime_template(
+                    "ready.database",
+                    t,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    state_dir,
+                    port,
+                )?,
+                None => "postgres".to_string(),
+            };
+            Ok(ReadyProbeKind::Postgres {
+                host: rendered_host,
+                port: port_num,
+                user: rendered_user,
+                database: rendered_database,
+            })
+        }
         // Reserved variants are lock-fail-closed in capsule-core; if they
         // somehow reach here it's a programming bug.
         ReadyProbe::Http { .. } => Err(OrchestratorError::TemplateExpansion {
@@ -957,6 +1018,7 @@ fn ready_probe_timeout(
     let raw = match &contract.ready {
         ReadyProbe::Tcp { timeout, .. }
         | ReadyProbe::Probe { timeout, .. }
+        | ReadyProbe::Postgres { timeout, .. }
         | ReadyProbe::Http { timeout, .. }
         | ReadyProbe::UnixSocket { timeout, .. } => timeout,
     };

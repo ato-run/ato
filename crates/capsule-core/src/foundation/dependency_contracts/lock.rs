@@ -279,7 +279,7 @@ fn verify_reserved_variants_on_contract(
     contract: &ContractSpec,
 ) -> Result<(), LockError> {
     match &contract.ready {
-        ReadyProbe::Tcp { .. } | ReadyProbe::Probe { .. } => Ok(()),
+        ReadyProbe::Tcp { .. } | ReadyProbe::Probe { .. } | ReadyProbe::Postgres { .. } => Ok(()),
         ReadyProbe::Http { .. } => Err(LockError::ReservedVariantReadyProbe {
             contract: contract_id.to_string(),
             variant: "http".to_string(),
