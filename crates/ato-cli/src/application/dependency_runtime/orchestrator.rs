@@ -1530,10 +1530,12 @@ version = "1"
 
     // ---------- P7: real-Postgres end-to-end (host-bound) ----------
     //
-    // Exercises ato/postgres provider + minimal consumer fixture against
-    // the real /opt/homebrew/bin/postgres binary on the host. The
-    // fixtures live in `crates/ato-cli/tests/fixtures/p7/`. Skipped if
-    // the host is missing Postgres binaries.
+    // Exercises the ato/postgres provider + minimal consumer fixture
+    // against the verified tool artifact resolver (#119/#120) — the
+    // postgres binaries come from $ATO_HOME/store/tools/postgresql-...
+    // not the host. The fixtures live in `crates/ato-cli/tests/fixtures/p7/`.
+    // Skipped on hosts whose platform isn't covered by the artifact
+    // pin in ato-cli's built-in registry (currently darwin-aarch64 only).
 
     fn p7_fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p7")
