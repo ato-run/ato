@@ -186,6 +186,15 @@ pub struct WebViewManager {
     /// background threads so the UI never blocks on
     /// `ato app session stop`.
     retention: crate::retention::RetentionTable,
+    /// Last successful launch for each capsule handle. Persists across
+    /// WebView rebuilds so the UI-stop path can find the live session
+    /// even when the per-pane WebView's `launched_session` reference
+    /// has been dropped — which we observe in the post-consent re-arm
+    /// flow when a same-pane Rebuild evicts the previous WebView. See
+    /// ato-run/ato#122 for the reproduction. Populated in
+    /// `drain_pending_launches`'s success arm; consumed (cleared) in
+    /// `stop_active_session` after a successful stop.
+    handle_to_session: HashMap<String, GuestLaunchSession>,
 }
 
 struct ManagedWebView {
@@ -354,6 +363,7 @@ impl WebViewManager {
             web_context,
             capsule_update_tx: None,
             retention: crate::retention::RetentionTable::with_defaults(),
+            handle_to_session: HashMap::new(),
         }
     }
 
@@ -1206,6 +1216,17 @@ impl WebViewManager {
                     // fresh modal, not a fatal toast.
                     state.reset_consent_retry_budget(&completed.handle);
 
+                    // Index the live session by handle so `stop_active_session`
+                    // can find it even if a subsequent same-pane Rebuild evicts
+                    // the WebView whose `launched_session` field was the only
+                    // anchor (ato-run/ato#122). The map is cleared on a
+                    // successful stop; if a second successful launch fires
+                    // for the same handle (e.g. capsule restart), the entry
+                    // is overwritten with the newer session — old entries
+                    // never accumulate.
+                    self.handle_to_session
+                        .insert(completed.handle.clone(), session.clone());
+
                     let is_web_url = session.display_strategy == CapsuleDisplayStrategy::WebUrl;
                     let is_terminal_stream =
                         session.display_strategy == CapsuleDisplayStrategy::TerminalStream;
@@ -1343,6 +1364,20 @@ impl WebViewManager {
                                     );
                                 }
                                 if let Some(session) = webview.launched_session.as_ref() {
+                                    // Anchor handle→session for the
+                                    // stop_active_session fallback
+                                    // (#122). Doing it here (in
+                                    // addition to the
+                                    // drain_pending_launches success
+                                    // arm) covers every successful
+                                    // WebView build — including paths
+                                    // where the WebView is built but
+                                    // the drain success arm took a
+                                    // different branch.
+                                    self.handle_to_session.insert(
+                                        session.handle.clone(),
+                                        session.clone(),
+                                    );
                                     match resolve_share_icon(session) {
                                         Some(ShareIconSource::Direct(icon)) => {
                                             info!(
@@ -2397,11 +2432,49 @@ impl WebViewManager {
         let Some(active_pane_id) = self.active_pane_id else {
             return false;
         };
-        let Some(view) = self.views.get(&active_pane_id) else {
-            return false;
-        };
-        let Some(session) = view.launched_session.as_ref() else {
-            return false;
+
+        // Primary path: the active pane's WebView still holds a
+        // `launched_session` reference (the simple case — no consent
+        // re-arm in between, no Rebuild that evicted the launch
+        // info). Fallback path: walk `handle_to_session` for the
+        // active pane's handle. The fallback exists because the
+        // post-consent re-arm flow in our Track C receipt
+        // (claudedocs/aodd-receipts/track-c-desktop-mcp-...) had
+        // `view.launched_session = None` while uvicorn + provider
+        // were still running and an `ato app session start` had
+        // succeeded; without this fallback the UI stop becomes a
+        // silent no-op. See ato-run/ato#122.
+        let primary = self
+            .views
+            .get(&active_pane_id)
+            .and_then(|v| v.launched_session.as_ref())
+            .cloned();
+
+        let session: GuestLaunchSession = if let Some(s) = primary {
+            s
+        } else {
+            let Some(handle) = self
+                .views
+                .get(&active_pane_id)
+                .and_then(|v| route_handle(&v.route))
+                .or_else(|| {
+                    state
+                        .active_web_pane()
+                        .and_then(|active| route_handle(&active.route))
+                })
+            else {
+                return false;
+            };
+            let Some(s) = self.handle_to_session.get(&handle).cloned() else {
+                return false;
+            };
+            tracing::info!(
+                pane_id = active_pane_id,
+                handle = %handle,
+                session_id = %s.session_id,
+                "stop_active_session: using handle_to_session fallback (launched_session was None on the active WebView)"
+            );
+            s
         };
         let session_id = session.session_id.clone();
         let handle = session.handle.clone();
@@ -2486,10 +2559,18 @@ impl WebViewManager {
                 "stop_active_session: evicted cached WebView so same-URL re-navigate retriggers Rebuild"
             );
         }
+        // Drop the handle→session anchor on a successful stop so the
+        // next launch for this handle starts from a clean state.
+        // Errored stops keep the entry: the user can retry the same
+        // stop without losing the reference.
+        if stopped {
+            self.handle_to_session.remove(&handle);
+        }
         state.sync_web_session_state(active_pane_id, WebSessionState::LaunchFailed);
 
         stopped
     }
+
 
     /// Drain every retained session and graceful-stop each in a
     /// background thread. Active panes (`self.views`) are
@@ -4026,6 +4107,21 @@ fn detach_macos_devtools_if_supported(webview: &WebView) {
                 .map(|attached| attached.to_string())
                 .unwrap_or_else(|| "<unknown>".to_string())
         ));
+    }
+}
+
+/// Extract the capsule handle from a [`GuestRoute`] for the
+/// `stop_active_session` handle-fallback lookup (ato-run/ato#122).
+/// Returns `None` for routes that aren't backed by a capsule
+/// launch (`Capsule` is a sub-session shape, `ExternalUrl` and
+/// `Terminal` are not capsule-launched).
+fn route_handle(route: &GuestRoute) -> Option<String> {
+    match route {
+        GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
+        GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
+        GuestRoute::Capsule { .. }
+        | GuestRoute::ExternalUrl(_)
+        | GuestRoute::Terminal { .. } => None,
     }
 }
 
