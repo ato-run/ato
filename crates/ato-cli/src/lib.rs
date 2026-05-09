@@ -202,6 +202,16 @@ pub fn main_entry() {
     // silently do nothing.
     logging::init_subscriber();
 
+    // #117 follow-up — when the desktop spawns us, stdin/stdout are
+    // captured pipes and panics print to the captured stderr without
+    // a backtrace by default. Default to a full backtrace on panic so
+    // any future panic surfaces enough detail in the desktop's
+    // captured stderr that a single user repro is enough to fix it.
+    // The user can still override via the env var explicitly.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
+
     let args: Vec<String> = std::env::args().collect();
     // Detect JSON mode before Clap parsing so even parse-time failures can be
     // rendered as machine-readable diagnostics.

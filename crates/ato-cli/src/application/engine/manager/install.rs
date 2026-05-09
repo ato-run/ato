@@ -1,14 +1,83 @@
 use anyhow::{Context, Result};
 use sha2::Digest;
 use std::fs;
+use std::future::Future;
 use std::io::{Cursor, Read};
 use std::path::Path;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
 
 use super::http::http_get_bytes;
 use super::locks::acquire_config_lock;
 use super::policy::{configured_nacelle_release_base_url, resolve_auto_bootstrap_policy_from_env};
 use super::release::{fetch_latest_nacelle_version_from_base_url, resolve_nacelle_release};
 use super::{EngineInstallResult, EngineManager};
+
+/// Drive an async future to completion synchronously without entering
+/// the futures-executor `LocalPool`.
+///
+/// Why we can't just use `futures::executor::block_on`:
+/// `auto_bootstrap_nacelle` and `download_engine` are reached
+/// transitively from inside a `tokio::runtime::Runtime::block_on(...)`
+/// call on the orchestration session-start path
+/// (`session::start_orchestration_session_in_process` →
+/// `runtime_handle.block_on(execute_until_ready_and_detach)` →
+/// `OrchestratorStartupRuntime::start_service` →
+/// `preflight_native_sandbox` → `auto_bootstrap_nacelle`). Tokio's
+/// `block_on` sets `futures_executor::enter()`'s thread-local guard,
+/// and the legacy `futures::executor::block_on(reporter.notify(...))`
+/// then panics with "cannot execute LocalPool from within another
+/// executor: EnterError". The panic only fires on first-time nacelle
+/// download — cached nacelle short-circuits the notify path entirely,
+/// which is why the regression escaped existing tests.
+///
+/// Why we can't move the future to a fresh thread either:
+/// `CapsuleReporter::notify(&self, ...)` is `async fn` — the returned
+/// future borrows `&self` for an anonymous lifetime, so it's neither
+/// `Send + 'static` nor cloneable. We can't `std::thread::spawn`
+/// it.
+///
+/// What we do instead: hand-roll a single-poll driver with a no-op
+/// waker. `CliReporter::notify` (the only reporter implementation
+/// reachable from the CLI's nacelle bootstrap path) is structurally
+/// synchronous — it serialises the message and `eprintln!`s it, with
+/// no `.await` between. So polling the returned future exactly once
+/// resolves it. Falls back to `panic!` if the future returns
+/// `Pending` so a future async-reporter regression fails loudly here
+/// instead of silently dropping notifications. This trade-off is
+/// fine because the alternative — making the reporter trait return
+/// `Send + 'static` futures or pinning a multi_thread tokio runtime
+/// for these sync helpers — is a much larger refactor than the
+/// notification-emission path warrants.
+fn drive_sync_async<F: Future>(future: F) -> F::Output {
+    // `RawWaker` with all-no-op vtable. Constructing a waker by hand
+    // sidesteps `futures-executor`'s `enter()` guard entirely — the
+    // panic we're avoiding lives inside that crate's `LocalPool`,
+    // which we don't touch here at all.
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(std::ptr::null(), &VTABLE),
+        |_| {},
+        |_| {},
+        |_| {},
+    );
+    let raw = RawWaker::new(std::ptr::null(), &VTABLE);
+    // Safety: the vtable above is `'static` and all functions are
+    // no-ops, satisfying the contract of `RawWaker::new`.
+    let waker = unsafe { Waker::from_raw(raw) };
+    let mut cx = TaskContext::from_waker(&waker);
+
+    // Pin on the stack and poll once.
+    let mut future = std::pin::pin!(future);
+    match Future::poll(future.as_mut() as Pin<&mut F>, &mut cx) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!(
+            "drive_sync_async: reporter future returned Pending on first poll. \
+             This helper assumes structurally-synchronous reporters; if a \
+             reporter implementation now actually awaits, the engine bootstrap \
+             notify path needs to be made async end-to-end."
+        ),
+    }
+}
 
 impl EngineManager {
     pub fn download_engine(
@@ -23,15 +92,14 @@ impl EngineManager {
         let output_path = self.engine_path(name, version);
 
         if output_path.exists() {
-            futures::executor::block_on(
-                reporter.notify(format!("✅ Engine {} {} already installed", name, version)),
-            )?;
+            drive_sync_async(reporter.notify(format!(
+                "✅ Engine {} {} already installed",
+                name, version
+            )))?;
             return Ok(output_path);
         }
 
-        futures::executor::block_on(
-            reporter.notify(format!("⬇️  Downloading {} {}...", name, version)),
-        )?;
+        drive_sync_async(reporter.notify(format!("⬇️  Downloading {} {}...", name, version)))?;
 
         let temp_path = output_path.with_extension("tmp");
         let _ = fs::remove_file(&temp_path);
@@ -83,7 +151,7 @@ impl EngineManager {
             )?;
         }
 
-        futures::executor::block_on(reporter.notify(format!(
+        drive_sync_async(reporter.notify(format!(
             "✅ Installed {} {} to {}",
             name,
             version,
@@ -197,7 +265,7 @@ pub(crate) fn auto_bootstrap_nacelle(
         );
     }
 
-    futures::executor::block_on(reporter.notify(format!(
+    drive_sync_async(reporter.notify(format!(
         "⚙️  Bootstrapping compatible nacelle engine {}...",
         policy.version
     )))?;
