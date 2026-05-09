@@ -590,6 +590,17 @@ pub(super) fn start_runtime_session(
     timer.finish_ok();
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
+    let dependency_contracts = dependency_contracts_for_session_record(
+        runtime_process.child.id() as i32,
+        dep_contracts.as_ref(),
+    );
+    // Slice A of #125 (umbrella #74): populate the persisted ExecutionGraph
+    // subset alongside `dependency_contracts`. Write-only — teardown still
+    // reads `dependency_contracts`. Parity is enforced in debug builds by
+    // the populator's internal `debug_assert!`.
+    let graph = crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
+        dependency_contracts.as_ref(),
+    );
     let session = StoredSessionInfo {
         session_id,
         handle: handle.to_string(),
@@ -622,11 +633,8 @@ pub(super) fn start_runtime_session(
                 log_path: log_path.display().to_string(),
             }
         }),
-        dependency_contracts: dependency_contracts_for_session_record(
-            runtime_process.child.id() as i32,
-            dep_contracts.as_ref(),
-        ),
-        graph: None,
+        dependency_contracts,
+        graph,
         // Single-target session (no `[services]`); orchestration_services
         // is populated only by start_orchestration_session_in_process.
         orchestration_services: None,
@@ -875,6 +883,16 @@ pub(super) fn start_orchestration_session_in_process(
     };
     process_manager.write_pid(&process_info)?;
 
+    // [dependencies.<alias>] subset — same as single-target session.
+    let dependency_contracts =
+        dependency_contracts_for_session_record(leaf_local_pid, dep_contracts.as_ref());
+    // Slice A of #125 (umbrella #74): populate the persisted ExecutionGraph
+    // subset alongside `dependency_contracts`. Write-only — teardown still
+    // reads `dependency_contracts`. Parity is enforced in debug builds by
+    // the populator's internal `debug_assert!`.
+    let graph = crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
+        dependency_contracts.as_ref(),
+    );
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
         handle: handle.to_string(),
@@ -899,12 +917,8 @@ pub(super) fn start_orchestration_session_in_process(
         }),
         terminal: None,
         service: None,
-        // [dependencies.<alias>] subset — same as single-target session.
-        dependency_contracts: dependency_contracts_for_session_record(
-            leaf_local_pid,
-            dep_contracts.as_ref(),
-        ),
-        graph: None,
+        dependency_contracts,
+        graph,
         // [services] graph subset (#73 PR-D). Persisted so `stop_session`
         // (and the parent-death watcher from PR-B) can tear services down
         // after the wrapper process exits — the OS keeps the underlying
@@ -2571,6 +2585,120 @@ mod tests {
         // Wire-contract pin: prevents accidental rename or version bump within v1.
         // Bumping to ccp/v2 is a major-version event requiring desktop coordination.
         assert_eq!(super::super::SCHEMA_VERSION, "ccp/v1");
+    }
+
+    /// Slice A of #125 (umbrella #74), session-start integration shape:
+    /// when a session record carries non-empty `dependency_contracts`,
+    /// the populator must also emit a non-None `graph` whose provider
+    /// node set matches the providers, and the resulting `StoredSessionInfo`
+    /// must round-trip through serde unchanged.
+    ///
+    /// This is the integration counterpart to the unit tests in
+    /// `application::session_graph_populate::tests`; it pins the call
+    /// shape used by `start_runtime_session` /
+    /// `start_orchestration_session_in_process` (build
+    /// dependency_contracts → call populator with the same value → store
+    /// both on the record).
+    #[test]
+    fn session_record_with_dep_contracts_carries_populated_graph_and_round_trips() {
+        use crate::application::session_graph_populate::populate_graph_from_dependency_contracts;
+
+        let dependency_contracts = Some(StoredDependencyContracts {
+            consumer_pid: 4242,
+            providers: vec![
+                StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: 5252,
+                    state_dir: PathBuf::from("/tmp/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec!["DATABASE_URL".to_string()],
+                },
+                StoredDependencyProvider {
+                    alias: "cache".to_string(),
+                    pid: 5353,
+                    state_dir: PathBuf::from("/tmp/cache"),
+                    resolved: "capsule://example/cache@1".to_string(),
+                    allocated_port: Some(6379),
+                    log_path: None,
+                    runtime_export_keys: vec!["CACHE_URL".to_string()],
+                },
+            ],
+        });
+        let graph = populate_graph_from_dependency_contracts(dependency_contracts.as_ref());
+        assert!(
+            graph.is_some(),
+            "non-empty dependency_contracts must yield a populated graph (slice A)"
+        );
+
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-populate".to_string(),
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: "/tmp/x.log".to_string(),
+            manifest_path: "/tmp/capsule.toml".to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts,
+            graph,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("d".repeat(64)),
+            process_start_time_unix_ms: None,
+        };
+
+        // Provider-set parity: graph providers ≡ dependency_contracts providers.
+        let contract_providers: std::collections::BTreeSet<&str> = record
+            .dependency_contracts
+            .as_ref()
+            .map(|c| c.providers.iter().map(|p| p.alias.as_str()).collect())
+            .unwrap_or_default();
+        let graph_providers: std::collections::BTreeSet<&str> = record
+            .graph
+            .as_ref()
+            .map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(|n| n.kind == "provider")
+                    .map(|n| n.identifier.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(graph_providers, contract_providers);
+
+        // Round-trip through serde unchanged: the populated graph survives
+        // ato-session-core's atomic-writer JSON serialization.
+        let first = serde_json::to_string(&record).expect("serialize");
+        let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
+        let second = serde_json::to_string(&parsed).expect("reserialize");
+        assert_eq!(first, second, "populated graph must round-trip byte-stable");
+        assert!(parsed.graph.is_some(), "graph must survive the round-trip");
+        let parsed_graph = parsed.graph.expect("graph present after round-trip");
+        assert_eq!(
+            parsed_graph.schema_version,
+            ato_session_core::StoredExecutionGraph::SCHEMA_VERSION
+        );
+        assert_eq!(parsed_graph.nodes.len(), 2);
+        assert_eq!(parsed_graph.edges.len(), 2);
     }
 
     #[test]
