@@ -510,6 +510,11 @@ impl WebViewManager {
             })
             .unwrap_or(WebViewReuseAction::Rebuild);
 
+        // Tracks whether the Navigate branch's `load_url` call below failed,
+        // so the post-reuse `Mounted` cleanup can skip force-promoting a
+        // pane whose new navigation never actually started (#143 review).
+        let mut navigate_load_url_failed = false;
+
         if matches!(reuse_action, WebViewReuseAction::Rebuild) {
             if let Some(previous) = self.views.remove(&active.pane_id) {
                 self.automation.fail_requests_for_pane(active.pane_id);
@@ -582,6 +587,11 @@ impl WebViewManager {
                         ActivityTone::Error,
                         format!("Failed to navigate child webview: {error}"),
                     );
+                    // load_url failed: don't force-promote to Mounted below —
+                    // the new navigation never happened and the user should
+                    // see something other than a confidently-mounted stale
+                    // page.
+                    navigate_load_url_failed = true;
                 } else {
                     existing.route = active.route.clone();
                     existing.route_key = route_key.clone();
@@ -599,11 +609,13 @@ impl WebViewManager {
         // "Starting app…") permanently on top of the live WebView.
         // Mirror the Rebuild logic for the reuse paths so omnibar
         // navigation between web pages clears the overlay (#143).
-        if should_force_mounted_after_reuse(
-            reuse_action,
-            self.views.contains_key(&active.pane_id),
-            &active.route,
-        ) {
+        if !navigate_load_url_failed
+            && should_force_mounted_after_reuse(
+                reuse_action,
+                self.views.contains_key(&active.pane_id),
+                &active.route,
+            )
+        {
             state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
         }
 
