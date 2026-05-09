@@ -352,6 +352,23 @@ pub(in crate::ui) fn render_resolution_modal_overlay(
         .into_any_element()
 }
 
+/// Render a horizontal stepper showing both steps as numbered
+/// breadcrumbs so the user can see at a glance "I'm on step 1 of 2,
+/// step 2 is still ahead". Single-step requests collapse to nothing —
+/// drawing a stepper for one step is more confusing than helpful.
+///
+/// Visual:
+///
+/// ```text
+///  ┌───┐                          ┌───┐
+///  │ 1 │ Review consents     →    │ 2 │ Provide secrets
+///  └───┘ (highlighted)            └───┘ (dim)
+/// ```
+///
+/// Active step uses `accent_subtle` background + `text_primary` text;
+/// inactive step uses transparent background + `text_tertiary` text.
+/// The arrow between is the visual cue that step 2 is the next
+/// destination.
 fn render_step_indicator(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
     let consents_present = !modal.request.consents.is_empty();
     let secrets_present = !modal.request.secrets.is_empty();
@@ -361,16 +378,89 @@ fn render_step_indicator(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
         return div().into_any_element();
     }
 
-    let step_label = match modal.step {
-        ResolutionStep::Consent => "Step 1 of 2 · Review & approve ExecutionPlans",
-        ResolutionStep::Secrets => "Step 2 of 2 · Provide secrets",
-    };
+    let on_consent = modal.step == ResolutionStep::Consent;
+
     div()
-        .text_size(px(11.0))
-        .font_weight(FontWeight(600.0))
-        .text_color(theme.text_tertiary)
-        .child(step_label)
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(render_step_pill(
+            1,
+            "Review consents",
+            on_consent,
+            theme,
+        ))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.text_tertiary)
+                .child("→"),
+        )
+        .child(render_step_pill(
+            2,
+            "Provide secrets",
+            !on_consent,
+            theme,
+        ))
         .into_any_element()
+}
+
+/// One numbered pill in the stepper. The number is rendered in a
+/// rounded box so the user reads "1" / "2" before the label — a
+/// stronger affordance than the prior "Step 1 of 2" text.
+fn render_step_pill(
+    number: u8,
+    label: &'static str,
+    active: bool,
+    theme: &Theme,
+) -> impl IntoElement {
+    let (badge_bg, badge_border, badge_text, label_text) = if active {
+        (
+            theme.accent_subtle,
+            theme.accent_border,
+            theme.text_primary,
+            theme.text_primary,
+        )
+    } else {
+        (
+            theme.panel_bg,
+            theme.border_default,
+            theme.text_tertiary,
+            theme.text_tertiary,
+        )
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(11.0))
+                .border_1()
+                .border_color(badge_border)
+                .bg(badge_bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .font_weight(FontWeight(700.0))
+                .text_color(badge_text)
+                .child(format!("{number}")),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .font_weight(if active {
+                    FontWeight(600.0)
+                } else {
+                    FontWeight(500.0)
+                })
+                .text_color(label_text)
+                .child(label),
+        )
 }
 
 fn render_step_body(modal: &ResolutionModal, theme: &Theme) -> AnyElement {

@@ -815,7 +815,6 @@ fn start_capsule(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         // Try to lift the trailing JSONL fatal envelope out of the
         // CLI output — `emit_ato_error_jsonl` writes to stderr in
@@ -836,16 +835,27 @@ fn start_capsule(
         // avoids re-breaking on future renumbering.
         let event = crate::cli_envelope::parse_cli_error_event(&stderr)
             .or_else(|| crate::cli_envelope::parse_cli_error_event(&stdout));
-        if let Some(event) = event {
+        if let Some(event) = &event {
             let is_missing_env = event.name.as_deref() == Some("missing_required_env")
                 || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
                 || event.code == "E103";
             if is_missing_env {
                 if let Some(details) = event.missing_env_details() {
                     if !details.missing_schema.is_empty() {
+                        // #117 — interactive resolution is an expected
+                        // state, not a failure. Log at warn (one line
+                        // per launch attempt, no payload spam) and
+                        // return the typed variant so the modal flow
+                        // takes over. The `error!` reserved for
+                        // unexpected CLI breakage stays at error.
+                        warn!(
+                            handle,
+                            target = ?details.target,
+                            "guest launch needs configuration; surfacing modal"
+                        );
                         return Err(LaunchError::MissingConfig {
                             handle: handle.to_string(),
-                            target: details.target.or(event.target),
+                            target: details.target.or(event.target.clone()),
                             fields: details.missing_schema,
                             original_secrets: secrets.to_vec(),
                         });
@@ -863,6 +873,13 @@ fn start_capsule(
                 || event.code == "E302";
             if is_execution_contract {
                 if let Some(details) = event.consent_required_details() {
+                    // Same rationale as the missing-env branch:
+                    // interactive consent is expected.
+                    warn!(
+                        handle,
+                        target = %details.target_label,
+                        "guest launch needs ExecutionPlan consent; surfacing modal"
+                    );
                     return Err(LaunchError::MissingConsent {
                         handle: handle.to_string(),
                         scoped_id: details.scoped_id,
@@ -876,6 +893,12 @@ fn start_capsule(
                 }
             }
         }
+
+        // Genuinely unexpected — preserve the original error log so
+        // operators can debug. Reaching here means either the CLI
+        // emitted a fatal we don't understand, or the envelope parse
+        // failed; both are worth a noisy entry.
+        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         let detail = if !stderr.is_empty() {
             stderr
