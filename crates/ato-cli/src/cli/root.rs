@@ -59,6 +59,7 @@ pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
         about = "Try something now",
+        long_about = "Try something now.\n\nIf consent is required, approve via desktop or `ato internal consent approve-execution-plan`.",
         trailing_var_arg = true
     )]
     Run {

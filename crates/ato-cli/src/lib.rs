@@ -189,6 +189,7 @@ pub(crate) use utils::error as ato_error_jsonl;
 pub(crate) use utils::error as error_codes;
 pub(crate) use utils::fs as fs_copy;
 pub(crate) use utils::hash as artifact_hash;
+pub(crate) use utils::interactive_requirement;
 pub(crate) use utils::local_input;
 pub(crate) use utils::payload_guard;
 
@@ -208,6 +209,12 @@ pub fn main_entry() {
     let command_context = diagnostics::detect_command_context(&args);
 
     if let Err(err) = run() {
+        // Emit the machine-readable interactive-requirement envelope
+        // before any other rendering. Today this fires only for the
+        // non-TTY E302 consent-required sub-shape and is a no-op for
+        // every other error or when stderr is a TTY. Issue #126.
+        let _ = interactive_requirement::try_emit_for_anyhow(&err);
+
         if json_mode && commands::inspect::try_emit_json_error(&err) {
             std::process::exit(error_codes::EXIT_USER_ERROR);
         }

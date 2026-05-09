@@ -1654,3 +1654,26 @@ fn pr_c_orchestrator_detach_and_foreground_entry_points_remain_public() {
     #[allow(unused_imports)]
     use crate::executors::orchestrator::{execute_until_ready_and_detach, execute_with_client};
 }
+
+/// `ato run --help` must point users at the CLI consent-approval
+/// command so a non-TTY caller that hits E302 can act without reading
+/// the source. Issue #126 — the matching machine-readable surface is
+/// the `ATO_INTERACTIVE_REQUIREMENT:` envelope on stderr.
+#[test]
+fn run_help_mentions_internal_consent_approve_path() {
+    use clap::CommandFactory;
+
+    let mut cmd = Cli::command();
+    let run_cmd = cmd
+        .find_subcommand_mut("run")
+        .expect("`run` subcommand must exist");
+    let mut buf: Vec<u8> = Vec::new();
+    run_cmd
+        .write_long_help(&mut buf)
+        .expect("render long help for `ato run`");
+    let rendered = String::from_utf8(buf).expect("help is utf-8");
+    assert!(
+        rendered.contains("ato internal consent approve-execution-plan"),
+        "expected `ato run --help` to advertise the CLI consent-approval command, got:\n{rendered}",
+    );
+}

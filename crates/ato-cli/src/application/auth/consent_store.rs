@@ -50,11 +50,23 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // on. Older consumers keep classifying this as a generic
         // execution-contract error and fall through to the existing
         // fatal-toast path.
+        //
+        // For non-TTY shell callers without an envelope-aware adapter,
+        // `lib.rs::main_entry` also emits the machine-readable
+        // `ATO_INTERACTIVE_REQUIREMENT:` line on stderr and the
+        // `message` below spells out the CLI approval command. (#126)
         return Err(AtoExecutionError::from_ato_error(
             AtoError::ExecutionPlanConsentRequired {
-                message: "ExecutionPlan consent required for this capsule. Approve via the desktop modal or a TTY prompt before retrying.".to_string(),
+                message: format!(
+                    "ExecutionPlan consent required for target={target} of {scoped_id}@{version}.\n\nTo approve from CLI:\n  ato internal consent approve-execution-plan \\\n    --scoped-id {scoped_id} --version {version} --target-label {target} \\\n    --policy-segment-hash {policy_hash} --provisioning-policy-hash {provisioning_hash}\n\nTo approve from Desktop: open the modal in the launching app.",
+                    scoped_id = plan.consent.key.scoped_id,
+                    version = plan.consent.key.version,
+                    target = plan.consent.key.target_label,
+                    policy_hash = plan.consent.policy_segment_hash,
+                    provisioning_hash = plan.consent.provisioning_policy_hash,
+                ),
                 hint: Some(
-                    "Desktop の承認モーダル、または TTY 上で対話的に承認してから再実行してください。".to_string(),
+                    "Desktop の承認モーダル、または `ato internal consent approve-execution-plan` を実行してから再試行してください。".to_string(),
                 ),
                 scoped_id: plan.consent.key.scoped_id.clone(),
                 version: plan.consent.key.version.clone(),
@@ -481,6 +493,45 @@ mod tests {
                 || snapshot.contains("execution_plan_consent_required"),
             "expected the new variant to surface, got: {snapshot}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn require_consent_non_tty_message_includes_cli_approval_command() {
+        // Issue #126: the human-readable message must spell out the
+        // `ato internal consent approve-execution-plan` invocation a
+        // non-TTY caller (script, AODD harness, MCP host) needs to run
+        // to unblock. The five identity fields shipped in the typed
+        // envelope must appear inline so the message is self-contained
+        // for users reading raw stderr.
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+        let err = require_consent(&plan, false).expect_err("must emit consent envelope");
+
+        assert!(
+            err.message
+                .contains("ato internal consent approve-execution-plan"),
+            "expected human-readable message to point at the CLI approval command, got: {message}",
+            message = err.message,
+        );
+        for fragment in [
+            plan.consent.key.scoped_id.as_str(),
+            plan.consent.key.version.as_str(),
+            plan.consent.key.target_label.as_str(),
+            plan.consent.policy_segment_hash.as_str(),
+            plan.consent.provisioning_policy_hash.as_str(),
+        ] {
+            assert!(
+                err.message.contains(fragment),
+                "expected human-readable message to embed {fragment:?}, got: {message}",
+                message = err.message,
+            );
+        }
     }
 
     #[test]
