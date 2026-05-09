@@ -322,17 +322,33 @@ pub fn resolve_and_start_guest(
     // (e.g. uncached remote ref), fall through to the legacy launch
     // loop which still drains lazily via `merge_*_into_resolution`.
     match collect_preflight_requirements(handle) {
-        Ok(envelopes) if !envelopes.is_empty() => {
-            return Err(LaunchError::PreflightAggregate {
-                handle: handle.to_string(),
-                requirements: envelopes,
-                original_secrets: secrets.to_vec(),
-            });
-        }
-        Ok(_) => {
-            // No pending requirements → proceed to the normal
-            // resolve+start path. The provisioning + execute phases
-            // run as before.
+        Ok(envelopes) => {
+            // Preflight emits "what the manifest requires" — it has no
+            // visibility into the desktop's per-handle SecretStore.
+            // After the user submits the resolution modal, those
+            // secrets are persisted to the SecretStore but the
+            // manifest still lists them as required, so the next
+            // preflight call would re-emit them and re-open the modal
+            // on the retry.
+            //
+            // Intersect against the snapshot already in `secrets` to
+            // drop the satisfied ones. Consents are already filtered
+            // upstream (preflight reads the consent JSONL directly via
+            // `consent_store::has_consent`), so they pass through
+            // unchanged. An envelope whose schema becomes empty after
+            // filtering is dropped entirely — otherwise the modal
+            // would show a section header with no inputs.
+            let filtered = filter_already_provided_secrets(envelopes, secrets);
+            if !filtered.is_empty() {
+                return Err(LaunchError::PreflightAggregate {
+                    handle: handle.to_string(),
+                    requirements: filtered,
+                    original_secrets: secrets.to_vec(),
+                });
+            }
+            // Else: every secret already in SecretStore + every
+            // consent already recorded → fall through to the actual
+            // launch. Provisioning runs.
         }
         Err(error) => {
             // Preflight intentionally fails closed for unsupported
@@ -349,6 +365,58 @@ pub fn resolve_and_start_guest(
     }
 
     resolve_and_start_capsule(handle, secrets, plain_configs)
+}
+
+/// Drop preflight envelopes whose secret requirements are already
+/// satisfied by the per-handle SecretStore snapshot. Returns the
+/// filtered list — consent envelopes pass through, secret envelopes
+/// have their `schema` narrowed to fields not yet in `secrets`, and
+/// envelopes whose schema becomes empty are dropped.
+///
+/// The matching key is `ConfigField.name` (the env-var key the
+/// runtime expects), compared against `SecretEntry.key` (the same
+/// env-var name as the SecretStore identifier). The convention is
+/// "same string"; the explicit comparison documents the invariant
+/// so a future divergence (e.g. typed key wrappers) breaks here
+/// instead of silently re-opening the modal.
+fn filter_already_provided_secrets(
+    envelopes: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+    secrets: &[SecretEntry],
+) -> Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope> {
+    use capsule_core::interactive_resolution::{
+        InteractiveResolutionEnvelope, InteractiveResolutionKind,
+    };
+    let provided: std::collections::HashSet<String> =
+        secrets.iter().map(|s| s.key.clone()).collect();
+
+    envelopes
+        .into_iter()
+        .filter_map(|env| match env.kind {
+            InteractiveResolutionKind::SecretsRequired { target, schema } => {
+                let still_missing: Vec<_> = schema
+                    .into_iter()
+                    .filter(|f| !provided.contains(&f.name))
+                    .collect();
+                if still_missing.is_empty() {
+                    None
+                } else {
+                    Some(InteractiveResolutionEnvelope {
+                        kind: InteractiveResolutionKind::SecretsRequired {
+                            target,
+                            schema: still_missing,
+                        },
+                        display: env.display,
+                    })
+                }
+            }
+            kind @ InteractiveResolutionKind::ConsentRequired { .. } => {
+                Some(InteractiveResolutionEnvelope {
+                    kind,
+                    display: env.display,
+                })
+            }
+        })
+        .collect()
 }
 
 /// Shell out to `ato internal preflight <handle> --json` and parse
