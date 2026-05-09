@@ -5,6 +5,7 @@ use serde_json::Value;
 use capsule_core::execution_plan::error::{
     AtoExecutionError, CleanupActionRecord, CleanupStatus, ManifestSuggestion,
 };
+use capsule_core::interactive_resolution::InteractiveResolutionEnvelope;
 
 use crate::application::pipeline::cleanup::PipelineAttemptError;
 
@@ -35,6 +36,12 @@ struct AtoErrorEvent<'a> {
     hint: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<&'a Value>,
+    /// #96 — additive typed envelope alongside the legacy `details`. Only
+    /// populated for variants with an interactive-resolution UI today
+    /// (E103, E302). Skipped from output when None so callers reading
+    /// the legacy shape see no new fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interactive_resolution_required: Option<&'a InteractiveResolutionEnvelope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cleanup_status: Option<CleanupStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -57,6 +64,7 @@ pub fn emit_ato_error_jsonl(err: &AtoExecutionError) {
         target: err.target.as_deref(),
         hint: err.hint.as_deref(),
         details: err.details.as_ref(),
+        interactive_resolution_required: err.interactive_resolution_required.as_ref(),
         cleanup_status: err.cleanup_status,
         cleanup_actions: &err.cleanup_actions,
         manifest_suggestion: err.manifest_suggestion.as_ref(),
@@ -243,5 +251,104 @@ mod tests {
         let err = anyhow::anyhow!("plain string error");
 
         assert!(!try_emit_interactive_resolution_envelope(&err));
+    }
+
+    /// #96 — the on-the-wire JSONL must carry the new
+    /// `interactive_resolution_required` envelope alongside the legacy
+    /// `details` payload for E302. This locks the additive shape so a
+    /// future regression that drops the field would fail loudly here.
+    #[test]
+    fn jsonl_event_carries_envelope_alongside_details_for_consent_error() {
+        let exec_err = AtoExecutionError::from_ato_error(AtoError::ExecutionPlanConsentRequired {
+            message: "consent required".to_string(),
+            hint: Some("approve via desktop".to_string()),
+            scoped_id: "publisher/app".to_string(),
+            version: "1.0.0".to_string(),
+            target_label: "cli".to_string(),
+            policy_segment_hash: "blake3:aaa".to_string(),
+            provisioning_policy_hash: "blake3:bbb".to_string(),
+            summary: "Capsule: publisher/app@1.0.0".to_string(),
+        });
+
+        // The wire payload is the same shape `emit_ato_error_jsonl`
+        // writes to stderr; serialize via the same struct rather than
+        // capturing stderr to avoid coupling the test to test-runner
+        // capture quirks.
+        let payload = AtoErrorEvent {
+            level: "fatal",
+            code: exec_err.code,
+            name: exec_err.name,
+            phase: exec_err.phase,
+            classification: exec_err.classification.as_str(),
+            message: &exec_err.message,
+            retryable: exec_err.retryable,
+            interactive_resolution: exec_err.interactive_resolution,
+            resource: exec_err.resource.as_deref(),
+            target: exec_err.target.as_deref(),
+            hint: exec_err.hint.as_deref(),
+            details: exec_err.details.as_ref(),
+            interactive_resolution_required: exec_err.interactive_resolution_required.as_ref(),
+            cleanup_status: exec_err.cleanup_status,
+            cleanup_actions: &exec_err.cleanup_actions,
+            manifest_suggestion: exec_err.manifest_suggestion.as_ref(),
+        };
+        let json: serde_json::Value =
+            serde_json::to_value(&payload).expect("serialize event");
+
+        // Legacy details path stays intact (desktop's
+        // `ConsentRequiredDetailsDto` still consumes this).
+        assert_eq!(
+            json["details"]["reason"].as_str(),
+            Some("execution_plan_consent_required"),
+            "legacy details.reason discriminator must stay; got: {json}"
+        );
+        assert_eq!(json["details"]["scoped_id"].as_str(), Some("publisher/app"));
+
+        // New typed envelope is emitted at the top level.
+        let env = &json["interactive_resolution_required"];
+        assert_eq!(
+            env["kind"]["type"].as_str(),
+            Some("consent_required"),
+            "envelope.kind.type discriminator missing; got: {json}"
+        );
+        assert_eq!(env["kind"]["scoped_id"].as_str(), Some("publisher/app"));
+        assert_eq!(env["kind"]["target_label"].as_str(), Some("cli"));
+        assert_eq!(env["kind"]["policy_segment_hash"].as_str(), Some("blake3:aaa"));
+        assert_eq!(env["display"]["message"].as_str(), Some("consent required"));
+    }
+
+    /// Errors that have no interactive-resolution UI today must NOT
+    /// emit the envelope (omitted via `skip_serializing_if`). Keeps
+    /// the wire shape compact for the common error case and prevents
+    /// future consumers from spuriously routing on `null`.
+    #[test]
+    fn jsonl_event_omits_envelope_for_non_interactive_error() {
+        let exec_err = AtoExecutionError::internal("boom".to_string());
+
+        let payload = AtoErrorEvent {
+            level: "fatal",
+            code: exec_err.code,
+            name: exec_err.name,
+            phase: exec_err.phase,
+            classification: exec_err.classification.as_str(),
+            message: &exec_err.message,
+            retryable: exec_err.retryable,
+            interactive_resolution: exec_err.interactive_resolution,
+            resource: exec_err.resource.as_deref(),
+            target: exec_err.target.as_deref(),
+            hint: exec_err.hint.as_deref(),
+            details: exec_err.details.as_ref(),
+            interactive_resolution_required: exec_err.interactive_resolution_required.as_ref(),
+            cleanup_status: exec_err.cleanup_status,
+            cleanup_actions: &exec_err.cleanup_actions,
+            manifest_suggestion: exec_err.manifest_suggestion.as_ref(),
+        };
+        let json: serde_json::Value =
+            serde_json::to_value(&payload).expect("serialize event");
+
+        assert!(
+            json.get("interactive_resolution_required").is_none(),
+            "envelope must be omitted for non-interactive errors; got: {json}"
+        );
     }
 }
