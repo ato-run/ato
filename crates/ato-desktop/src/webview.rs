@@ -589,6 +589,24 @@ impl WebViewManager {
             }
         }
 
+        // navigate_to_url always resets the focused pane to
+        // `WebSessionState::Launching`. The Rebuild branch above
+        // immediately transitions back to `Mounted` for routes that
+        // don't need a guest ready signal — but Navigate (URL change in
+        // an already-built ExternalUrl WebView) and Keep (same URL
+        // re-typed into the omnibar) skipped that transition, leaving
+        // the launching overlay (`render_generic_loading_overlay` →
+        // "Starting app…") permanently on top of the live WebView.
+        // Mirror the Rebuild logic for the reuse paths so omnibar
+        // navigation between web pages clears the overlay (#143).
+        if should_force_mounted_after_reuse(
+            reuse_action,
+            self.views.contains_key(&active.pane_id),
+            &active.route,
+        ) {
+            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+        }
+
         let webview_bounds = content_bounds(active.bounds);
 
         if let Some(existing) = self.views.get_mut(&active.pane_id) {
@@ -3353,6 +3371,21 @@ fn route_requires_ready_signal(route: &GuestRoute) -> bool {
     )
 }
 
+/// True when `sync_from_state` reused (Navigate or Keep) an existing
+/// child WebView whose route does not need a guest "ready" signal — the
+/// caller must then force-transition the pane to `WebSessionState::Mounted`
+/// so the launching overlay set by `AppState::navigate_to_url` clears
+/// (#143). The Rebuild branch already handles its own transition.
+fn should_force_mounted_after_reuse(
+    reuse_action: WebViewReuseAction,
+    has_existing_view: bool,
+    route: &GuestRoute,
+) -> bool {
+    !matches!(reuse_action, WebViewReuseAction::Rebuild)
+        && has_existing_view
+        && !route_requires_ready_signal(route)
+}
+
 fn should_show_webview(
     route: &GuestRoute,
     session: &WebSessionState,
@@ -4889,6 +4922,72 @@ mod tests {
              stop_active_session relies on evicting views[pane_id] \
              to bypass this branch (#112)"
         );
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_clears_overlay_for_external_url_navigate() {
+        // Regression for #143. navigate_to_url resets the focused pane to
+        // `WebSessionState::Launching`; in the Navigate path the WebView
+        // is reused (load_url) so the build_webview branch's mounted
+        // transition never runs, leaving the launching overlay stuck
+        // ("Starting app…") on top of a live external page.
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url"));
+        assert!(should_force_mounted_after_reuse(
+            WebViewReuseAction::Navigate,
+            true,
+            &route,
+        ));
+        assert!(should_force_mounted_after_reuse(
+            WebViewReuseAction::Keep,
+            true,
+            &route,
+        ));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_skips_when_no_existing_view() {
+        // Without a cached entry in WebViewManager.views the Rebuild
+        // branch will run and own its own mounted transition, so the
+        // post-reuse cleanup must not run.
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url"));
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Navigate,
+            false,
+            &route,
+        ));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_skips_capsule_routes() {
+        // CapsuleHandle / Capsule routes need an explicit guest "ready"
+        // signal before the overlay clears. Forcing Mounted here would
+        // unhide the WebView before the guest has wired its bridge.
+        let route = GuestRoute::CapsuleHandle {
+            handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+        };
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Navigate,
+            true,
+            &route,
+        ));
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Keep,
+            true,
+            &route,
+        ));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_skips_rebuild_branch() {
+        // The Rebuild branch already owns its own state transition; doing
+        // it twice is harmless but signals confused ownership.
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url"));
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Rebuild,
+            true,
+            &route,
+        ));
     }
 
     #[test]
