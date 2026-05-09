@@ -193,12 +193,36 @@ pub struct ExecutionIdentityInputV2 {
     pub launch: LaunchIdentityV2,
     pub local: Option<LocalExecutionLocator>,
     pub reproducibility: ReproducibilityIdentity,
+    /// Graph-derived identity in the `Declared` domain (manifest + lock +
+    /// policy only, host-independent). Populated in v0.6.0+ when the receipt
+    /// builder constructs a declared `ExecutionGraph`. Optional so the field
+    /// is additive on existing v2 receipts; readers built before #99 ignore
+    /// it. Not part of the JCS execution_id projection — it is a parallel
+    /// diagnostic identity surfaced alongside the JCS-derived `execution_id`.
+    /// Spec: `docs/execution-identity.md` §"Graph-based execution identity".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_execution_id: Option<String>,
+    /// Graph-derived identity in the `Resolved` domain (declared + host
+    /// resolution outputs). See `declared_execution_id` for the additivity /
+    /// projection-exclusion contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_execution_id: Option<String>,
+    /// Graph-derived identity in the `Observed` domain (resolved +
+    /// undeclared edges). Reserved for the runtime observation feature
+    /// (Phase 4 in the umbrella tracker); always `None` in v0.6.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_execution_id: Option<String>,
 }
 
 impl ExecutionIdentityInputV2 {
     // V2 adds source_provenance + local on top of v1's eight facets; like
     // the v1 constructor these are all canonical schema fields, not a place
     // for builder-style indirection.
+    //
+    // Graph-derived ids (declared/resolved/observed) are NOT positional
+    // arguments here — they were added later (#99 / PR-5a) and live behind
+    // dedicated `with_*_execution_id` setters so existing call sites keep
+    // their argument shape and graph plumbing is opt-in per call site.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source: SourceIdentityV2,
@@ -226,7 +250,30 @@ impl ExecutionIdentityInputV2 {
             launch,
             local,
             reproducibility,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
         }
+    }
+
+    /// Attach a graph-derived `declared_execution_id` (see field docs).
+    pub fn with_declared_execution_id(mut self, id: Option<String>) -> Self {
+        self.declared_execution_id = id;
+        self
+    }
+
+    /// Attach a graph-derived `resolved_execution_id` (see field docs).
+    pub fn with_resolved_execution_id(mut self, id: Option<String>) -> Self {
+        self.resolved_execution_id = id;
+        self
+    }
+
+    /// Attach a graph-derived `observed_execution_id` (see field docs).
+    /// Always `None` in v0.6.0; the setter exists for forward-compat so
+    /// the future observation feature has a typed entry point.
+    pub fn with_observed_execution_id(mut self, id: Option<String>) -> Self {
+        self.observed_execution_id = id;
+        self
     }
 
     pub fn compute_id(&self) -> Result<ExecutionIdentityDigest> {
@@ -251,6 +298,17 @@ pub struct ExecutionReceiptV2 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalExecutionLocator>,
     pub reproducibility: ReproducibilityIdentity,
+    /// Graph-derived `Declared`-domain id; see
+    /// [`ExecutionIdentityInputV2::declared_execution_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_execution_id: Option<String>,
+    /// Graph-derived `Resolved`-domain id; see
+    /// [`ExecutionIdentityInputV2::resolved_execution_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_execution_id: Option<String>,
+    /// Graph-derived `Observed`-domain id; always `None` in v0.6.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_execution_id: Option<String>,
 }
 
 impl ExecutionReceiptV2 {
@@ -275,6 +333,9 @@ impl ExecutionReceiptV2 {
             launch: input.launch,
             local: input.local,
             reproducibility: input.reproducibility,
+            declared_execution_id: input.declared_execution_id,
+            resolved_execution_id: input.resolved_execution_id,
+            observed_execution_id: input.observed_execution_id,
         })
     }
 }
@@ -1472,6 +1533,28 @@ pub(in crate::engine::execution_identity) mod tests {
         };
         let after = after_input.compute_id().expect("after").execution_id;
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn v2_graph_derived_execution_ids_do_not_affect_jcs_execution_id() {
+        // Graph-derived ids are surfaced on the receipt JSON but MUST NOT
+        // participate in the JCS projection — otherwise existing v2 receipts
+        // would re-hash to different values once #99 lands. Pin both the
+        // declared and the resolved id slot here.
+        let before = sample_input_v2().compute_id().expect("before").execution_id;
+
+        let mut input = sample_input_v2();
+        input.declared_execution_id = Some("sha256:declared-test".to_string());
+        input.resolved_execution_id = Some("sha256:resolved-test".to_string());
+        // observed stays None per v0.6.0 contract; setting it here only
+        // proves the future-compat field is also excluded from JCS.
+        input.observed_execution_id = Some("sha256:observed-test".to_string());
+
+        let after = input.compute_id().expect("after").execution_id;
+        assert_eq!(
+            before, after,
+            "declared/resolved/observed_execution_id must be parallel diagnostic ids, not JCS inputs"
+        );
     }
 
     #[test]

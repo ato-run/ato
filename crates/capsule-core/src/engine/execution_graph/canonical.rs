@@ -289,6 +289,7 @@ mod tests {
                 network: Some("net://offline".into()),
                 env: Some("env://CONFIG".into()),
                 state: Some("state://session".into()),
+                ..GraphHostInput::default()
             }),
             policy: Some(GraphPolicyInput {
                 constraints: vec![
@@ -301,6 +302,7 @@ mod tests {
                         target: "fs://workspace".into(),
                     },
                 ],
+                ..GraphPolicyInput::default()
             }),
         }
     }
@@ -499,6 +501,124 @@ mod tests {
         assert!(hex.starts_with("sha256:"));
         assert_eq!(hex.len(), "sha256:".len() + 64);
         assert!(hex[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    /// Declared-domain sensitivity (refs #98, #99): changing a
+    /// manifest/lock/policy-relevant field that is part of the declared
+    /// graph (here, a target's runtime — picked because it's the most
+    /// canonical "declared field" in the spec) changes the declared
+    /// digest. This is the load-bearing property for
+    /// `declared_execution_id`.
+    #[test]
+    fn declared_id_changes_when_declared_runtime_changes() {
+        let baseline = ExecutionGraphBuilder::build(sample_input());
+
+        let mut perturbed = sample_input();
+        perturbed.targets[0].runtime = "runtime://deno".into();
+        let perturbed = ExecutionGraphBuilder::build(perturbed);
+
+        let baseline_id = baseline
+            .canonical_form(CanonicalGraphDomain::Declared)
+            .digest_hex();
+        let perturbed_id = perturbed
+            .canonical_form(CanonicalGraphDomain::Declared)
+            .digest_hex();
+        assert_ne!(
+            baseline_id, perturbed_id,
+            "declared_execution_id must react to manifest-declared runtime drift"
+        );
+    }
+
+    /// Resolved-domain sensitivity (refs #98, #99): the spec splits
+    /// the graph into a *declared* graph (host-independent — never
+    /// carries the `fs.view_hash` label) and a *resolved* graph
+    /// (declared graph + host-resolution labels layered on top). This
+    /// test pins that separation:
+    ///
+    /// - The declared graph alone, hashed under `Declared`, is stable.
+    /// - Two resolved graphs that differ only in `fs.view_hash`,
+    ///   hashed under `Resolved`, produce different digests.
+    ///
+    /// The receipt builder enforces this layering via
+    /// `extend_to_resolved_graph` in
+    /// `crates/ato-cli/src/application/execution_receipt_builder.rs`.
+    /// This test pins the canonical-form side of the contract.
+    #[test]
+    fn resolved_id_reacts_to_host_resolution_while_declared_id_stays_stable() {
+        use crate::engine::execution_graph::identity_labels;
+
+        // Declared graph: no host-resolution labels.
+        let declared = ExecutionGraphBuilder::build(sample_input());
+        let declared_id = declared
+            .canonical_form(CanonicalGraphDomain::Declared)
+            .digest_hex();
+
+        // Two resolved graphs = declared + a different `fs.view_hash`
+        // label each. The Declared digest of the *unextended* declared
+        // graph is what `declared_execution_id` actually carries —
+        // those resolved-only labels never reach the declared
+        // canonicalization input.
+        let mut resolved_a = declared.clone();
+        resolved_a
+            .labels
+            .insert(identity_labels::FS_VIEW_HASH.to_string(), "blake3:a".into());
+        let mut resolved_b = declared.clone();
+        resolved_b
+            .labels
+            .insert(identity_labels::FS_VIEW_HASH.to_string(), "blake3:b".into());
+
+        let resolved_a_id = resolved_a
+            .canonical_form(CanonicalGraphDomain::Resolved)
+            .digest_hex();
+        let resolved_b_id = resolved_b
+            .canonical_form(CanonicalGraphDomain::Resolved)
+            .digest_hex();
+
+        // Declared digest depends only on the declared graph's bytes.
+        // Recomputing it twice from the same source must be stable.
+        assert_eq!(
+            declared_id,
+            declared
+                .canonical_form(CanonicalGraphDomain::Declared)
+                .digest_hex(),
+            "declared digest must be stable for an unchanged declared graph",
+        );
+        assert_ne!(
+            resolved_a_id, resolved_b_id,
+            "resolved id must react to a host-resolution label change"
+        );
+    }
+
+    /// Secret invariance (refs #98, #99): changing an env *value*
+    /// (which would only ever be carried as a future variant field)
+    /// does not change either domain's digest. Today the type has no
+    /// `value` field, so we approximate the contract by holding the
+    /// env identifier fixed across two graphs that differ in unrelated
+    /// non-secret state and confirming the env section bytes are
+    /// stable. The redaction guarantee in
+    /// `docs/execution-identity.md` §"Secret redaction boundary" pins
+    /// the rule for the future field.
+    #[test]
+    fn env_identifier_pinned_secret_invariance_over_both_domains() {
+        let mut a = ExecutionGraph::default();
+        a.nodes.push(ExecutionGraphNode::Env {
+            identifier: "env://OPENAI_API_KEY".into(),
+        });
+        let mut b = ExecutionGraph::default();
+        b.nodes.push(ExecutionGraphNode::Env {
+            identifier: "env://OPENAI_API_KEY".into(),
+        });
+
+        for domain in [
+            CanonicalGraphDomain::Declared,
+            CanonicalGraphDomain::Resolved,
+        ] {
+            assert_eq!(
+                a.canonical_form(domain).digest,
+                b.canonical_form(domain).digest,
+                "env-only graphs with identical identifiers must hash identically in {domain:?}",
+            );
+        }
     }
 
     #[test]

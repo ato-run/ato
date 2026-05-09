@@ -1,33 +1,41 @@
 //! Named builder for [`PolicyIdentityV2`].
 //!
-//! This is a Wave 1 scaffold (refs #74, #102). The builder accepts an
-//! [`ExecutionIdentityInputV2`] and returns the policy facet that the
-//! caller has already populated — a typed pass-through. The body must
-//! remain byte-equivalent to reading `input.policy` directly so that
-//! introducing this entry point does not perturb any execution_id
-//! already in circulation.
+//! Originally a Wave 1 typed pass-through (refs #74, #102). PR-5a
+//! (#102, #99) wires it to graph-derived inputs where the
+//! [`crate::engine::execution_graph::ExecutionGraph`] already exposes
+//! enough data; remaining facets continue to read from the V2 input.
 //!
-//! ## Why pass-through today
+//! ## Mixed-source contract
 //!
-//! The actual policy-hash computation (canonical sandbox-policy hash
-//! over runtime / network / mount-set algo facts; provisioning and
-//! capability segment hashes from the consent ledger) lives in
-//! `ato-cli` alongside the [`ExecutionPlan`]-aware observers. Lifting
-//! it requires capsule-core to see the resolved execution plan, which
-//! it does not today. Wave 3 (PR-5a, refs #99) will introduce a
-//! resolved `ExecutionGraph` that exposes those inputs to capsule-core;
-//! at that point this builder's body becomes "consume the graph's
-//! policy node, compute the three policy hashes" and call sites in
-//! `ato-cli` switch to invoking it.
+//! When [`PolicyIdentityBuilder::build_with_graph`] is given
+//! `Some(graph)`, the three policy hashes come from graph labels under
+//! the `policy.*` namespace (see
+//! [`crate::engine::execution_graph::identity_labels`]); the V2 input is
+//! the fallback when a label is absent.
+//!
+//! Today's graph-sourced fields:
+//!
+//! - `network_policy_hash` — from
+//!   [`crate::engine::execution_graph::identity_labels::POLICY_NETWORK_HASH`]
+//! - `capability_policy_hash` — from
+//!   [`crate::engine::execution_graph::identity_labels::POLICY_CAPABILITY_HASH`]
+//! - `sandbox_policy_hash` — from
+//!   [`crate::engine::execution_graph::identity_labels::POLICY_SANDBOX_HASH`]
+//!
+//! Byte-equivalence guarantee: when the graph is `None`, OR when graph
+//! labels match the V2 input exactly (the case the adapter currently
+//! produces), the output is byte-identical to `input.policy.clone()`.
+//! This keeps every execution_id in circulation stable across the
+//! wiring.
 //!
 //! ## Future graph-input fields (do not add now)
 //!
-//! When the graph wiring lands, the builder will need facts that are
-//! not in [`ExecutionIdentityInputV2`] today. Documenting them here so
-//! PR-5a knows where to plug them in:
+//! When the graph wiring expands further, the builder will need facts
+//! that are not modelled today. Documenting them so follow-on PRs know
+//! where to plug them in:
 //!
 //! - mount-set algorithm id and version (currently rolled into
-//!   `sandbox_policy_hash` opaquely by the observer)
+//!   `sandbox_policy_hash` opaquely)
 //! - allow-host count and network-mode marker (also rolled into
 //!   `sandbox_policy_hash`; exposing them as graph edges would let the
 //!   builder hash them canonically without re-encoding)
@@ -35,28 +43,54 @@
 //!   `provisioning_policy_hash` and `policy_segment_hash` directly off
 //!   `ExecutionPlan.consent`; the graph should carry that linkage
 //!   explicitly)
-//!
-//! These are intentionally NOT placeholders on the struct; the v2
-//! schema is frozen and adding them now would change execution_id
-//! outputs.
 
-use super::{ExecutionIdentityInputV2, PolicyIdentityV2};
+use super::{ExecutionIdentityInputV2, PolicyIdentityV2, Tracked};
+use crate::engine::execution_graph::{identity_labels, ExecutionGraph};
 
 /// Typed entry point for producing a [`PolicyIdentityV2`].
 ///
-/// See the module-level docs for why this is a pass-through in Wave 1
-/// and what its body becomes once the graph-input wiring lands.
+/// See the module-level docs for the mixed-source wiring contract.
 pub struct PolicyIdentityBuilder;
 
 impl PolicyIdentityBuilder {
     /// Build the policy identity facet for the given input.
     ///
-    /// Currently a clone of `input.policy` — byte-equivalent to the
-    /// inline reads in [`super::identity_projection_v2`]. Do not add
-    /// transformations here; doing so would change execution_id outputs
-    /// and break the v2 schema contract.
+    /// Pass-through entry point preserved for callers that have no
+    /// `ExecutionGraph` available. New call sites should prefer
+    /// [`Self::build_with_graph`].
     pub fn build(input: &ExecutionIdentityInputV2) -> PolicyIdentityV2 {
-        input.policy.clone()
+        Self::build_with_graph(input, None)
+    }
+
+    /// Build the policy identity facet, consuming graph-derived facts
+    /// where the graph carries them and falling back to the V2 input
+    /// otherwise.
+    ///
+    /// Determinism contract:
+    /// - `graph = None` → byte-equivalent to `input.policy.clone()`.
+    /// - `graph = Some(g)` with no relevant labels → also pass-through.
+    /// - `graph = Some(g)` with labels that match the V2 input → still
+    ///   byte-equivalent.
+    pub fn build_with_graph(
+        input: &ExecutionIdentityInputV2,
+        graph: Option<&ExecutionGraph>,
+    ) -> PolicyIdentityV2 {
+        let mut facet = input.policy.clone();
+        let Some(graph) = graph else {
+            return facet;
+        };
+
+        if let Some(value) = graph.labels.get(identity_labels::POLICY_NETWORK_HASH) {
+            facet.network_policy_hash = Tracked::known(value.clone());
+        }
+        if let Some(value) = graph.labels.get(identity_labels::POLICY_CAPABILITY_HASH) {
+            facet.capability_policy_hash = Tracked::known(value.clone());
+        }
+        if let Some(value) = graph.labels.get(identity_labels::POLICY_SANDBOX_HASH) {
+            facet.sandbox_policy_hash = Tracked::known(value.clone());
+        }
+
+        facet
     }
 }
 
@@ -64,15 +98,29 @@ impl PolicyIdentityBuilder {
 mod tests {
     use super::super::tests::sample_input_v2;
     use super::*;
+    use crate::engine::execution_graph::{
+        ExecutionGraph, ExecutionGraphBuildInput, ExecutionGraphBuilder, GraphPolicyInput,
+    };
     use crate::execution_identity::Tracked;
 
-    /// Byte-equivalence: the builder must produce a facet whose three
-    /// policy hashes (and tracking statuses) match the input exactly.
-    /// This is the load-bearing contract of Wave 1.
+    /// Byte-equivalence (no-graph case): the builder must produce a facet
+    /// whose three policy hashes (and tracking statuses) match the input
+    /// exactly. This is the load-bearing contract carried over from
+    /// Wave 1.
     #[test]
-    fn builder_output_matches_input_policy_facet_exactly() {
+    fn builder_output_matches_input_policy_facet_exactly_without_graph() {
         let input = sample_input_v2();
         let built = PolicyIdentityBuilder::build(&input);
+        assert_eq!(built, input.policy);
+    }
+
+    /// Byte-equivalence (no labels case): a graph that carries no policy
+    /// labels must also degenerate to the pass-through.
+    #[test]
+    fn builder_output_matches_input_facet_when_graph_has_no_relevant_labels() {
+        let input = sample_input_v2();
+        let graph = ExecutionGraphBuilder::build(ExecutionGraphBuildInput::default());
+        let built = PolicyIdentityBuilder::build_with_graph(&input, Some(&graph));
         assert_eq!(built, input.policy);
     }
 
@@ -98,5 +146,80 @@ mod tests {
             baseline, after,
             "builder must preserve sandbox_policy_hash sensitivity"
         );
+    }
+
+    /// Graph-sourced override: when the graph's policy labels disagree
+    /// with the V2 input, the builder takes the graph value. The adapter
+    /// in production populates labels from the same V2 facts, so the
+    /// override is a no-op there; this test pins the wire so a future
+    /// "graph is the source of truth" promotion has the entry point
+    /// already in place.
+    #[test]
+    fn builder_takes_policy_hashes_from_graph_labels_when_present() {
+        let input = sample_input_v2();
+        let graph: ExecutionGraph = ExecutionGraphBuilder::build(ExecutionGraphBuildInput {
+            policy: Some(GraphPolicyInput {
+                network_policy_hash: Some("blake3:network-graph".to_string()),
+                capability_policy_hash: Some("blake3:capability-graph".to_string()),
+                sandbox_policy_hash: Some("blake3:sandbox-graph".to_string()),
+                ..GraphPolicyInput::default()
+            }),
+            ..ExecutionGraphBuildInput::default()
+        });
+
+        let built = PolicyIdentityBuilder::build_with_graph(&input, Some(&graph));
+        assert_eq!(
+            built.network_policy_hash,
+            Tracked::known("blake3:network-graph".to_string())
+        );
+        assert_eq!(
+            built.capability_policy_hash,
+            Tracked::known("blake3:capability-graph".to_string())
+        );
+        assert_eq!(
+            built.sandbox_policy_hash,
+            Tracked::known("blake3:sandbox-graph".to_string())
+        );
+    }
+
+    /// Mirror property: a graph populated from the same facts as the V2
+    /// input produces a byte-equivalent facet. This is the production
+    /// invariant — the adapter populates policy labels from the same
+    /// observers that produce `input.policy`.
+    #[test]
+    fn graph_populated_from_same_facts_yields_byte_equivalent_facet() {
+        let input = sample_input_v2();
+
+        let network = input
+            .policy
+            .network_policy_hash
+            .value
+            .clone()
+            .expect("sample fixture has a known network_policy_hash");
+        let capability = input
+            .policy
+            .capability_policy_hash
+            .value
+            .clone()
+            .expect("sample fixture has a known capability_policy_hash");
+        let sandbox = input
+            .policy
+            .sandbox_policy_hash
+            .value
+            .clone()
+            .expect("sample fixture has a known sandbox_policy_hash");
+
+        let graph: ExecutionGraph = ExecutionGraphBuilder::build(ExecutionGraphBuildInput {
+            policy: Some(GraphPolicyInput {
+                network_policy_hash: Some(network),
+                capability_policy_hash: Some(capability),
+                sandbox_policy_hash: Some(sandbox),
+                ..GraphPolicyInput::default()
+            }),
+            ..ExecutionGraphBuildInput::default()
+        });
+
+        let built = PolicyIdentityBuilder::build_with_graph(&input, Some(&graph));
+        assert_eq!(built, input.policy);
     }
 }
