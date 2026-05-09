@@ -64,6 +64,10 @@ actions!(
         // actions stay for the (now fallback-only) single-slot modals.
         SubmitResolutionForm,
         CancelResolutionForm,
+        // #117 step navigation — consent step (review-only) →
+        // secrets step (form input). Skipped if either side is empty.
+        ResolutionFormNext,
+        ResolutionFormBack,
         ToggleRouteMetadataPopover,
         ToggleDevConsole,
         ToggleAutoDevtools,

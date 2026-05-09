@@ -1563,6 +1563,58 @@ impl WebViewManager {
                         });
                     }
                 }
+                Err(LaunchError::PreflightAggregate {
+                    handle,
+                    requirements,
+                    original_secrets,
+                }) => {
+                    // #117 — eager preflight returned the full set of
+                    // pending requirements before any provisioning ran.
+                    // Convert each envelope into the existing per-error
+                    // PendingConfig / PendingConsent shapes and route
+                    // through `merge_*_into_resolution`, so the
+                    // unified resolution modal sees one populated
+                    // request with everything visible at once instead
+                    // of accumulating across N launch retries.
+                    use capsule_core::interactive_resolution::InteractiveResolutionKind;
+                    info!(
+                        pane_id,
+                        handle = %handle,
+                        requirement_count = requirements.len(),
+                        "preflight surfaced aggregate requirements; populating unified modal"
+                    );
+                    for envelope in requirements {
+                        match envelope.kind {
+                            InteractiveResolutionKind::SecretsRequired { target, schema } => {
+                                state.merge_config_into_resolution(PendingConfigRequest {
+                                    handle: handle.clone(),
+                                    target,
+                                    fields: schema,
+                                    original_secrets: original_secrets.clone(),
+                                });
+                            }
+                            InteractiveResolutionKind::ConsentRequired {
+                                scoped_id,
+                                version,
+                                target_label,
+                                policy_segment_hash,
+                                provisioning_policy_hash,
+                                summary,
+                            } => {
+                                state.merge_consent_into_resolution(PendingConsentRequest {
+                                    handle: handle.clone(),
+                                    scoped_id,
+                                    version,
+                                    target_label,
+                                    policy_segment_hash,
+                                    provisioning_policy_hash,
+                                    summary,
+                                    original_secrets: original_secrets.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
                 Err(LaunchError::Other(message)) => {
                     error!(pane_id, error = %message, "guest session failed");
                     // Use LaunchFailed (not Closed) to prevent ensure_pending_local_launch
@@ -1621,6 +1673,23 @@ impl WebViewManager {
             }
         }
 
+        // #117 — same gate for the unified resolution modal. Without
+        // this, every render frame after `LaunchError::PreflightAggregate`
+        // would re-spawn the launch worker (the legacy single-slot
+        // gates above don't trip because `pending_resolution` is the
+        // populated field, not `pending_config` / `pending_consent`).
+        // The result before this gate was an info!/error! pair every
+        // few tens of ms while the user was filling in the modal —
+        // log spam plus wasted preflight subprocess spawns. The
+        // Submit/Cancel handlers clear `pending_resolution`, which
+        // collapses this guard on the next render so the freshly-
+        // resolved retry can fire exactly once.
+        if let Some(pending) = &state.pending_resolution {
+            if pending.handle == handle {
+                return;
+            }
+        }
+
         info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -1666,7 +1735,34 @@ impl WebViewManager {
                 handle: handle.clone(),
                 session: resolve_and_start_guest(&handle, &secrets, &plain_configs).inspect_err(
                     |err| {
-                        error!(handle = %handle, error = %err, "guest session launch failed");
+                        // #117 — interactive-resolution errors
+                        // (preflight aggregate, missing config,
+                        // missing consent) are expected states, not
+                        // failures. Log them at info so the user-side
+                        // log stream stays readable while the modal
+                        // is open; reserve `error!` for genuinely
+                        // unexpected breakage. The orchestrator
+                        // upstream already logs at warn when it
+                        // recognises these cases, so info here keeps
+                        // both sides at-or-below-warn.
+                        match err {
+                            LaunchError::MissingConfig { .. }
+                            | LaunchError::MissingConsent { .. }
+                            | LaunchError::PreflightAggregate { .. } => {
+                                info!(
+                                    handle = %handle,
+                                    error = %err,
+                                    "guest session launch awaiting user input"
+                                );
+                            }
+                            LaunchError::Other(_) => {
+                                error!(
+                                    handle = %handle,
+                                    error = %err,
+                                    "guest session launch failed"
+                                );
+                            }
+                        }
                     },
                 ),
             };
