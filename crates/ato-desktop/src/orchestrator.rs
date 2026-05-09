@@ -237,6 +237,29 @@ pub enum LaunchError {
         /// exactly the same input.
         original_secrets: Vec<SecretEntry>,
     },
+    /// #117 — eager preflight detected one or more pending pre-launch
+    /// requirements (a mix of missing secrets and per-target consents)
+    /// before any provisioning side effects ran. Carries the full list
+    /// so `webview.rs` can populate the unified `pending_resolution`
+    /// in one shot and the resolution modal opens once with everything
+    /// visible — instead of the legacy lazy-aggregation flow that
+    /// re-opened the modal once per retry as the launch loop tripped
+    /// errors sequentially.
+    PreflightAggregate {
+        /// Original handle the user asked to launch — re-fed into
+        /// `resolve_and_start_capsule` after Submit.
+        handle: String,
+        /// Aggregate envelope from `ato internal preflight --json`.
+        /// Each item is either a `SecretsRequired` (target-scoped or
+        /// global) or a `ConsentRequired` carrying the five identity
+        /// fields the modal needs for `ato internal consent
+        /// approve-execution-plan`.
+        requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+        /// Snapshot of secrets passed to the original
+        /// `start_capsule` call. Cloned so the post-Submit retry uses
+        /// exactly the same input.
+        original_secrets: Vec<SecretEntry>,
+    },
     /// Any other failure — opaque string suitable for direct display.
     Other(String),
 }
@@ -258,6 +281,17 @@ impl std::fmt::Display for LaunchError {
             Self::MissingConsent { handle, .. } => {
                 write!(f, "guest launch needs ExecutionPlan consent for '{handle}'")
             }
+            Self::PreflightAggregate {
+                handle,
+                requirements,
+                ..
+            } => {
+                write!(
+                    f,
+                    "guest launch needs {} pre-launch requirement(s) for '{handle}'",
+                    requirements.len()
+                )
+            }
             Self::Other(message) => f.write_str(message),
         }
     }
@@ -278,7 +312,162 @@ pub fn resolve_and_start_guest(
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
 ) -> Result<GuestLaunchSession, LaunchError> {
+    // #117 — eager preflight collection. Walks the orchestration
+    // target graph via `ato internal preflight --json` *before* any
+    // provisioning side effects. If any requirements are pending,
+    // surface them as a single `PreflightAggregate` so the unified
+    // resolution modal opens once with everything visible. If
+    // preflight is empty (every consent + every required env is
+    // already satisfied) or returns a "ref not supported" error
+    // (e.g. uncached remote ref), fall through to the legacy launch
+    // loop which still drains lazily via `merge_*_into_resolution`.
+    match collect_preflight_requirements(handle) {
+        Ok(envelopes) => {
+            // Preflight emits "what the manifest requires" — it has no
+            // visibility into the desktop's per-handle SecretStore.
+            // After the user submits the resolution modal, those
+            // secrets are persisted to the SecretStore but the
+            // manifest still lists them as required, so the next
+            // preflight call would re-emit them and re-open the modal
+            // on the retry.
+            //
+            // Intersect against the snapshot already in `secrets` to
+            // drop the satisfied ones. Consents are already filtered
+            // upstream (preflight reads the consent JSONL directly via
+            // `consent_store::has_consent`), so they pass through
+            // unchanged. An envelope whose schema becomes empty after
+            // filtering is dropped entirely — otherwise the modal
+            // would show a section header with no inputs.
+            let filtered = filter_already_provided_secrets(envelopes, secrets);
+            if !filtered.is_empty() {
+                return Err(LaunchError::PreflightAggregate {
+                    handle: handle.to_string(),
+                    requirements: filtered,
+                    original_secrets: secrets.to_vec(),
+                });
+            }
+            // Else: every secret already in SecretStore + every
+            // consent already recorded → fall through to the actual
+            // launch. Provisioning runs.
+        }
+        Err(error) => {
+            // Preflight intentionally fails closed for unsupported
+            // refs (e.g. an uncached `publisher/slug` registry ref)
+            // so the legacy E103/E302 flow can still surface the
+            // requirements lazily. Logged at warn so we can spot
+            // patterns without spamming under expected conditions.
+            warn!(
+                handle = %handle,
+                error = %error,
+                "preflight collection skipped; falling back to lazy aggregation"
+            );
+        }
+    }
+
     resolve_and_start_capsule(handle, secrets, plain_configs)
+}
+
+/// Drop preflight envelopes whose secret requirements are already
+/// satisfied by the per-handle SecretStore snapshot. Returns the
+/// filtered list — consent envelopes pass through, secret envelopes
+/// have their `schema` narrowed to fields not yet in `secrets`, and
+/// envelopes whose schema becomes empty are dropped.
+///
+/// The matching key is `ConfigField.name` (the env-var key the
+/// runtime expects), compared against `SecretEntry.key` (the same
+/// env-var name as the SecretStore identifier). The convention is
+/// "same string"; the explicit comparison documents the invariant
+/// so a future divergence (e.g. typed key wrappers) breaks here
+/// instead of silently re-opening the modal.
+fn filter_already_provided_secrets(
+    envelopes: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+    secrets: &[SecretEntry],
+) -> Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope> {
+    use capsule_core::interactive_resolution::{
+        InteractiveResolutionEnvelope, InteractiveResolutionKind,
+    };
+    let provided: std::collections::HashSet<String> =
+        secrets.iter().map(|s| s.key.clone()).collect();
+
+    envelopes
+        .into_iter()
+        .filter_map(|env| match env.kind {
+            InteractiveResolutionKind::SecretsRequired { target, schema } => {
+                let still_missing: Vec<_> = schema
+                    .into_iter()
+                    .filter(|f| !provided.contains(&f.name))
+                    .collect();
+                if still_missing.is_empty() {
+                    None
+                } else {
+                    Some(InteractiveResolutionEnvelope {
+                        kind: InteractiveResolutionKind::SecretsRequired {
+                            target,
+                            schema: still_missing,
+                        },
+                        display: env.display,
+                    })
+                }
+            }
+            kind @ InteractiveResolutionKind::ConsentRequired { .. } => {
+                Some(InteractiveResolutionEnvelope {
+                    kind,
+                    display: env.display,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Shell out to `ato internal preflight <handle> --json` and parse
+/// the aggregate envelope. Returns the list of pending
+/// `InteractiveResolutionEnvelope` items — empty list means the
+/// launch can proceed without further interaction.
+///
+/// Errors from this helper are non-fatal: the caller falls through
+/// to the legacy launch loop. We intentionally do NOT bubble them up
+/// as `LaunchError::Other` because that would short-circuit the
+/// existing fallback story and confuse users whose capsule simply
+/// hasn't been cached yet.
+fn collect_preflight_requirements(
+    handle: &str,
+) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
+    let output = Command::new(&ato_bin)
+        .args(["internal", "preflight", handle, "--json"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight",
+                ato_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        bail!(
+            "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    let payload: PreflightAggregateEnvelope = serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))?;
+
+    Ok(payload.requirements)
+}
+
+#[derive(Debug, Deserialize)]
+struct PreflightAggregateEnvelope {
+    #[serde(default)]
+    #[allow(dead_code)]
+    schema_version: Option<String>,
+    #[serde(default)]
+    requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
@@ -694,7 +883,6 @@ fn start_capsule(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         // Try to lift the trailing JSONL fatal envelope out of the
         // CLI output — `emit_ato_error_jsonl` writes to stderr in
@@ -715,16 +903,27 @@ fn start_capsule(
         // avoids re-breaking on future renumbering.
         let event = crate::cli_envelope::parse_cli_error_event(&stderr)
             .or_else(|| crate::cli_envelope::parse_cli_error_event(&stdout));
-        if let Some(event) = event {
+        if let Some(event) = &event {
             let is_missing_env = event.name.as_deref() == Some("missing_required_env")
                 || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
                 || event.code == "E103";
             if is_missing_env {
                 if let Some(details) = event.missing_env_details() {
                     if !details.missing_schema.is_empty() {
+                        // #117 — interactive resolution is an expected
+                        // state, not a failure. Log at warn (one line
+                        // per launch attempt, no payload spam) and
+                        // return the typed variant so the modal flow
+                        // takes over. The `error!` reserved for
+                        // unexpected CLI breakage stays at error.
+                        warn!(
+                            handle,
+                            target = ?details.target,
+                            "guest launch needs configuration; surfacing modal"
+                        );
                         return Err(LaunchError::MissingConfig {
                             handle: handle.to_string(),
-                            target: details.target.or(event.target),
+                            target: details.target.or(event.target.clone()),
                             fields: details.missing_schema,
                             original_secrets: secrets.to_vec(),
                         });
@@ -742,6 +941,13 @@ fn start_capsule(
                 || event.code == "E302";
             if is_execution_contract {
                 if let Some(details) = event.consent_required_details() {
+                    // Same rationale as the missing-env branch:
+                    // interactive consent is expected.
+                    warn!(
+                        handle,
+                        target = %details.target_label,
+                        "guest launch needs ExecutionPlan consent; surfacing modal"
+                    );
                     return Err(LaunchError::MissingConsent {
                         handle: handle.to_string(),
                         scoped_id: details.scoped_id,
@@ -755,6 +961,12 @@ fn start_capsule(
                 }
             }
         }
+
+        // Genuinely unexpected — preserve the original error log so
+        // operators can debug. Reaching here means either the CLI
+        // emitted a fatal we don't understand, or the envelope parse
+        // failed; both are worth a noisy entry.
+        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         let detail = if !stderr.is_empty() {
             stderr

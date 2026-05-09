@@ -20,6 +20,7 @@ pub(crate) mod launch_materialization;
 pub(crate) mod managed_service_receipt;
 pub(crate) mod pipeline;
 pub(crate) mod ports;
+pub(crate) mod preflight;
 pub(crate) mod preview;
 pub(crate) mod producer_input;
 pub(crate) mod receipt_boundary;
