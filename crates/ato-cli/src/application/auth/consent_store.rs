@@ -591,4 +591,68 @@ mod tests {
         assert_eq!(dir_mode, 0o700);
         assert_eq!(file_mode, 0o600);
     }
+
+    /// Regression for #116: a test fixture must be able to isolate its
+    /// consent state by setting `ATO_HOME=$tmp` alone, without touching
+    /// the user's real `HOME`. The receipt that surfaced #116 reported
+    /// the opposite — that `executionplan_v1.jsonl` lived under
+    /// `~/.ato/consent/` regardless of `ATO_HOME`. That observation was
+    /// a misattribution (the E302 reappearance came from the
+    /// per-desktop-process retry-once budget, not the on-disk consent
+    /// log), but there was no consent-store-level test that locked the
+    /// invariant in. This is that test: a fresh `ATO_HOME` produces an
+    /// isolated consent log, and writes never land under `HOME/.ato/`.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn approve_execution_plan_consent_isolates_via_ato_home() {
+        let _serial = env_lock().lock().unwrap();
+        let real_home = TempDir::new().expect("create temporary HOME");
+        let ato_home = TempDir::new().expect("create temporary ATO_HOME");
+
+        // Set HOME to a *different* temp dir so a regression that
+        // anchors consent to `~/.ato` would land there visibly instead
+        // of silently passing because HOME and ATO_HOME happened to
+        // coincide.
+        let _home_guard = EnvVarGuard::set("HOME", Some(&real_home.path().to_string_lossy()));
+        let _ato_home_guard =
+            EnvVarGuard::set("ATO_HOME", Some(&ato_home.path().to_string_lossy()));
+
+        approve_execution_plan_consent("publisher/app", "1.0.0", "cli", "blake3:aaa", "blake3:bbb")
+            .expect("approve under ATO_HOME");
+
+        let ato_home_consent = ato_home.path().join("consent").join(CONSENT_FILE_NAME);
+        assert!(
+            ato_home_consent.exists(),
+            "consent record must land under ATO_HOME ({}), not HOME ({})",
+            ato_home.path().display(),
+            real_home.path().display(),
+        );
+        let home_consent = real_home
+            .path()
+            .join(".ato")
+            .join("consent")
+            .join(CONSENT_FILE_NAME);
+        assert!(
+            !home_consent.exists(),
+            "consent record must NOT leak into HOME/.ato/consent when ATO_HOME is set; found: {}",
+            home_consent.display(),
+        );
+
+        // Re-reading via has_consent must agree — proves the read path
+        // and the write path resolve the same ATO_HOME-anchored file.
+        let plan = non_trivial_plan();
+        approve_execution_plan_consent(
+            &plan.consent.key.scoped_id,
+            &plan.consent.key.version,
+            &plan.consent.key.target_label,
+            &plan.consent.policy_segment_hash,
+            &plan.consent.provisioning_policy_hash,
+        )
+        .expect("approve plan under ATO_HOME");
+        assert!(
+            has_consent(&plan).expect("has_consent under ATO_HOME"),
+            "approve write + has_consent read must agree under ATO_HOME isolation"
+        );
+    }
 }
