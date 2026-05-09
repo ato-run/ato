@@ -58,6 +58,12 @@ actions!(
         CancelConfigForm,
         ApproveConsentForm,
         CancelConsentForm,
+        // #117 — unified pre-launch resolution modal that combines
+        // E103 secret entry with E302 consent approval into one
+        // overlay. The legacy SaveConfigForm / ApproveConsentForm
+        // actions stay for the (now fallback-only) single-slot modals.
+        SubmitResolutionForm,
+        CancelResolutionForm,
         ToggleRouteMetadataPopover,
         ToggleDevConsole,
         ToggleAutoDevtools,
