@@ -436,6 +436,7 @@ pub(super) fn start_guest_session(
         terminal: None,
         service: None,
         dependency_contracts: None,
+        graph: None,
         orchestration_services: None,
         // App Session Materialization: filled in by run_execute after spawn
         // succeeds (start_time helper takes the freshly-spawned PID + the
@@ -613,6 +614,7 @@ pub(super) fn start_runtime_session(
             runtime_process.child.id() as i32,
             dep_contracts.as_ref(),
         ),
+        graph: None,
         // Single-target session (no `[services]`); orchestration_services
         // is populated only by start_orchestration_session_in_process.
         orchestration_services: None,
@@ -890,6 +892,7 @@ pub(super) fn start_orchestration_session_in_process(
             leaf_local_pid,
             dep_contracts.as_ref(),
         ),
+        graph: None,
         // [services] graph subset (#73 PR-D). Persisted so `stop_session`
         // (and the parent-death watcher from PR-B) can tear services down
         // after the wrapper process exits — the OS keeps the underlying
@@ -1101,6 +1104,7 @@ pub(super) fn start_orchestration_session_supervisor(
         terminal: None,
         service: None,
         dependency_contracts: None,
+        graph: None,
         // Legacy supervisor path: the nested `ato run` child owns the
         // service lifecycle, so this wrapper has no DetachedServiceSnapshot
         // to persist. Reachable only via ATO_LEGACY_SUPERVISOR=1.
@@ -2680,6 +2684,7 @@ mod tests {
                         runtime_export_keys: vec!["DATABASE_URL".to_string()],
                     }],
                 }),
+                graph: None,
                 orchestration_services: None,
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -2798,6 +2803,7 @@ mod tests {
                         runtime_export_keys: vec!["DATABASE_URL".to_string()],
                     }],
                 }),
+                graph: None,
                 orchestration_services: None,
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -2877,6 +2883,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: std::process::id() as i32,
                 services: vec![
@@ -3064,6 +3071,7 @@ mod tests {
                 terminal: None,
                 service: None,
                 dependency_contracts: None,
+                graph: None,
                 orchestration_services: Some(StoredOrchestrationServices {
                     wrapper_pid: dead_recorded_pid,
                     services: vec![
@@ -3234,6 +3242,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: dead_recorded_pid,
                 services: vec![StoredOrchestrationService {
@@ -3394,6 +3403,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: wrapper_pid as i32,
                 services: vec![StoredOrchestrationService {
