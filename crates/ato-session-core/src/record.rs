@@ -46,6 +46,13 @@ pub struct StoredSessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_contracts: Option<StoredDependencyContracts>,
 
+    /// Persisted subset of the materialized `ExecutionGraph` that
+    /// teardown will reverse-traverse (umbrella #74 Phase 3). See
+    /// [`StoredExecutionGraph`] for the schema-versioning contract; this
+    /// field stays `None` until the Phase 3 implementation lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<StoredExecutionGraph>,
+
     /// Embedded `[services]` orchestration snapshot for crash recovery
     /// (#73 PR-D, closes #28 phase 2). For orchestration capsules, the
     /// services started by `ServicePhaseCoordinator` are persisted here so
@@ -173,6 +180,41 @@ pub struct StoredOrchestrationService {
     pub published_port: Option<u16>,
 }
 
+/// Persisted subset of the materialized `ExecutionGraph` (umbrella #74,
+/// Phase 3). The Phase 3 implementation will populate this field; until
+/// then it stays `None` on every record and v0.5.x records (without
+/// `graph`) continue to deserialize cleanly via `#[serde(default)]`.
+///
+/// SCHEMA_VERSION_NOTE: future `schema_version` bumps must keep
+/// deserialization of `schema_version: 1` records readable, by either
+/// keeping fields additive or by explicit migration in
+/// `StoredSessionInfo::deserialize`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredExecutionGraph {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub nodes: Vec<StoredGraphNode>,
+    #[serde(default)]
+    pub edges: Vec<StoredGraphEdge>,
+}
+
+impl StoredExecutionGraph {
+    pub const SCHEMA_VERSION: u32 = 1;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredGraphNode {
+    pub kind: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredGraphEdge {
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +327,7 @@ mod tests {
                     runtime_export_keys: vec!["DATABASE_URL".to_string()],
                 }],
             }),
+            graph: None,
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("a".repeat(64)),
@@ -342,6 +385,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: 7777,
                 services: vec![
@@ -405,5 +449,115 @@ mod tests {
         }"#;
         let parsed: StoredSessionInfo = serde_json::from_str(json_without).expect("parse");
         assert!(parsed.orchestration_services.is_none());
+    }
+
+    /// Phase 3 forward-compat (umbrella #74): a v0.5.x-shaped record that
+    /// pre-dates the `graph` field deserializes cleanly into the
+    /// post-scaffold `StoredSessionInfo`. `serde(default)` on the new
+    /// field is what makes this safe; without it a stored record from
+    /// 0.5.1 would refuse to load on 0.6.0+ readers.
+    #[test]
+    fn schema_v1_record_without_graph_field_deserializes_cleanly() {
+        let json_without_graph = r#"{
+            "session_id": "x", "handle": "h", "normalized_handle": "h",
+            "canonical_handle": null, "trust_state": "untrusted",
+            "source": null, "restricted": false, "snapshot": null,
+            "runtime": {"target_label": "m", "runtime": "node",
+                        "driver": null, "language": null, "port": null},
+            "display_strategy": "web_url",
+            "pid": 1, "log_path": "/x", "manifest_path": "/y",
+            "target_label": "m", "notes": [],
+            "guest": null, "web": null, "terminal": null, "service": null
+        }"#;
+        let parsed: StoredSessionInfo =
+            serde_json::from_str(json_without_graph).expect("parse pre-Phase-3 record");
+        assert!(parsed.graph.is_none(), "missing graph field must default to None");
+    }
+
+    /// `graph: None` round-trips byte-stable — the field is skipped on
+    /// serialize (`skip_serializing_if = "Option::is_none"`), so the
+    /// emitted JSON matches what a v0.5.x record looks like, and a second
+    /// pass through serde produces the same string.
+    #[test]
+    fn graph_none_round_trips_byte_stable() {
+        let original = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-none".to_string(),
+            handle: "publisher/slug".to_string(),
+            normalized_handle: "publisher/slug".to_string(),
+            canonical_handle: None,
+            trust_state: TrustState::Untrusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: make_runtime(),
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
+            pid: 1,
+            log_path: "/tmp/x.log".to_string(),
+            manifest_path: "/tmp/manifest.toml".to_string(),
+            target_label: "main".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: None,
+            graph: None,
+            orchestration_services: None,
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+        let first = serde_json::to_string(&original).expect("serialize");
+        let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
+        let second = serde_json::to_string(&parsed).expect("reserialize");
+        assert_eq!(first, second, "graph: None must round-trip byte-stable");
+        // skip_serializing_if elides the field entirely from the wire.
+        assert!(!first.contains("\"graph\""));
+    }
+
+    /// `graph: Some(StoredExecutionGraph { schema_version: 1, nodes: [],
+    /// edges: [] })` round-trips byte-stable — the on-disk shape that
+    /// Phase 3 will eventually populate.
+    #[test]
+    fn graph_some_empty_round_trips_byte_stable() {
+        let original = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-empty".to_string(),
+            handle: "publisher/slug".to_string(),
+            normalized_handle: "publisher/slug".to_string(),
+            canonical_handle: None,
+            trust_state: TrustState::Untrusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: make_runtime(),
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
+            pid: 1,
+            log_path: "/tmp/x.log".to_string(),
+            manifest_path: "/tmp/manifest.toml".to_string(),
+            target_label: "main".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: None,
+            graph: Some(StoredExecutionGraph {
+                schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![],
+                edges: vec![],
+            }),
+            orchestration_services: None,
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+        let first = serde_json::to_string(&original).expect("serialize");
+        let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
+        let second = serde_json::to_string(&parsed).expect("reserialize");
+        assert_eq!(first, second, "graph: Some(empty) must round-trip byte-stable");
+        let parsed_graph = parsed.graph.expect("graph field present");
+        assert_eq!(parsed_graph.schema_version, StoredExecutionGraph::SCHEMA_VERSION);
+        assert!(parsed_graph.nodes.is_empty());
+        assert!(parsed_graph.edges.is_empty());
     }
 }
