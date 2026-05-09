@@ -779,6 +779,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
@@ -844,6 +845,7 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: 999_999_999,
                 services: vec![StoredOrchestrationService {
@@ -925,6 +927,7 @@ mod tests {
                     runtime_export_keys: Vec::new(),
                 }],
             }),
+            graph: None,
             orchestration_services: None,
             schema_version: None,
             launch_digest: None,
