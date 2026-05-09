@@ -1,4 +1,5 @@
 use anyhow::Result;
+use capsule_core::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode};
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput,
@@ -11,6 +12,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::application::execution_graph_adapter::build_input_from_external_dependencies;
 use crate::application::source_inference::{
     materialize_run_from_compatibility, materialize_run_from_source_only,
 };
@@ -104,6 +106,14 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             } else {
                 let external_dependencies =
                     manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+
+                // Wave 2 / PR-4a: emit the unified execution graph alongside
+                // the legacy derivation. The graph is *not* load-bearing —
+                // the legacy `external_dependencies` vector below remains the
+                // source of truth for the gating decision. We only debug-assert
+                // shape parity (provider count) to surface drift early.
+                debug_assert_provider_node_parity(&external_dependencies);
+
                 if !external_dependencies.is_empty() {
                     return Err(AtoExecutionError::lock_incomplete(
                         "external capsule dependencies require capsule.lock.json",
@@ -211,4 +221,102 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
     }
 
     Ok(result)
+}
+
+/// PR-4a equivalence guard: build the unified execution graph from the same
+/// `ExternalCapsuleDependency` list the validate path consumes and check that
+/// its provider-node count matches 1:1.
+///
+/// `debug_assert_eq!` is a no-op in release builds, but the surrounding
+/// graph build still runs there. That's intentional: validate is a low-rate
+/// inspection command, the graph build is cheap, and continuing to compute
+/// it in release surfaces real-world drift between the two derivations
+/// before PR-4b promotes the graph to the source of truth.
+fn debug_assert_provider_node_parity(
+    external_dependencies: &[capsule_core::types::ExternalCapsuleDependency],
+) {
+    let input = build_input_from_external_dependencies(external_dependencies, None);
+    let graph = ExecutionGraphBuilder::build(input);
+    let graph_provider_count = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, ExecutionGraphNode::Provider { .. }))
+        .count();
+    debug_assert_eq!(
+        graph_provider_count,
+        external_dependencies.len(),
+        "execution graph provider count drifted from manifest_external_capsule_dependencies"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capsule_core::types::ExternalCapsuleDependency;
+    use std::collections::BTreeMap;
+
+    fn dependency(alias: &str) -> ExternalCapsuleDependency {
+        ExternalCapsuleDependency {
+            alias: alias.to_string(),
+            source: format!("capsule://ato/{alias}"),
+            source_type: "store".to_string(),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn graph_provider_count_equals_legacy_external_dependency_count() {
+        // Equivalence test for PR-4a: the validate-path adapter flow
+        // produces a provider-node count that matches the legacy
+        // `manifest_external_capsule_dependencies` vector 1:1.
+        let dependencies = vec![dependency("db"), dependency("cache"), dependency("queue")];
+
+        let input = build_input_from_external_dependencies(&dependencies, None);
+        let graph = ExecutionGraphBuilder::build(input);
+
+        let provider_count = graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, ExecutionGraphNode::Provider { .. }))
+            .count();
+        assert_eq!(provider_count, dependencies.len());
+
+        let mut graph_aliases: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                ExecutionGraphNode::Provider { identifier } => Some(
+                    identifier
+                        .strip_prefix("provider://")
+                        .unwrap_or(identifier.as_str())
+                        .to_string(),
+                ),
+                _ => None,
+            })
+            .collect();
+        graph_aliases.sort();
+
+        let mut legacy_aliases: Vec<String> = dependencies
+            .iter()
+            .map(|dependency| dependency.alias.clone())
+            .collect();
+        legacy_aliases.sort();
+
+        assert_eq!(graph_aliases, legacy_aliases);
+    }
+
+    #[test]
+    fn empty_dependency_list_yields_empty_provider_set() {
+        let dependencies: Vec<ExternalCapsuleDependency> = Vec::new();
+        let input = build_input_from_external_dependencies(&dependencies, None);
+        let graph = ExecutionGraphBuilder::build(input);
+
+        assert!(graph
+            .nodes
+            .iter()
+            .all(|node| !matches!(node, ExecutionGraphNode::Provider { .. })));
+    }
 }

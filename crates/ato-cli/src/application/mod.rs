@@ -9,6 +9,7 @@ pub(crate) mod dependency_credentials;
 pub(crate) mod dependency_materializer;
 pub(crate) mod dependency_runtime;
 pub(crate) mod engine;
+pub(crate) mod execution_graph_adapter;
 pub(crate) mod execution_observers;
 pub(crate) mod execution_observers_v2;
 pub(crate) mod execution_receipt_builder;
