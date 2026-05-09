@@ -31,14 +31,15 @@ use crate::logging::TARGET_FAVICON;
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, ApproveConsentForm, BrowserBack,
     BrowserForward, BrowserReload, CancelAuthHandoff, CancelConfigForm, CancelConsentForm,
-    CancelQuit, CheckForUpdates, CloseTask, ConfirmQuitClear, ConfirmQuitKeep, CycleHandle,
-    DenyPermissionPrompt, DismissTransient, ExpandSplit, FocusCommandBar, InstallCapsuleUpdate,
-    MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
-    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
-    PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab,
-    SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
-    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
+    CancelQuit, CancelResolutionForm, CheckForUpdates, CloseTask, ConfirmQuitClear,
+    ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
+    FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
+    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
+    OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
+    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
+    SelectRouteMetadataTab, SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit,
+    SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm, ToggleAutoDevtools, ToggleDevConsole,
+    ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -279,6 +280,16 @@ pub struct DesktopShell {
     /// identity tuple changes. Dropped when `pending_consent` returns
     /// to `None`.
     consent_modal: Option<modals::consent_form::ConsentModal>,
+    /// #117 — unified pre-launch resolution modal. Reconciled against
+    /// `state.pending_resolution` on every render: created on the
+    /// `None → Some` transition, patched in place when new
+    /// requirements are merged into the same `PendingResolutionRequest`,
+    /// rebuilt only when the handle changes or a previously-input
+    /// field disappears. Dropped when `pending_resolution` returns
+    /// to `None`. Takes precedence over `config_modal` /
+    /// `consent_modal` in the render gate so we never render the
+    /// legacy single-slot overlays alongside the unified one.
+    resolution_modal: Option<modals::resolution_form::ResolutionModal>,
 }
 
 impl DesktopShell {
@@ -406,6 +417,7 @@ impl DesktopShell {
             capsule_update_rx,
             config_modal: None,
             consent_modal: None,
+            resolution_modal: None,
         }
     }
 
@@ -1207,6 +1219,39 @@ impl DesktopShell {
         }
     }
 
+    /// #117 — reconcile `self.resolution_modal` with
+    /// `state.pending_resolution`. Differs from the legacy modal sync
+    /// in that we *patch* the existing modal in place when new
+    /// requirements are merged in (preserving keystroke state for
+    /// already-shown secret fields), and only rebuild wholesale when
+    /// the handle changes or a previously-shown field disappears.
+    fn sync_resolution_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match (&self.state.pending_resolution, self.resolution_modal.as_mut()) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                self.resolution_modal = None;
+            }
+            (Some(req), None) => {
+                self.resolution_modal = Some(modals::resolution_form::ResolutionModal::new(
+                    req.clone(),
+                    window,
+                    cx,
+                ));
+            }
+            (Some(req), Some(modal)) => {
+                if modal.should_rebuild_for(req) {
+                    self.resolution_modal = Some(modals::resolution_form::ResolutionModal::new(
+                        req.clone(),
+                        window,
+                        cx,
+                    ));
+                } else {
+                    modal.merge_inputs_for(req.clone(), window, cx);
+                }
+            }
+        }
+    }
+
     /// Handler for `ApproveConsentForm`. Calls
     /// `apply_capsule_consent` (which routes through
     /// `ato internal consent approve-execution-plan` on the CLI) and
@@ -1417,6 +1462,194 @@ impl DesktopShell {
         cx.notify();
     }
 
+    /// #117 — handler for `SubmitResolutionForm`. Persists every
+    /// secret in `pending_resolution.secrets`, approves every consent
+    /// in `pending_resolution.consents`, then clears the unified
+    /// pending request so `ensure_pending_local_launch` re-arms the
+    /// launch on the next render. Iteration order: secrets first,
+    /// then consents — secrets are runtime input that the consents'
+    /// ExecutionPlans expect to see in env, but the CLI rederives
+    /// plans on retry so the order is informational here, not load-
+    /// bearing.
+    ///
+    /// On the first error (a secret that fails to persist, or a CLI
+    /// invocation that fails to record consent), we surface an
+    /// activity entry and bail — the modal stays open with the
+    /// remaining work intact so the user can retry without losing the
+    /// secrets / approvals that already succeeded.
+    fn on_submit_resolution_form(
+        &mut self,
+        _: &SubmitResolutionForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.resolution_modal.as_ref() else {
+            return;
+        };
+        let request = modal.request.clone();
+        let handle = request.handle.clone();
+
+        // Snapshot everything we need before mutating AppState, since
+        // the submit path borrows `cx` to read input values.
+        struct PendingSecretWrite {
+            target: Option<String>,
+            field_name: String,
+            kind: ConfigKind,
+            value: String,
+        }
+        let mut secret_writes: Vec<PendingSecretWrite> = Vec::new();
+        for item in &request.secrets {
+            for field in &item.fields {
+                let Some(value) =
+                    modal.read_input(item.target.as_deref(), &field.name, cx)
+                else {
+                    continue;
+                };
+                if value.is_empty() {
+                    // Same gating as the legacy save handler: an empty
+                    // value would round-trip into an empty env var and
+                    // fail preflight again. Halt so the user can fill
+                    // in the field rather than dismissing the modal.
+                    return;
+                }
+                if let ConfigKind::Enum { choices } = &field.kind {
+                    if !choices.iter().any(|c| c == &value) {
+                        self.state.push_activity(
+                            ActivityTone::Warning,
+                            format!(
+                                "'{value}' is not a valid choice for {}. Allowed: {}",
+                                field.name,
+                                choices.join(", ")
+                            ),
+                        );
+                        return;
+                    }
+                }
+                secret_writes.push(PendingSecretWrite {
+                    target: item.target.clone(),
+                    field_name: field.name.clone(),
+                    kind: field.kind.clone(),
+                    value,
+                });
+            }
+        }
+
+        // Persist secrets and grant them to the capsule. Same as the
+        // legacy save handler — secret-typed fields go to the
+        // SecretStore + grant table; non-secret config goes to the
+        // capsule-config map keyed by handle. The `target` is purely
+        // informational at the schema level; the secret store key is
+        // the field name.
+        for write in secret_writes {
+            match write.kind {
+                ConfigKind::Secret => {
+                    if let Err(error) =
+                        self.state.add_secret(write.field_name.clone(), write.value)
+                    {
+                        self.state.push_activity(
+                            ActivityTone::Error,
+                            format!(
+                                "Failed to save secret '{}': {error}",
+                                write.field_name
+                            ),
+                        );
+                        return;
+                    }
+                    if let Err(error) = self
+                        .state
+                        .grant_secret_to_capsule(&handle, &write.field_name)
+                    {
+                        self.state.push_activity(
+                            ActivityTone::Error,
+                            format!(
+                                "Failed to grant secret '{}' to {handle}: {error}",
+                                write.field_name
+                            ),
+                        );
+                        return;
+                    }
+                }
+                ConfigKind::String | ConfigKind::Number | ConfigKind::Enum { .. } => {
+                    self.state
+                        .add_capsule_config(&handle, write.field_name, write.value);
+                }
+            }
+            // `target` is intentionally unused at write time — the
+            // schema groups by target for display, but the SecretStore
+            // and CapsuleConfigStore key on (handle, name).
+            let _ = write.target;
+        }
+
+        // Approve every consent item via the same CLI plumbing the
+        // legacy modal's Approve button uses. We call the orchestrator
+        // helper directly with each item's identity tuple instead of
+        // routing through `apply_capsule_consent` (which pulls from
+        // the legacy single-slot `pending_consent`).
+        for consent in &request.consents {
+            if let Err(error) = crate::orchestrator::approve_execution_plan_consent(
+                &consent.scoped_id,
+                &consent.version,
+                &consent.target_label,
+                &consent.policy_segment_hash,
+                &consent.provisioning_policy_hash,
+            ) {
+                self.state.push_activity(
+                    ActivityTone::Error,
+                    format!(
+                        "Failed to record consent for target {}: {error:#}",
+                        consent.target_label
+                    ),
+                );
+                return;
+            }
+            self.state
+                .mark_consent_retry_consumed(&handle, &consent.target_label);
+        }
+
+        let secret_count: usize = request.secrets.iter().map(|s| s.fields.len()).sum();
+        let consent_count = request.consents.len();
+        self.state.clear_pending_resolution();
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!(
+                "Approved {} secret{} and {} ExecutionPlan{}; relaunching {handle}…",
+                secret_count,
+                if secret_count == 1 { "" } else { "s" },
+                consent_count,
+                if consent_count == 1 { "" } else { "s" },
+            ),
+        );
+        cx.notify();
+    }
+
+    /// #117 — handler for `CancelResolutionForm`. Drops the unified
+    /// pending request and marks the active web pane `LaunchFailed`
+    /// so `ensure_pending_local_launch` doesn't immediately re-trip
+    /// the same requirements. The user re-opens the launch via the
+    /// omnibar.
+    fn on_cancel_resolution_form(
+        &mut self,
+        _: &CancelResolutionForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.resolution_modal.as_ref() else {
+            return;
+        };
+        let handle = modal.request.handle.clone();
+        self.state.clear_pending_resolution();
+        if let Some(active) = self.state.active_web_pane() {
+            let pane_id = active.pane_id;
+            self.state
+                .sync_web_session_state(pane_id, crate::state::WebSessionState::LaunchFailed);
+        }
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!("Cancelled launch resolution for {handle}."),
+        );
+        cx.notify();
+    }
+
     fn sync_favicons(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Two icon families share the cache: external-URL favicons
         // (key = origin, request URL = "{origin}/favicon.ico") and
@@ -1590,6 +1823,7 @@ impl Render for DesktopShell {
         self.poll_capsule_updates();
         self.sync_config_modal(window, cx);
         self.sync_consent_modal();
+        self.sync_resolution_modal(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
@@ -1657,33 +1891,56 @@ impl Render for DesktopShell {
                     .when(self.state.active_permission_prompt().is_some(), |this| {
                         this.child(render_permission_prompt_overlay(&self.state, &theme))
                     })
-                    .when(self.config_modal.is_some(), |this| {
-                        // The modal renders only when AppState requested
-                        // it AND `sync_config_modal` has populated the
-                        // local entity — both must be true. The
-                        // `Option::as_ref().unwrap()` is safe because the
-                        // `is_some()` guard above runs before this child
-                        // call inside `.when`.
+                    // #117 — the unified resolution modal takes
+                    // precedence over the legacy single-slot modals.
+                    // When `pending_resolution` is set the orchestrator
+                    // drain has already merged any E103/E302 surfaces
+                    // into it; we explicitly skip the legacy overlays
+                    // so the user never sees two modals stacked.
+                    .when(self.resolution_modal.is_some(), |this| {
                         let modal = self
-                            .config_modal
+                            .resolution_modal
                             .as_ref()
-                            .expect("config_modal checked above");
-                        this.child(modals::config_form::render_config_modal_overlay(
+                            .expect("resolution_modal checked above");
+                        this.child(modals::resolution_form::render_resolution_modal_overlay(
                             modal, &theme,
                         ))
                     })
-                    .when(self.consent_modal.is_some(), |this| {
-                        // Same guard model as the config modal: only
-                        // render once both AppState's `pending_consent`
-                        // AND the local snapshot have populated.
-                        let modal = self
-                            .consent_modal
-                            .as_ref()
-                            .expect("consent_modal checked above");
-                        this.child(modals::consent_form::render_consent_modal_overlay(
-                            modal, &theme,
-                        ))
-                    })
+                    .when(
+                        self.resolution_modal.is_none() && self.config_modal.is_some(),
+                        |this| {
+                            // Fallback: the legacy E103 modal renders
+                            // only when no unified resolution modal is
+                            // in flight. In practice the orchestrator
+                            // drain stopped writing to `pending_config`
+                            // with #117, so this branch is dead today —
+                            // it stays as a safety net for any caller
+                            // that still calls `set_pending_config`
+                            // directly (e.g. tests).
+                            let modal = self
+                                .config_modal
+                                .as_ref()
+                                .expect("config_modal checked above");
+                            this.child(modals::config_form::render_config_modal_overlay(
+                                modal, &theme,
+                            ))
+                        },
+                    )
+                    .when(
+                        self.resolution_modal.is_none() && self.consent_modal.is_some(),
+                        |this| {
+                            // Fallback for legacy consent surface — see
+                            // the config-modal branch above for why
+                            // this is now dead in production.
+                            let modal = self
+                                .consent_modal
+                                .as_ref()
+                                .expect("consent_modal checked above");
+                            this.child(modals::consent_form::render_consent_modal_overlay(
+                                modal, &theme,
+                            ))
+                        },
+                    )
                     .when(self.state.route_metadata_popover_open, |this| {
                         this.child(render_route_metadata_popover(&self.state, &theme))
                     })
@@ -1749,6 +2006,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_cancel_config_form))
             .on_action(cx.listener(Self::on_approve_consent_form))
             .on_action(cx.listener(Self::on_cancel_consent_form))
+            .on_action(cx.listener(Self::on_submit_resolution_form))
+            .on_action(cx.listener(Self::on_cancel_resolution_form))
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_open_latest_release_page))
             .on_action(cx.listener(Self::on_open_external_link))
