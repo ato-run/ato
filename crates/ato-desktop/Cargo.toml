@@ -1,3 +1,14 @@
+# Standalone workspace marker. The parent `apps/ato/Cargo.toml` excludes
+# this directory from its workspace, but Cargo's exclude paths are
+# relative to the parent manifest, so they don't match when ato-desktop
+# is checked out under `.worktrees/<branch>/crates/ato-desktop/`. The
+# empty `[workspace]` block here makes the crate its own workspace
+# regardless of where the directory lives, so `cargo check` /
+# `cargo build` inside the worktree resolves dependencies through the
+# crate-local `Cargo.lock` (already committed alongside) instead of
+# tripping the parent's exclude logic.
+[workspace]
+
 [package]
 name = "ato-desktop"
 version = "0.5.1"

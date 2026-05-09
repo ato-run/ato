@@ -891,6 +891,121 @@ pub struct PendingConsentRequest {
     pub original_secrets: Vec<SecretEntry>,
 }
 
+/// One missing-env requirement, scoped to a specific orchestration
+/// target. Carries the rich field schema the dynamic form renders.
+/// Equivalent of the old `PendingConfigRequest` but stripped of the
+/// per-launch context (`handle`, `original_secrets`) — that lives once
+/// on the parent [`PendingResolutionRequest`] so multiple secret
+/// requirements can share it.
+#[derive(Clone, Debug)]
+pub struct PendingSecretsItem {
+    pub target: Option<String>,
+    pub fields: Vec<ConfigField>,
+}
+
+/// One consent requirement for a specific ExecutionPlan. Equivalent of
+/// the old `PendingConsentRequest` but stripped of the per-launch
+/// context (`handle`, `original_secrets`) so multiple consent items can
+/// share it on the parent [`PendingResolutionRequest`].
+#[derive(Clone, Debug)]
+pub struct PendingConsentItem {
+    pub scoped_id: String,
+    pub version: String,
+    pub target_label: String,
+    pub policy_segment_hash: String,
+    pub provisioning_policy_hash: String,
+    pub summary: String,
+}
+
+/// #117 — unified pre-launch resolution request. Replaces the previous
+/// pair of single-slot `pending_config` (E103) + `pending_consent`
+/// (E302) modals with one accumulating modal that handles both kinds
+/// at once.
+///
+/// Today the CLI still surfaces requirements one at a time (E103 first,
+/// then E302 per target after each retry). Instead of opening a fresh
+/// modal each time, the orchestrator drain merges the new requirement
+/// into the existing `PendingResolutionRequest` so the user sees ONE
+/// modal that progressively becomes complete, then submits once.
+///
+/// The legacy `PendingConfigRequest` / `PendingConsentRequest` types
+/// stay in this module as the wire shape from the orchestrator drain;
+/// they are converted into [`PendingSecretsItem`] / [`PendingConsentItem`]
+/// during the merge.
+#[derive(Clone, Debug, Default)]
+pub struct PendingResolutionRequest {
+    /// The capsule handle the user asked to launch. Authoritative for
+    /// the retry call once all requirements are resolved.
+    pub handle: String,
+    /// Snapshot of secrets passed to the original `start_capsule`
+    /// call. Cloned at request-construction time so a concurrent
+    /// secret-store mutation can't corrupt the retry. Carried at the
+    /// request level (not per-item) so the retry path is identical
+    /// regardless of whether secrets, consents, or both were missing.
+    pub original_secrets: Vec<SecretEntry>,
+    /// Missing secret schemas across all targets. Order is
+    /// arrival-order (first-merged-first); the modal renders sections
+    /// in this order. A target only appears once in this list — a
+    /// merge with the same `target` replaces the previous fields
+    /// rather than appending duplicates.
+    pub secrets: Vec<PendingSecretsItem>,
+    /// Pending ExecutionPlan consents across all targets, identified by
+    /// the five-tuple. Same de-duplication policy as `secrets`: a merge
+    /// with an identical identity tuple replaces rather than duplicates
+    /// (e.g. if the CLI re-derives the same plan after a retry).
+    pub consents: Vec<PendingConsentItem>,
+}
+
+impl PendingResolutionRequest {
+    /// Merge one secrets requirement (typically converted from a
+    /// `PendingConfigRequest` produced by the orchestrator drain).
+    /// If a section for the same `target` already exists, replace it
+    /// with the new schema (the CLI may emit a refined schema after a
+    /// partial retry). Otherwise, append.
+    pub fn merge_secrets(&mut self, item: PendingSecretsItem) {
+        if let Some(existing) = self.secrets.iter_mut().find(|s| s.target == item.target) {
+            existing.fields = item.fields;
+        } else {
+            self.secrets.push(item);
+        }
+    }
+
+    /// Merge one consent requirement. Identity tuple
+    /// `(scoped_id, version, target_label, policy_segment_hash,
+    /// provisioning_policy_hash)` is the merge key — a re-emit for the
+    /// same plan replaces the prior summary text in case the CLI
+    /// rendered it differently the second time.
+    pub fn merge_consent(&mut self, item: PendingConsentItem) {
+        let key = (
+            item.scoped_id.clone(),
+            item.version.clone(),
+            item.target_label.clone(),
+            item.policy_segment_hash.clone(),
+            item.provisioning_policy_hash.clone(),
+        );
+        if let Some(existing) = self.consents.iter_mut().find(|c| {
+            (
+                c.scoped_id.clone(),
+                c.version.clone(),
+                c.target_label.clone(),
+                c.policy_segment_hash.clone(),
+                c.provisioning_policy_hash.clone(),
+            ) == key
+        }) {
+            existing.summary = item.summary;
+        } else {
+            self.consents.push(item);
+        }
+    }
+
+    /// Whether the request has nothing left to resolve. Used by the
+    /// submit handler to decide when to clear the modal and retry the
+    /// launch.
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty() && self.consents.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveWebPane {
     pub workspace_id: WorkspaceId,
@@ -994,7 +1109,25 @@ pub struct AppState {
     /// `ato internal consent approve-execution-plan` and clears it via
     /// `AppState::clear_pending_consent`, after which
     /// `ensure_pending_local_launch` re-arms the launch.
+    ///
+    /// **Deprecated as of #117.** The orchestrator drain no longer
+    /// writes to this field directly — both E103 and E302 surfaces
+    /// are merged into [`pending_resolution`] which the unified
+    /// resolution modal consumes. The field is kept as a fallback
+    /// rendering surface during migration: the legacy
+    /// [`crate::ui::modals::consent_form`] renders only when
+    /// `pending_resolution.is_none() && pending_consent.is_some()`.
     pub pending_consent: Option<PendingConsentRequest>,
+    /// #117 — unified pre-launch resolution request that replaces the
+    /// pair of single-slot `pending_config` + `pending_consent` modals
+    /// with one accumulating modal handling both E103 and E302 in a
+    /// single panel. Set by the orchestrator drain when the first
+    /// missing requirement surfaces; subsequent requirements (typically
+    /// a per-target E302 after the user fills in secrets) are merged
+    /// into the same request rather than replacing it. Cleared on
+    /// Submit (writes everything atomically + re-arms launch) or
+    /// Cancel.
+    pub pending_resolution: Option<PendingResolutionRequest>,
     /// (handle, target_label) pairs for which a post-Approve retry
     /// has already been consumed. If a second E302 surfaces for the
     /// same (handle, target_label) in the same session, the desktop
@@ -1136,6 +1269,7 @@ impl AppState {
             pending_permission_prompt: None,
             pending_config: None,
             pending_consent: None,
+            pending_resolution: None,
             consent_retry_consumed: HashSet::new(),
             theme_mode: ThemeMode::Light,
             desktop_auth: DesktopAuthState {
@@ -1324,6 +1458,7 @@ impl AppState {
             pending_permission_prompt: None,
             pending_config: None,
             pending_consent: None,
+            pending_resolution: None,
             consent_retry_consumed: HashSet::new(),
             theme_mode: ThemeMode::Light, // synced below from config
             desktop_auth: DesktopAuthState {
@@ -1452,6 +1587,63 @@ impl AppState {
     /// handle in the same session does NOT re-open the modal.
     pub fn clear_pending_consent(&mut self) {
         self.pending_consent = None;
+    }
+
+    /// #117 — merge an incoming missing-config request into the
+    /// unified [`PendingResolutionRequest`]. Creates the unified
+    /// request if absent, otherwise appends to the existing one.
+    ///
+    /// The legacy `pending_config` field is left untouched so any
+    /// in-flight render that references it still finishes cleanly,
+    /// but the unified modal takes precedence in the render gate
+    /// (see `ui/modals/mod.rs`).
+    pub fn merge_config_into_resolution(&mut self, request: PendingConfigRequest) {
+        let pending = self
+            .pending_resolution
+            .get_or_insert_with(|| PendingResolutionRequest {
+                handle: request.handle.clone(),
+                original_secrets: request.original_secrets.clone(),
+                ..PendingResolutionRequest::default()
+            });
+        // Latest secrets snapshot wins — the orchestrator's drain path
+        // re-emits the snapshot on every retry attempt, so the most
+        // recent value is the one we should use to retry the launch.
+        pending.original_secrets = request.original_secrets;
+        pending.merge_secrets(PendingSecretsItem {
+            target: request.target,
+            fields: request.fields,
+        });
+    }
+
+    /// #117 — merge an incoming missing-consent request into the
+    /// unified [`PendingResolutionRequest`]. Same accumulation policy
+    /// as [`Self::merge_config_into_resolution`].
+    pub fn merge_consent_into_resolution(&mut self, request: PendingConsentRequest) {
+        let pending = self
+            .pending_resolution
+            .get_or_insert_with(|| PendingResolutionRequest {
+                handle: request.handle.clone(),
+                original_secrets: request.original_secrets.clone(),
+                ..PendingResolutionRequest::default()
+            });
+        pending.original_secrets = request.original_secrets;
+        pending.merge_consent(PendingConsentItem {
+            scoped_id: request.scoped_id,
+            version: request.version,
+            target_label: request.target_label,
+            policy_segment_hash: request.policy_segment_hash,
+            provisioning_policy_hash: request.provisioning_policy_hash,
+            summary: request.summary,
+        });
+    }
+
+    /// Clear the unified pending resolution request. Called from the
+    /// resolution modal's Submit handler after every requirement has
+    /// been persisted (secrets → SecretStore, consents → consent JSONL
+    /// via the existing `ato internal consent approve-execution-plan`
+    /// plumbing) and the launch is being re-armed.
+    pub fn clear_pending_resolution(&mut self) {
+        self.pending_resolution = None;
     }
 
     /// Record that a post-Approve retry has been consumed for the
