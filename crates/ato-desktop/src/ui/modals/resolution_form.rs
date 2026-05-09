@@ -48,13 +48,33 @@ use gpui::{
     MouseButton, Window,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::scroll::ScrollableElement;
 
 use capsule_wire::config::{ConfigField, ConfigKind};
 
-use crate::app::{CancelResolutionForm, SubmitResolutionForm};
+use crate::app::{
+    CancelResolutionForm, ResolutionFormBack, ResolutionFormNext, SubmitResolutionForm,
+};
 use crate::state::{PendingResolutionRequest, PendingSecretsItem};
 use crate::ui::theme::Theme;
 use crate::ui::DesktopShell;
+
+/// Two-step navigation for the unified resolution modal.
+///
+/// Consent review comes first because it's read-only and
+/// contextualises why the user is being asked for secrets afterwards.
+/// Single-side requests (no consents *or* no secrets) collapse to a
+/// single step — the modal still renders, just without Next/Back
+/// navigation. The step state is owned by [`ResolutionModal`] and
+/// preserved across re-renders so a mid-resolution merge
+/// (orchestrator drain merging another envelope into the existing
+/// `pending_resolution`) does not snap the user back to the first
+/// step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ui) enum ResolutionStep {
+    Consent,
+    Secrets,
+}
 
 /// Per-modal view state. One instance lives in `DesktopShell` for as
 /// long as `AppState::pending_resolution` is `Some`.
@@ -73,6 +93,12 @@ use crate::ui::DesktopShell;
 pub(in crate::ui) struct ResolutionModal {
     pub(in crate::ui) request: PendingResolutionRequest,
     pub(in crate::ui) inputs: HashMap<String, Entity<InputState>>,
+    /// Currently-active step. Initial value picked by
+    /// [`Self::initial_step_for`] so a no-consents request opens
+    /// directly on the secrets form (single-step mode); a
+    /// no-secrets request opens on consent and the Submit button
+    /// approves directly.
+    pub(in crate::ui) step: ResolutionStep,
 }
 
 impl ResolutionModal {
@@ -88,7 +114,42 @@ impl ResolutionModal {
                 inputs.insert(input_key(item.target.as_deref(), &field.name), entity);
             }
         }
-        Self { request, inputs }
+        let step = Self::initial_step_for(&request);
+        Self {
+            request,
+            inputs,
+            step,
+        }
+    }
+
+    /// Pick the opening step for a freshly-constructed modal. Consent
+    /// first when present (the user reviews what they're about to
+    /// approve before being asked for secrets), otherwise jump to
+    /// secrets so single-step capsules don't show an empty consent
+    /// screen.
+    fn initial_step_for(request: &PendingResolutionRequest) -> ResolutionStep {
+        if request.consents.is_empty() {
+            ResolutionStep::Secrets
+        } else {
+            ResolutionStep::Consent
+        }
+    }
+
+    /// Advance from consent → secrets. No-op if already on secrets or
+    /// if the request has no secrets to advance to (the Submit button
+    /// is the right action there).
+    pub(in crate::ui) fn advance_step(&mut self) {
+        if self.step == ResolutionStep::Consent && !self.request.secrets.is_empty() {
+            self.step = ResolutionStep::Secrets;
+        }
+    }
+
+    /// Go back from secrets → consent. No-op if the request has no
+    /// consents (single-step mode).
+    pub(in crate::ui) fn retreat_step(&mut self) {
+        if self.step == ResolutionStep::Secrets && !self.request.consents.is_empty() {
+            self.step = ResolutionStep::Consent;
+        }
     }
 
     /// Reconcile the modal against an updated [`PendingResolutionRequest`].
@@ -144,6 +205,18 @@ impl ResolutionModal {
                 }
             }
         }
+        // Preserve the user's current step across merges in the
+        // common case: if the merge added something the current step
+        // can show, stay put. Only re-init when the merge would leave
+        // the user staring at an empty step (e.g. consent step with
+        // no consents left after a re-emit).
+        let step_now_empty = match self.step {
+            ResolutionStep::Consent => request.consents.is_empty(),
+            ResolutionStep::Secrets => request.secrets.is_empty(),
+        };
+        if step_now_empty {
+            self.step = Self::initial_step_for(&request);
+        }
         self.request = request;
     }
 
@@ -193,6 +266,17 @@ fn make_input(
 /// Stateless overlay renderer. The parent (`DesktopShell`) owns the
 /// `ResolutionModal` instance and feeds it in alongside the active
 /// `Theme`; this function is pure projection.
+///
+/// The body renders only the current step's content (consent
+/// summaries OR secret input rows) and wraps it in a vertical
+/// scroll container so multi-target capsules with long policy
+/// summaries don't clip against the modal's `max_h` cap. The button
+/// row depends on the step:
+///
+/// - **Consent step, secrets pending**: `[Cancel]` `[Continue]`
+/// - **Consent step, no secrets**: `[Cancel]` `[Approve & Launch]`
+/// - **Secrets step, consents present**: `[← Back]` `[Approve & Launch]`
+/// - **Secrets step, no consents**: `[Cancel]` `[Approve & Launch]`
 pub(in crate::ui) fn render_resolution_modal_overlay(
     modal: &ResolutionModal,
     theme: &Theme,
@@ -200,24 +284,10 @@ pub(in crate::ui) fn render_resolution_modal_overlay(
     let request = &modal.request;
     let secret_count: usize = request.secrets.iter().map(|s| s.fields.len()).sum();
     let consent_count = request.consents.len();
-    let summary = format_summary_line(secret_count, consent_count);
-
-    let mut body_children: Vec<AnyElement> = Vec::new();
-
-    if !request.secrets.is_empty() {
-        body_children.push(render_section_header("Required configuration", theme).into_any_element());
-        for item in &request.secrets {
-            body_children.push(render_secrets_section(modal, item, theme).into_any_element());
-        }
-    }
-
-    if !request.consents.is_empty() {
-        body_children
-            .push(render_section_header("ExecutionPlan consent", theme).into_any_element());
-        for item in &request.consents {
-            body_children.push(render_consent_section(item, theme).into_any_element());
-        }
-    }
+    let header_summary = format_summary_line(secret_count, consent_count);
+    let step_indicator = render_step_indicator(modal, theme);
+    let body = render_step_body(modal, theme);
+    let buttons = render_step_buttons(modal, theme);
 
     div()
         .absolute()
@@ -230,7 +300,7 @@ pub(in crate::ui) fn render_resolution_modal_overlay(
             div()
                 .w(px(620.0))
                 .max_w(px(760.0))
-                .max_h(px(760.0))
+                .max_h(px(720.0))
                 .rounded(px(18.0))
                 .bg(theme.panel_bg)
                 .border_1()
@@ -256,32 +326,243 @@ pub(in crate::ui) fn render_resolution_modal_overlay(
                     div()
                         .text_size(px(12.5))
                         .text_color(theme.text_secondary)
-                        .child(summary),
+                        .child(header_summary),
                 )
-                .child(div().flex().flex_col().gap_3().children(body_children))
+                .child(step_indicator)
+                // Scrollable body — vertical overflow is the common
+                // case (long ExecutionPlan summaries on multi-target
+                // capsules). `flex_grow + min_h(0) + overflow_y_scrollbar`
+                // is the GPUI idiom for "let me grow into available
+                // space and scroll if I exceed it" inside a
+                // flex_col parent. `overflow_y_scrollbar` is the
+                // method gpui-component exposes — it sets vertical
+                // scroll behaviour and renders a scrollbar.
                 .child(
                     div()
-                        .mt_2()
                         .flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(render_modal_button(
-                            "Cancel",
-                            theme.panel_bg,
-                            theme.border_default,
-                            theme.text_secondary,
-                            CancelResolutionForm,
-                        ))
-                        .child(render_modal_button(
-                            "Approve & Launch",
-                            theme.accent_subtle,
-                            theme.accent_border,
-                            theme.text_primary,
-                            SubmitResolutionForm,
-                        )),
-                ),
+                        .flex_col()
+                        .gap_3()
+                        .flex_grow()
+                        .min_h(px(0.0))
+                        .overflow_y_scrollbar()
+                        .child(body),
+                )
+                .child(buttons),
         )
         .into_any_element()
+}
+
+/// Render a horizontal stepper showing both steps as numbered
+/// breadcrumbs so the user can see at a glance "I'm on step 1 of 2,
+/// step 2 is still ahead". Single-step requests collapse to nothing —
+/// drawing a stepper for one step is more confusing than helpful.
+///
+/// Visual:
+///
+/// ```text
+///  ┌───┐                          ┌───┐
+///  │ 1 │ Review consents     →    │ 2 │ Provide secrets
+///  └───┘ (highlighted)            └───┘ (dim)
+/// ```
+///
+/// Active step uses `accent_subtle` background + `text_primary` text;
+/// inactive step uses transparent background + `text_tertiary` text.
+/// The arrow between is the visual cue that step 2 is the next
+/// destination.
+fn render_step_indicator(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
+    let consents_present = !modal.request.consents.is_empty();
+    let secrets_present = !modal.request.secrets.is_empty();
+    if !consents_present || !secrets_present {
+        // Single-step mode — no indicator clutter; the header
+        // already says what's happening.
+        return div().into_any_element();
+    }
+
+    let on_consent = modal.step == ResolutionStep::Consent;
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(render_step_pill(
+            1,
+            "Review consents",
+            on_consent,
+            theme,
+        ))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(theme.text_tertiary)
+                .child("→"),
+        )
+        .child(render_step_pill(
+            2,
+            "Provide secrets",
+            !on_consent,
+            theme,
+        ))
+        .into_any_element()
+}
+
+/// One numbered pill in the stepper. The number is rendered in a
+/// rounded box so the user reads "1" / "2" before the label — a
+/// stronger affordance than the prior "Step 1 of 2" text.
+fn render_step_pill(
+    number: u8,
+    label: &'static str,
+    active: bool,
+    theme: &Theme,
+) -> impl IntoElement {
+    let (badge_bg, badge_border, badge_text, label_text) = if active {
+        (
+            theme.accent_subtle,
+            theme.accent_border,
+            theme.text_primary,
+            theme.text_primary,
+        )
+    } else {
+        (
+            theme.panel_bg,
+            theme.border_default,
+            theme.text_tertiary,
+            theme.text_tertiary,
+        )
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(22.0))
+                .h(px(22.0))
+                .rounded(px(11.0))
+                .border_1()
+                .border_color(badge_border)
+                .bg(badge_bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .font_weight(FontWeight(700.0))
+                .text_color(badge_text)
+                .child(format!("{number}")),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .font_weight(if active {
+                    FontWeight(600.0)
+                } else {
+                    FontWeight(500.0)
+                })
+                .text_color(label_text)
+                .child(label),
+        )
+}
+
+fn render_step_body(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
+    match modal.step {
+        ResolutionStep::Consent => {
+            if modal.request.consents.is_empty() {
+                // Edge: step is Consent but the list is empty (a
+                // merge cleared every consent between renders). The
+                // step transitions on next reconcile; render a brief
+                // placeholder rather than a confusing empty box.
+                return placeholder_text(
+                    "No ExecutionPlans pending review. Continue to provide secrets.",
+                    theme,
+                );
+            }
+            let mut children: Vec<AnyElement> = Vec::new();
+            for item in &modal.request.consents {
+                children.push(render_consent_section(item, theme).into_any_element());
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .children(children)
+                .into_any_element()
+        }
+        ResolutionStep::Secrets => {
+            if modal.request.secrets.is_empty() {
+                return placeholder_text(
+                    "No secrets pending. Approve to launch.",
+                    theme,
+                );
+            }
+            let mut children: Vec<AnyElement> = Vec::new();
+            for item in &modal.request.secrets {
+                children.push(render_secrets_section(modal, item, theme).into_any_element());
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .children(children)
+                .into_any_element()
+        }
+    }
+}
+
+fn placeholder_text(message: &'static str, theme: &Theme) -> AnyElement {
+    div()
+        .text_size(px(12.0))
+        .text_color(theme.text_secondary)
+        .child(message)
+        .into_any_element()
+}
+
+fn render_step_buttons(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
+    let consents_present = !modal.request.consents.is_empty();
+    let secrets_present = !modal.request.secrets.is_empty();
+    let on_secrets_step = modal.step == ResolutionStep::Secrets;
+    let on_consent_step_with_secrets = modal.step == ResolutionStep::Consent && secrets_present;
+
+    let mut row = div().mt_2().flex().gap_2().justify_end();
+
+    // Left button: Back if we can go back, otherwise Cancel.
+    if on_secrets_step && consents_present {
+        row = row.child(render_modal_button(
+            "← Back",
+            theme.panel_bg,
+            theme.border_default,
+            theme.text_secondary,
+            ResolutionFormBack,
+        ));
+    } else {
+        row = row.child(render_modal_button(
+            "Cancel",
+            theme.panel_bg,
+            theme.border_default,
+            theme.text_secondary,
+            CancelResolutionForm,
+        ));
+    }
+
+    // Right button: Continue if there's a next step, otherwise Submit.
+    if on_consent_step_with_secrets {
+        row = row.child(render_modal_button(
+            "Continue →",
+            theme.accent_subtle,
+            theme.accent_border,
+            theme.text_primary,
+            ResolutionFormNext,
+        ));
+    } else {
+        row = row.child(render_modal_button(
+            "Approve & Launch",
+            theme.accent_subtle,
+            theme.accent_border,
+            theme.text_primary,
+            SubmitResolutionForm,
+        ));
+    }
+
+    row.into_any_element()
 }
 
 fn format_summary_line(secret_count: usize, consent_count: usize) -> String {
