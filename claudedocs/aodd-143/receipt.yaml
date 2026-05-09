@@ -1,0 +1,61 @@
+usecase: "User types an HTTPS URL into the omnibar and reaches that page"
+actor: "First-time desktop user with no prior context"
+goal: "After typing a URL into the omnibar and pressing Enter, the page is rendered (no stuck loading overlay)"
+
+result: "complete"
+
+context:
+  build: "ato-desktop debug binary built from fix/issue-143-omnibar-navigate-state @ 31d26dd8 (cargo build --bin ato-desktop)"
+  build_caveat: "Debug build, not the production cargo-dist artifact. Same code path; release polish unchanged."
+  hermetic_env_root: "/tmp/ato-aodd-143"
+  ato_home: "/tmp/ato-aodd-143/ato-home"
+  layer1_surface: "ato-desktop-mcp browser_* tools only — see /tmp/ato-aodd-143/mcp_call.py allowlist"
+  layer1_caveat: |
+    The Operator drove navigation via the `browser_navigate` MCP tool, which
+    is documented as the user-equivalent of "type a URL into the omnibar and
+    press Enter". It dispatches the same `NavigateToUrl` action that the host
+    omnibar's PressEnter handler dispatches, so the post-navigate state path
+    being tested (#143) is hit identically. A keyboard-driven omnibar
+    interaction is not exposed as a Layer 1 tool today.
+
+steps:
+  - action: "browser_tabs() — discover panes"
+    observation: '{"panes":[{"pane_id":1}]}'
+  - action: "browser_take_screenshot(pane_id=1) — observe boot tab"
+    observation: "ato.run landing page rendered (search bar, ollama/jupyter/claude chips, 'Sign in' button). No 'Starting app…' overlay. Evidence: 01-boot-ato-run.png"
+  - action: "browser_navigate(pane_id=1, url='https://example.com')  # exercise Navigate path"
+    observation: '{"ok":true}'
+  - action: "browser_take_screenshot(pane_id=1) after 3s settle"
+    observation: "Example Domain rendered (h1 + paragraph + 'Learn more' link). Evidence: 02-after-omnibar-nav-to-example.png"
+  - action: "browser_verify_text_visible(text='Example Domain')"
+    observation: '{"visible":true}'
+  - action: "browser_verify_text_visible(text='Starting app')"
+    observation: '{"visible":false}  # overlay correctly cleared'
+  - action: "browser_navigate(pane_id=1, url='https://example.com')  # exercise Keep path (same URL re-typed)"
+    observation: '{"ok":true}'
+  - action: "browser_take_screenshot(pane_id=1) + verify"
+    observation: "Example Domain still rendered, no overlay regression. Evidence: 03-keep-path-same-url.png"
+  - action: "browser_navigate(pane_id=1, url='https://ato.run/')  # exercise Navigate path the other direction"
+    observation: '{"ok":true}'
+  - action: "browser_take_screenshot(pane_id=1) + verify"
+    observation: "ato.run landing page rendered (with placeholder 'Discover CLI tools' instead of 'Search' — page state advanced). No 'Starting app…' overlay. Evidence: 04-navigate-back-to-ato-run.png"
+
+agent_observation:
+  user_visible_problem: "(pre-fix) the launching overlay stayed on top of the live WebView whenever the omnibar reused the existing WebView (Navigate or Keep) — user saw 'Starting app…' instead of the page they asked for, with no recovery short of closing the tab."
+  likely_cause: "Inspector-confirmed during the Fixer's static analysis: AppState::navigate_to_url always sets WebSessionState::Launching; WebViewManager::sync_from_state only transitioned back to Mounted in the Rebuild branch; the Navigate (load_url on existing view) and Keep (no-op) branches left the pane stuck on Launching."
+  applied_fix:
+    - "crates/ato-desktop/src/webview.rs: extracted should_force_mounted_after_reuse(reuse_action, has_existing_view, route) helper; called after the reuse block in sync_from_state to mirror the Rebuild branch's transition for non-ready-signal routes."
+  suggested_followups:
+    - "Consider auditing other pane state transitions for the same Navigate/Keep oversight (Terminal, HostPanel) — none are currently affected because they don't go through navigate_to_url, but the asymmetry between Rebuild and Navigate/Keep is a structural smell worth addressing."
+
+evidence:
+  - "claudedocs/aodd-143/evidence/01-boot-ato-run.png"
+  - "claudedocs/aodd-143/evidence/02-after-omnibar-nav-to-example.png"
+  - "claudedocs/aodd-143/evidence/03-keep-path-same-url.png"
+  - "claudedocs/aodd-143/evidence/04-navigate-back-to-ato-run.png"
+  - "claudedocs/aodd-143/evidence/desktop.stderr.log"
+
+status: "fixed"
+issue: "ato-run/ato#143"
+pr: "ato-run/ato#144"
+fix_commit: "31d26dd8"
