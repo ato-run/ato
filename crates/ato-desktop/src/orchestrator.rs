@@ -237,6 +237,29 @@ pub enum LaunchError {
         /// exactly the same input.
         original_secrets: Vec<SecretEntry>,
     },
+    /// #117 — eager preflight detected one or more pending pre-launch
+    /// requirements (a mix of missing secrets and per-target consents)
+    /// before any provisioning side effects ran. Carries the full list
+    /// so `webview.rs` can populate the unified `pending_resolution`
+    /// in one shot and the resolution modal opens once with everything
+    /// visible — instead of the legacy lazy-aggregation flow that
+    /// re-opened the modal once per retry as the launch loop tripped
+    /// errors sequentially.
+    PreflightAggregate {
+        /// Original handle the user asked to launch — re-fed into
+        /// `resolve_and_start_capsule` after Submit.
+        handle: String,
+        /// Aggregate envelope from `ato internal preflight --json`.
+        /// Each item is either a `SecretsRequired` (target-scoped or
+        /// global) or a `ConsentRequired` carrying the five identity
+        /// fields the modal needs for `ato internal consent
+        /// approve-execution-plan`.
+        requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+        /// Snapshot of secrets passed to the original
+        /// `start_capsule` call. Cloned so the post-Submit retry uses
+        /// exactly the same input.
+        original_secrets: Vec<SecretEntry>,
+    },
     /// Any other failure — opaque string suitable for direct display.
     Other(String),
 }
@@ -258,6 +281,17 @@ impl std::fmt::Display for LaunchError {
             Self::MissingConsent { handle, .. } => {
                 write!(f, "guest launch needs ExecutionPlan consent for '{handle}'")
             }
+            Self::PreflightAggregate {
+                handle,
+                requirements,
+                ..
+            } => {
+                write!(
+                    f,
+                    "guest launch needs {} pre-launch requirement(s) for '{handle}'",
+                    requirements.len()
+                )
+            }
             Self::Other(message) => f.write_str(message),
         }
     }
@@ -278,7 +312,94 @@ pub fn resolve_and_start_guest(
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
 ) -> Result<GuestLaunchSession, LaunchError> {
+    // #117 — eager preflight collection. Walks the orchestration
+    // target graph via `ato internal preflight --json` *before* any
+    // provisioning side effects. If any requirements are pending,
+    // surface them as a single `PreflightAggregate` so the unified
+    // resolution modal opens once with everything visible. If
+    // preflight is empty (every consent + every required env is
+    // already satisfied) or returns a "ref not supported" error
+    // (e.g. uncached remote ref), fall through to the legacy launch
+    // loop which still drains lazily via `merge_*_into_resolution`.
+    match collect_preflight_requirements(handle) {
+        Ok(envelopes) if !envelopes.is_empty() => {
+            return Err(LaunchError::PreflightAggregate {
+                handle: handle.to_string(),
+                requirements: envelopes,
+                original_secrets: secrets.to_vec(),
+            });
+        }
+        Ok(_) => {
+            // No pending requirements → proceed to the normal
+            // resolve+start path. The provisioning + execute phases
+            // run as before.
+        }
+        Err(error) => {
+            // Preflight intentionally fails closed for unsupported
+            // refs (e.g. an uncached `publisher/slug` registry ref)
+            // so the legacy E103/E302 flow can still surface the
+            // requirements lazily. Logged at warn so we can spot
+            // patterns without spamming under expected conditions.
+            warn!(
+                handle = %handle,
+                error = %error,
+                "preflight collection skipped; falling back to lazy aggregation"
+            );
+        }
+    }
+
     resolve_and_start_capsule(handle, secrets, plain_configs)
+}
+
+/// Shell out to `ato internal preflight <handle> --json` and parse
+/// the aggregate envelope. Returns the list of pending
+/// `InteractiveResolutionEnvelope` items — empty list means the
+/// launch can proceed without further interaction.
+///
+/// Errors from this helper are non-fatal: the caller falls through
+/// to the legacy launch loop. We intentionally do NOT bubble them up
+/// as `LaunchError::Other` because that would short-circuit the
+/// existing fallback story and confuse users whose capsule simply
+/// hasn't been cached yet.
+fn collect_preflight_requirements(
+    handle: &str,
+) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
+    let output = Command::new(&ato_bin)
+        .args(["internal", "preflight", handle, "--json"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight",
+                ato_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        bail!(
+            "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    let payload: PreflightAggregateEnvelope = serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))?;
+
+    Ok(payload.requirements)
+}
+
+#[derive(Debug, Deserialize)]
+struct PreflightAggregateEnvelope {
+    #[serde(default)]
+    #[allow(dead_code)]
+    schema_version: Option<String>,
+    #[serde(default)]
+    requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {

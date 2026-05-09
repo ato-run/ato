@@ -1533,6 +1533,58 @@ impl WebViewManager {
                         });
                     }
                 }
+                Err(LaunchError::PreflightAggregate {
+                    handle,
+                    requirements,
+                    original_secrets,
+                }) => {
+                    // #117 — eager preflight returned the full set of
+                    // pending requirements before any provisioning ran.
+                    // Convert each envelope into the existing per-error
+                    // PendingConfig / PendingConsent shapes and route
+                    // through `merge_*_into_resolution`, so the
+                    // unified resolution modal sees one populated
+                    // request with everything visible at once instead
+                    // of accumulating across N launch retries.
+                    use capsule_core::interactive_resolution::InteractiveResolutionKind;
+                    info!(
+                        pane_id,
+                        handle = %handle,
+                        requirement_count = requirements.len(),
+                        "preflight surfaced aggregate requirements; populating unified modal"
+                    );
+                    for envelope in requirements {
+                        match envelope.kind {
+                            InteractiveResolutionKind::SecretsRequired { target, schema } => {
+                                state.merge_config_into_resolution(PendingConfigRequest {
+                                    handle: handle.clone(),
+                                    target,
+                                    fields: schema,
+                                    original_secrets: original_secrets.clone(),
+                                });
+                            }
+                            InteractiveResolutionKind::ConsentRequired {
+                                scoped_id,
+                                version,
+                                target_label,
+                                policy_segment_hash,
+                                provisioning_policy_hash,
+                                summary,
+                            } => {
+                                state.merge_consent_into_resolution(PendingConsentRequest {
+                                    handle: handle.clone(),
+                                    scoped_id,
+                                    version,
+                                    target_label,
+                                    policy_segment_hash,
+                                    provisioning_policy_hash,
+                                    summary,
+                                    original_secrets: original_secrets.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
                 Err(LaunchError::Other(message)) => {
                     error!(pane_id, error = %message, "guest session failed");
                     // Use LaunchFailed (not Closed) to prevent ensure_pending_local_launch
