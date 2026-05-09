@@ -53,7 +53,6 @@ evidence:
   - "claudedocs/aodd-143/evidence/02-after-omnibar-nav-to-example.png"
   - "claudedocs/aodd-143/evidence/03-keep-path-same-url.png"
   - "claudedocs/aodd-143/evidence/04-navigate-back-to-ato-run.png"
-  - "claudedocs/aodd-143/evidence/desktop.stderr.log"
 
 status: "fixed"
 issue: "ato-run/ato#143"
