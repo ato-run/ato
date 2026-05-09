@@ -1,11 +1,16 @@
 #[path = "env_origin.rs"]
 mod env_origin;
 
+mod filesystem_builder;
+mod policy_builder;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::error::{CapsuleError, Result};
 pub use env_origin::{default_env_origin, EnvOrigin};
+pub use filesystem_builder::FilesystemIdentityBuilder;
+pub use policy_builder::PolicyIdentityBuilder;
 
 pub const EXECUTION_IDENTITY_SCHEMA_VERSION: u32 = 1;
 pub const EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL: u32 = 2;
@@ -1138,7 +1143,7 @@ fn hash_normalized_value(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::engine::execution_identity) mod tests {
     use super::*;
 
     fn sample_input() -> ExecutionIdentityInput {
@@ -1196,7 +1201,7 @@ mod tests {
         )
     }
 
-    fn sample_input_v2() -> ExecutionIdentityInputV2 {
+    pub(in crate::engine::execution_identity) fn sample_input_v2() -> ExecutionIdentityInputV2 {
         let normalizer = PathRoleNormalizer::new([
             ("${WORKSPACE}", "/Users/alice/proj"),
             ("${ATO_HOME}", "/Users/alice/.ato"),
