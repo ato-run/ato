@@ -33,8 +33,8 @@ mod tests;
 mod types;
 
 pub use builder::{
-    ExecutionGraphBuildInput, ExecutionGraphBuilder, GraphDependencyInput, GraphHostInput,
-    GraphPolicyInput, GraphSourceInput, GraphTargetInput,
+    identity_labels, ExecutionGraphBuildInput, ExecutionGraphBuilder, GraphDependencyInput,
+    GraphHostInput, GraphPolicyInput, GraphSourceInput, GraphTargetInput,
 };
 pub use canonical::{
     CanonicalGraphDomain, CanonicalizableGraph, GraphCanonicalForm, CANONICAL_FORM_VERSION,

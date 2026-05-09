@@ -11,10 +11,47 @@
 //! nodes and edges in deterministic order so downstream identity hashing
 //! (Wave 2, #98) is straightforward to add.
 
+use std::collections::BTreeMap;
+
 use super::types::{
     ExecutionGraph, ExecutionGraphConstraint, ExecutionGraphEdge, ExecutionGraphEdgeKind,
     ExecutionGraphNode,
 };
+
+/// Insert `(key, value.clone())` into `labels` when `value` is `Some`.
+/// No-op when `value` is `None`. Centralizes the "optional graph fact →
+/// canonical label" wiring so callers don't repeat the `if let Some`
+/// dance for every identity facet.
+fn insert_optional_label(
+    labels: &mut BTreeMap<String, String>,
+    key: &'static str,
+    value: Option<&String>,
+) {
+    if let Some(value) = value {
+        labels.insert(key.to_string(), value.clone());
+    }
+}
+
+/// Stable label keys for graph-derived identity facets.
+///
+/// These keys are part of the canonical form's `LBLS` section, so renaming
+/// any of them is a breaking change — every previously computed digest
+/// would shift. Add new keys, never rename.
+pub mod identity_labels {
+    /// [`crate::execution_identity::FilesystemIdentityV2::source_root`].
+    pub const FS_SOURCE_ROOT: &str = "fs.source_root";
+    /// [`crate::execution_identity::FilesystemIdentityV2::working_directory`].
+    pub const FS_WORKING_DIRECTORY: &str = "fs.working_directory";
+    /// [`crate::execution_identity::FilesystemIdentityV2::view_hash`] value
+    /// (resolved domain only; absent before host materialization).
+    pub const FS_VIEW_HASH: &str = "fs.view_hash";
+    /// [`crate::execution_identity::PolicyIdentityV2::network_policy_hash`].
+    pub const POLICY_NETWORK_HASH: &str = "policy.network_hash";
+    /// [`crate::execution_identity::PolicyIdentityV2::capability_policy_hash`].
+    pub const POLICY_CAPABILITY_HASH: &str = "policy.capability_hash";
+    /// [`crate::execution_identity::PolicyIdentityV2::sandbox_policy_hash`].
+    pub const POLICY_SANDBOX_HASH: &str = "policy.sandbox_hash";
+}
 
 /// Decoupled input fed to [`ExecutionGraphBuilder::build`].
 ///
@@ -62,18 +99,52 @@ pub struct GraphDependencyInput {
 ///
 /// All fields are optional so individual call sites can populate only the
 /// facets they actually know about.
+///
+/// ## Identity-relevant fields (PR-5a, refs #100)
+///
+/// The `*_role` fields are declared-domain facts (manifest + lock + policy
+/// only), while `filesystem_view_hash` is a resolved-domain fact that only
+/// becomes available after host materialization. They are surfaced on the
+/// graph as deterministic labels (see [`ExecutionGraphBuilder::build`])
+/// so they participate in the canonical form's `LBLS` section. Identity
+/// builders (e.g. [`crate::execution_identity::FilesystemIdentityBuilder`])
+/// consume the corresponding labels back out via [`ExecutionGraph::labels`].
+///
+/// All identity-relevant fields are `Option<String>`; if a call site doesn't
+/// know a value, leave it `None` — the builder skips emission of that label.
 #[derive(Debug, Clone, Default)]
 pub struct GraphHostInput {
     pub filesystem: Option<String>,
     pub network: Option<String>,
     pub env: Option<String>,
     pub state: Option<String>,
+    /// Workspace-relative role string for the source root (declared domain).
+    /// Mirrors `FilesystemIdentityV2::source_root` when known.
+    pub filesystem_source_root: Option<String>,
+    /// Workspace-relative role string for the working directory (declared
+    /// domain). Mirrors `FilesystemIdentityV2::working_directory` when known.
+    pub filesystem_working_directory: Option<String>,
+    /// Resolved view hash of the materialized filesystem (resolved domain).
+    /// Mirrors `FilesystemIdentityV2::view_hash.value` when known.
+    pub filesystem_view_hash: Option<String>,
 }
 
 /// Policy facets that gate execution.
+///
+/// ## Identity-relevant fields (PR-5a, refs #102)
+///
+/// The three `*_policy_hash` fields mirror [`crate::execution_identity::PolicyIdentityV2`]
+/// and are surfaced on the graph as labels under the `policy.*` namespace.
+/// `network_policy_hash` and `capability_policy_hash` are declared-domain
+/// (derived from the manifest's policy and consent ledger respectively);
+/// `sandbox_policy_hash` straddles both domains in v0.6.0 (target_runtime
+/// is declared, mount_set_algo and allow_hosts_count are resolved).
 #[derive(Debug, Clone, Default)]
 pub struct GraphPolicyInput {
     pub constraints: Vec<ExecutionGraphConstraint>,
+    pub network_policy_hash: Option<String>,
+    pub capability_policy_hash: Option<String>,
+    pub sandbox_policy_hash: Option<String>,
 }
 
 /// Builder for [`ExecutionGraph`].
@@ -103,6 +174,7 @@ impl ExecutionGraphBuilder {
 
         let mut nodes: Vec<ExecutionGraphNode> = Vec::new();
         let mut edges: Vec<ExecutionGraphEdge> = Vec::new();
+        let mut labels: BTreeMap<String, String> = BTreeMap::new();
 
         if let Some(src) = source.as_ref() {
             nodes.push(ExecutionGraphNode::Source {
@@ -171,6 +243,39 @@ impl ExecutionGraphBuilder {
                     identifier: state.clone(),
                 });
             }
+            insert_optional_label(
+                &mut labels,
+                identity_labels::FS_SOURCE_ROOT,
+                host.filesystem_source_root.as_ref(),
+            );
+            insert_optional_label(
+                &mut labels,
+                identity_labels::FS_WORKING_DIRECTORY,
+                host.filesystem_working_directory.as_ref(),
+            );
+            insert_optional_label(
+                &mut labels,
+                identity_labels::FS_VIEW_HASH,
+                host.filesystem_view_hash.as_ref(),
+            );
+        }
+
+        if let Some(policy) = policy.as_ref() {
+            insert_optional_label(
+                &mut labels,
+                identity_labels::POLICY_NETWORK_HASH,
+                policy.network_policy_hash.as_ref(),
+            );
+            insert_optional_label(
+                &mut labels,
+                identity_labels::POLICY_CAPABILITY_HASH,
+                policy.capability_policy_hash.as_ref(),
+            );
+            insert_optional_label(
+                &mut labels,
+                identity_labels::POLICY_SANDBOX_HASH,
+                policy.sandbox_policy_hash.as_ref(),
+            );
         }
 
         // Deduplicate nodes — a runtime referenced by multiple targets,
@@ -196,7 +301,7 @@ impl ExecutionGraphBuilder {
         ExecutionGraph {
             nodes,
             edges,
-            labels: Default::default(),
+            labels,
             constraints,
         }
     }
