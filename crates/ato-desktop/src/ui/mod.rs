@@ -36,10 +36,10 @@ use crate::app::{
     FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
     NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
     OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
-    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm,
-    SelectRouteMetadataTab, SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit,
-    SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm, ToggleAutoDevtools, ToggleDevConsole,
-    ToggleRouteMetadataPopover, ToggleTheme,
+    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResolutionFormBack, ResolutionFormNext,
+    ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab, SelectSettingsTab, SelectTask,
+    ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm,
+    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -1622,6 +1622,41 @@ impl DesktopShell {
         cx.notify();
     }
 
+    /// #117 step UI — advance from consent review to secrets entry.
+    /// No-op when the modal is already on the secrets step or when
+    /// the request has no secrets to advance to (single-step mode,
+    /// where the Submit button is the right action). The mutation is
+    /// on the modal's local state only — `pending_resolution` itself
+    /// is unchanged so a concurrent merge-in still lands cleanly.
+    fn on_resolution_form_next(
+        &mut self,
+        _: &ResolutionFormNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(modal) = self.resolution_modal.as_mut() {
+            modal.advance_step();
+            cx.notify();
+        }
+    }
+
+    /// #117 step UI — go back from secrets entry to consent review.
+    /// No-op when the request has no consents (single-step mode).
+    /// Input state for the secrets form is preserved across the
+    /// round-trip via the existing `inputs` map, so users don't lose
+    /// keystrokes by stepping back to re-read a policy summary.
+    fn on_resolution_form_back(
+        &mut self,
+        _: &ResolutionFormBack,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(modal) = self.resolution_modal.as_mut() {
+            modal.retreat_step();
+            cx.notify();
+        }
+    }
+
     /// #117 — handler for `CancelResolutionForm`. Drops the unified
     /// pending request and marks the active web pane `LaunchFailed`
     /// so `ensure_pending_local_launch` doesn't immediately re-trip
@@ -2008,6 +2043,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_cancel_consent_form))
             .on_action(cx.listener(Self::on_submit_resolution_form))
             .on_action(cx.listener(Self::on_cancel_resolution_form))
+            .on_action(cx.listener(Self::on_resolution_form_next))
+            .on_action(cx.listener(Self::on_resolution_form_back))
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_open_latest_release_page))
             .on_action(cx.listener(Self::on_open_external_link))
