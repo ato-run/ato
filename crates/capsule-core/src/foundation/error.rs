@@ -698,6 +698,76 @@ impl AtoError {
             Self::AuthRequired { .. } => None,
         }
     }
+
+    /// Returns the additive [`InteractiveResolutionEnvelope`] for variants
+    /// that the user can resolve interactively today (E103
+    /// `MissingRequiredEnv` and E302 `ExecutionPlanConsentRequired`).
+    ///
+    /// This is the typed counterpart to the legacy per-variant
+    /// [`details`](AtoError::details) JSON. Both are emitted side-by-side
+    /// on the wire so existing consumers (the desktop's
+    /// `MissingEnvDetailsDto` / `ConsentRequiredDetailsDto`) keep parsing
+    /// the legacy shape unchanged, while new consumers can route on the
+    /// single typed envelope. See `foundation::interactive_resolution`
+    /// for the long-form rationale and the migration plan toward
+    /// aggregate-envelope work in #117.
+    ///
+    /// Returns `None` for non-interactive variants. The set returned
+    /// here is intentionally narrower than
+    /// [`interactive_resolution`](AtoError::interactive_resolution): the
+    /// boolean signals "the desktop should pause and show *something*",
+    /// while this method only returns when we have a typed payload to
+    /// drive a generic resolution UI without per-variant branching.
+    pub fn interactive_resolution_envelope(
+        &self,
+    ) -> Option<crate::interactive_resolution::InteractiveResolutionEnvelope> {
+        use crate::interactive_resolution::{
+            InteractiveResolutionEnvelope, InteractiveResolutionKind, ResolutionDisplay,
+        };
+
+        match self {
+            Self::MissingRequiredEnv {
+                message,
+                hint,
+                missing_schema,
+                target,
+                ..
+            } => Some(InteractiveResolutionEnvelope {
+                kind: InteractiveResolutionKind::SecretsRequired {
+                    target: target.clone(),
+                    schema: missing_schema.clone(),
+                },
+                display: ResolutionDisplay {
+                    message: message.clone(),
+                    hint: hint.clone(),
+                },
+            }),
+            Self::ExecutionPlanConsentRequired {
+                message,
+                hint,
+                scoped_id,
+                version,
+                target_label,
+                policy_segment_hash,
+                provisioning_policy_hash,
+                summary,
+            } => Some(InteractiveResolutionEnvelope {
+                kind: InteractiveResolutionKind::ConsentRequired {
+                    scoped_id: scoped_id.clone(),
+                    version: version.clone(),
+                    target_label: target_label.clone(),
+                    policy_segment_hash: policy_segment_hash.clone(),
+                    provisioning_policy_hash: provisioning_policy_hash.clone(),
+                    summary: summary.clone(),
+                },
+                display: ResolutionDisplay {
+                    message: message.clone(),
+                    hint: hint.clone(),
+                },
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for AtoError {
