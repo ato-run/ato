@@ -97,11 +97,24 @@ pub struct RunArgs {
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
-    if args.watch {
-        execute_watch_mode_with_install(args).await
-    } else {
-        execute_normal_mode(args).await
-    }
+    // Boundary-level receipt emission (refs #74, #99). Wraps the inner
+    // pipeline so that on the recoverable-failure / aborted path a
+    // *partial* execution receipt is emitted to
+    // `~/.ato/executions/<id>/receipt.json`, even though the inner
+    // pipeline never reached `build_prelaunch_receipt_v2`. On the
+    // happy path the inner pipeline already emitted a full v2
+    // receipt; the wrapper observes `Ok(_)` and returns it unchanged.
+    let ctx = crate::application::receipt_boundary::ReceiptEmissionContext::for_boundary(
+        "ato run",
+    );
+    crate::application::receipt_boundary::emit_receipt_on_result(ctx, async move {
+        if args.watch {
+            execute_watch_mode_with_install(args).await
+        } else {
+            execute_normal_mode(args).await
+        }
+    })
+    .await
 }
 
 async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
