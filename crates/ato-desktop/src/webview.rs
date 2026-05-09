@@ -1458,7 +1458,12 @@ impl WebViewManager {
                         field_count = fields.len(),
                         "guest session needs config; surfacing modal"
                     );
-                    state.set_pending_config(PendingConfigRequest {
+                    // #117 — route into the unified resolution request.
+                    // The legacy `pending_config` slot is left untouched
+                    // (callers that still observe it stay correct); the
+                    // unified resolution modal takes precedence in the
+                    // ui/modals render gate when both are populated.
+                    state.merge_config_into_resolution(PendingConfigRequest {
                         handle,
                         target,
                         fields,
@@ -1511,7 +1516,12 @@ impl WebViewManager {
                             target = %target_label,
                             "guest session needs ExecutionPlan consent; surfacing modal"
                         );
-                        state.set_pending_consent(PendingConsentRequest {
+                        // #117 — route into the unified resolution
+                        // request, same as the E103 arm above. The
+                        // retry-budget gate stays per-target so a
+                        // post-Approve loop still surfaces a fatal
+                        // toast rather than re-opening the modal.
+                        state.merge_consent_into_resolution(PendingConsentRequest {
                             handle,
                             scoped_id,
                             version,
