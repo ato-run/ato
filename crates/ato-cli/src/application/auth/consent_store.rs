@@ -50,17 +50,43 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // on. Older consumers keep classifying this as a generic
         // execution-contract error and fall through to the existing
         // fatal-toast path.
+        let scoped_id = plan.consent.key.scoped_id.clone();
+        let version = plan.consent.key.version.clone();
+        let target_label = plan.consent.key.target_label.clone();
+        let policy_segment_hash = plan.consent.policy_segment_hash.clone();
+        let provisioning_policy_hash = plan.consent.provisioning_policy_hash.clone();
+
+        let approve_command = format!(
+            "ato internal consent approve-execution-plan \\\n  \
+             --scoped-id {scoped_id} \\\n  \
+             --version {version} \\\n  \
+             --target-label {target_label} \\\n  \
+             --policy-segment-hash {policy_segment_hash} \\\n  \
+             --provisioning-policy-hash {provisioning_policy_hash}",
+        );
+
+        let message = format!(
+            "ExecutionPlan consent required for target={target_label} of \
+             {scoped_id}@{version}. Approve via the desktop modal, a TTY \
+             prompt, or `ato internal consent approve-execution-plan` \
+             (the same identity fields are emitted as a JSON envelope on \
+             stderr in non-TTY mode).",
+        );
+
+        let hint = format!(
+            "Approve from CLI:\n  {approve_command}\n\
+             Or open the launching app and click Approve in the modal.",
+        );
+
         return Err(AtoExecutionError::from_ato_error(
             AtoError::ExecutionPlanConsentRequired {
-                message: "ExecutionPlan consent required for this capsule. Approve via the desktop modal or a TTY prompt before retrying.".to_string(),
-                hint: Some(
-                    "Desktop の承認モーダル、または TTY 上で対話的に承認してから再実行してください。".to_string(),
-                ),
-                scoped_id: plan.consent.key.scoped_id.clone(),
-                version: plan.consent.key.version.clone(),
-                target_label: plan.consent.key.target_label.clone(),
-                policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-                provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+                message,
+                hint: Some(hint),
+                scoped_id,
+                version,
+                target_label,
+                policy_segment_hash,
+                provisioning_policy_hash,
                 summary: consent_summary(plan),
             },
         ));
@@ -480,6 +506,111 @@ mod tests {
             snapshot.contains("ExecutionPlanConsentRequired")
                 || snapshot.contains("execution_plan_consent_required"),
             "expected the new variant to surface, got: {snapshot}"
+        );
+    }
+
+    /// #126 — the non-TTY message and hint must give CLI users a
+    /// concrete approval recipe. Without this, a CLI caller hitting
+    /// E302 has no documented way to proceed (the receipt at
+    /// claudedocs/aodd-receipts/117-cli-baseline-local-* shows this is
+    /// the reason CLI runs of WasedaP2P were a true dead-end before
+    /// this change). Anchored on actual content so future drift fails
+    /// loudly at this site instead of silently regressing the CLI UX.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn non_tty_consent_message_carries_approve_command_recipe() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+        let err = require_consent(&plan, false).expect_err("must emit consent envelope");
+
+        let message = err.message.as_str();
+        assert!(
+            message.contains("ato internal consent approve-execution-plan"),
+            "non-TTY consent message must mention the CLI approval command; got: {message}"
+        );
+        assert!(
+            message.contains(&plan.consent.key.scoped_id),
+            "non-TTY consent message must name the capsule scoped_id; got: {message}"
+        );
+        assert!(
+            message.contains(&plan.consent.key.target_label),
+            "non-TTY consent message must name the target_label; got: {message}"
+        );
+
+        let hint = err
+            .hint
+            .as_deref()
+            .expect("non-TTY consent error must carry a hint");
+        for field_value in [
+            plan.consent.key.scoped_id.as_str(),
+            plan.consent.key.version.as_str(),
+            plan.consent.key.target_label.as_str(),
+            plan.consent.policy_segment_hash.as_str(),
+            plan.consent.provisioning_policy_hash.as_str(),
+        ] {
+            assert!(
+                hint.contains(field_value),
+                "non-TTY consent hint must embed identity field {field_value:?} so the user \
+                 can copy-paste the approval command; got hint: {hint}"
+            );
+        }
+    }
+
+    /// #126 — the typed error's `details` JSON (the same shape the
+    /// non-TTY-without-`--json` envelope writes to stderr) must carry
+    /// the five identity fields plus the `execution_plan_consent_required`
+    /// discriminator. Locks the wire shape so callers scraping stderr
+    /// can rely on it across releases.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn non_tty_consent_envelope_details_carry_identity_tuple() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+        let err = require_consent(&plan, false).expect_err("must emit consent envelope");
+
+        let details = err
+            .details
+            .as_ref()
+            .expect("non-TTY consent error must populate details");
+        assert_eq!(
+            details
+                .get("reason")
+                .and_then(|value| value.as_str()),
+            Some("execution_plan_consent_required"),
+            "details.reason must be the consent discriminator; got: {details}"
+        );
+        for (field, expected) in [
+            ("scoped_id", plan.consent.key.scoped_id.as_str()),
+            ("version", plan.consent.key.version.as_str()),
+            ("target_label", plan.consent.key.target_label.as_str()),
+            ("policy_segment_hash", plan.consent.policy_segment_hash.as_str()),
+            (
+                "provisioning_policy_hash",
+                plan.consent.provisioning_policy_hash.as_str(),
+            ),
+        ] {
+            let actual = details.get(field).and_then(|value| value.as_str());
+            assert_eq!(
+                actual,
+                Some(expected),
+                "details.{field} must be present in the envelope so non-TTY callers can scrape it; \
+                 got: {details}"
+            );
+        }
+        assert!(
+            err.interactive_resolution,
+            "ExecutionPlanConsentRequired must report interactive_resolution=true so the \
+             non-TTY envelope helper picks it up"
         );
     }
 

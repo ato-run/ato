@@ -3,6 +3,7 @@
 //! The binary target stays intentionally small so startup, error rendering, and
 //! command dispatch can be exercised through this library from tests.
 
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -214,6 +215,19 @@ pub fn main_entry() {
 
         if ato_error_jsonl::try_emit_from_anyhow(&err, json_mode) {
             std::process::exit(error_codes::EXIT_USER_ERROR);
+        }
+
+        // #126 — non-TTY callers (CI, scripted shells, AODD harnesses) must
+        // be able to read the typed identity fields for any error that
+        // requires interactive resolution (consent_required, missing_env,
+        // auth_required, etc.). Emit the JSON envelope to stderr alongside
+        // the human diagnostic when stdin or stdout is not a TTY. This is
+        // additive: TTY callers and `--json` callers see no behaviour
+        // change.
+        let non_tty_caller = !std::io::stdin().is_terminal()
+            || !std::io::stdout().is_terminal();
+        if !json_mode && non_tty_caller {
+            ato_error_jsonl::try_emit_interactive_resolution_envelope(&err);
         }
 
         let diagnostic = diagnostics::from_anyhow(&err, command_context);
