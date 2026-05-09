@@ -246,7 +246,19 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     let mut runner =
         super::session_runner::SessionStartPhaseRunner::new(handle, target_label, json);
     let pipeline = ConsumerRunPipeline::standard();
-    futures::executor::block_on(pipeline.run(&mut runner))?;
+    // Boundary-level receipt emission (refs #74, #99). On the happy
+    // path the pipeline emits its own full v2 receipt before spawn
+    // (see `SessionStartPhaseRunner::emit_execution_receipt`); on the
+    // failure path the wrapper synthesizes a partial receipt with
+    // the typed `AtoExecutionError` envelope so `~/.ato/executions/`
+    // contains a record for every session-start attempt.
+    let ctx = crate::application::receipt_boundary::ReceiptEmissionContext::for_boundary(
+        "ato app session start",
+    );
+    futures::executor::block_on(crate::application::receipt_boundary::emit_receipt_on_result(
+        ctx,
+        async { pipeline.run(&mut runner).await },
+    ))?;
 
     let info = runner
         .session_info
