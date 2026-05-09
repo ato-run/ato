@@ -281,7 +281,11 @@ impl ExecutionIdentityInputV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is intentionally omitted because `failure_envelope.details` carries
+// a `serde_json::Value` (which is `PartialEq` only — `Number` is f64, no
+// total order). Receipts are persisted as JSON anyway, so `Eq`-keyed
+// containers were never a use case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutionReceiptV2 {
     pub schema_version: u32,
     pub execution_id: String,
@@ -309,6 +313,23 @@ pub struct ExecutionReceiptV2 {
     /// Graph-derived `Observed`-domain id; always `None` in v0.6.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_execution_id: Option<String>,
+    /// Receipt result classification (refs #74, #99). Defaults to
+    /// [`ReceiptResultClass::Passed`] for serde back-compat: existing v2
+    /// receipts on disk re-deserialize cleanly, and the field is omitted
+    /// from successful receipts so the happy-path wire bytes are
+    /// unchanged. Populated by the boundary-level
+    /// `emit_receipt_on_result` wrapper (`ato-cli`'s
+    /// `application::receipt_boundary`).
+    #[serde(default, skip_serializing_if = "ReceiptResultClass::is_passed")]
+    pub result: ReceiptResultClass,
+    /// Typed failure envelope, populated when `result` is
+    /// `RecoverableFailure` or `Aborted`. Carries the
+    /// `AtoError`-derived diagnostic shape (kind/code/phase/etc.) so
+    /// downstream consumers can route on it without re-parsing the
+    /// human message. Excluded from the JCS projection — diagnostic
+    /// only, never feeds `execution_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_envelope: Option<ReceiptFailureEnvelope>,
 }
 
 impl ExecutionReceiptV2 {
@@ -336,8 +357,234 @@ impl ExecutionReceiptV2 {
             declared_execution_id: input.declared_execution_id,
             resolved_execution_id: input.resolved_execution_id,
             observed_execution_id: input.observed_execution_id,
+            result: ReceiptResultClass::Passed,
+            failure_envelope: None,
         })
     }
+
+    /// Attach a result class + failure envelope onto an already-built
+    /// receipt. Used by the boundary wrapper to mark the
+    /// recoverable-failure / aborted path without rebuilding the receipt
+    /// from observers.
+    pub fn with_result(
+        mut self,
+        result: ReceiptResultClass,
+        failure_envelope: Option<ReceiptFailureEnvelope>,
+    ) -> Self {
+        self.result = result;
+        self.failure_envelope = failure_envelope;
+        self
+    }
+
+    /// Build a partial v2 receipt for a launch that failed before the
+    /// full launch envelope was resolved (refs #74, #99).
+    ///
+    /// `execution_id` is synthetic (`partial:blake3:<digest>`) — content-
+    /// addressed over the failure envelope and any graph-derived
+    /// identities the boundary already knew. JCS-derived `execution_id`s
+    /// require the full launch envelope (source/deps/runtime/env/fs/
+    /// policy/launch), so partial receipts use this disjoint id space
+    /// to avoid collisions with happy-path JCS ids.
+    ///
+    /// `computed_at` is intentionally NOT mixed into the hash: two
+    /// retries with the same envelope and the same graph state must
+    /// produce the same `execution_id` so downstream consumers
+    /// (e.g. `ato diff execution`, GC roots) can treat the synthetic
+    /// id as content-addressed. If per-attempt uniqueness is needed
+    /// in the future it must ride on a separate field, not on
+    /// `execution_id`.
+    ///
+    /// Identity facets are filled with `Tracked::untracked` placeholders
+    /// because the launch envelope is by definition incomplete here.
+    /// Graph-derived ids (`declared_execution_id`,
+    /// `resolved_execution_id`) are populated by the boundary wrapper
+    /// when the failure happened *after* the corresponding graph was
+    /// built; otherwise they stay `None`.
+    pub fn partial_failure(
+        computed_at: String,
+        result: ReceiptResultClass,
+        failure_envelope: ReceiptFailureEnvelope,
+        declared_execution_id: Option<String>,
+        resolved_execution_id: Option<String>,
+        local: Option<LocalExecutionLocator>,
+    ) -> Self {
+        let envelope_canonical = serde_jcs::to_vec(&failure_envelope).unwrap_or_default();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&envelope_canonical);
+        if let Some(id) = declared_execution_id.as_deref() {
+            hasher.update(b"declared:");
+            hasher.update(id.as_bytes());
+        }
+        if let Some(id) = resolved_execution_id.as_deref() {
+            hasher.update(b"resolved:");
+            hasher.update(id.as_bytes());
+        }
+        let synthetic_id = format!("partial:blake3:{}", hasher.finalize().to_hex());
+
+        let untracked_string =
+            || Tracked::untracked("partial receipt: launch envelope not resolved");
+
+        Self {
+            schema_version: EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+            execution_id: synthetic_id.clone(),
+            computed_at,
+            identity: ExecutionIdentityMetadata {
+                canonicalization: EXECUTION_IDENTITY_CANONICALIZATION.to_string(),
+                hash_algorithm: EXECUTION_IDENTITY_HASH_ALGORITHM.to_string(),
+                input_hash: synthetic_id,
+            },
+            source: SourceIdentityV2 {
+                source_tree_hash: untracked_string(),
+                manifest_path_role: untracked_string(),
+            },
+            source_provenance: SourceProvenance {
+                kind: SourceProvenanceKind::Unknown,
+                git_remote: None,
+                git_commit: None,
+                registry_ref: None,
+            },
+            dependencies: DependencyIdentityV2 {
+                derivation_hash: untracked_string(),
+                output_hash: untracked_string(),
+                derivation_inputs: None,
+            },
+            runtime: RuntimeIdentityV2 {
+                declared: None,
+                resolved_ref: untracked_string(),
+                binary_hash: untracked_string(),
+                dynamic_linkage: untracked_string(),
+                completeness: RuntimeCompleteness::DeclaredOnly,
+                platform: PlatformIdentity {
+                    os: std::env::consts::OS.to_string(),
+                    arch: std::env::consts::ARCH.to_string(),
+                    libc: "unknown".to_string(),
+                },
+            },
+            environment: EnvironmentIdentityV2 {
+                entries: Vec::new(),
+                fd_layout: Tracked::untracked("partial receipt"),
+                umask: untracked_string(),
+                ulimits: Tracked::untracked("partial receipt"),
+                mode: EnvironmentMode::Untracked,
+                ambient_untracked_keys: Vec::new(),
+            },
+            filesystem: FilesystemIdentityV2 {
+                view_hash: untracked_string(),
+                partial_view_hash: None,
+                source_root: untracked_string(),
+                working_directory: untracked_string(),
+                readonly_layers: Vec::new(),
+                writable_dirs: Vec::new(),
+                persistent_state: Vec::new(),
+                semantics: FilesystemSemantics {
+                    case_sensitivity: Tracked::untracked("partial receipt"),
+                    symlink_policy: Tracked::untracked("partial receipt"),
+                    tmp_policy: Tracked::untracked("partial receipt"),
+                },
+            },
+            policy: PolicyIdentityV2 {
+                network_policy_hash: untracked_string(),
+                capability_policy_hash: untracked_string(),
+                sandbox_policy_hash: untracked_string(),
+            },
+            launch: LaunchIdentityV2 {
+                entry_point: LaunchEntryPoint::Untracked {
+                    reason: "partial receipt: launch envelope not resolved".to_string(),
+                },
+                argv: Vec::new(),
+                working_directory: untracked_string(),
+            },
+            local,
+            reproducibility: ReproducibilityIdentity {
+                class: ReproducibilityClass::BestEffort,
+                causes: vec![ReproducibilityCause::LifecycleUnknown],
+            },
+            declared_execution_id,
+            resolved_execution_id,
+            observed_execution_id: None,
+            result,
+            failure_envelope: Some(failure_envelope),
+        }
+    }
+}
+
+/// Outcome class for an execution receipt (refs #74, #99).
+///
+/// `Passed` — the launch envelope was fully resolved and the workload
+/// reached the readiness gate (or completed normally for non-service
+/// capsules). `RecoverableFailure` — the launch failed in the
+/// Manifest / Provisioning / Execution phases at a step the user can
+/// fix and retry (manifest parse error, runtime not resolved, consent
+/// required, etc.). `Aborted` — internal panics, `AtoErrorPhase::Internal`,
+/// or explicit user abort that the user cannot meaningfully retry
+/// without external intervention.
+///
+/// Defaults to `Passed` so existing v2 receipts on disk re-deserialize
+/// cleanly and the success wire shape stays byte-identical
+/// (`skip_serializing_if = "is_passed"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReceiptResultClass {
+    Passed,
+    RecoverableFailure,
+    Aborted,
+}
+
+impl ReceiptResultClass {
+    pub fn is_passed(&self) -> bool {
+        matches!(self, Self::Passed)
+    }
+}
+
+impl Default for ReceiptResultClass {
+    fn default() -> Self {
+        Self::Passed
+    }
+}
+
+/// Typed failure envelope for partial receipts.
+///
+/// Mirrors the diagnostic shape of [`crate::execution_plan::error::AtoExecutionError`]
+/// (which is itself derived from [`crate::error::AtoError`] at the CLI
+/// boundary), but lives on the receipt schema so consumers reading
+/// `~/.ato/executions/<id>/receipt.json` don't have to re-parse the
+/// human message to know the error code, phase, or whether the failure
+/// is retryable. Diagnostic only — never participates in the JCS
+/// `execution_id` projection.
+///
+/// `details` carries the typed `serde_json::Value` from `AtoError::details()`
+/// verbatim, so the envelope is `PartialEq` but not `Eq` (Value contains
+/// f64 which has no total order). The receipt itself drops `Eq` for the
+/// same reason; this is the only field that introduces this constraint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReceiptFailureEnvelope {
+    /// `recoverable` or `aborted`. Mirrors the receipt-level
+    /// [`ReceiptResultClass`] for self-contained downstream routing
+    /// (the receipt and the envelope can be inspected independently).
+    pub kind: ReceiptFailureKind,
+    /// Stable wire code (`E001`..`E999`). Matches `AtoExecutionError::code`.
+    pub code: String,
+    /// Stable variant name (e.g. `manifest_toml_parse`).
+    pub name: String,
+    /// `manifest`, `inference`, `provisioning`, `execution`, `internal`.
+    pub phase: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReceiptFailureKind {
+    Recoverable,
+    Aborted,
 }
 
 // Variants differ in size (V1 ~1.1KB, V2 ~2.4KB) but the enum is the
@@ -346,8 +593,10 @@ impl ExecutionReceiptV2 {
 // `*Box::new(...)` ceremony at every call site (see ato-cli/src/cli/
 // commands/inspect.rs and application/execution_replay.rs) for a few
 // stack-bytes saved per receipt — not worth the churn.
+// `Eq` dropped because `ExecutionReceiptV2` is no longer `Eq` (see
+// note on that struct). `PartialEq` is preserved for tests.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "schema", rename_all = "kebab-case")]
 pub enum ExecutionReceiptDocument {
     V1(ExecutionReceipt),
@@ -1615,6 +1864,164 @@ pub(in crate::engine::execution_identity) mod tests {
         assert_eq!(
             receipt.dependencies.output_hash.reason.as_deref(),
             Some("dependency output not observed")
+        );
+    }
+
+    /// Setting `result` and `failure_envelope` (the v2 fields added in
+    /// #99) MUST NOT change the JCS-derived `execution_id`. They live
+    /// only on the receipt-level type, not on `ExecutionIdentityInputV2`,
+    /// so by construction they cannot feed the canonical projection. This
+    /// test pins that property at the receipt-construction boundary.
+    #[test]
+    fn v2_result_and_failure_envelope_do_not_affect_jcs_execution_id() {
+        let input = sample_input_v2();
+        let baseline = input.compute_id().expect("baseline").execution_id;
+        let baseline_receipt =
+            ExecutionReceiptV2::from_input(input, "2026-05-03T00:00:00Z".to_string())
+                .expect("baseline receipt");
+
+        let labeled = baseline_receipt.clone().with_result(
+            ReceiptResultClass::RecoverableFailure,
+            Some(ReceiptFailureEnvelope {
+                kind: ReceiptFailureKind::Recoverable,
+                code: "E001".to_string(),
+                name: "manifest_toml_parse".to_string(),
+                phase: "manifest".to_string(),
+                message: "fixture failure".to_string(),
+                hint: None,
+                resource: None,
+                target: None,
+                retryable: false,
+                details: None,
+            }),
+        );
+
+        assert_eq!(
+            labeled.execution_id, baseline,
+            "result/failure_envelope must be diagnostic-only — JCS execution_id stable"
+        );
+        assert_eq!(
+            labeled.identity.input_hash, baseline_receipt.identity.input_hash,
+            "result/failure_envelope must not feed the input_hash projection"
+        );
+    }
+
+    /// Successful v2 receipts continue to serialize byte-identically
+    /// before and after the #99 schema additions: `result: Passed`
+    /// is `skip_serializing_if = "is_passed"` and `failure_envelope`
+    /// is omitted when `None`. Regression-pin against the bytes a v2
+    /// receipt produced before #99 — the JSON for a `from_input` receipt
+    /// must contain neither `"result"` nor `"failure_envelope"`.
+    #[test]
+    fn v2_happy_path_receipt_bytes_omit_partial_failure_fields() {
+        let receipt =
+            ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
+                .expect("receipt");
+        let json = serde_json::to_string(&receipt).expect("encode");
+        assert!(
+            !json.contains("\"result\""),
+            "happy-path receipt JSON must not include `result` field; got: {json}"
+        );
+        assert!(
+            !json.contains("\"failure_envelope\""),
+            "happy-path receipt JSON must not include `failure_envelope` field; got: {json}"
+        );
+    }
+
+    /// Reading a v2 receipt that pre-dates #99 (no `result` /
+    /// `failure_envelope` keys) must round-trip cleanly with the new
+    /// fields defaulting to `Passed` / `None`.
+    #[test]
+    fn v2_pre_99_receipt_deserializes_with_defaults() {
+        let receipt =
+            ExecutionReceiptV2::from_input(sample_input_v2(), "2026-05-03T00:00:00Z".to_string())
+                .expect("receipt");
+        let json = serde_json::to_string(&receipt).expect("encode");
+        let decoded: ExecutionReceiptV2 = serde_json::from_str(&json).expect("decode");
+        assert_eq!(decoded.result, ReceiptResultClass::Passed);
+        assert!(decoded.failure_envelope.is_none());
+    }
+
+    #[test]
+    fn partial_failure_receipt_carries_envelope_and_synthetic_id() {
+        let envelope = ReceiptFailureEnvelope {
+            kind: ReceiptFailureKind::Recoverable,
+            code: "E001".to_string(),
+            name: "manifest_toml_parse".to_string(),
+            phase: "manifest".to_string(),
+            message: "expected `=`".to_string(),
+            hint: None,
+            resource: None,
+            target: None,
+            retryable: false,
+            details: None,
+        };
+        let receipt = ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            envelope.clone(),
+            None,
+            None,
+            None,
+        );
+
+        assert!(
+            receipt.execution_id.starts_with("partial:blake3:"),
+            "partial receipt execution_id must use the synthetic `partial:` prefix, got {}",
+            receipt.execution_id
+        );
+        assert_eq!(receipt.result, ReceiptResultClass::RecoverableFailure);
+        assert_eq!(receipt.failure_envelope.as_ref(), Some(&envelope));
+        assert!(receipt.declared_execution_id.is_none());
+        assert!(receipt.resolved_execution_id.is_none());
+        assert!(receipt.observed_execution_id.is_none());
+    }
+
+    /// Two retries with the same envelope and the same graph state must
+    /// produce the same synthetic `execution_id`. Pinning this lets
+    /// downstream consumers (e.g. `ato diff execution`, GC roots)
+    /// treat the synthetic id as content-addressed — the brief's
+    /// invariant for the partial-receipt id space.
+    #[test]
+    fn partial_failure_id_is_stable_across_recomputation_with_same_envelope() {
+        let envelope = ReceiptFailureEnvelope {
+            kind: ReceiptFailureKind::Recoverable,
+            code: "E001".to_string(),
+            name: "manifest_toml_parse".to_string(),
+            phase: "manifest".to_string(),
+            message: "expected `=`".to_string(),
+            hint: None,
+            resource: None,
+            target: None,
+            retryable: false,
+            details: None,
+        };
+
+        let first = ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            envelope.clone(),
+            Some("blake3:declared-fixture".to_string()),
+            Some("blake3:resolved-fixture".to_string()),
+            None,
+        );
+        let second = ExecutionReceiptV2::partial_failure(
+            // Different `computed_at` — must NOT change the id.
+            "2099-12-31T23:59:59Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            envelope,
+            Some("blake3:declared-fixture".to_string()),
+            Some("blake3:resolved-fixture".to_string()),
+            None,
+        );
+
+        assert_eq!(
+            first.execution_id, second.execution_id,
+            "partial:blake3 execution_id must be content-addressed (envelope + graph ids only) — `computed_at` must not feed it"
+        );
+        assert_ne!(
+            first.computed_at, second.computed_at,
+            "fixture sanity: the two receipts should have different computed_at timestamps"
         );
     }
 }
