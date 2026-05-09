@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use std::fs;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use capsule_core::launch_spec::derive_launch_spec;
@@ -54,6 +56,9 @@ pub fn execute(
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            apply_logged_stdio(&mut cmd, &log_path)?;
+        }
     }
 
     let child = cmd
@@ -67,6 +72,29 @@ pub fn execute(
         workload_pid: None,
         log_path: None,
     })
+}
+
+/// Open `log_path` for append and connect it to stdout+stderr at spawn time
+/// so the redirection survives the parent process's exit. Mirrors
+/// `source::apply_logged_stdio`; kept local to avoid widening the
+/// `executors::source` public surface.
+fn apply_logged_stdio(cmd: &mut Command, log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let stdout_handle = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
+    let stderr_handle = stdout_handle
+        .try_clone()
+        .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::from(stdout_handle));
+    cmd.stderr(Stdio::from(stderr_handle));
+    Ok(())
 }
 
 fn shell_command(command: &str) -> Command {
