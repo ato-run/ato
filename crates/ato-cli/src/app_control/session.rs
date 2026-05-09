@@ -499,19 +499,58 @@ pub(super) fn start_runtime_session(
     } = prepare_session_execution(plan, raw_manifest)?;
     timer.finish_ok();
 
+    // Pre-open the log file under a temporary name so we can wire
+    // `Stdio::from(file)` onto the child at spawn time. This replaces the
+    // older proxy-thread pattern in `attach_process_logs`, which dropped
+    // child output the moment `ato app session start` exited (the threads
+    // doing `io::copy` died with the parent process and the kernel sent
+    // EPIPE to the child's stdout).
+    //
+    // The temp suffix is the parent ato process's PID — unique per
+    // invocation, so concurrent `ato app session start` calls don't
+    // collide on the same temp file. After the child spawns we rename to
+    // the canonical `ato-desktop-session-<child_pid>.log` path; rename of
+    // an open file is fine on POSIX (the inode is preserved) and on
+    // Windows when the file was opened with default share modes.
+    let temp_log_path = session_root.join(format!(".tmp-spawn-{}.log", std::process::id()));
+    let _ = fs::remove_file(&temp_log_path);
+
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_runtime_process");
-    let mut runtime_process = spawn_runtime_process(plan, &prepared, &display_strategy)
-        .with_context(|| {
-            format!(
-                "failed to start capsule session for {}",
-                manifest_path.display()
-            )
-        })?;
+    let mut runtime_process =
+        spawn_runtime_process(plan, &prepared, &display_strategy, &temp_log_path).with_context(
+            || {
+                format!(
+                    "failed to start capsule session for {}",
+                    manifest_path.display()
+                )
+            },
+        )?;
     timer.finish_ok();
 
     let session_id = format!("ato-desktop-session-{}", runtime_process.child.id());
     let log_path = session_root.join(format!("{}.log", session_id));
-    attach_process_logs(&mut runtime_process.child, &log_path)?;
+    // Some executor kinds (deno, node_compat, web/static) don't honour
+    // `ExecuteMode::Logged` because they own their own stdio routing —
+    // they never opened `temp_log_path` at all. Treat the rename's ENOENT
+    // as "this executor doesn't write a log" and just touch an empty file
+    // so the desktop's log-tail UI has a stable path to read from.
+    if temp_log_path.exists() {
+        if let Err(err) = fs::rename(&temp_log_path, &log_path) {
+            let _ = runtime_process.child.kill();
+            let _ = runtime_process.child.wait();
+            return Err(anyhow::Error::new(err).context(format!(
+                "failed to rename session log {} -> {}",
+                temp_log_path.display(),
+                log_path.display()
+            )));
+        }
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to create empty log file {}", log_path.display()))?;
+    }
 
     let runtime = runtime_descriptor(plan);
     let local_url = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
@@ -1474,7 +1513,9 @@ fn spawn_runtime_process(
     plan: &capsule_core::router::ManifestData,
     prepared: &crate::executors::target_runner::PreparedTargetExecution,
     display_strategy: &CapsuleDisplayStrategy,
+    log_path: &Path,
 ) -> Result<CapsuleProcess> {
+    let logged = || ExecuteMode::Logged(log_path.to_path_buf());
     if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         let driver = plan
             .execution_driver()
@@ -1519,7 +1560,7 @@ fn spawn_runtime_process(
                 plan,
                 None,
                 Arc::new(CliReporter::new(false)),
-                ExecuteMode::Piped,
+                logged(),
                 &prepared.launch_ctx,
             ),
             _ => anyhow::bail!("unsupported runtime=web driver '{driver}' for session start"),
@@ -1580,18 +1621,18 @@ fn spawn_runtime_process(
                 plan,
                 None,
                 Arc::new(CliReporter::new(false)),
-                ExecuteMode::Piped,
+                logged(),
                 &prepared.launch_ctx,
             )
         }
         _ if plan.execution_run_command().is_some() => {
-            crate::executors::shell::execute(plan, ExecuteMode::Piped, &prepared.launch_ctx)
+            crate::executors::shell::execute(plan, logged(), &prepared.launch_ctx)
         }
         _ => crate::executors::source::execute_host(
             plan,
             None,
             Arc::new(CliReporter::new(false)),
-            ExecuteMode::Piped,
+            logged(),
             &prepared.launch_ctx,
         ),
     }
@@ -1659,36 +1700,14 @@ fn web_served_by(plan: &capsule_core::router::ManifestData) -> String {
     }
 }
 
-fn attach_process_logs(child: &mut std::process::Child, log_path: &Path) -> Result<()> {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let writer = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
-    let stderr_writer = writer
-        .try_clone()
-        .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
-
-    if let Some(mut stdout) = stdout {
-        let mut writer = writer;
-        std::thread::spawn(move || {
-            let _ = std::io::copy(&mut stdout, &mut writer);
-        });
-    }
-    if let Some(mut stderr) = stderr {
-        let mut writer = stderr_writer;
-        std::thread::spawn(move || {
-            let _ = std::io::copy(&mut stderr, &mut writer);
-        });
-    }
-    Ok(())
-}
+// `attach_process_logs` (proxy-thread pattern) was removed in favour of
+// `ExecuteMode::Logged`, which connects the child's stdout/stderr directly
+// to the log file at `Command::spawn` time via `Stdio::from(File)`. The old
+// pattern silently dropped output once `ato app session start` exited
+// because the proxy threads doing `io::copy` died with the parent process,
+// and the kernel then sent EPIPE to the child's stdout. The replacement
+// keeps a kernel-owned file descriptor wired to the log file across the
+// parent's exit, so detached children continue logging normally.
 
 fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
     let bytes = fs::read(path).ok()?;

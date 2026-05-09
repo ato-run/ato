@@ -55,11 +55,19 @@ pub struct CapsuleProcess {
     pub log_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ExecuteMode {
     Foreground,
     Background,
     Piped,
+    /// Connect the child's stdout and stderr directly to this log file at
+    /// `Command::spawn` time via `Stdio::from(File)`. Use this when the
+    /// caller intends to detach (e.g. `ato app session start` exits while
+    /// the child keeps running): the kernel keeps the file descriptor wired
+    /// to the file, so the child's writes survive the parent's exit. The
+    /// older `Piped` + proxy-thread pattern in `attach_process_logs`
+    /// silently dropped output once the parent thread died.
+    Logged(PathBuf),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,7 +117,7 @@ pub fn execute(
         )?;
     }
 
-    let adapter = NacelleExecAdapter::for_plan(plan, mode, launch_ctx)?;
+    let adapter = NacelleExecAdapter::for_plan(plan, mode.clone(), launch_ctx)?;
     let (child, event_rx, exec_meta) =
         spawn_internal_exec(&nacelle, &plan.manifest_dir, &adapter.payload, mode)?;
 
@@ -217,6 +225,9 @@ pub fn execute_host(
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            apply_logged_stdio(&mut cmd, &log_path)?;
+        }
     }
 
     // Run the host-native consumer in its own process group on Unix
@@ -268,6 +279,9 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            apply_logged_stdio(&mut cmd, &log_path)?;
+        }
     }
 
     let child = cmd
@@ -281,6 +295,37 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
         workload_pid: None,
         log_path: None,
     })
+}
+
+/// Open `log_path` for append (creating it and any parent directories) and
+/// return an owning `File`. Used to wire `Stdio::from(file)` directly into
+/// the child at spawn time so the redirection survives the parent process's
+/// exit — see `ExecuteMode::Logged`.
+fn open_log_file_for_stdio(log_path: &Path) -> Result<fs::File> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open log file {}", log_path.display()))
+}
+
+/// Wire stdin=null and connect stdout+stderr to `log_path` at spawn time.
+/// The kernel keeps the file descriptor connected to the file across the
+/// parent's exit, so detached children (`ato app session start` returning
+/// after spawn) keep writing to the log without a proxy thread.
+fn apply_logged_stdio(cmd: &mut Command, log_path: &Path) -> Result<()> {
+    let stdout_handle = open_log_file_for_stdio(log_path)?;
+    let stderr_handle = stdout_handle
+        .try_clone()
+        .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::from(stdout_handle));
+    cmd.stderr(Stdio::from(stderr_handle));
+    Ok(())
 }
 
 fn apply_host_isolation(
@@ -610,6 +655,17 @@ fn is_node_launch_spec(plan: &ManifestData, command: &str, language: Option<&str
 fn apply_python_runtime_hardening(cmd: &mut Command, force_python_no_bytecode: bool) {
     if force_python_no_bytecode {
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+        // Force unbuffered stdout/stderr. Python defaults to block-buffered
+        // I/O whenever stdout isn't a TTY (i.e. when we redirect to a pipe
+        // or a log file via `Stdio::from(File)`), so short-lived `print()`
+        // calls sit in the 8 KB user-space buffer and never reach the log
+        // file the desktop tails for `display_strategy=terminal_stream`.
+        // Long-running services hide this behind their own framework
+        // logging (uvicorn, fastapi, etc.) but a bare `python app.py`
+        // surfaces it as "ato Desktop session is ready but the terminal
+        // pane is empty". Mirrors `start_guest_session`, which sets the
+        // same env var for the same reason.
+        cmd.env("PYTHONUNBUFFERED", "1");
     }
 }
 
@@ -1196,6 +1252,15 @@ fn spawn_internal_exec(
         ExecuteMode::Piped => {
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            // Nacelle's `internal exec` protocol talks JSON over stdout, so
+            // we cannot redirect stdout to a file here. Only stderr is safe
+            // to send to the log; nacelle's worker stdout/stderr already
+            // surface via `LifecycleEvent::ProcessOutput` to the supervisor
+            // when it routes them downstream.
+            let stderr_handle = open_log_file_for_stdio(&log_path)?;
+            cmd.stderr(Stdio::from(stderr_handle));
+        }
     }
 
     let mut child = cmd
@@ -1674,18 +1739,30 @@ mod tests {
         let mut cmd = Command::new("echo");
         apply_python_runtime_hardening(&mut cmd, true);
 
-        let value = cmd
-            .get_envs()
-            .find_map(|(key, value)| {
-                if key == "PYTHONDONTWRITEBYTECODE" {
+        let env_value = |needle: &str| -> Option<String> {
+            cmd.get_envs().find_map(|(key, value)| {
+                if key == needle {
                     value.map(|v| v.to_string_lossy().to_string())
                 } else {
                     None
                 }
             })
-            .expect("PYTHONDONTWRITEBYTECODE must be set");
+        };
 
-        assert_eq!(value, "1");
+        assert_eq!(
+            env_value("PYTHONDONTWRITEBYTECODE").as_deref(),
+            Some("1"),
+            "PYTHONDONTWRITEBYTECODE must be set"
+        );
+        // PYTHONUNBUFFERED must be set so `print()` flushes through to the
+        // log file the desktop tails (see `ExecuteMode::Logged`); without
+        // it Python defaults to block-buffered I/O whenever stdout isn't a
+        // TTY and short-lived output never reaches the file.
+        assert_eq!(
+            env_value("PYTHONUNBUFFERED").as_deref(),
+            Some("1"),
+            "PYTHONUNBUFFERED must be set"
+        );
     }
 
     #[test]
@@ -1693,11 +1770,13 @@ mod tests {
         let mut cmd = Command::new("echo");
         apply_python_runtime_hardening(&mut cmd, false);
 
-        let has_var = cmd
+        let has_dontwrite = cmd
             .get_envs()
             .any(|(key, _)| key == "PYTHONDONTWRITEBYTECODE");
+        assert!(!has_dontwrite, "PYTHONDONTWRITEBYTECODE must not be set");
 
-        assert!(!has_var, "PYTHONDONTWRITEBYTECODE must not be set");
+        let has_unbuffered = cmd.get_envs().any(|(key, _)| key == "PYTHONUNBUFFERED");
+        assert!(!has_unbuffered, "PYTHONUNBUFFERED must not be set");
     }
 
     #[test]
