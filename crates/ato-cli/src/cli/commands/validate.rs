@@ -101,6 +101,19 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                             AtoExecutionError::policy_violation(err.to_string())
                         }
                     })?;
+
+                // Wave 2 / PR-4b: emit the unified execution graph alongside
+                // the legacy lock-vs-manifest verification. The graph is *not*
+                // load-bearing — `verify_lockfile_external_dependencies`
+                // remains the source of truth for the consistency check; the
+                // graph build is purely a parity observation.
+                let external_dependencies =
+                    manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+                debug_assert_provider_aliases_match_lock(
+                    &external_dependencies,
+                    &legacy_lock.lock,
+                );
+
                 verify_lockfile_external_dependencies(&decision.plan.manifest, &legacy_lock.lock)?;
                 true
             } else {
@@ -223,15 +236,15 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
     Ok(result)
 }
 
-/// PR-4a equivalence guard: build the unified execution graph from the same
-/// `ExternalCapsuleDependency` list the validate path consumes and check that
-/// its provider-node count matches 1:1.
+/// PR-4a / PR-4b equivalence guard: build the unified execution graph from
+/// the same `ExternalCapsuleDependency` list the validate path consumes and
+/// check that its provider-node count matches 1:1.
 ///
 /// `debug_assert_eq!` is a no-op in release builds, but the surrounding
 /// graph build still runs there. That's intentional: validate is a low-rate
 /// inspection command, the graph build is cheap, and continuing to compute
 /// it in release surfaces real-world drift between the two derivations
-/// before PR-4b promotes the graph to the source of truth.
+/// before a future wave promotes the graph to the source of truth.
 fn debug_assert_provider_node_parity(
     external_dependencies: &[capsule_core::types::ExternalCapsuleDependency],
 ) {
@@ -246,6 +259,78 @@ fn debug_assert_provider_node_parity(
         graph_provider_count,
         external_dependencies.len(),
         "execution graph provider count drifted from manifest_external_capsule_dependencies"
+    );
+}
+
+/// PR-4b equivalence guard for the legacy-lock-present validate branch:
+/// build the unified execution graph from the manifest-derived
+/// `ExternalCapsuleDependency` list, extract the provider-node alias set,
+/// and check it matches the alias set of the lock's `capsule_dependencies`
+/// (modulo deps that are present in only one side — those are caught by
+/// `verify_lockfile_external_dependencies` itself, which remains the source
+/// of truth for the gating decision).
+///
+/// This is intentionally weaker than `verify_lockfile_external_dependencies`
+/// — that function already enforces full equality of source/contract/etc.
+/// We only assert *alias-set* parity here so a divergence between the
+/// graph adapter's stable provider-identifier convention and the manifest's
+/// alias convention surfaces immediately, without duplicating the full
+/// consistency check.
+fn debug_assert_provider_aliases_match_lock(
+    external_dependencies: &[capsule_core::types::ExternalCapsuleDependency],
+    lock: &capsule_core::lockfile::CapsuleLock,
+) {
+    let input = build_input_from_external_dependencies(external_dependencies, None);
+    let graph = ExecutionGraphBuilder::build(input);
+
+    let mut graph_provider_aliases: Vec<String> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            ExecutionGraphNode::Provider { identifier } => Some(
+                identifier
+                    .strip_prefix("provider://")
+                    .unwrap_or(identifier.as_str())
+                    .to_string(),
+            ),
+            _ => None,
+        })
+        .collect();
+    graph_provider_aliases.sort();
+
+    let mut manifest_aliases: Vec<String> = external_dependencies
+        .iter()
+        .map(|dependency| dependency.alias.clone())
+        .collect();
+    manifest_aliases.sort();
+
+    debug_assert_eq!(
+        graph_provider_aliases, manifest_aliases,
+        "execution graph provider aliases drifted from manifest dependency aliases"
+    );
+
+    // Lock side: only consider lock entries whose alias matches a manifest
+    // alias. The lock may carry additional dependencies (e.g. transitive),
+    // and `verify_lockfile_external_dependencies` does not require lock
+    // ⊆ manifest in that direction. We just want to know that every
+    // manifest-derived alias is also present in the lock — which is what
+    // the legacy verify call enforces too.
+    let manifest_alias_set: std::collections::BTreeSet<&str> = external_dependencies
+        .iter()
+        .map(|dependency| dependency.alias.as_str())
+        .collect();
+    let mut lock_aliases_in_manifest: Vec<&str> = lock
+        .capsule_dependencies
+        .iter()
+        .map(|locked| locked.name.as_str())
+        .filter(|name| manifest_alias_set.contains(*name))
+        .collect();
+    lock_aliases_in_manifest.sort_unstable();
+
+    let manifest_alias_strs: Vec<&str> = manifest_aliases.iter().map(String::as_str).collect();
+    debug_assert_eq!(
+        lock_aliases_in_manifest, manifest_alias_strs,
+        "lock capsule_dependencies missing aliases the graph derived from the manifest"
     );
 }
 
@@ -318,5 +403,127 @@ mod tests {
             .nodes
             .iter()
             .all(|node| !matches!(node, ExecutionGraphNode::Provider { .. })));
+    }
+
+    fn locked_dependency(alias: &str) -> capsule_core::lockfile::LockedCapsuleDependency {
+        capsule_core::lockfile::LockedCapsuleDependency {
+            name: alias.to_string(),
+            source: format!("capsule://ato/{alias}"),
+            source_type: "store".to_string(),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+            identity_exports: BTreeMap::new(),
+            resolved_version: None,
+            digest: None,
+            sha256: None,
+            artifact_url: None,
+        }
+    }
+
+    fn empty_lock_with(
+        capsule_dependencies: Vec<capsule_core::lockfile::LockedCapsuleDependency>,
+    ) -> capsule_core::lockfile::CapsuleLock {
+        capsule_core::lockfile::CapsuleLock {
+            version: "1".to_string(),
+            meta: capsule_core::lockfile::LockMeta {
+                created_at: "2026-05-09T00:00:00Z".to_string(),
+                manifest_hash: "sha256:test".to_string(),
+            },
+            allowlist: None,
+            capsule_dependencies,
+            tool_capsules: BTreeMap::new(),
+            injected_data: std::collections::HashMap::new(),
+            tools: None,
+            runtimes: None,
+            targets: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn graph_provider_aliases_match_lock_for_legacy_lock_branch() {
+        // Equivalence test for PR-4b: the legacy-lock-present validate
+        // branch's adapter flow produces a provider-alias set that matches
+        // the lock's `capsule_dependencies` aliases for every alias the
+        // manifest declares.
+        let manifest_dependencies =
+            vec![dependency("db"), dependency("cache"), dependency("queue")];
+        let lock = empty_lock_with(vec![
+            locked_dependency("db"),
+            locked_dependency("cache"),
+            locked_dependency("queue"),
+        ]);
+
+        // This must not panic — the helper itself is the assertion under test.
+        debug_assert_provider_aliases_match_lock(&manifest_dependencies, &lock);
+
+        // Reproduce the alias-set check inline so the test fails loudly even
+        // if `debug_assertions` are off (release-mode `cargo test` builds).
+        let input = build_input_from_external_dependencies(&manifest_dependencies, None);
+        let graph = ExecutionGraphBuilder::build(input);
+        let mut graph_aliases: Vec<String> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                ExecutionGraphNode::Provider { identifier } => Some(
+                    identifier
+                        .strip_prefix("provider://")
+                        .unwrap_or(identifier.as_str())
+                        .to_string(),
+                ),
+                _ => None,
+            })
+            .collect();
+        graph_aliases.sort();
+
+        let mut lock_aliases: Vec<String> = lock
+            .capsule_dependencies
+            .iter()
+            .map(|locked| locked.name.clone())
+            .collect();
+        lock_aliases.sort();
+
+        assert_eq!(graph_aliases, lock_aliases);
+    }
+
+    #[test]
+    fn graph_provider_aliases_ignore_lock_extras_outside_manifest() {
+        // The legacy-lock branch verify already enforces manifest⊆lock; the
+        // graph parity guard must tolerate lock entries that the manifest
+        // does not declare (e.g. transitive deps recorded in the lock).
+        let manifest_dependencies = vec![dependency("db")];
+        let lock = empty_lock_with(vec![
+            locked_dependency("db"),
+            locked_dependency("transitive-extra"),
+        ]);
+
+        // Should not panic — the helper filters lock entries by manifest set.
+        debug_assert_provider_aliases_match_lock(&manifest_dependencies, &lock);
+    }
+
+    #[test]
+    fn graph_provider_count_matches_lock_count_for_legacy_lock_branch() {
+        // Direct count-parity check that mirrors PR-4a's primary equivalence
+        // assertion, but for the legacy-lock-present validate branch.
+        let manifest_dependencies = vec![dependency("db"), dependency("cache")];
+        let lock = empty_lock_with(vec![
+            locked_dependency("db"),
+            locked_dependency("cache"),
+        ]);
+
+        let input = build_input_from_external_dependencies(&manifest_dependencies, None);
+        let graph = ExecutionGraphBuilder::build(input);
+        let provider_count = graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, ExecutionGraphNode::Provider { .. }))
+            .count();
+
+        // Manifest-derived count and lock-recorded count both equal the
+        // graph's provider-node count for the inputs the legacy verify
+        // function consumes.
+        assert_eq!(provider_count, manifest_dependencies.len());
+        assert_eq!(provider_count, lock.capsule_dependencies.len());
     }
 }
