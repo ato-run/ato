@@ -10,3 +10,4 @@
 
 pub(super) mod config_form;
 pub(super) mod consent_form;
+pub(super) mod resolution_form;
