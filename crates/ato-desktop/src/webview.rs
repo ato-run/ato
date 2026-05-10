@@ -48,7 +48,7 @@ use crate::orchestrator::{
 };
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest,
+    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId, PendingConfigRequest,
     PendingConsentRequest, ShellMode, WebSessionState,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
@@ -322,13 +322,15 @@ impl WebViewManager {
             use std::sync::atomic::Ordering;
             use std::time::Duration;
             let has_pending = Arc::clone(&automation.has_pending);
+            let pending = Arc::clone(&automation.pending);
             let fe = async_app.foreground_executor().clone();
             let be = async_app.background_executor().clone();
             let async_app_poll = async_app.clone();
             fe.spawn(async move {
                 loop {
                     be.timer(Duration::from_millis(50)).await;
-                    if has_pending.swap(false, Ordering::Relaxed) {
+                    let queued = pending.lock().map(|q| !q.is_empty()).unwrap_or(false);
+                    if has_pending.swap(false, Ordering::Relaxed) || queued {
                         notify_window(async_app_poll.clone(), window_handle);
                     }
                 }
@@ -947,12 +949,10 @@ impl WebViewManager {
             );
 
             if needs_loaded && !self.automation.is_page_loaded(pane_id) {
-                if req.wait_deadline.map_or(false, |d| Instant::now() < d)
-                    || matches!(req.command, WaitFor { .. })
-                {
+                if req.wait_deadline.map_or(false, |d| Instant::now() < d) {
                     requeue.push(req);
                 } else {
-                    req.send(Err("page not yet loaded".into()));
+                    req.send(Err(page_not_loaded_message(state, pane_id)));
                 }
                 continue;
             }
@@ -1720,6 +1720,7 @@ impl WebViewManager {
                 receiver,
             },
         );
+        state.sync_web_session_state(pane_id, WebSessionState::Resolving);
         state.push_activity(
             ActivityTone::Info,
             format!("Launching guest session for {route_key}"),
@@ -4131,6 +4132,72 @@ pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
     }))
 }
 
+fn page_not_loaded_message(state: &AppState, pane_id: PaneId) -> String {
+    let Some(inspector) = state.capsule_inspector_by_pane_id(pane_id) else {
+        return "page not yet loaded".to_string();
+    };
+
+    let session_state = inspector.session_state.clone();
+    let session_label = web_session_state_label(session_state.clone());
+    let pending_suffix = pending_prelaunch_requirement_message(state, &inspector.handle)
+        .map(|message| format!("; {message}"))
+        .unwrap_or_default();
+    match session_state {
+        crate::state::WebSessionState::Resolving
+        | crate::state::WebSessionState::Materializing
+        | crate::state::WebSessionState::Launching => {
+            format!(
+                "page not yet loaded (session: {session_label}; launch still in progress{pending_suffix})"
+            )
+        }
+        _ => format!("page not yet loaded (session: {session_label}{pending_suffix})"),
+    }
+}
+
+fn pending_prelaunch_requirement_message(state: &AppState, handle: &str) -> Option<String> {
+    let mut labels = Vec::new();
+
+    if let Some(request) = state.pending_resolution.as_ref().filter(|request| request.handle == handle)
+    {
+        labels.extend(request.secrets.iter().map(|item| match item.target.as_deref() {
+            Some(target) if !target.is_empty() => format!("config:{target}"),
+            _ => "config".to_string(),
+        }));
+        labels.extend(request.consents.iter().map(|item| {
+            if item.target_label.is_empty() {
+                "consent".to_string()
+            } else {
+                format!("consent:{}", item.target_label)
+            }
+        }));
+    } else {
+        if let Some(request) = state.pending_config.as_ref().filter(|request| request.handle == handle)
+        {
+            labels.push(match request.target.as_deref() {
+                Some(target) if !target.is_empty() => format!("config:{target}"),
+                _ => "config".to_string(),
+            });
+        }
+        if let Some(request) = state.pending_consent.as_ref().filter(|request| request.handle == handle)
+        {
+            labels.push(if request.target_label.is_empty() {
+                "consent".to_string()
+            } else {
+                format!("consent:{}", request.target_label)
+            });
+        }
+    }
+
+    if labels.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "awaiting pre-launch requirements: {}",
+            labels.join(", ")
+        ))
+    }
+}
+
 fn web_session_state_label(state: crate::state::WebSessionState) -> &'static str {
     match state {
         crate::state::WebSessionState::Detached => "detached",
@@ -4402,7 +4469,8 @@ fn mime_for_path(path: &Path) -> &'static str {
 /// Approve the pending ExecutionPlan consent for `handle`: invoke
 /// `ato internal consent approve-execution-plan` (the CLI writer
 /// owns the JSONL append), mark the per-handle retry-once budget as
-/// consumed, and clear `AppState::pending_consent` so
+/// consumed, and clear the matching legacy `pending_consent` or
+/// unified `pending_resolution.consents` entry so
 /// `ensure_pending_local_launch` re-arms the launch on the next
 /// render. Used by:
 ///
@@ -4414,37 +4482,116 @@ fn mime_for_path(path: &Path) -> &'static str {
 /// invocation fails, the modal stays open and the budget is NOT
 /// consumed (the user can retry the same Approve).
 pub(crate) fn apply_capsule_consent(state: &mut AppState, handle: &str) -> Result<(), String> {
-    let request = state
+    if let Some(request) = state
         .pending_consent
         .as_ref()
         .filter(|r| r.handle == handle)
         .cloned()
-        .ok_or_else(|| {
-            format!(
-                "no pending ExecutionPlan consent matches handle '{handle}' \
-                 (the modal is either closed or pinned to a different handle)"
-            )
-        })?;
+    {
+        crate::orchestrator::approve_execution_plan_consent(
+            &request.scoped_id,
+            &request.version,
+            &request.target_label,
+            &request.policy_segment_hash,
+            &request.provisioning_policy_hash,
+        )
+        .map_err(|err| format!("failed to record consent: {err:#}"))?;
 
-    crate::orchestrator::approve_execution_plan_consent(
-        &request.scoped_id,
-        &request.version,
-        &request.target_label,
-        &request.policy_segment_hash,
-        &request.provisioning_policy_hash,
-    )
-    .map_err(|err| format!("failed to record consent: {err:#}"))?;
+        state.mark_consent_retry_consumed(handle, &request.target_label);
+        state.clear_pending_consent();
+        return Ok(());
+    }
 
-    state.mark_consent_retry_consumed(handle, &request.target_label);
-    state.clear_pending_consent();
-    Ok(())
+    if apply_pending_resolution_consents(state, handle, |consent| {
+        crate::orchestrator::approve_execution_plan_consent(
+            &consent.scoped_id,
+            &consent.version,
+            &consent.target_label,
+            &consent.policy_segment_hash,
+            &consent.provisioning_policy_hash,
+        )
+        .map_err(|err| format!("failed to record consent: {err:#}"))
+    })? {
+        return Ok(());
+    }
+
+    Err(format!(
+        "no pending ExecutionPlan consent matches handle '{handle}' \
+         (the modal is either closed or pinned to a different handle)"
+    ))
+}
+
+fn apply_pending_resolution_consents<F>(
+    state: &mut AppState,
+    handle: &str,
+    mut approve: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&crate::state::PendingConsentItem) -> Result<(), String>,
+{
+    let consents = state
+        .pending_resolution
+        .as_ref()
+        .filter(|request| request.handle == handle)
+        .map(|request| request.consents.clone())
+        .unwrap_or_default();
+
+    if consents.is_empty() {
+        return Ok(false);
+    }
+
+    for consent in &consents {
+        approve(consent)?;
+        state.mark_consent_retry_consumed(handle, &consent.target_label);
+    }
+
+    if let Some(request) = state
+        .pending_resolution
+        .as_mut()
+        .filter(|request| request.handle == handle)
+    {
+        request.consents.clear();
+        if request.is_empty() {
+            state.clear_pending_resolution();
+        }
+    }
+
+    Ok(true)
+}
+
+fn clear_matching_pending_resolution_secrets(
+    state: &mut AppState,
+    handle: &str,
+    resolved_secret_keys: &std::collections::BTreeSet<String>,
+) {
+    let Some(request) = state
+        .pending_resolution
+        .as_mut()
+        .filter(|request| request.handle == handle)
+    else {
+        return;
+    };
+
+    request.secrets.retain(|item| {
+        item.fields.iter().any(|field| match &field.kind {
+            capsule_wire::config::ConfigKind::Secret => {
+                !resolved_secret_keys.contains(&field.name)
+            }
+            _ => true,
+        })
+    });
+
+    if request.is_empty() {
+        state.clear_pending_resolution();
+    }
 }
 
 // ── Automation command dispatch ───────────────────────────────────────────────
 
 /// Apply a batch of secrets for `handle` and (optionally) clear an open
-/// `pending_config` modal pointing at the same handle so the next render
-/// re-arms the launch.
+/// legacy `pending_config` modal or any fully-resolved secret sections in
+/// the unified `pending_resolution` request for the same handle so the next
+/// render re-arms the launch.
 ///
 /// Returns the keys that were applied (in input order) on success. On the
 /// first persist failure, returns `Err(message)` — earlier secrets that
@@ -4472,6 +4619,7 @@ pub(crate) fn apply_capsule_secrets(
     }
 
     if clear_pending_config {
+        let resolved_secret_keys = applied.iter().cloned().collect();
         let matches = state
             .pending_config
             .as_ref()
@@ -4480,6 +4628,7 @@ pub(crate) fn apply_capsule_secrets(
         if matches {
             state.clear_pending_config();
         }
+        clear_matching_pending_resolution_secrets(state, handle, &resolved_secret_keys);
     }
 
     Ok(applied)
@@ -4502,8 +4651,7 @@ fn dispatch_automation_command(
             let tx = $req.clone_tx();
             let js_str: String = $js;
             if let Err(e) = webview.evaluate_script_with_callback(&js_str, move |result| {
-                let v = serde_json::from_str::<Value>(&result)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw": result }));
+                let v = decode_js_callback_value(&result);
                 if let Ok(mut guard) = tx.lock() {
                     if let Some(sender) = guard.take() {
                         let _ = sender.send(Ok(v));
@@ -4642,9 +4790,9 @@ fn dispatch_automation_command(
             let selector_clone = selector.clone();
 
             if let Err(e) = webview.evaluate_script_with_callback(&js, move |result| {
-                let found = serde_json::from_str::<Value>(&result)
-                    .ok()
-                    .and_then(|v| v.get("found").and_then(|f| f.as_bool()))
+                let found = decode_js_callback_value(&result)
+                    .get("found")
+                    .and_then(|f| f.as_bool())
                     .unwrap_or(false);
 
                 if found {
@@ -4738,6 +4886,15 @@ fn dispatch_automation_command(
         | StopActiveSession => {
             unreachable!()
         }
+    }
+}
+
+fn decode_js_callback_value(result: &str) -> Value {
+    match serde_json::from_str::<Value>(result) {
+        Ok(Value::String(inner)) => serde_json::from_str::<Value>(&inner)
+            .unwrap_or_else(|_| Value::String(inner)),
+        Ok(value) => value,
+        Err(_) => Value::String(result.to_string()),
     }
 }
 
@@ -4969,6 +5126,20 @@ mod tests {
             ShellMode::CommandBar,
             bounds,
         ));
+    }
+
+    #[test]
+    fn decode_js_callback_value_unwraps_double_encoded_object() {
+        let value = decode_js_callback_value("\"{\\\"found\\\":true}\"");
+
+        assert_eq!(value.get("found").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn decode_js_callback_value_preserves_plain_strings() {
+        let value = decode_js_callback_value("\"not-json\"");
+
+        assert_eq!(value.as_str(), Some("not-json"));
     }
 
     #[test]
@@ -5211,7 +5382,10 @@ mod tests {
     // would otherwise see each other's tempdir.
     mod apply_capsule_secrets {
         use super::*;
-        use crate::state::PendingConfigRequest;
+        use crate::state::{
+            PendingConfigRequest, PendingConsentItem, PendingResolutionRequest, PendingSecretsItem,
+        };
+        use capsule_wire::config::{ConfigField, ConfigKind};
         use std::ffi::OsString;
         use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -5262,6 +5436,39 @@ mod tests {
                 target: None,
                 fields: Vec::new(),
                 original_secrets: Vec::new(),
+            }
+        }
+
+        fn secret_field(name: &str) -> ConfigField {
+            ConfigField {
+                name: name.to_string(),
+                label: None,
+                description: None,
+                kind: ConfigKind::Secret,
+                default: None,
+                placeholder: None,
+            }
+        }
+
+        fn string_field(name: &str) -> ConfigField {
+            ConfigField {
+                name: name.to_string(),
+                label: None,
+                description: None,
+                kind: ConfigKind::String,
+                default: None,
+                placeholder: None,
+            }
+        }
+
+        fn consent_item(target_label: &str) -> PendingConsentItem {
+            PendingConsentItem {
+                scoped_id: format!("publisher/{target_label}"),
+                version: "1.0.0".to_string(),
+                target_label: target_label.to_string(),
+                policy_segment_hash: format!("blake3:{target_label}-policy"),
+                provisioning_policy_hash: format!("blake3:{target_label}-prov"),
+                summary: format!("Consent for {target_label}"),
             }
         }
 
@@ -5330,6 +5537,71 @@ mod tests {
                 "modal for a different handle must not be dismissed"
             );
         }
+
+        #[test]
+        fn clears_matching_pending_resolution_secret_sections() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![PendingSecretsItem {
+                    target: Some("app".to_string()),
+                    fields: vec![secret_field("SECRET_KEY")],
+                }],
+                consents: Vec::new(),
+            });
+
+            apply_capsule_secrets(
+                &mut state,
+                "capsule://github.com/Koh0920/WasedaP2P",
+                &[("SECRET_KEY".into(), "v".into())],
+                true,
+            )
+            .expect("apply");
+
+            assert!(
+                state.pending_resolution.is_none(),
+                "resolved secrets-only pending_resolution must clear"
+            );
+        }
+
+        #[test]
+        fn keeps_remaining_resolution_items_after_secret_apply() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![
+                    PendingSecretsItem {
+                        target: Some("app".to_string()),
+                        fields: vec![secret_field("SECRET_KEY")],
+                    },
+                    PendingSecretsItem {
+                        target: Some("web".to_string()),
+                        fields: vec![string_field("APP_MODE")],
+                    },
+                ],
+                consents: vec![consent_item("web")],
+            });
+
+            apply_capsule_secrets(
+                &mut state,
+                "capsule://github.com/Koh0920/WasedaP2P",
+                &[("SECRET_KEY".into(), "v".into())],
+                true,
+            )
+            .expect("apply");
+
+            let pending = state
+                .pending_resolution
+                .as_ref()
+                .expect("consent + non-secret config must remain");
+            assert_eq!(pending.secrets.len(), 1);
+            assert_eq!(pending.secrets[0].target.as_deref(), Some("web"));
+            assert_eq!(pending.consents.len(), 1);
+        }
     }
 
     // ── apply_capsule_consent (UI handler + MCP automation share path) ───
@@ -5344,7 +5616,7 @@ mod tests {
     // the full plumbing surface.
     mod apply_capsule_consent {
         use super::*;
-        use crate::state::PendingConsentRequest;
+        use crate::state::{PendingConsentItem, PendingConsentRequest, PendingResolutionRequest};
 
         fn pending(handle: &str) -> PendingConsentRequest {
             PendingConsentRequest {
@@ -5356,6 +5628,17 @@ mod tests {
                 provisioning_policy_hash: "blake3:bbb".to_string(),
                 summary: "Capsule: publisher/app@1.0.0".to_string(),
                 original_secrets: Vec::new(),
+            }
+        }
+
+        fn consent_item(target_label: &str) -> PendingConsentItem {
+            PendingConsentItem {
+                scoped_id: format!("publisher/{target_label}"),
+                version: "1.0.0".to_string(),
+                target_label: target_label.to_string(),
+                policy_segment_hash: format!("blake3:{target_label}-policy"),
+                provisioning_policy_hash: format!("blake3:{target_label}-prov"),
+                summary: format!("Consent for {target_label}"),
             }
         }
 
@@ -5414,6 +5697,133 @@ mod tests {
             state.reset_consent_retry_budget(handle);
             assert!(!state.consent_retry_already_consumed(handle, "app"));
             assert!(!state.consent_retry_already_consumed(handle, "web"));
+        }
+
+        #[test]
+        fn resolves_matching_pending_resolution_consents() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: handle.to_string(),
+                original_secrets: Vec::new(),
+                secrets: Vec::new(),
+                consents: vec![consent_item("app"), consent_item("web")],
+            });
+
+            let handled = apply_pending_resolution_consents(&mut state, handle, |_| Ok(()))
+                .expect("approve");
+
+            assert!(handled, "matching pending_resolution consents must be handled");
+            assert!(state.pending_resolution.is_none(), "all consents resolved -> clear");
+            assert!(state.consent_retry_already_consumed(handle, "app"));
+            assert!(state.consent_retry_already_consumed(handle, "web"));
+        }
+
+        #[test]
+        fn preserves_other_resolution_requirements_when_approving_consents() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: handle.to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![crate::state::PendingSecretsItem {
+                    target: Some("app".to_string()),
+                    fields: Vec::new(),
+                }],
+                consents: vec![consent_item("app")],
+            });
+
+            apply_pending_resolution_consents(&mut state, handle, |_| Ok(())).expect("approve");
+
+            let pending = state
+                .pending_resolution
+                .as_ref()
+                .expect("remaining secrets must keep pending_resolution open");
+            assert_eq!(pending.secrets.len(), 1);
+            assert!(pending.consents.is_empty());
+        }
+    }
+
+    mod pending_prelaunch_requirement_message {
+        use super::*;
+        use crate::state::{PendingConfigRequest, PendingConsentRequest, PendingConsentItem, PendingResolutionRequest, PendingSecretsItem};
+
+        fn pending_config(handle: &str, target: Option<&str>) -> PendingConfigRequest {
+            PendingConfigRequest {
+                handle: handle.to_string(),
+                target: target.map(str::to_string),
+                fields: Vec::new(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        fn pending_consent(handle: &str, target_label: &str) -> PendingConsentRequest {
+            PendingConsentRequest {
+                handle: handle.to_string(),
+                scoped_id: "publisher/app".to_string(),
+                version: "1.0.0".to_string(),
+                target_label: target_label.to_string(),
+                policy_segment_hash: "blake3:policy".to_string(),
+                provisioning_policy_hash: "blake3:prov".to_string(),
+                summary: "Consent summary".to_string(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn summarizes_legacy_pending_config_and_consent() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.set_pending_config(pending_config(handle, Some("app")));
+            state.set_pending_consent(pending_consent(handle, "web"));
+
+            let message = pending_prelaunch_requirement_message(&state, handle)
+                .expect("legacy requirements message");
+
+            assert_eq!(
+                message,
+                "awaiting pre-launch requirements: config:app, consent:web"
+            );
+        }
+
+        #[test]
+        fn summarizes_unified_pending_resolution_items() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: handle.to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![PendingSecretsItem {
+                    target: Some("app".to_string()),
+                    fields: Vec::new(),
+                }],
+                consents: vec![
+                    PendingConsentItem {
+                        scoped_id: "publisher/app".to_string(),
+                        version: "1.0.0".to_string(),
+                        target_label: "app".to_string(),
+                        policy_segment_hash: "blake3:app-policy".to_string(),
+                        provisioning_policy_hash: "blake3:app-prov".to_string(),
+                        summary: "Consent app".to_string(),
+                    },
+                    PendingConsentItem {
+                        scoped_id: "publisher/web".to_string(),
+                        version: "1.0.0".to_string(),
+                        target_label: "web".to_string(),
+                        policy_segment_hash: "blake3:web-policy".to_string(),
+                        provisioning_policy_hash: "blake3:web-prov".to_string(),
+                        summary: "Consent web".to_string(),
+                    },
+                ],
+            });
+
+            let message = pending_prelaunch_requirement_message(&state, handle)
+                .expect("unified requirements message");
+
+            assert_eq!(
+                message,
+                "awaiting pre-launch requirements: config:app, consent:app, consent:web"
+            );
         }
     }
 }
