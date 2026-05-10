@@ -1,0 +1,32 @@
+usecase: "Relative ATO_HOME rerun — WasedaP2P launch gates must be visible and actionable from MCP"
+actor: "ato-desktop-mcp Layer-1 driver on isolated relative ATO_HOME runs (.tmp/rt5 -> .tmp/rt10), current local ato-desktop/ato-cli HEAD"
+goal: "On a fresh cold start, the operator should be able to progress through config secrets and execution-plan consent using only the MCP UI-equivalent surface, then reach an inspectable guest webview"
+
+result: complete
+
+steps:
+  - action: "Fresh rt10 run: browser_navigate capsule://github.com/Koh0920/WasedaP2P"
+    observation: "The first browser snapshot surfaced `page not yet loaded (session: resolving; launch still in progress)`, then advanced to `awaiting pre-launch requirements: config:app` without any log inspection or timeout guessing."
+  - action: "set_capsule_secrets with SECRET_KEY + PG_PASSWORD"
+    observation: "MCP returned `{ok:true, applied:[SECRET_KEY,PG_PASSWORD]}` immediately, and the next browser snapshot surfaced `awaiting pre-launch requirements: consent:app, consent:web)`."
+  - action: "approve_execution_plan_consent for capsule://github.com/Koh0920/WasedaP2P"
+    observation: "MCP returned `{ok:true, approved_handle: capsule://github.com/Koh0920/WasedaP2P}` and the browser surface stayed on `session: resolving; launch still in progress` rather than falling back to a stale `session: closed` state."
+  - action: "browser_wait_for selector=body timeout=180000"
+    observation: "The long wait succeeded with `{found:true}` on the same fresh run, demonstrating that the operator can now wait naturally through the cold start instead of hitting the old 35/45 second transport ceilings or the double-encoded wait_for parse bug."
+  - action: "browser_snapshot after the successful wait"
+    observation: "The final snapshot returned a live accessibility tree for the loaded ManabiEcho page, so the operator reached an inspectable guest webview using only the MCP UI-equivalent surface."
+
+agent_observation:
+  user_visible_problem: "The original operator-visible frictions are removed. Config and consent gates are now explicit on the browser surface, modal-era MCP commands do not starve, post-consent relaunches stay visibly `resolving`, and long waits can complete naturally until the guest page mounts."
+  likely_cause: "Three changes closed the loop: the automation polling loop now keeps waking while requests remain queued, queued relaunches immediately sync the pane back to `WebSessionState::Resolving`, and `browser_wait_for` now respects caller-provided time budgets and correctly decodes Wry's double-encoded callback payloads."
+  suggested_fix:
+    - "Keep the current operator-visible launch-state messaging and long-wait support covered in regression tests, especially for cold-start runs under fresh relative ATO_HOME roots."
+    - "Optionally normalize `browser_snapshot` output from quoted JSON text to a plain JSON object in a separate cleanup, but this is no longer blocking the usecase."
+
+evidence:
+  - .tmp/rt5/ah/logs/ato-desktop.log.2026-05-10
+  - .tmp/rt6/ah/logs/ato-desktop.log.2026-05-10
+  - .tmp/rt10/ah/logs/ato-desktop.log.2026-05-10
+  - .tmp/rt10/ah/secrets.json
+
+status: fixed
