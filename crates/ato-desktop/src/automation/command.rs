@@ -1,11 +1,14 @@
+use std::cmp::max;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::policy::MCP_IMPLICIT_PAGE_LOAD_TIMEOUT;
+use super::policy::{
+    AUTOMATION_CONNECTION_IO_TIMEOUT, AUTOMATION_DISPATCH_TIMEOUT, MCP_IMPLICIT_PAGE_LOAD_TIMEOUT,
+};
 
 // ── JSON-RPC 2.0 wire types ──────────────────────────────────────────────────
 
@@ -193,7 +196,50 @@ impl PendingAutomationRequest {
         Arc::clone(&self.response_tx)
     }
 
+    pub fn response_timeout(&self) -> Duration {
+        match &self.command {
+            AutomationCommand::WaitFor { timeout_ms, .. } => max(
+                AUTOMATION_DISPATCH_TIMEOUT,
+                Duration::from_millis(*timeout_ms)
+                    .saturating_add(AUTOMATION_CONNECTION_IO_TIMEOUT),
+            ),
+            _ => AUTOMATION_DISPATCH_TIMEOUT,
+        }
+    }
+
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed().as_secs() > 30
+        self.created_at.elapsed() > self.response_timeout()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn wait_for_request_timeout_extends_for_long_caller_timeout() {
+        let (tx, _rx) = channel();
+        let req = PendingAutomationRequest::new(
+            1,
+            AutomationCommand::WaitFor {
+                selector: "body".to_string(),
+                timeout_ms: 120_000,
+            },
+            tx,
+        );
+
+        assert!(
+            req.response_timeout() >= Duration::from_secs(130),
+            "long wait_for must outlive the default 35s transport budget"
+        );
+    }
+
+    #[test]
+    fn non_wait_request_timeout_stays_on_default_budget() {
+        let (tx, _rx) = channel();
+        let req = PendingAutomationRequest::new(1, AutomationCommand::Snapshot, tx);
+
+        assert_eq!(req.response_timeout(), AUTOMATION_DISPATCH_TIMEOUT);
     }
 }
