@@ -370,6 +370,24 @@ mod tests {
     }
 
     #[test]
+    fn client_timeout_stays_default_for_non_wait_commands() {
+        let timeout = super::automation_client_response_timeout("snapshot", &serde_json::json!({}));
+        assert_eq!(timeout, super::policy::AUTOMATION_CLIENT_RESPONSE_TIMEOUT);
+    }
+
+    #[test]
+    fn client_timeout_extends_for_long_wait_for_calls() {
+        let timeout = super::automation_client_response_timeout(
+            "wait_for",
+            &serde_json::json!({"selector": "body", "timeout": 120000}),
+        );
+        assert!(
+            timeout >= std::time::Duration::from_secs(135),
+            "long wait_for must outlive the default 45s client read timeout"
+        );
+    }
+
+    #[test]
     fn tools_list_includes_stop_active_session_with_no_required_args() {
         let tools: serde_json::Value =
             serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
@@ -464,8 +482,9 @@ fn handle_tools_call(
             return mcp_error(id, &msg);
         }
     };
+    let response_timeout = automation_client_response_timeout(&method, &rpc_params);
 
-    match send_automation_command(socket_path, &method, rpc_params) {
+    match send_automation_command(socket_path, &method, rpc_params, response_timeout) {
         Ok(result) => serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -487,6 +506,26 @@ fn mcp_error(id: serde_json::Value, message: &str) -> serde_json::Value {
             "isError": true
         }
     })
+}
+
+fn automation_client_response_timeout(method: &str, params: &serde_json::Value) -> std::time::Duration {
+    use std::cmp::max;
+    use std::time::Duration;
+
+    if method == "wait_for" {
+        let timeout_ms = params
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5000);
+        return max(
+            policy::AUTOMATION_CLIENT_RESPONSE_TIMEOUT,
+            Duration::from_millis(timeout_ms)
+                .saturating_add(policy::AUTOMATION_CONNECTION_IO_TIMEOUT)
+                .saturating_add(policy::AUTOMATION_CLIENT_WRITE_TIMEOUT),
+        );
+    }
+
+    policy::AUTOMATION_CLIENT_RESPONSE_TIMEOUT
 }
 
 // ── Tool → command mapping ────────────────────────────────────────────────────
@@ -617,6 +656,7 @@ fn send_automation_command(
     socket_path: &Path,
     method: &str,
     params: serde_json::Value,
+    response_timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
     use std::io::{BufRead, BufReader, ErrorKind, Write};
     use std::os::unix::net::UnixStream;
@@ -640,7 +680,7 @@ fn send_automation_command(
         ),
     })?;
     stream
-        .set_read_timeout(Some(policy::AUTOMATION_CLIENT_RESPONSE_TIMEOUT))
+        .set_read_timeout(Some(response_timeout))
         .ok();
     stream
         .set_write_timeout(Some(policy::AUTOMATION_CLIENT_WRITE_TIMEOUT))
@@ -685,6 +725,7 @@ fn send_automation_command(
     _socket_path: &Path,
     _method: &str,
     _params: serde_json::Value,
+    _response_timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
     Err("automation socket transport is not supported on this platform".into())
 }
