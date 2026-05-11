@@ -14,6 +14,7 @@ use gpui::{
 use gpui_component::{Icon, IconName};
 
 use super::theme::{task_hue, Theme};
+use super::RAIL_WIDTH;
 use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
 use crate::state::{HostPanelRoute, PaneSurface};
 
@@ -253,21 +254,28 @@ pub(super) fn render_task_rail(
     theme: &Theme,
 ) -> impl IntoElement {
     let tasks = state.sidebar_task_items();
-    let panel_bg = theme.panel_bg;
-    let panel_border = theme.panel_border;
+    let sidebar_bg = theme.sidebar_bg;
+    let sidebar_border = theme.sidebar_border;
 
+    // Container chain mirrors the gpui-html lowering of
+    //   <div class="flex flex-col h-full bg-sidebar-bg border-r
+    //               border-sidebar-border"></div>
+    // (see .tmp/gpui-html/sidebar-rail.generated.rs). Production
+    // adds the fixed RAIL_WIDTH, vertical padding, gap, and the
+    // tab-list / separator / new-tab / settings children that
+    // gpui-html doesn't lower from this slice's mockup.
     div()
-        .w(px(52.0))
-        .min_w(px(52.0))
+        .w(px(RAIL_WIDTH))
+        .min_w(px(RAIL_WIDTH))
         .h_full()
         .flex()
         .flex_col()
         .items_center()
         .py_3()
         .gap_1()
-        .bg(panel_bg)
+        .bg(sidebar_bg)
         .border_r_1()
-        .border_color(panel_border)
+        .border_color(sidebar_border)
         .children(
             tasks
                 .into_iter()

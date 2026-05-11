@@ -93,6 +93,14 @@ pub struct Theme {
     // Preview cards (design_system.rs)
     pub preview_card_bg: Hsla,
     pub preview_chrome_bg: Hsla,
+
+    // Sidebar rail (left vertical strip). Separate from
+    // panel_bg / panel_border because the mockup at
+    // .tmp/sidebar.html uses an `elevated: #111113` surface that
+    // sits between the deeper chrome `#09090b` and the lighter
+    // floating panels.
+    pub sidebar_bg: Hsla,
+    pub sidebar_border: Hsla,
 }
 
 impl Theme {
@@ -167,6 +175,12 @@ impl Theme {
 
             preview_card_bg: hsla(60.0 / 360.0, 0.05, 0.950, 1.0),
             preview_chrome_bg: hsla(60.0 / 360.0, 0.06, 0.933, 1.0),
+
+            // Light mode keeps the previous panel surface for the
+            // sidebar so the white-mode UI stays familiar; the
+            // mockup's #111113 / #27272a are dark-mode specific.
+            sidebar_bg: hsla(0.0, 0.0, 1.0, 0.92), // matches panel_bg
+            sidebar_border: hsla(60.0 / 360.0, 0.05, 0.897, 1.0), // matches panel_border
         }
     }
 
@@ -234,6 +248,15 @@ impl Theme {
 
             preview_card_bg: hsla(240.0 / 360.0, 0.10, 0.17, 1.0),
             preview_chrome_bg: hsla(0.0, 0.0, 1.0, 0.04),
+
+            // #111113 — the mockup's `bg-elevated` for the sidebar.
+            // Manifest in .tmp/gpui-html/theme.toml mirrors this hex.
+            sidebar_bg: hsla(240.0 / 360.0, 0.056, 0.0706, 1.0),
+            // #27272a — the mockup's `border-border`. Same hex as
+            // chrome_border (Theme already exposes that field on a
+            // separate PR; we duplicate the hex here so this slice
+            // doesn't depend on it).
+            sidebar_border: hsla(240.0 / 360.0, 0.037, 0.159, 1.0),
         }
     }
 }

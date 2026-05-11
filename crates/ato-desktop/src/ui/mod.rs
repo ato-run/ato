@@ -51,7 +51,12 @@ use crate::webview::WebViewManager;
 use capsule_wire::config::ConfigKind;
 
 pub(super) const CHROME_HEIGHT: f32 = 48.0;
-pub(super) const RAIL_WIDTH: f32 = 52.0;
+// Sidebar rail width. 72px matches the mockup at .tmp/sidebar.html's
+// `#sidebar.collapsed { width: 4.5rem }` (= 72px) collapsed state.
+// Future slice B4 makes this dynamic 72 ↔ 256 once collapse/expand
+// state lands; for now the rail is always at the mockup's collapsed
+// width.
+pub(super) const RAIL_WIDTH: f32 = 72.0;
 pub(super) const STAGE_PADDING: f32 = 0.0;
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
