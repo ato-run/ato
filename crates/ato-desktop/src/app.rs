@@ -82,7 +82,14 @@ actions!(
         // platform / keymap conflict surfaces we re-bind without
         // changing the action name.
         StopActiveSession,
-        StopAllRetainedSessions
+        StopAllRetainedSessions,
+        // Sidebar collapse / expand toggle. Bound to cmd-b
+        // (standard editor convention — VS Code / Sublime / Atom
+        // all use cmd-b for "toggle sidebar"). Flips
+        // AppState.sidebar_expanded; render_task_rail reads the
+        // flag to pick between RAIL_COLLAPSED_WIDTH (72px) and
+        // RAIL_EXPANDED_WIDTH (256px).
+        ToggleSidebar
     ]
 );
 
@@ -293,6 +300,7 @@ pub fn run() {
             // session); Cmd+Shift+W is the explicit "stop session"
             // action that actively kills the process.
             KeyBinding::new("cmd-shift-w", StopActiveSession, Some("AtoDesktopShell")),
+            KeyBinding::new("cmd-b", ToggleSidebar, Some("AtoDesktopShell")),
         ]);
 
         #[cfg(target_os = "macos")]

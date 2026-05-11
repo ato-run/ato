@@ -1155,6 +1155,14 @@ pub struct AppState {
     /// Managed by `show_settings_panel()` (toggle). No sidebar tab
     /// is created — the overlay is rendered on top of the stage.
     pub settings_panel_open: bool,
+    /// Whether the left sidebar is expanded to show task labels
+    /// (256px) or collapsed to icon-only (72px). Toggled by the
+    /// `ToggleSidebar` action (cmd-b). Defaults to `false` (collapsed)
+    /// so first-time users see the compact rail and discover the
+    /// expand affordance organically. Not persisted yet — resets on
+    /// every desktop launch. The dynamic width feeds the stage-bounds
+    /// computation in `crate::ui::current_rail_width`.
+    pub sidebar_expanded: bool,
     pub settings_active_tab: SettingsTab,
     /// Status of the most recent GitHub-release version check. Drives
     /// the Updates card in the settings panel — the actual fetch is
@@ -1282,6 +1290,7 @@ impl AppState {
             route_metadata_active_tab: CapsuleDetailTab::Overview,
             settings_panel_open: false,
             settings_active_tab: SettingsTab::General,
+            sidebar_expanded: false,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
             capsule_updates: HashMap::new(),
@@ -1471,6 +1480,7 @@ impl AppState {
             route_metadata_active_tab: CapsuleDetailTab::Overview,
             settings_panel_open: false,
             settings_active_tab: SettingsTab::General,
+            sidebar_expanded: false,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
             capsule_updates: HashMap::new(),

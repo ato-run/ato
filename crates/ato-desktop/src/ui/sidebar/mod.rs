@@ -13,8 +13,11 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName};
 
+use super::current_rail_width;
 use super::theme::{task_hue, Theme};
-use crate::app::{CloseTask, FocusCommandBar, MoveTask, NewTab, SelectTask, ShowSettings};
+use crate::app::{
+    CloseTask, FocusCommandBar, MoveTask, NewTab, SelectTask, ShowSettings, ToggleSidebar,
+};
 use crate::state::{HostPanelRoute, PaneSurface};
 
 /// Drag-and-drop payload for reordering sidebar task tabs. The drop
@@ -255,21 +258,26 @@ pub(super) fn render_task_rail(
     let tasks = state.sidebar_task_items();
     let panel_bg = theme.panel_bg;
     let panel_border = theme.panel_border;
+    // Width is dynamic: collapsed (72px) by default, expanded (256px)
+    // when state.sidebar_expanded is true. The same helper feeds
+    // compute_stage_bounds so WebView positioning stays in sync.
+    let rail_width = current_rail_width(state);
+    let expanded = state.sidebar_expanded;
 
     // Outer container = the rail surface. Header (h-12) and body
     // (flex_1) are stacked vertically — the body keeps the previous
     // py_3 / gap_1 / items_center rhythm so existing tabs render
     // identically below the new header.
     div()
-        .w(px(52.0))
-        .min_w(px(52.0))
+        .w(px(rail_width))
+        .min_w(px(rail_width))
         .h_full()
         .flex()
         .flex_col()
         .bg(panel_bg)
         .border_r_1()
         .border_color(panel_border)
-        .child(render_sidebar_header(theme))
+        .child(render_sidebar_header(expanded, theme))
         .child(
             div()
                 .flex_1()
@@ -307,7 +315,15 @@ pub(super) fn render_task_rail(
 ///
 /// Replaces the previous `render_new_tab_button` that sat mid-rail
 /// between the task list and the spacer.
-fn render_sidebar_header(theme: &Theme) -> impl IntoElement {
+fn render_sidebar_header(expanded: bool, theme: &Theme) -> impl IntoElement {
+    // Toggle icon flips with state so the affordance shows what
+    // clicking would do: collapsed → PanelLeftOpen (action: expand),
+    // expanded → PanelLeftClose (action: collapse).
+    let toggle_icon = if expanded {
+        IconName::PanelLeftClose
+    } else {
+        IconName::PanelLeftOpen
+    };
     div()
         .w_full()
         .flex()
@@ -331,6 +347,14 @@ fn render_sidebar_header(theme: &Theme) -> impl IntoElement {
             theme,
             |_, window, cx| {
                 window.dispatch_action(Box::new(FocusCommandBar), cx);
+            },
+        ))
+        .child(render_sidebar_header_button(
+            "sidebar-header-toggle",
+            toggle_icon,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(ToggleSidebar), cx);
             },
         ))
 }

@@ -39,7 +39,7 @@ use crate::app::{
     OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResolutionFormBack, ResolutionFormNext,
     ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab, SelectSettingsTab, SelectTask,
     ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm,
-    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
+    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleSidebar, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -51,7 +51,32 @@ use crate::webview::WebViewManager;
 use capsule_wire::config::ConfigKind;
 
 pub(super) const CHROME_HEIGHT: f32 = 48.0;
-pub(super) const RAIL_WIDTH: f32 = 52.0;
+/// Width of the sidebar rail when collapsed to icon-only mode.
+/// Matches `.tmp/sidebar.html`'s `#sidebar.collapsed { width: 4.5rem }`
+/// (= 72px). This is the default — first-time users see the compact
+/// rail until they hit cmd-b to expand.
+pub(super) const RAIL_COLLAPSED_WIDTH: f32 = 72.0;
+/// Width of the sidebar rail when expanded to show task labels.
+/// Matches `.tmp/sidebar.html`'s `#sidebar { width: 16rem }` (= 256px).
+pub(super) const RAIL_EXPANDED_WIDTH: f32 = 256.0;
+/// Legacy alias — many consumers still read `RAIL_WIDTH` as a single
+/// value. Returns the collapsed width since that's the default state;
+/// any consumer that needs the actual current width on every render
+/// should call [`current_rail_width`] instead.
+pub(super) const RAIL_WIDTH: f32 = RAIL_COLLAPSED_WIDTH;
+
+/// Pick the rail's current width based on `state.sidebar_expanded`.
+/// Used by stage-bounds computation and by `render_task_rail` so the
+/// two stay in sync on every render. The rail width participates in
+/// WebView positioning, so a stale width would push WebViews off the
+/// stage edge.
+pub(super) fn current_rail_width(state: &AppState) -> f32 {
+    if state.sidebar_expanded {
+        RAIL_EXPANDED_WIDTH
+    } else {
+        RAIL_COLLAPSED_WIDTH
+    }
+}
 pub(super) const STAGE_PADDING: f32 = 0.0;
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
@@ -654,6 +679,21 @@ impl DesktopShell {
         crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, true);
         self.sync_focus_target(window, cx);
+        cx.notify();
+    }
+
+    /// Toggle the sidebar between collapsed (72px) and expanded
+    /// (256px). The flag participates in stage-bounds computation
+    /// via [`current_rail_width`], so child WebViews resize on the
+    /// next render frame. Not persisted yet — resets to collapsed
+    /// on every launch.
+    fn on_toggle_sidebar(
+        &mut self,
+        _: &ToggleSidebar,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.sidebar_expanded = !self.state.sidebar_expanded;
         cx.notify();
     }
 
@@ -1996,6 +2036,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_toggle_auto_devtools))
             .on_action(cx.listener(Self::on_focus_command_bar))
             .on_action(cx.listener(Self::on_show_settings))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_select_settings_tab))
             .on_action(cx.listener(Self::on_select_route_metadata_tab))
             .on_action(cx.listener(Self::on_toggle_dev_console))
@@ -2808,11 +2849,14 @@ fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
     None
 }
 
-fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBounds {
+fn compute_stage_bounds(state: &AppState, width: f32, height: f32) -> PaneBounds {
+    // Rail width is dynamic now (sidebar_expanded toggle). Read on
+    // every call so WebView bounds shift with the rail.
+    let rail = current_rail_width(state);
     PaneBounds {
-        x: RAIL_WIDTH + STAGE_PADDING,
+        x: rail + STAGE_PADDING,
         y: CHROME_HEIGHT + STAGE_PADDING,
-        width: (width - RAIL_WIDTH - STAGE_PADDING * 2.0).max(240.0),
+        width: (width - rail - STAGE_PADDING * 2.0).max(240.0),
         height: (height - CHROME_HEIGHT - STAGE_PADDING * 2.0).max(180.0),
     }
 }
