@@ -3,9 +3,10 @@ mod window_controls;
 use gpui::prelude::*;
 use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
 use gpui_component::input::{Input, InputState};
+use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
+    BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, NewTab, SelectTask,
     ShowSettings, StopActiveSession, StopAllRetainedSessions, ToggleRouteMetadataPopover,
 };
 use crate::state::{
@@ -43,8 +44,85 @@ pub(super) fn render_command_chrome(
             command_bar,
             theme,
         )))
+        .child(render_right_actions(theme))
+        .child(render_chrome_divider(theme))
         .child(render_retention_indicator(state, theme))
         .child(render_active_route_status(state, theme))
+}
+
+/// Right-side action cluster — `+` (NewTab) + `⚙` (Settings).
+///
+/// ## gpui-html origin
+///
+/// Lowered from `.tmp/gpui-html/right-actions.html`. The generated
+/// chain is preserved in `.tmp/gpui-html/right-actions.generated.rs`.
+/// The mockup expresses two `p-2 rounded-md` boxes each wrapping a
+/// `size-4` icon slot at `gap-1`; production tightens spacing to
+/// `gap_0p5()` / `p_1p5()` (the half-step scale gpui-html v0.1 lacks)
+/// and replaces the placeholder `div().size_4()` with real
+/// `Icon::new(IconName::{Plus,Settings})`.
+///
+/// Bell and Avatar from the mockup are deliberately not ported — see
+/// `.tmp/aodd-receipts/{bell,avatar}-blocked-*.yaml` (no underlying
+/// feature exists; rendering them would violate the no-lying-UI rule).
+fn render_right_actions(theme: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .child(render_action_button(
+            "chrome-action-new-tab",
+            IconName::Plus,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(NewTab), cx);
+            },
+        ))
+        .child(render_action_button(
+            "chrome-action-settings",
+            IconName::Settings,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(ShowSettings), cx);
+            },
+        ))
+}
+
+fn render_action_button(
+    id: &'static str,
+    icon: IconName,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    // Same visual treatment as the nav-button row (text-tertiary rest,
+    // text-secondary + surface-hover bg on hover). Local helper rather
+    // than reusing render_nav_button because the nav helper is being
+    // rewritten in parallel by PR #157; a follow-up refactor can fold
+    // both into a single `icon_button` once both PRs land.
+    let rest_color = theme.text_tertiary;
+    let hover_color = theme.text_secondary;
+    let hover_bg = theme.surface_hover;
+
+    div()
+        .id(id)
+        .p_1p5()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rest_color)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_bg).text_color(hover_color))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(Icon::new(icon).size_4())
+}
+
+/// 1px vertical divider between the action cluster and the route /
+/// retention indicators. Mirrors the mockup's `w-px h-4 bg-border
+/// mx-1`. `w-px` is not in gpui-html v0.1's class table so this is
+/// authored directly in Rust rather than lowered.
+fn render_chrome_divider(theme: &Theme) -> impl IntoElement {
+    div().w(px(1.0)).h_4().mx_1().bg(theme.border_subtle)
 }
 
 /// RFC: SURFACE_CLOSE_SEMANTICS §6.4 — discoverability hook for
