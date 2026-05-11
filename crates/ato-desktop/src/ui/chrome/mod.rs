@@ -34,7 +34,10 @@ pub(super) fn render_command_chrome(
         .bg(theme.panel_bg)
         .border_b_1()
         .border_color(theme.panel_border)
-        .child(render_window_controls(default_window_control_buttons()))
+        .child(render_window_controls(
+            default_window_control_buttons(),
+            theme,
+        ))
         .child(render_nav_buttons(state, theme))
         .child(div().flex_1().flex().justify_center().child(render_omnibar(
             omnibar,
