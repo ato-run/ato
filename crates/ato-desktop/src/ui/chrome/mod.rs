@@ -3,6 +3,7 @@ mod window_controls;
 use gpui::prelude::*;
 use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
 use gpui_component::input::{Input, InputState};
+use gpui_component::{Icon, IconName};
 
 use crate::app::{
     BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
@@ -86,27 +87,21 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
     // Reload works on any web pane (capsule reload restarts the session)
     let has_any_web_pane =
         state.active_web_pane().is_some() || state.active_capsule_pane().is_some();
-    let enabled_color = theme.text_secondary;
-    let disabled_color = theme.text_tertiary;
-    let nav_color = if is_external_url {
-        enabled_color
-    } else {
-        disabled_color
-    };
-    let reload_color = if has_any_web_pane {
-        enabled_color
-    } else {
-        disabled_color
-    };
 
+    // Layout chain mirrors the gpui-html lowering of
+    //   <div class="flex items-center gap-1"> …three p-2 rounded-md
+    //   wrappers around a size-4 icon slot… </div>
+    // (see .tmp/gpui-html/nav-buttons.generated.rs). Production
+    // tightens gap-1 / p-2 back to the mockup's gap-0.5 / p-1.5
+    // (gpui exposes the half-step scale via `.gap_0p5()` / `.p_1p5()`;
+    // gpui-html v0.1 does not).
     div()
         .flex()
         .items_center()
-        .gap(px(2.0))
+        .gap_0p5()
         .child(render_nav_button(
             "nav-back",
-            "◀",
-            nav_color,
+            IconName::ChevronLeft,
             is_external_url,
             theme,
             |_, window, cx| {
@@ -115,8 +110,7 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         ))
         .child(render_nav_button(
             "nav-forward",
-            "▶",
-            nav_color,
+            IconName::ChevronRight,
             is_external_url,
             theme,
             |_, window, cx| {
@@ -125,8 +119,7 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         ))
         .child(render_nav_button(
             "nav-reload",
-            "↻",
-            reload_color,
+            IconName::Redo,
             has_any_web_pane,
             theme,
             |_, window, cx| {
@@ -137,30 +130,36 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
 
 fn render_nav_button(
     id: &'static str,
-    label: &'static str,
-    color: gpui::Hsla,
+    icon: IconName,
     enabled: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    // Mockup: `p-1.5 rounded-md text-muted hover:bg-hover
+    // hover:text-secondary transition-colors`. The generated
+    // skeleton is just `div().p_2().rounded_md().child(div().size_4())`
+    // (gpui-html lowers neither `text-<token>` for unmapped tokens
+    // nor `hover:` prefixes); the rest below — color, hover state,
+    // gating, click dispatch — is the Rust-side work the SKILL.md
+    // workflow expects.
+    let rest_color = theme.text_tertiary;
+    let hover_color = theme.text_secondary;
     let hover_bg = theme.surface_hover;
 
     div()
         .id(id)
-        .w(px(26.0))
-        .h(px(26.0))
-        .rounded(px(6.0))
+        .p_1p5()
+        .rounded_md()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(12.0))
-        .text_color(color)
+        .text_color(rest_color)
         .when(enabled, move |this| {
             this.cursor_pointer()
-                .hover(move |style| style.bg(hover_bg))
+                .hover(move |style| style.bg(hover_bg).text_color(hover_color))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
-        .child(label)
+        .child(Icon::new(icon).size_4())
 }
 
 fn render_omnibar(
