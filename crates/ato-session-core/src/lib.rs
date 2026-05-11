@@ -24,8 +24,9 @@ pub mod validate;
 
 pub use record::{
     GuestSessionDisplay, ServiceBackgroundDisplay, StoredDependencyContracts,
-    StoredDependencyProvider, StoredOrchestrationService, StoredOrchestrationServices,
-    StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay, SCHEMA_VERSION_V2,
+    StoredDependencyProvider, StoredExecutionGraph, StoredGraphEdge, StoredGraphNode,
+    StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
+    TerminalSessionDisplay, WebSessionDisplay, SCHEMA_VERSION_V2,
 };
 pub use store::{
     read_session_records, session_record_path, session_root, write_session_record_atomic,
