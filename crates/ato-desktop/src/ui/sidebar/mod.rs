@@ -277,6 +277,34 @@ pub(super) fn render_task_rail(
         .child(render_nav_separator(theme))
         .child(render_new_tab_button(theme))
         .child(div().flex_1())
+        .child(render_sidebar_footer(state, theme))
+}
+
+/// Sidebar footer — Settings row in a bordered block at the bottom of
+/// the rail.
+///
+/// ## gpui-html origin
+///
+/// Lowered from `.tmp/gpui-html/sidebar-footer.html`:
+///   <div class="border-t border-border-subtle py-2 px-2 flex flex-col gap-1"></div>
+/// (generated chain at `.tmp/gpui-html/sidebar-footer.generated.rs`).
+/// Production adds the `.opacity(0.5)` on the border color (the mockup
+/// at `.tmp/sidebar.html` says `border-border/50`; gpui-html v0.1
+/// doesn't lower theme-token alpha on `border-<token>` classes, only
+/// on `bg-<token>/<n>`) and the Settings child, plus `w_full` +
+/// `items_center` so the 36px Settings item centers horizontally on
+/// the rail.
+fn render_sidebar_footer(state: &crate::state::AppState, theme: &Theme) -> impl IntoElement {
+    div()
+        .w_full()
+        .border_t_1()
+        .border_color(theme.border_subtle.opacity(0.5))
+        .py_2()
+        .px_2()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
         .child(render_settings_nav_item(settings_nav_active(state), theme))
 }
 
