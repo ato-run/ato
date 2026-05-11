@@ -93,6 +93,15 @@ pub struct Theme {
     // Preview cards (design_system.rs)
     pub preview_card_bg: Hsla,
     pub preview_chrome_bg: Hsla,
+
+    // Chrome bar (top titlebar / command bar). Separate from
+    // `panel_bg` / `panel_border` because the mockup at
+    // `.tmp/header.html` uses deeper, more saturated values for the
+    // chrome surface (`bg-surface = #09090b`, `border-border =
+    // #27272a`) than the lighter, semi-translucent panel tokens used
+    // for popovers and the retention pill.
+    pub chrome_bg: Hsla,
+    pub chrome_border: Hsla,
 }
 
 impl Theme {
@@ -167,6 +176,12 @@ impl Theme {
 
             preview_card_bg: hsla(60.0 / 360.0, 0.05, 0.950, 1.0),
             preview_chrome_bg: hsla(60.0 / 360.0, 0.06, 0.933, 1.0),
+
+            // Light mode keeps the previous panel surface so the
+            // chrome stays in the white family. The mockup colors
+            // (#09090b / #27272a) are dark-mode specific.
+            chrome_bg: hsla(0.0, 0.0, 1.0, 0.92), // matches panel_bg
+            chrome_border: hsla(60.0 / 360.0, 0.05, 0.897, 1.0), // matches panel_border
         }
     }
 
@@ -234,6 +249,13 @@ impl Theme {
 
             preview_card_bg: hsla(240.0 / 360.0, 0.10, 0.17, 1.0),
             preview_chrome_bg: hsla(0.0, 0.0, 1.0, 0.04),
+
+            // #09090b — the mockup's `bg-surface`. Manifest in
+            // .tmp/gpui-html/theme.toml mirrors this hex so the
+            // gpui-html lowering byte-matches the runtime token.
+            chrome_bg: hsla(240.0 / 360.0, 0.10, 0.039, 1.0),
+            // #27272a — the mockup's `border-border`.
+            chrome_border: hsla(240.0 / 360.0, 0.037, 0.159, 1.0),
         }
     }
 }

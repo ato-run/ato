@@ -25,15 +25,21 @@ pub(super) fn render_command_chrome(
     command_bar: bool,
     theme: &Theme,
 ) -> impl IntoElement {
+    // Container chain mirrors the gpui-html lowering of
+    //   <div class="flex items-center h-12 px-4 gap-2 bg-chrome-bg
+    //               border-b border-chrome-border"></div>
+    // (see .tmp/gpui-html/chrome-container.generated.rs). `h_12()`
+    // is 48px = CHROME_HEIGHT; we keep the named constant since
+    // other modules (sidebar, panels) depend on it.
     div()
         .h(px(CHROME_HEIGHT))
-        .px(px(14.0))
+        .px_4()
         .flex()
         .items_center()
-        .gap_3()
-        .bg(theme.panel_bg)
+        .gap_2()
+        .bg(theme.chrome_bg)
         .border_b_1()
-        .border_color(theme.panel_border)
+        .border_color(theme.chrome_border)
         .child(render_window_controls(default_window_control_buttons()))
         .child(render_nav_buttons(state, theme))
         .child(div().flex_1().flex().justify_center().child(render_omnibar(
