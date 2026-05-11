@@ -288,10 +288,9 @@ pub(super) fn render_task_rail(
                 .py_3()
                 .gap_1()
                 .children(
-                    tasks
-                        .into_iter()
-                        .enumerate()
-                        .map(move |(i, task)| render_nav_item(task, i, favicon_cache, theme)),
+                    tasks.into_iter().enumerate().map(move |(i, task)| {
+                        render_nav_item(task, i, expanded, favicon_cache, theme)
+                    }),
                 )
                 .child(render_nav_separator(theme))
                 .child(div().flex_1())
@@ -412,27 +411,28 @@ pub(super) fn favicon_candidate_urls(origin: &str) -> Vec<String> {
 fn render_nav_item(
     task: SidebarTaskItem,
     index: usize,
+    expanded: bool,
     favicon_cache: &HashMap<String, FaviconState>,
     theme: &Theme,
 ) -> Stateful<Div> {
     let task_id = task.id;
+    let title = task.title.clone();
+    let is_active = task.is_active;
     let accent_subtle = theme.accent_subtle;
     let accent = theme.accent;
     let drag_id = (task_id, index);
 
-    let item = div()
+    let mut item = div()
         .id(("task-tab", task_id))
         // Group lets the close-button child react to the rail item's
         // hover state (canonical gpui-component pattern, see
         // notification.rs). The empty group name matches the close
         // button's group_hover() call below.
         .group("")
-        .w(px(NAV_ITEM_SIZE))
         .h(px(NAV_ITEM_SIZE))
         .rounded(px(6.0))
         .flex()
         .items_center()
-        .justify_center()
         .cursor_pointer()
         .relative()
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
@@ -445,11 +445,6 @@ fn render_nav_item(
                 ghost: GhostIcon::from_spec(&task.icon, task_id as u64, favicon_cache, theme),
             },
             |dragged, _offset, _window, cx| {
-                // Stop propagation so the parent on_mouse_down does
-                // not steal the gesture (canonical gpui-component
-                // tab_panel.rs pattern). Render the payload itself —
-                // its Render impl produces a chip mirroring the rail
-                // icon that follows the cursor.
                 cx.stop_propagation();
                 cx.new(|_| dragged.clone())
             },
@@ -467,29 +462,78 @@ fn render_nav_item(
             );
         });
 
-    let item = if task.is_active {
-        item.bg(accent_subtle).child(
-            div()
-                .absolute()
-                .left(px(-8.0))
-                .top_1_2()
-                .mt(px(-9.0))
-                .w(px(3.0))
-                .h(px(18.0))
-                .rounded_r(px(3.0))
-                .bg(accent),
-        )
+    // Collapsed = the original 36×36 square. Expanded = horizontal
+    // row that fills the rail with icon + label + close button,
+    // matching the mockup's `.tab-item` block (sidebar.html lines
+    // 182-189).
+    if expanded {
+        item = item.w_full().px_2().gap_3();
+    } else {
+        item = item.w(px(NAV_ITEM_SIZE)).justify_center();
+    }
+
+    // Active accent bar — position differs between modes:
+    //   collapsed: existing left(-8) anchor outside the tab
+    //   expanded : mockup-faithful left:0 inside the tab at 50% height
+    let item = if is_active {
+        if expanded {
+            item.bg(accent_subtle).child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(gpui::relative(0.25))
+                    .bottom(gpui::relative(0.25))
+                    .w(px(3.0))
+                    .rounded_r(px(3.0))
+                    .bg(accent),
+            )
+        } else {
+            item.bg(accent_subtle).child(
+                div()
+                    .absolute()
+                    .left(px(-8.0))
+                    .top_1_2()
+                    .mt(px(-9.0))
+                    .w(px(3.0))
+                    .h(px(18.0))
+                    .rounded_r(px(3.0))
+                    .bg(accent),
+            )
+        }
     } else {
         item
     };
 
-    item.child(render_app_icon(
+    let mut item = item.child(render_app_icon(
         task.icon,
         task_id as u64,
         favicon_cache,
         theme,
-    ))
-    .child(render_close_button(task_id, theme))
+    ));
+
+    // Expanded mode shows the task title between the icon and the
+    // close button. Active tabs use accent color; idle tabs use
+    // text_secondary (matches the mockup's `text-accent` /
+    // `text-secondary` swap on `.tab-item.active`).
+    if expanded {
+        let label_color = if is_active {
+            theme.accent
+        } else {
+            theme.text_secondary
+        };
+        item = item.child(
+            div().flex_1().overflow_hidden().child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight(500.0))
+                    .text_color(label_color)
+                    .truncate()
+                    .child(title),
+            ),
+        );
+    }
+
+    item.child(render_close_button(task_id, theme))
 }
 
 fn render_close_button(task_id: usize, theme: &Theme) -> Stateful<Div> {
