@@ -29,6 +29,7 @@ pub(crate) mod provider_cache;
 pub(crate) mod search;
 pub(crate) mod secrets;
 pub(crate) mod services;
+pub(crate) mod session_graph_populate;
 #[allow(dead_code)]
 pub(crate) mod share;
 pub(crate) mod source_inference;
