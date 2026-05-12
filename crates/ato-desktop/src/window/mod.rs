@@ -1,0 +1,31 @@
+//! Multi-window orchestration — layer 2 of the Focus View redesign (#169).
+//!
+//! Today's desktop opens exactly one GPUI window from `app::run`. The
+//! redesign opens one window per running guest app, with a paired
+//! Control Bar child window per app window (#171). This module owns
+//! the spawn / despawn machinery and a minimal placeholder GPUI view
+//! that gets installed in each new window until later layers (#171,
+//! #172, #173) bring the real content.
+//!
+//! The full cut-over described in #169 also moves the `WebViewManager`
+//! from a `HashMap<PaneId, ManagedWebView>` to a per-window singleton
+//! and persists window frames under `~/.ato/desktop/windows.json`.
+//! Both are deferred to follow-up commits on the same redesign branch
+//! and tracked in the consolidated PR description.
+
+pub mod orchestrator;
+
+pub use orchestrator::{open_app_window, AppWindowShell};
+
+/// `ATO_DESKTOP_MULTI_WINDOW=1` opt-in flag. Defaults to **off** until
+/// layer 4 (Control Bar UI, #172) lands, at which point the legacy
+/// single-window path is removed and this flag goes away.
+pub fn is_multi_window_enabled() -> bool {
+    match std::env::var("ATO_DESKTOP_MULTI_WINDOW") {
+        Ok(v) => {
+            let trimmed = v.trim();
+            !trimmed.is_empty() && !matches!(trimmed, "0" | "false" | "off" | "no")
+        }
+        Err(_) => false,
+    }
+}

@@ -82,7 +82,14 @@ actions!(
         // platform / keymap conflict surfaces we re-bind without
         // changing the action name.
         StopActiveSession,
-        StopAllRetainedSessions
+        StopAllRetainedSessions,
+        // #169 — gated on `ATO_DESKTOP_MULTI_WINDOW=1`. Opens an
+        // additional top-level GPUI window rendering the placeholder
+        // `AppWindowShell` so the multi-window orchestrator can be
+        // exercised end-to-end before later layers (#171–#174) plug in
+        // real content. The action is wired regardless of the flag,
+        // but the handler is a no-op when the flag is off.
+        OpenAppWindowExperiment
     ]
 );
 
@@ -293,6 +300,13 @@ pub fn run() {
             // session); Cmd+Shift+W is the explicit "stop session"
             // action that actively kills the process.
             KeyBinding::new("cmd-shift-w", StopActiveSession, Some("AtoDesktopShell")),
+            // #169 — open a multi-window experiment window. Handler
+            // checks `ATO_DESKTOP_MULTI_WINDOW` and no-ops when off.
+            KeyBinding::new(
+                "cmd-shift-n",
+                OpenAppWindowExperiment,
+                Some("AtoDesktopShell"),
+            ),
         ]);
 
         #[cfg(target_os = "macos")]
@@ -320,6 +334,26 @@ pub fn run() {
             }
         })
         .detach();
+
+        // #169 — multi-window experiment action. Opens a placeholder
+        // `AppWindowShell` window when `ATO_DESKTOP_MULTI_WINDOW=1`.
+        // When the flag is off this is a no-op so the binding never
+        // surprises users who haven't opted in.
+        cx.on_action(|_: &OpenAppWindowExperiment, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenAppWindowExperiment dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            let route = crate::state::GuestRoute::ExternalUrl(
+                url::Url::parse("https://ato.run/")
+                    .expect("https://ato.run/ is a valid URL"),
+            );
+            if let Err(err) = crate::window::open_app_window(cx, route) {
+                tracing::error!(error = %err, "failed to open app window experiment");
+            }
+        });
 
         let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
 

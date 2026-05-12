@@ -16,6 +16,7 @@ mod terminal;
 mod ui;
 mod userland;
 mod webview;
+mod window;
 
 fn main() {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
