@@ -284,6 +284,10 @@ pub fn run() {
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
         cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
+        // Slot tracking the currently-open Launcher window so the
+        // Control Bar's Settings / Store buttons focus the existing
+        // window on a 2nd+ click instead of spawning a new one.
+        cx.set_global(crate::window::launcher::LauncherWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
@@ -375,6 +379,27 @@ pub fn run() {
                     gpui_window_id = closed_id,
                     "AppWindow evicted from registry on close"
                 );
+            }
+
+            // Clear singleton slots when their tracked window closes
+            // so the next Settings / Store / switcher click opens a
+            // fresh one cleanly. Match by `WindowId` since the slots
+            // store the typed handle which derefs to AnyWindowHandle.
+            let launcher_slot = cx
+                .global::<crate::window::launcher::LauncherWindowSlot>()
+                .0;
+            if launcher_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(crate::window::launcher::LauncherWindowSlot(None));
+                tracing::info!("Launcher window closed; slot cleared");
+            }
+            let switcher_slot = cx
+                .global::<crate::window::card_switcher::CardSwitcherWindowSlot>()
+                .0;
+            if switcher_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(
+                    crate::window::card_switcher::CardSwitcherWindowSlot(None),
+                );
+                tracing::info!("Card Switcher window closed; slot cleared");
             }
 
             // In Focus mode the Control Bar is a process-lifetime

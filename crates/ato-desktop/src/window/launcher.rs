@@ -10,10 +10,19 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds, WindowDecorations,
-    WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, WindowBounds,
+    WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+
+/// Process-wide slot for the currently-open Launcher window. The
+/// Control Bar's Settings / Store buttons dispatch
+/// `OpenLauncherWindow`; on a 2nd+ click we want to focus the
+/// existing window (bring it to the front) rather than spawn a new
+/// one on top.
+#[derive(Default)]
+pub struct LauncherWindowSlot(pub Option<AnyWindowHandle>);
+impl gpui::Global for LauncherWindowSlot {}
 
 /// Placeholder Launcher shell — replaced by the renamed
 /// `LauncherShell` (extracted from today's `DesktopShell`) once the
@@ -54,12 +63,27 @@ impl Render for LauncherShellPlaceholder {
     }
 }
 
-/// Open a Launcher window when `ATO_DESKTOP_MULTI_WINDOW=1`. The real
-/// Launcher migration moves today's `DesktopShell` (rail + chrome +
-/// settings panel + retention pill) into this window in follow-up
-/// commits. For now the window is a placeholder so the orchestrator
-/// pattern can be exercised end-to-end.
+/// Open the Launcher window, or focus it if one is already open.
+/// First click: opens a new window. Second-and-later clicks: bring
+/// the existing window to the foreground (no new window spawned).
+/// If the user closed the previous Launcher (red traffic light), the
+/// next click opens a fresh one — `app::on_window_closed` clears the
+/// slot for us.
 pub fn open_launcher_window(cx: &mut App) -> Result<()> {
+    // Focus path: an existing handle is tracked. Try to activate it.
+    let existing = cx.global::<LauncherWindowSlot>().0;
+    if let Some(handle) = existing {
+        let result = handle.update(cx, |_, window, _| window.activate_window());
+        match result {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                // Stale handle — window was closed without our
+                // cleanup hook running. Drop it and fall through.
+                cx.set_global(LauncherWindowSlot(None));
+            }
+        }
+    }
+
     let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
@@ -69,9 +93,10 @@ pub fn open_launcher_window(cx: &mut App) -> Result<()> {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
-    cx.open_window(options, |window, cx| {
+    let handle = cx.open_window(options, |window, cx| {
         let shell = cx.new(|_cx| LauncherShellPlaceholder);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+    cx.set_global(LauncherWindowSlot(Some(*handle)));
     Ok(())
 }
