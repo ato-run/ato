@@ -14,7 +14,8 @@ use gpui::{
     WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
-use wry::{WebView, WebViewBuilder};
+use wry::dpi::{LogicalPosition, LogicalSize};
+use wry::{Rect, WebView, WebViewBuilder};
 
 /// Slot tracking the single open Store window so the Control Bar's
 /// Store button focuses an existing window on a 2nd+ click instead
@@ -70,8 +71,23 @@ pub fn open_store_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
     let handle = cx.open_window(options, |window, cx| {
+        // Size the WebView to fill the window's content area.
+        // Without an explicit `with_bounds`, Wry's `build_as_child`
+        // hands the WKWebView some platform-default rectangle that
+        // ends up much smaller than the window (~480×320 worth),
+        // leaving most of the window blank.
+        let win_size = window.bounds().size;
+        let webview_rect = Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(win_size.width) as u32,
+                f32::from(win_size.height) as u32,
+            )
+            .into(),
+        };
         let webview = WebViewBuilder::new()
             .with_url(STORE_URL)
+            .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Store WebView");
         let store = cx.new(|_cx| StoreWebView { _webview: webview });
