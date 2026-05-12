@@ -15,6 +15,7 @@
 
 pub mod card_switcher;
 pub mod control_bar;
+pub mod gestures;
 pub mod launcher;
 pub mod orchestrator;
 
