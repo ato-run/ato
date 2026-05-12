@@ -24,8 +24,9 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName};
 
-use crate::app::OpenAppWindowExperiment;
+use crate::app::OpenLauncherWindow;
 use crate::state::{AppWindowRegistry, GuestRoute};
+use crate::window::launcher::{LauncherView, LauncherViewState};
 
 /// Process-wide slot for the currently-open Card Switcher window so
 /// the Control Bar's switcher button can behave as a toggle: a
@@ -303,12 +304,18 @@ fn new_window_card() -> impl IntoElement {
                 .border_color(rgb(0x6366f1))
         })
         // Swallow the click so it does not bubble to the backdrop's
-        // close-on-click handler, dispatch the open action, then
-        // remove ourselves — order matters: the dispatch is queued
-        // onto the global action queue before the window goes away.
+        // close-on-click handler. Then route to the Launcher in Start
+        // view — that surface (start-window.png) is the proper place
+        // for a user to compose a new window (search, recents, store,
+        // quick actions). Setting LauncherViewState BEFORE dispatch
+        // covers the case where Launcher is already open in Settings
+        // view: its observe_global subscription will re-render Start
+        // before the activate_window inside open_launcher_window
+        // brings it to the foreground.
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             cx.stop_propagation();
-            window.dispatch_action(Box::new(OpenAppWindowExperiment), cx);
+            cx.set_global(LauncherViewState(LauncherView::Start));
+            window.dispatch_action(Box::new(OpenLauncherWindow), cx);
             cx.set_global(CardSwitcherWindowSlot(None));
             window.remove_window();
         })
@@ -338,7 +345,7 @@ fn new_window_card() -> impl IntoElement {
             div()
                 .text_xs()
                 .text_color(rgb(0x71717a))
-                .child("カプセルまたは URL を入力"),
+                .child("スタートページを開く"),
         )
 }
 
@@ -405,9 +412,12 @@ fn dock_new_window_tile() -> impl IntoElement {
         .justify_center()
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0xe0e7ff)))
+        // Mirrors `new_window_card`'s click route: open the Launcher
+        // in Start view rather than spawning a raw AppWindow.
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             cx.stop_propagation();
-            window.dispatch_action(Box::new(OpenAppWindowExperiment), cx);
+            cx.set_global(LauncherViewState(LauncherView::Start));
+            window.dispatch_action(Box::new(OpenLauncherWindow), cx);
             cx.set_global(CardSwitcherWindowSlot(None));
             window.remove_window();
         })
