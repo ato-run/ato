@@ -13,9 +13,9 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, rgb, size, svg, AnyWindowHandle, App, Bounds, BoxShadow, Context,
-    FontWeight, IntoElement, MouseButton, Pixels, Render, SharedString,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    div, hsla, px, rgb, size, svg, AnyWindowHandle, App, Bounds, Context, FontWeight, IntoElement,
+    MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions,
 };
 use gpui_component::{Icon, IconName};
 
@@ -24,11 +24,11 @@ use crate::state::GuestRoute;
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
-/// Padding around the pill inside the host window — gives the
-/// multi-layer drop shadow room to render. Without this the shadow
-/// is clipped flush against the NSWindow edge and the pill loses
-/// the floating quality the reference mockup carries.
-const WINDOW_PAD: f32 = 32.0;
+/// Host NSWindow is sized flush to the pill — the rectangle of the
+/// window and the rectangle of the pill are the same; the only
+/// transparent area is the four rounded-corner cut-outs created by
+/// the pill's `rounded(BAR_HEIGHT / 2)`. Drop shadow is not declared
+/// on `bar_pill` because it would be clipped at the window edge.
 const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
 pub struct ControlBarShellPlaceholder {
@@ -61,55 +61,31 @@ impl Render for ControlBarShellPlaceholder {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Outer wrapper occupies the entire host window — including
-        // the transparent padding ring — and centres the pill so the
-        // drop shadow has equal room on every side.
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(bar_pill(self.url_display.clone()))
+        // The host window is the pill — no padding ring, no centring
+        // wrapper. `bar_pill` is the entire content and uses
+        // `.size_full()` to inherit the window's dimensions.
+        bar_pill(self.url_display.clone())
     }
 }
 
 fn bar_pill(url: SharedString) -> impl IntoElement {
     div()
-        .w(px(BAR_WIDTH))
-        .h(px(BAR_HEIGHT))
+        .size_full()
         .px(px(6.0))
         .flex()
         .items_center()
         .gap(px(6.0))
         .bg(rgb(0xffffff))
-        .rounded(px(BAR_HEIGHT / 2.0))
+        // `rounded_full` forces a true capsule shape regardless of the
+        // pill's actual rendered height (gpui clamps fractional
+        // pixel heights, so `rounded(BAR_HEIGHT / 2.0)` was reading
+        // as slightly-too-small at the corners and the curve never
+        // fully met).
+        .rounded_full()
         // Hairline border — barely perceptible against the white
         // fill, mirrors the reference's near-invisible edge.
         .border_1()
         .border_color(hsla(0.0, 0.0, 0.0, 0.04))
-        // Three-layer drop shadow stacked from tight-and-near-opaque
-        // to wide-and-very-soft. Reads as a single natural shadow
-        // rather than a single hard offset.
-        .shadow(vec![
-            BoxShadow {
-                color: hsla(0.0, 0.0, 0.0, 0.04),
-                offset: point(px(0.0), px(1.0)),
-                blur_radius: px(2.0),
-                spread_radius: px(0.0),
-            },
-            BoxShadow {
-                color: hsla(0.0, 0.0, 0.0, 0.06),
-                offset: point(px(0.0), px(8.0)),
-                blur_radius: px(16.0),
-                spread_radius: px(0.0),
-            },
-            BoxShadow {
-                color: hsla(0.0, 0.0, 0.0, 0.08),
-                offset: point(px(0.0), px(24.0)),
-                blur_radius: px(40.0),
-                spread_radius: px(-8.0),
-            },
-        ])
         .child(pill_button(
             "settings",
             Some(PillIcon::Builtin(IconName::Settings)),
@@ -274,8 +250,8 @@ pub fn open_control_bar_window_at(
     parent_bounds: Bounds<Pixels>,
     route: GuestRoute,
 ) -> Result<AnyWindowHandle> {
-    let win_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
-    let win_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let win_w = px(BAR_WIDTH);
+    let win_h = px(BAR_HEIGHT);
     let origin = gpui::Point {
         x: parent_bounds.origin.x + (parent_bounds.size.width - win_w) / 2.0,
         y: parent_bounds.origin.y - win_h + px(BAR_GAP_ABOVE_APP),
@@ -290,8 +266,8 @@ pub fn open_control_bar_window_at(
 /// Standalone bar opener — keeps the legacy code path callable
 /// without parent bounds.
 pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    let win_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
-    let win_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let win_w = px(BAR_WIDTH);
+    let win_h = px(BAR_HEIGHT);
     let bounds = Bounds::centered(None, size(win_w, win_h), cx);
     open_control_bar_inner(
         cx,
@@ -304,14 +280,14 @@ pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
 
 /// Open the Focus-mode Control Bar as a process-lifetime singleton.
 pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
-    let win_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
-    let win_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let win_w = px(BAR_WIDTH);
+    let win_h = px(BAR_HEIGHT);
     let bounds = match cx.primary_display() {
         Some(d) => {
             let display_bounds = d.bounds();
             let left =
                 display_bounds.origin.x + (display_bounds.size.width - win_w) / 2.0;
-            let top = display_bounds.origin.y + px(24.0);
+            let top = display_bounds.origin.y + px(36.0);
             Bounds {
                 origin: gpui::point(left, top),
                 size: size(win_w, win_h),

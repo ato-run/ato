@@ -1,0 +1,51 @@
+usecase: "Window flush to pill bounds, plus the pill must read as a true capsule (left/right ends fully rounded)"
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Host NSWindow == bar pill rectangle, pill corners fully rounded into half-circles matching the reference"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Drop shadow — sacrificed; would be clipped against the flush window edge"
+time_budget: "15 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports white halo around the pill; wants window flush to pill bounds"
+    observation: "R20 had `WINDOW_PAD=32` for shadow room. With the Store's white content behind, the padding ring read as a halo rather than empty space."
+
+  - action: "Drop WINDOW_PAD constant + shadow stack; render pill as the full window"
+    observation: |
+      Three openers compute their bounds as `BAR_WIDTH × BAR_HEIGHT`
+      flat. `Render` returns `bar_pill(...)` directly (no centring
+      wrapper). `bar_pill` switches from fixed `.w().h()` to
+      `.size_full()` so it inherits the flush window dimensions.
+      Multi-layer shadow declaration removed — would have been
+      clipped at the window edge anyway.
+
+  - action: "First screenshot — user reports pill round is insufficient vs reference"
+    observation: "Used `.rounded(px(BAR_HEIGHT / 2.0))` which should be a half-height radius. In practice gpui's float-to-int rasterisation clipped the radius slightly below the ideal half-height, so the curve never fully met and the ends read as soft-rectangle rather than capsule."
+    stuck_at: "rounded(28) did not produce a true pill"
+
+  - action: "Switch to `.rounded_full()`"
+    observation: |
+      gpui's `rounded_full()` applies a very large radius that forces
+      the capsule shape regardless of actual pixel dimensions. The
+      pill ends are now perfect half-circles.
+
+  - action: "Build, launch hermetic Focus mode, host_take_screenshot"
+    observation: |
+      flush-pill-rounded-full.png shows the bar as a true capsule:
+      flush to its host window, fully rounded ends, no halo. Only
+      the four rounded-corner cut-outs let the Store window behind
+      show through.
+
+agent_observation:
+  user_visible_problem: "Resolved. Bar reads as a tight capsule chip flush to the desktop / Store backdrop, matching the reference's rounded-end shape."
+  likely_cause: "Two compounding issues — host window padding inherited from R20's shadow recipe, plus `rounded(px(BAR_HEIGHT/2.0))` reading as just-under-half-height after rasterisation."
+  suggested_fix:
+    - "Already shipped: WINDOW_PAD removed, shadow stack removed, `rounded_full()` for guaranteed capsule shape."
+    - "Future: if we ever want a visible shadow without padding, render it via a layer-level CALayer shadow path (extends beyond the NSWindow contentView)."
+
+evidence:
+  - flush-pill-rounded-full.png
+
+status: "fixed"
