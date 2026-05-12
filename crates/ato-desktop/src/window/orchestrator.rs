@@ -81,13 +81,28 @@ fn top_card_row() -> impl IntoElement {
         .flex()
         .gap(px(16.0))
         .items_stretch()
-        .child(preview_card("CodeLab", IconName::SquareTerminal, 0x6366f1))
-        .child(preview_card("Discover", IconName::ChartPie, 0x10b981))
+        .child(preview_card(
+            "CodeLab",
+            IconName::SquareTerminal,
+            0x6366f1,
+            code_preview_body().into_any_element(),
+        ))
+        .child(preview_card(
+            "Discover",
+            IconName::ChartPie,
+            0x10b981,
+            chart_preview_body().into_any_element(),
+        ))
         .child(div().flex_1())
         .child(safety_summary_card())
 }
 
-fn preview_card(label: &'static str, icon: IconName, accent: u32) -> impl IntoElement {
+fn preview_card(
+    label: &'static str,
+    icon: IconName,
+    accent: u32,
+    body: gpui::AnyElement,
+) -> impl IntoElement {
     div()
         .w(px(180.0))
         .h(px(110.0))
@@ -106,14 +121,14 @@ fn preview_card(label: &'static str, icon: IconName, accent: u32) -> impl IntoEl
                 .items_center()
                 .child(
                     div()
-                        .w(px(28.0))
-                        .h(px(28.0))
-                        .rounded(px(8.0))
+                        .w(px(24.0))
+                        .h(px(24.0))
+                        .rounded(px(6.0))
                         .bg(rgb(accent))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(Icon::new(icon).size(px(16.0)).text_color(rgb(0xffffff))),
+                        .child(Icon::new(icon).size(px(14.0)).text_color(rgb(0xffffff))),
                 )
                 .child(
                     div()
@@ -122,13 +137,62 @@ fn preview_card(label: &'static str, icon: IconName, accent: u32) -> impl IntoEl
                         .child(label),
                 ),
         )
-        .child(div().flex_1())
-        .child(
-            div()
-                .h(px(32.0))
-                .rounded(px(6.0))
-                .bg(rgb(0xf4f4f5)),
-        )
+        .child(div().flex_1().child(body))
+}
+
+/// Mock "code preview" body — six short rectangles of varying width
+/// and colour suggesting a syntax-highlighted code block. Replaces
+/// the earlier blank grey rect on the CodeLab preview card.
+fn code_preview_body() -> impl IntoElement {
+    let line = |segments: &[(f32, u32)]| -> gpui::Div {
+        let mut row = div().flex().gap(px(4.0)).h(px(6.0));
+        for (w, color) in segments {
+            row = row.child(div().w(px(*w)).h_full().rounded(px(2.0)).bg(rgb(*color)));
+        }
+        row
+    };
+    div()
+        .size_full()
+        .bg(rgb(0x0f172a))
+        .rounded(px(6.0))
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        // Each line: (width_px, color_rgb). Colours mimic a typical
+        // editor theme (keyword purple, ident white, string orange,
+        // comment gray, number cyan).
+        .child(line(&[(18.0, 0xa78bfa), (40.0, 0xe2e8f0)]))
+        .child(line(&[(30.0, 0x60a5fa), (8.0, 0xe2e8f0), (24.0, 0xfb923c)]))
+        .child(line(&[(8.0, 0xe2e8f0), (50.0, 0x94a3b8)]))
+        .child(line(&[(14.0, 0xa78bfa), (12.0, 0xe2e8f0), (20.0, 0x22d3ee)]))
+        .child(line(&[(36.0, 0xe2e8f0)]))
+}
+
+/// Mock "chart preview" body — five vertical bars of varying height
+/// suggesting a bar chart. Replaces the earlier blank grey rect on
+/// the Discover preview card.
+fn chart_preview_body() -> impl IntoElement {
+    let bar = |h: f32, color: u32| -> gpui::Div {
+        div()
+            .w(px(10.0))
+            .h(px(h))
+            .rounded(px(2.0))
+            .bg(rgb(color))
+    };
+    div()
+        .size_full()
+        .bg(rgb(0xeff6ff))
+        .rounded(px(6.0))
+        .p(px(6.0))
+        .flex()
+        .items_end()
+        .justify_between()
+        .child(bar(14.0, 0x60a5fa))
+        .child(bar(26.0, 0x3b82f6))
+        .child(bar(20.0, 0x6366f1))
+        .child(bar(36.0, 0x10b981))
+        .child(bar(22.0, 0x10b981))
 }
 
 fn safety_summary_card() -> impl IntoElement {
