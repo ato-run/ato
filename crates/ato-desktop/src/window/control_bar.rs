@@ -1,39 +1,53 @@
-//! Layer 3+4 — floating Control Bar window with the four affordances
-//! (Settings · URL pill · Card Switcher · Store) rendered as
-//! light-themed rounded pills, matching the redesign reference
-//! mockups.
+//! Floating Control Bar window — light pill bar with four
+//! affordances (Settings · URL pill · Card Switcher · Store). Matches
+//! the redesign reference mockups.
 //!
-//! The window itself is borderless and transparent so the pill bar
-//! reads as a free-floating element. The actual
-//! `addChildWindow:ordered:` parent-child attachment that locks the
-//! bar to its parent app window is still TBD on this branch (see
-//! module-level comment on the lower-level scaffolding in #171).
+//! Real `addChildWindow:ordered:` parent-child attachment is still
+//! TBD on this branch — for now the orchestrator passes initial
+//! parent bounds so the bar opens anchored to the top of its app
+//! window. OS-managed co-movement lands with the raw `objc2_app_kit`
+//! plumbing pass.
 
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
     div, hsla, point, px, rgb, size, App, Bounds, BoxShadow, Context, FontWeight, IntoElement,
-    MouseButton, Render, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions,
+    MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions,
 };
 use gpui_component::{Icon, IconName};
 
 use crate::app::{OpenCardSwitcher, OpenLauncherWindow, ShowSettings};
+use crate::state::GuestRoute;
 
 const BAR_WIDTH: f32 = 840.0;
 const BAR_HEIGHT: f32 = 60.0;
 const WINDOW_PAD: f32 = 16.0;
+const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
-/// Control Bar contents — four affordances laid out per the
-/// redesign mockup:
-///
-/// `[ ⚙ 設定 ]   [ 🌐 ato.app/shell://… ▾ ]   [ ▦ ]   [ 📦 ストア ]`
-///
-/// The Card Switcher pill is rendered enabled (#173 scaffolding
-/// reachable). Settings and Store dispatch to existing chrome
-/// actions; the URL pill is presentation-only until the per-window
-/// WebView migration lands.
-pub struct ControlBarShellPlaceholder;
+pub struct ControlBarShellPlaceholder {
+    url_display: SharedString,
+}
+
+impl ControlBarShellPlaceholder {
+    pub fn new(route: &GuestRoute) -> Self {
+        Self {
+            url_display: SharedString::from(display_url_from_route(route)),
+        }
+    }
+}
+
+fn display_url_from_route(route: &GuestRoute) -> String {
+    match route {
+        GuestRoute::ExternalUrl(url) => url.as_str().to_string(),
+        GuestRoute::CapsuleHandle { handle, .. } => format!("ato.app/shell://{handle}"),
+        GuestRoute::CapsuleUrl { handle, url, .. } => {
+            format!("ato.app/shell://{handle} → {url}")
+        }
+        GuestRoute::Capsule { session, .. } => format!("capsule://{session}/"),
+        GuestRoute::Terminal { session_id } => format!("terminal://{session_id}/"),
+    }
+}
 
 impl Render for ControlBarShellPlaceholder {
     fn render(
@@ -41,19 +55,17 @@ impl Render for ControlBarShellPlaceholder {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Outer transparent wrapper so the pill bar gets a true
-        // floating look (the window background appearance is also
-        // Transparent).
+        let url = self.url_display.clone();
         div()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .child(bar_pill())
+            .child(bar_pill(url))
     }
 }
 
-fn bar_pill() -> impl IntoElement {
+fn bar_pill(url: SharedString) -> impl IntoElement {
     div()
         .w(px(BAR_WIDTH))
         .h(px(BAR_HEIGHT))
@@ -77,7 +89,7 @@ fn bar_pill() -> impl IntoElement {
             Some("設定"),
             ActionTarget::Settings,
         ))
-        .child(url_pill())
+        .child(url_pill(url))
         .child(pill_button(
             "card-switcher",
             Some(IconName::GalleryVerticalEnd),
@@ -123,10 +135,6 @@ fn pill_button(
         .hover(|s| s.bg(rgb(0xf4f4f5)))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| match target {
             ActionTarget::Settings => {
-                // Settings opens the Launcher (#170) with the settings
-                // tab focused; the per-tab dispatch lands with the
-                // DesktopShell → LauncherShell rename. For now we just
-                // open the Launcher window.
                 window.dispatch_action(Box::new(OpenLauncherWindow), cx);
                 window.dispatch_action(Box::new(ShowSettings), cx);
             }
@@ -146,7 +154,7 @@ fn pill_button(
     body
 }
 
-fn url_pill() -> impl IntoElement {
+fn url_pill(url: SharedString) -> impl IntoElement {
     div()
         .id("url-pill")
         .flex_1()
@@ -162,29 +170,55 @@ fn url_pill() -> impl IntoElement {
         .text_color(rgb(0x18181b))
         .text_sm()
         .child(Icon::new(IconName::Globe).size(px(16.0)))
-        .child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .child("ato.app/shell://wasedap2p"),
-        )
+        .child(div().flex_1().overflow_hidden().child(url))
         .child(Icon::new(IconName::ChevronDown).size(px(14.0)))
 }
 
-/// Open a borderless transparent Control Bar window centred on the
-/// screen. Sized to fit `BAR_WIDTH + 2 * WINDOW_PAD` × `BAR_HEIGHT + 2
-/// * WINDOW_PAD` so the drop shadow has room to render. Once
-/// `addChildWindow:` plumbing lands the orchestrator will reposition
-/// the bar to anchor at the parent app window's top-center.
+/// Open the bar anchored above a parent app window's bounds. The
+/// position is computed once at spawn time; OS-managed tracking
+/// across drag / Spaces / fullscreen depends on the
+/// `addChildWindow:ordered:` plumbing scheduled for a follow-up.
+pub fn open_control_bar_window_at(
+    cx: &mut App,
+    parent_bounds: Bounds<Pixels>,
+    route: GuestRoute,
+) -> Result<()> {
+    let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
+    let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    // Center horizontally on the parent; sit just above the parent's top edge.
+    let origin = gpui::Point {
+        x: parent_bounds.origin.x + (parent_bounds.size.width - bar_w) / 2.0,
+        y: parent_bounds.origin.y - bar_h + px(BAR_GAP_ABOVE_APP),
+    };
+    let bounds = Bounds {
+        origin,
+        size: size(bar_w, bar_h),
+    };
+    open_control_bar_inner(cx, bounds, route)
+}
+
+/// Standalone bar opener — used by the legacy `OpenAppWindowExperiment`
+/// path where no parent bounds are known. Centers the bar on the
+/// screen. Will be removed once every spawn goes through
+/// `open_control_bar_window_at`.
 pub fn open_control_bar_window(cx: &mut App) -> Result<()> {
-    let bounds = Bounds::centered(
-        None,
-        size(
-            px(BAR_WIDTH + 2.0 * WINDOW_PAD),
-            px(BAR_HEIGHT + 2.0 * WINDOW_PAD),
-        ),
+    let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
+    let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let bounds = Bounds::centered(None, size(bar_w, bar_h), cx);
+    open_control_bar_inner(
         cx,
-    );
+        bounds,
+        GuestRoute::ExternalUrl(
+            url::Url::parse("https://ato.run/").expect("https://ato.run/ is a valid URL"),
+        ),
+    )
+}
+
+fn open_control_bar_inner(
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    route: GuestRoute,
+) -> Result<()> {
     let options = WindowOptions {
         titlebar: None,
         focus: false,
@@ -197,8 +231,8 @@ pub fn open_control_bar_window(cx: &mut App) -> Result<()> {
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
-    cx.open_window(options, |window, cx| {
-        let shell = cx.new(|_cx| ControlBarShellPlaceholder);
+    cx.open_window(options, move |window, cx| {
+        let shell = cx.new(|_cx| ControlBarShellPlaceholder::new(&route));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     Ok(())
