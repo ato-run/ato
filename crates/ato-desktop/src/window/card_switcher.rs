@@ -12,7 +12,9 @@ use gpui::{
     FontWeight, IntoElement, MouseButton, Render, SharedString, WindowBounds, WindowDecorations,
     WindowKind, WindowOptions,
 };
+use gpui_component::{Icon, IconName};
 
+use crate::app::OpenAppWindowExperiment;
 use crate::state::{AppWindowRegistry, GuestRoute};
 
 /// Process-wide slot for the currently-open Card Switcher window so
@@ -85,15 +87,15 @@ impl Render for CardSwitcherShellPlaceholder {
             .items_center()
             .justify_center()
             .gap_6();
-        if self.cards.is_empty() {
-            backdrop.child(empty_state_card())
-        } else {
-            let mut row = backdrop;
-            for (idx, card) in self.cards.iter().enumerate() {
-                row = row.child(mru_card(card.clone(), idx, idx == 0));
-            }
-            row
+        let mut row = backdrop;
+        for (idx, card) in self.cards.iter().enumerate() {
+            row = row.child(mru_card(card.clone(), idx, idx == 0));
         }
+        // The "+ 新しいウィンドウ" tile is always rendered as the
+        // trailing card. With no MRU entries it doubles as the
+        // empty-state CTA; with entries it sits to the right of the
+        // existing windows.
+        row.child(new_window_card())
     }
 }
 
@@ -135,31 +137,60 @@ fn mru_card(card: CardEntry, idx: usize, is_active: bool) -> impl IntoElement {
         )
 }
 
-fn empty_state_card() -> impl IntoElement {
+/// Trailing tile inside the Card Switcher row that opens a fresh
+/// AppWindow. Click dispatches `OpenAppWindowExperiment` (the same
+/// action the Control Bar / MCP route through) and dismisses the
+/// switcher so the new window is immediately interactable. Sized to
+/// match `mru_card` so the row reads as a uniform tile strip.
+fn new_window_card() -> impl IntoElement {
     div()
-        .w(px(360.0))
+        .id("new-window-card")
+        .w(px(320.0))
         .h(px(200.0))
-        .bg(rgb(0x18181b))
-        .border_1()
-        .border_color(rgb(0x3f3f46))
+        // Quiet translucent fill — distinguishes the affordance from
+        // the solid `mru_card` tiles without competing with the
+        // active-window indigo accent.
+        .bg(hsla(0.0, 0.0, 1.0, 0.06))
+        .border_2()
+        .border_color(rgb(0x52525b))
         .rounded_xl()
-        .p(px(20.0))
+        .p(px(16.0))
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap_2()
+        .gap_3()
+        .cursor_pointer()
+        .hover(|s| {
+            s.bg(hsla(0.0, 0.0, 1.0, 0.12))
+                .border_color(rgb(0x6366f1))
+        })
+        // Swallow the click so it does not bubble to the backdrop's
+        // close-on-click handler, dispatch the open action, then
+        // remove ourselves — order matters: the dispatch is queued
+        // onto the global action queue before the window goes away.
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            cx.stop_propagation();
+            window.dispatch_action(Box::new(OpenAppWindowExperiment), cx);
+            cx.set_global(CardSwitcherWindowSlot(None));
+            window.remove_window();
+        })
+        .child(
+            div()
+                .w(px(48.0))
+                .h(px(48.0))
+                .rounded_full()
+                .bg(hsla(0.0, 0.0, 1.0, 0.1))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(IconName::Plus).size(px(24.0))),
+        )
         .child(
             div()
                 .text_sm()
                 .font_weight(FontWeight(600.0))
-                .child("No app windows yet"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .opacity(0.7)
-                .child("Open one via host_dispatch_action OpenAppWindowExperiment"),
+                .child("新しいウィンドウ"),
         )
 }
 
