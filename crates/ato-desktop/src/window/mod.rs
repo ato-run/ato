@@ -13,9 +13,11 @@
 //! Both are deferred to follow-up commits on the same redesign branch
 //! and tracked in the consolidated PR description.
 
+pub mod control_bar;
 pub mod launcher;
 pub mod orchestrator;
 
+pub use control_bar::{open_control_bar_window, ControlBarShellPlaceholder};
 pub use launcher::{open_launcher_window, LauncherShellPlaceholder};
 pub use orchestrator::{open_app_window, AppWindowShell};
 

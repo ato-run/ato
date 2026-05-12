@@ -82,5 +82,13 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<()> {
         let shell = cx.new(|_cx| AppWindowShell::new(&route));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+
+    // #171 — pair every spawned app window with its Control Bar
+    // window. Until the `addChildWindow:` plumbing lands the bar is a
+    // free-floating window rather than a true child, but spawning it
+    // here ensures the 1:1 lifecycle is exercised from day one.
+    if let Err(err) = super::control_bar::open_control_bar_window(cx) {
+        tracing::error!(error = %err, "failed to open control bar window");
+    }
     Ok(())
 }
