@@ -1,4 +1,10 @@
+mod app_window;
 pub(crate) mod persistence;
+
+// `ShellSurface` is re-exported now so #169 can flip the renderer over to it
+// without churning the public path. It is intentionally unused in this PR.
+#[allow(unused_imports)]
+pub use app_window::{AppWindow, AppWindowId, AppWindowRegistry, ShellSurface};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -1196,6 +1202,11 @@ pub struct AppState {
     pub capsule_policy_overrides: crate::config::CapsulePolicyOverrideStore,
     pub capsule_search_results: Vec<CapsuleSearchResult>,
     pub capsule_search_query: String,
+    /// Multi-window registry — layer 1 of the Focus View redesign (#167).
+    /// Empty until #169 wires the orchestrator to populate it; today it
+    /// is unread by the renderer.
+    #[allow(dead_code)]
+    pub app_windows: AppWindowRegistry,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -1298,6 +1309,7 @@ impl AppState {
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
+            app_windows: AppWindowRegistry::default(),
             next_task_id: 2,
             next_pane_id: 2,
             next_new_tab_index: 1,
@@ -1487,12 +1499,40 @@ impl AppState {
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
+            app_windows: AppWindowRegistry::default(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
         };
         state.sync_theme_from_config();
         state
+    }
+
+    /// Allocate an `AppWindow` for the given route in the multi-window
+    /// registry (#167). Returns the new id, which is also marked as
+    /// most-recently focused. Currently unused by the renderer — wired
+    /// up in #169.
+    pub fn open_app_window(&mut self, route: GuestRoute) -> AppWindowId {
+        self.app_windows.open(route)
+    }
+
+    /// Mark an `AppWindow` as most-recently focused. Returns true if the
+    /// id existed.
+    pub fn focus_window(&mut self, id: AppWindowId) -> bool {
+        self.app_windows.focus(id)
+    }
+
+    /// Remove the `AppWindow` from the registry. Returns the removed
+    /// record (so callers can demote its session to retention before
+    /// dropping it).
+    pub fn close_window(&mut self, id: AppWindowId) -> Option<AppWindow> {
+        self.app_windows.close(id)
+    }
+
+    /// Currently-open `AppWindow`s ordered most-recently-focused first.
+    /// Drives the future Card Switcher (#173).
+    pub fn app_window_mru_order(&self) -> Vec<AppWindowId> {
+        self.app_windows.mru_order()
     }
 
     pub fn toggle_theme(&mut self) {
