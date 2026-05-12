@@ -15,11 +15,18 @@
 
 pub mod card_switcher;
 pub mod control_bar;
+pub mod focus_dispatcher;
 pub mod gestures;
 pub mod launcher;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod orchestrator;
+
+// Make the pure-data `AppWindowRegistry` from `state` accessible
+// across windows via `cx.global::<AppWindowRegistry>()`. The impl
+// lives here (not in `state/`) so the state module stays free of
+// UI-framework dependencies.
+impl gpui::Global for crate::state::AppWindowRegistry {}
 
 pub use card_switcher::{open_card_switcher_window, CardSwitcherShellPlaceholder};
 pub use control_bar::{open_control_bar_window, ControlBarShellPlaceholder};

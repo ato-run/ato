@@ -6,8 +6,9 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, px, rgb, size, App, Bounds, Context, FontWeight,
-    IntoElement, Render, SharedString, WindowBounds, WindowDecorations, WindowOptions,
+    div, hsla, linear_color_stop, linear_gradient, px, rgb, size, AnyWindowHandle, App, Bounds,
+    Context, FontWeight, IntoElement, Render, SharedString, WindowBounds, WindowDecorations,
+    WindowOptions,
 };
 use gpui_component::{Icon, IconName, TitleBar};
 
@@ -385,10 +386,10 @@ fn terminal_panel() -> impl IntoElement {
 
 /// Open a new top-level GPUI window hosting the placeholder
 /// `AppWindowShell` for the given guest route, paired with its
-/// Control Bar. The Control Bar position is offset toward the top of
-/// the App Window so the two visually read as a unit until the real
-/// `addChildWindow:` plumbing lands.
-pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<()> {
+/// Control Bar. Returns the AppWindow's `AnyWindowHandle` so callers
+/// (e.g. `app::run`'s Focus-mode automation dispatcher) can route
+/// keyboard actions to it.
+pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandle> {
     // Compute bounds explicitly rather than `Bounds::centered` so we
     // can reserve breathing room ABOVE the AppWindow for the floating
     // Control Bar — otherwise the bar sits flush against the macOS
@@ -421,6 +422,14 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<()> {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
+    // Register this AppWindow in the cross-window MRU registry so
+    // the Card Switcher (#173) can surface real entries. Population
+    // happens BEFORE `cx.open_window` so that even if the GPUI open
+    // fails the registry stays consistent — we'd remove on failure.
+    let _app_window_id = cx
+        .global_mut::<crate::state::AppWindowRegistry>()
+        .open(route.clone());
+
     let route_for_view = route.clone();
     let app_handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|_cx| AppWindowShell::new(&route_for_view));
@@ -447,5 +456,5 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<()> {
             tracing::error!(error = %err, "failed to open control bar window");
         }
     }
-    Ok(())
+    Ok(*app_handle)
 }

@@ -276,6 +276,10 @@ pub fn run() {
     application.run(move |cx: &mut App| {
         gpui_component::init(cx);
         open_url_bridge.install_async_app(cx.to_async());
+        // Cross-window MRU registry — populated as AppWindows spawn,
+        // read by Card Switcher (#173) to render real entries instead
+        // of hardcoded placeholders.
+        cx.set_global(crate::state::AppWindowRegistry::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
@@ -429,14 +433,26 @@ pub fn run() {
                 handle: "github.com/Koh0920/WasedaP2P".to_string(),
                 label: "WasedaP2P".to_string(),
             };
-            match crate::window::open_app_window(cx, route) {
-                Ok(_) => tracing::info!("Focus View AppWindow opened at startup"),
+            let app_handle = match crate::window::open_app_window(cx, route) {
+                Ok(handle) => {
+                    tracing::info!("Focus View AppWindow opened at startup");
+                    handle
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "Focus View startup failed; quitting");
                     cx.quit();
                     return;
                 }
-            }
+            };
+            // Focus mode has no DesktopShell / WebViewManager, so the
+            // automation socket would never start and host_dispatch_action
+            // would have nowhere to land. Start a thin dispatcher that
+            // owns its own `AutomationHost`, drains socket-delivered
+            // requests, and routes `HostDispatchAction { action }` to
+            // the AppWindow as a real GPUI action dispatch. Other
+            // commands return an explicit "not supported in Focus mode"
+            // error so callers do not silently hang.
+            crate::window::focus_dispatcher::start(cx, app_handle);
         } else {
             tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
