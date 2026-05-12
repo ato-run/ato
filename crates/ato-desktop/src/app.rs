@@ -89,7 +89,12 @@ actions!(
         // exercised end-to-end before later layers (#171–#174) plug in
         // real content. The action is wired regardless of the flag,
         // but the handler is a no-op when the flag is off.
-        OpenAppWindowExperiment
+        OpenAppWindowExperiment,
+        // #170 — focuses or opens the Launcher window. Gated on the
+        // same multi-window flag; no-op when off. Will replace the
+        // legacy in-shell settings/store invocations once the rename
+        // portion of #170 lands.
+        OpenLauncherWindow
     ]
 );
 
@@ -307,6 +312,13 @@ pub fn run() {
                 OpenAppWindowExperiment,
                 Some("AtoDesktopShell"),
             ),
+            // #170 — open / focus the Launcher window (placeholder
+            // until the DesktopShell → LauncherShell rename lands).
+            KeyBinding::new(
+                "cmd-shift-k",
+                OpenLauncherWindow,
+                Some("AtoDesktopShell"),
+            ),
         ]);
 
         #[cfg(target_os = "macos")]
@@ -352,6 +364,21 @@ pub fn run() {
             );
             if let Err(err) = crate::window::open_app_window(cx, route) {
                 tracing::error!(error = %err, "failed to open app window experiment");
+            }
+        });
+
+        // #170 — open / focus the Launcher window. No-op when the
+        // multi-window flag is off; in that mode settings / store are
+        // still reached through the legacy `DesktopShell` chrome.
+        cx.on_action(|_: &OpenLauncherWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenLauncherWindow dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::open_launcher_window(cx) {
+                tracing::error!(error = %err, "failed to open launcher window");
             }
         });
 

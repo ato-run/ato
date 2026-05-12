@@ -13,8 +13,10 @@
 //! Both are deferred to follow-up commits on the same redesign branch
 //! and tracked in the consolidated PR description.
 
+pub mod launcher;
 pub mod orchestrator;
 
+pub use launcher::{open_launcher_window, LauncherShellPlaceholder};
 pub use orchestrator::{open_app_window, AppWindowShell};
 
 /// `ATO_DESKTOP_MULTI_WINDOW=1` opt-in flag. Defaults to **off** until
