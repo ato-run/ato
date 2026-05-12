@@ -8,12 +8,20 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, size, App, Bounds, Context, FocusHandle, Focusable, FontWeight,
-    IntoElement, MouseButton, Render, SharedString, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions,
+    div, hsla, px, rgb, size, AnyWindowHandle, App, Bounds, Context, FocusHandle, Focusable,
+    FontWeight, IntoElement, MouseButton, Render, SharedString, WindowBounds, WindowDecorations,
+    WindowKind, WindowOptions,
 };
 
 use crate::state::{AppWindowRegistry, GuestRoute};
+
+/// Process-wide slot for the currently-open Card Switcher window so
+/// the Control Bar's switcher button can behave as a toggle: a
+/// second click closes the open switcher instead of stacking a new
+/// overlay on top.
+#[derive(Default)]
+pub struct CardSwitcherWindowSlot(pub Option<AnyWindowHandle>);
+impl gpui::Global for CardSwitcherWindowSlot {}
 
 /// Snapshot of one registry entry for rendering in the switcher.
 /// Detached from `AppWindow` so the switcher's data is immutable for
@@ -60,11 +68,13 @@ impl Render for CardSwitcherShellPlaceholder {
         let backdrop = div()
             .id("card-switcher-backdrop")
             .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, |_, window, _cx| {
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                cx.set_global(CardSwitcherWindowSlot(None));
                 window.remove_window();
             })
-            .on_key_down(|event, window, _cx| {
+            .on_key_down(|event, window, cx| {
                 if event.keystroke.key == "escape" {
+                    cx.set_global(CardSwitcherWindowSlot(None));
                     window.remove_window();
                 }
             })
@@ -180,11 +190,29 @@ fn entry_from_route(route: &GuestRoute) -> CardEntry {
     }
 }
 
-/// Read the MRU snapshot from the global `AppWindowRegistry` and open
-/// the Card Switcher overlay populated with one card per registered
-/// AppWindow. Without an `AppWindowRegistry` global, falls back to
-/// the empty-state card.
+/// Toggle the Card Switcher overlay. If one is already open
+/// (tracked via the `CardSwitcherWindowSlot` global), this closes
+/// it. Otherwise it reads the MRU snapshot from `AppWindowRegistry`
+/// and opens a fresh overlay. The Control Bar's switcher button
+/// dispatches through here so a second click dismisses the overlay
+/// instead of stacking another one on top.
 pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
+    // If a switcher is already tracked, try to close it. Whether
+    // close succeeds or the handle is stale (window was already
+    // dismissed via backdrop / Escape), we clear the slot so the
+    // next click reopens cleanly. When we successfully closed an
+    // existing window, this is a toggle-off — return early.
+    let existing = cx.global::<CardSwitcherWindowSlot>().0;
+    if let Some(handle) = existing {
+        let close_result = handle.update(cx, |_, window, _| window.remove_window());
+        cx.set_global(CardSwitcherWindowSlot(None));
+        if close_result.is_ok() {
+            return Ok(());
+        }
+        // Handle was stale (window already gone) — fall through to
+        // open a fresh switcher.
+    }
+
     let cards: Vec<CardEntry> = {
         let registry = cx.global::<AppWindowRegistry>();
         registry
@@ -205,7 +233,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
-    cx.open_window(options, |window, cx| {
+    let handle = cx.open_window(options, |window, cx| {
         let shell = cx.new(|cx| CardSwitcherShellPlaceholder::new(cards, cx));
         // Focus the backdrop so the `on_key_down` Escape handler
         // fires without the user having to click first.
@@ -213,5 +241,6 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         window.focus(&focus, cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+    cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
     Ok(())
 }

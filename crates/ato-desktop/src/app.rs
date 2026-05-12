@@ -280,6 +280,10 @@ pub fn run() {
         // read by Card Switcher (#173) to render real entries instead
         // of hardcoded placeholders.
         cx.set_global(crate::state::AppWindowRegistry::default());
+        // Slot tracking the currently-open Card Switcher window so
+        // the Control Bar's switcher button can toggle (open → close)
+        // rather than stack overlays.
+        cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
