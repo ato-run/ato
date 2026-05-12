@@ -11,9 +11,9 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, rgb, size, AnyWindowHandle, App, Bounds, BoxShadow, Context, FontWeight,
-    IntoElement, MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    div, hsla, px, rgb, size, AnyWindowHandle, App, Bounds, Context, FontWeight, IntoElement,
+    MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions,
 };
 use gpui_component::{Icon, IconName};
 
@@ -70,26 +70,22 @@ impl Render for ControlBarShellPlaceholder {
 }
 
 fn bar_pill(url: SharedString) -> impl IntoElement {
+    // The pill's outer shell is transparent — the window backdrop
+    // (set to `WindowBackgroundAppearance::Blurred` in
+    // `open_control_bar_inner`) gives the bar a frosted-glass feel
+    // that integrates with whatever surface is behind it (desktop
+    // wallpaper, AppWindow gradient, another app, …). The inner
+    // affordance buttons stay opaque so they remain readable
+    // regardless of backdrop contrast.
     div()
         .size_full()
         .px(px(8.0))
         .flex()
         .items_center()
         .gap_2()
-        .bg(rgb(0xffffff))
         .border_1()
-        .border_color(rgb(0xe4e4e7))
+        .border_color(hsla(0.0, 0.0, 1.0, 0.35))
         .rounded(px(BAR_HEIGHT / 2.0))
-        .shadow(vec![BoxShadow {
-            // Shadow is declared so we keep the visual recipe if a
-            // future iteration restores window padding, but it is
-            // clipped by the now-flush window edge — visible only as
-            // a faint darkening at the pill border.
-            color: hsla(0.0, 0.0, 0.0, 0.10),
-            offset: point(px(0.0), px(8.0)),
-            blur_radius: px(24.0),
-            spread_radius: px(0.0),
-        }])
         .child(pill_button(
             "settings",
             Some(IconName::Settings),
@@ -269,7 +265,12 @@ fn open_control_bar_inner(
         is_resizable: false,
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_decorations: Some(WindowDecorations::Client),
-        window_background: WindowBackgroundAppearance::Transparent,
+        // `Blurred` activates macOS vibrancy on the window backdrop:
+        // whatever is behind the pill gets the system's frosted-glass
+        // treatment. Pair with a transparent outer pill so the
+        // backdrop blur reads through, and opaque inner buttons so
+        // affordances stay readable.
+        window_background: WindowBackgroundAppearance::Blurred,
         ..Default::default()
     };
     let handle = cx.open_window(options, move |window, cx| {
