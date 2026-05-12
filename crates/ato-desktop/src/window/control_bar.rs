@@ -330,5 +330,14 @@ fn open_control_bar_inner(
         let shell = cx.new(|_cx| ControlBarShellPlaceholder::new(&route));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+    // Round the NSWindow's contentView layer so the underlying
+    // rectangle does not leak through at the corners of the pill.
+    // Without this the pill's gpui-side `rounded_full()` reveals the
+    // rectangular NSWindow underneath whenever the backdrop happens
+    // to share the pill's white fill (e.g. when the Store sits below
+    // the bar). macOS treats the rounded contentView as the window
+    // shape for clicking, screen-grabs, and shadow casting.
+    #[cfg(target_os = "macos")]
+    super::macos::round_window_corners(cx, *handle, (BAR_HEIGHT / 2.0) as f64);
     Ok(*handle)
 }
