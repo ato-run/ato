@@ -21,6 +21,7 @@ pub mod launcher;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod orchestrator;
+pub mod start_window;
 pub mod store;
 
 // Make the pure-data `AppWindowRegistry` from `state` accessible

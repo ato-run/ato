@@ -101,7 +101,11 @@ actions!(
         // https://ato.run/. Re-clicks focus the existing window
         // rather than stacking duplicates. Gated on the multi-window
         // flag.
-        OpenStoreWindow
+        OpenStoreWindow,
+        // Opens a fresh StartWindow — the standalone "compose a new
+        // window" surface that the Card Switcher's new-window tile
+        // routes to. Always spawns a new window (no slot reuse).
+        OpenStartWindow
     ]
 );
 
@@ -515,6 +519,25 @@ pub fn run() {
             }
             if let Err(err) = crate::window::store::open_store_window(cx) {
                 tracing::error!(error = %err, "failed to open store window");
+            }
+        });
+
+        // Spawn a fresh StartWindow. Unlike the Launcher / Store
+        // handlers, there is no slot — every dispatch produces a new
+        // window. The Card Switcher's new-window tile invokes the
+        // underlying function directly (not through this action) to
+        // avoid the dispatch-queue-vs-window-removal race, but the
+        // action is still registered so MCP / keybind paths reach
+        // the same target.
+        cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenStartWindow dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                tracing::error!(error = %err, "failed to open start window");
             }
         });
 

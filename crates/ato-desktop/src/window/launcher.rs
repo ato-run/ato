@@ -77,13 +77,16 @@ impl Render for LauncherShellPlaceholder {
             .flex_col()
             .items_center();
         match view {
-            LauncherView::Start => root.child(launcher_content()),
+            LauncherView::Start => root.child(render_start_view()),
             LauncherView::Settings => root.child(settings_content()),
         }
     }
 }
 
-fn launcher_content() -> impl IntoElement {
+/// Render the Start view body. Shared with `StartWindow` so the two
+/// surfaces stay visually aligned — Launcher hosts it when its view
+/// state is `Start`, StartWindow always hosts it.
+pub(crate) fn render_start_view() -> impl IntoElement {
     div()
         .w(px(960.0))
         .px(px(40.0))

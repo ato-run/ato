@@ -24,9 +24,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName};
 
-use crate::app::OpenLauncherWindow;
 use crate::state::{AppWindowRegistry, GuestRoute};
-use crate::window::launcher::{LauncherView, LauncherViewState};
 
 /// Process-wide slot for the currently-open Card Switcher window so
 /// the Control Bar's switcher button can behave as a toggle: a
@@ -304,18 +302,20 @@ fn new_window_card() -> impl IntoElement {
                 .border_color(rgb(0x6366f1))
         })
         // Swallow the click so it does not bubble to the backdrop's
-        // close-on-click handler. Then route to the Launcher in Start
-        // view — that surface (start-window.png) is the proper place
-        // for a user to compose a new window (search, recents, store,
-        // quick actions). Setting LauncherViewState BEFORE dispatch
-        // covers the case where Launcher is already open in Settings
-        // view: its observe_global subscription will re-render Start
-        // before the activate_window inside open_launcher_window
-        // brings it to the foreground.
+        // close-on-click handler. Open a fresh StartWindow by calling
+        // the function directly — not through dispatch_action — so
+        // the new window does NOT depend on the dispatch queue
+        // surviving the Card Switcher's remove_window call that
+        // follows immediately. R29 used dispatch_action and the
+        // dispatch never fired in practice; the direct call is the
+        // reliable path. Open BEFORE removing the switcher so a
+        // spawn failure does not leave the user staring at a closed
+        // switcher with nowhere to go.
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             cx.stop_propagation();
-            cx.set_global(LauncherViewState(LauncherView::Start));
-            window.dispatch_action(Box::new(OpenLauncherWindow), cx);
+            if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                tracing::error!(error = %err, "failed to open start window");
+            }
             cx.set_global(CardSwitcherWindowSlot(None));
             window.remove_window();
         })
@@ -412,12 +412,13 @@ fn dock_new_window_tile() -> impl IntoElement {
         .justify_center()
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0xe0e7ff)))
-        // Mirrors `new_window_card`'s click route: open the Launcher
-        // in Start view rather than spawning a raw AppWindow.
+        // Mirrors `new_window_card`'s click route: spawn a fresh
+        // StartWindow via a direct call rather than dispatch_action.
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             cx.stop_propagation();
-            cx.set_global(LauncherViewState(LauncherView::Start));
-            window.dispatch_action(Box::new(OpenLauncherWindow), cx);
+            if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                tracing::error!(error = %err, "failed to open start window");
+            }
             cx.set_global(CardSwitcherWindowSlot(None));
             window.remove_window();
         })
