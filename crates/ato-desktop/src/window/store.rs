@@ -47,14 +47,16 @@ const STORE_URL: &str = "https://ato.run/";
 
 /// Open the Store window (Wry WebView on `https://ato.run/`). On a
 /// 2nd+ click the existing window gets focused / brought to front
-/// rather than a duplicate spawned.
-pub fn open_store_window(cx: &mut App) -> Result<()> {
+/// rather than a duplicate spawned. Returns the GPUI `WindowHandle`
+/// so the Focus-mode boot path can use the Store as its initial
+/// window and hand the handle to `focus_dispatcher::start`.
+pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // Focus-on-existing — mirrors `open_launcher_window`.
     let existing = cx.global::<StoreWindowSlot>().0;
     if let Some(handle) = existing {
         let result = handle.update(cx, |_, window, _| window.activate_window());
         match result {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(handle),
             Err(_) => {
                 cx.set_global(StoreWindowSlot(None));
             }
@@ -94,5 +96,5 @@ pub fn open_store_window(cx: &mut App) -> Result<()> {
         cx.new(|cx| gpui_component::Root::new(store, window, cx))
     })?;
     cx.set_global(StoreWindowSlot(Some(*handle)));
-    Ok(())
+    Ok(*handle)
 }

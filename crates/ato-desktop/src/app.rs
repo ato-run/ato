@@ -523,13 +523,16 @@ pub fn run() {
             }
             tracing::info!("Focus View Control Bar opened at startup");
 
-            let route = crate::state::GuestRoute::CapsuleHandle {
-                handle: "github.com/Koh0920/WasedaP2P".to_string(),
-                label: "WasedaP2P".to_string(),
-            };
-            let app_handle = match crate::window::open_app_window(cx, route) {
+            // Open the Store (Wry WebView on ato.run) as the
+            // initial content window. The WasedaP2P mock dashboard
+            // is reachable via host_dispatch_action
+            // OpenAppWindowExperiment when an AODD script or
+            // developer needs it; the boot landing surface is the
+            // real Store so first-run feels like landing in the
+            // catalogue.
+            let initial_handle = match crate::window::store::open_store_window(cx) {
                 Ok(handle) => {
-                    tracing::info!("Focus View AppWindow opened at startup");
+                    tracing::info!("Focus View Store window opened at startup");
                     handle
                 }
                 Err(err) => {
@@ -543,10 +546,11 @@ pub fn run() {
             // would have nowhere to land. Start a thin dispatcher that
             // owns its own `AutomationHost`, drains socket-delivered
             // requests, and routes `HostDispatchAction { action }` to
-            // the AppWindow as a real GPUI action dispatch. Other
-            // commands return an explicit "not supported in Focus mode"
-            // error so callers do not silently hang.
-            crate::window::focus_dispatcher::start(cx, app_handle);
+            // the initial window as a real GPUI action dispatch.
+            // Actions are App-level so dispatching via any window
+            // handle reaches the registered handler — the Store
+            // handle is fine here.
+            crate::window::focus_dispatcher::start(cx, initial_handle);
         } else {
             tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
