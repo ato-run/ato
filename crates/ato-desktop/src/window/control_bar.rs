@@ -20,9 +20,15 @@ use gpui::{
     WindowOptions,
 };
 
-/// Visual placeholder until layer 4 (#172) replaces the body with the
-/// four real affordances (settings cog / URL pill / store / window
-/// list).
+/// Control Bar contents — four affordances per the redesign:
+/// settings cog · URL pill · store icon · window-list icon. The
+/// Window-list icon is deliberately disabled with a tooltip until the
+/// Card Switcher (#173) lands — honesty principle, no lying UI.
+///
+/// Real action dispatch (Settings → open Launcher with settings tab,
+/// Store → open Launcher with capsule search focused, URL pill →
+/// navigate parent app's webview) is wired in a follow-up commit on
+/// this branch alongside the per-window WebViewManager migration.
 pub struct ControlBarShellPlaceholder;
 
 impl Render for ControlBarShellPlaceholder {
@@ -40,14 +46,53 @@ impl Render for ControlBarShellPlaceholder {
             .border_color(rgb(0x27272a))
             .flex()
             .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .text_xs()
-                    .opacity(0.8)
-                    .child("Control Bar placeholder — #171"),
-            )
+            .gap_2()
+            .px_3()
+            .child(affordance_button("⚙", "Settings", false))
+            .child(url_pill_placeholder())
+            .child(affordance_button("⊞", "Store", false))
+            .child(affordance_button("▦", "Card switcher (#173 — coming)", true))
     }
+}
+
+fn affordance_button(
+    glyph: &'static str,
+    tooltip: &'static str,
+    disabled: bool,
+) -> impl IntoElement {
+    div()
+        .id(tooltip)
+        .h(px(32.0))
+        .w(px(32.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(rgb(0x27272a))
+        .text_color(if disabled {
+            rgb(0x52525b)
+        } else {
+            rgb(0xfafafa)
+        })
+        .text_sm()
+        .child(glyph)
+        .tooltip(move |_, cx| cx.new(|_| gpui_component::tooltip::Tooltip::new(tooltip)).into())
+}
+
+fn url_pill_placeholder() -> impl IntoElement {
+    div()
+        .flex_1()
+        .h(px(32.0))
+        .rounded_md()
+        .bg(rgb(0x09090b))
+        .border_1()
+        .border_color(rgb(0x3f3f46))
+        .flex()
+        .items_center()
+        .px_3()
+        .text_xs()
+        .text_color(rgb(0x71717a))
+        .child("https://… (URL pill placeholder — #172)")
 }
 
 /// Open a borderless floating Control Bar window. Sized
