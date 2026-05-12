@@ -94,7 +94,9 @@ actions!(
         // same multi-window flag; no-op when off. Will replace the
         // legacy in-shell settings/store invocations once the rename
         // portion of #170 lands.
-        OpenLauncherWindow
+        OpenLauncherWindow,
+        // #173 — opens the Card Switcher overlay window.
+        OpenCardSwitcher
     ]
 );
 
@@ -319,6 +321,14 @@ pub fn run() {
                 OpenLauncherWindow,
                 Some("AtoDesktopShell"),
             ),
+            // #173 — open the Card Switcher overlay window.
+            // Provisional binding; will be augmented by gesture
+            // invocation from the Control Bar (#174).
+            KeyBinding::new(
+                "cmd-shift-p",
+                OpenCardSwitcher,
+                Some("AtoDesktopShell"),
+            ),
         ]);
 
         #[cfg(target_os = "macos")]
@@ -379,6 +389,23 @@ pub fn run() {
             }
             if let Err(err) = crate::window::open_launcher_window(cx) {
                 tracing::error!(error = %err, "failed to open launcher window");
+            }
+        });
+
+        // #173 — open Card Switcher overlay. No-op when multi-window
+        // flag is off. The overlay snapshots open `AppWindow`s and
+        // renders them as MRU-ordered cards; until the per-window
+        // WebViewManager migration lands the snapshot/dismissal logic
+        // is placeholder.
+        cx.on_action(|_: &OpenCardSwitcher, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenCardSwitcher dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::open_card_switcher_window(cx) {
+                tracing::error!(error = %err, "failed to open card switcher window");
             }
         });
 
