@@ -1,0 +1,52 @@
+usecase: "Shrink the Control Bar host window so the transparent area around the pill is as small as possible"
+actor: "Autonomous Claude Operator + Fixer via Focus-mode MCP socket"
+goal: "Control Bar NSWindow's bounding rect matches the pill's bounding rect — the only remaining transparent area is at the four rounded-corner cut-outs."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Drop shadow visibility (was relying on the 16px window padding; clipped now)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: the area outside the Control Bar pill should be transparent + the window size should equal the bar's size so the transparent area is minimised"
+    observation: |
+      Prior implementation sized the host window to BAR_WIDTH + 2*16
+      x BAR_HEIGHT + 2*16 (872 x 92) with a 16px transparent ring
+      around the 840x60 pill. The ring let the drop shadow render
+      but added meaningful transparent-but-still-window real-estate
+      around the pill.
+
+  - action: "Drop the WINDOW_PAD constant (effectively 0) and re-size the host window to exactly BAR_WIDTH x BAR_HEIGHT (840 x 60)"
+    observation: |
+      `open_focus_control_bar`, `open_control_bar_window`, and
+      `open_control_bar_window_at` all compute bounds with no
+      padding now.
+
+  - action: "Render the pill as the window's sole content (remove the centering wrapper)"
+    observation: |
+      `ControlBarShellPlaceholder::render` returns `bar_pill(...)`
+      directly. `bar_pill` switches its fixed `.w(BAR_WIDTH).h(BAR_HEIGHT)`
+      to `.size_full()` so it inherits the window's exact size.
+
+  - action: "Build, restart hermetic Focus mode, host_take_screenshot"
+    observation: |
+      flush-bar.png shows the Control Bar pill at the top of the
+      screen with no extra transparent ring; the only transparent
+      pixels are at the four rounded-corner cut-outs of the pill's
+      `rounded(BAR_HEIGHT/2)` shape. Underlying desktop content
+      (user's editor) shows through those cut-outs cleanly.
+
+agent_observation:
+  user_visible_problem: "None. The bar is visually identical to before but the surrounding clickable / transparent area is now tight."
+
+  likely_cause: "n/a — direct response to the user's stated requirement."
+
+  suggested_fix:
+    - "Already shipped: removed WINDOW_PAD, window bounds now exactly match pill dimensions, pill uses size_full()."
+    - "Defer: the drop shadow declaration in `bar_pill` is now clipped at the window edge — visible only as a faint darkening on the pill's lower curve. If we later want a visible shadow with NO transparent ring, we'd need GPUI to render past the window bounds (Layer-level technique) or accept some padding back."
+
+evidence:
+  - flush-bar.png
+
+status: "fixed"

@@ -22,7 +22,12 @@ use crate::state::GuestRoute;
 
 const BAR_WIDTH: f32 = 840.0;
 const BAR_HEIGHT: f32 = 60.0;
-const WINDOW_PAD: f32 = 16.0;
+// `WINDOW_PAD = 0` keeps the host NSWindow flush against the pill so
+// the transparent border around the bar is the bare minimum
+// (effectively the rounded-corner cut-outs). The cost is that the
+// drop shadow declared inside `bar_pill` gets clipped at the window
+// edge; we trade that for a tighter hit-target / less wasted
+// transparent-but-still-window real-estate.
 const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
 pub struct ControlBarShellPlaceholder {
@@ -55,20 +60,18 @@ impl Render for ControlBarShellPlaceholder {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let url = self.url_display.clone();
-        div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(bar_pill(url))
+        // The window is sized exactly to the pill (no outer padding),
+        // so we drop the centering wrapper and render the pill as the
+        // window's sole content. The only transparent area left is
+        // the four rounded-corner cut-outs that bleed past the
+        // pill's `rounded_full` edge.
+        bar_pill(self.url_display.clone())
     }
 }
 
 fn bar_pill(url: SharedString) -> impl IntoElement {
     div()
-        .w(px(BAR_WIDTH))
-        .h(px(BAR_HEIGHT))
+        .size_full()
         .px(px(8.0))
         .flex()
         .items_center()
@@ -78,6 +81,10 @@ fn bar_pill(url: SharedString) -> impl IntoElement {
         .border_color(rgb(0xe4e4e7))
         .rounded(px(BAR_HEIGHT / 2.0))
         .shadow(vec![BoxShadow {
+            // Shadow is declared so we keep the visual recipe if a
+            // future iteration restores window padding, but it is
+            // clipped by the now-flush window edge — visible only as
+            // a faint darkening at the pill border.
             color: hsla(0.0, 0.0, 0.0, 0.10),
             offset: point(px(0.0), px(8.0)),
             blur_radius: px(24.0),
@@ -184,8 +191,8 @@ pub fn open_control_bar_window_at(
     parent_bounds: Bounds<Pixels>,
     route: GuestRoute,
 ) -> Result<AnyWindowHandle> {
-    let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
-    let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let bar_w = px(BAR_WIDTH);
+    let bar_h = px(BAR_HEIGHT);
     // Center horizontally on the parent; sit just above the parent's top edge.
     let origin = gpui::Point {
         x: parent_bounds.origin.x + (parent_bounds.size.width - bar_w) / 2.0,
@@ -201,8 +208,8 @@ pub fn open_control_bar_window_at(
 /// Standalone bar opener — keeps the legacy code path callable
 /// (e.g. AODD scripts) without parent bounds. Centers on screen.
 pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
-    let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let bar_w = px(BAR_WIDTH);
+    let bar_h = px(BAR_HEIGHT);
     let bounds = Bounds::centered(None, size(bar_w, bar_h), cx);
     open_control_bar_inner(
         cx,
@@ -218,8 +225,8 @@ pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
 /// as the global navigation chrome — independent of any AppWindow's
 /// lifecycle. Called once from `app::run`'s Focus branch.
 pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
-    let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
-    let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let bar_w = px(BAR_WIDTH);
+    let bar_h = px(BAR_HEIGHT);
     let bounds = match cx.primary_display() {
         Some(d) => {
             let display_bounds = d.bounds();
