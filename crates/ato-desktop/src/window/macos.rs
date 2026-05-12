@@ -14,7 +14,9 @@
 
 use gpui::{AnyWindowHandle, App};
 use objc2::rc::Retained;
-use objc2_app_kit::{NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
+use objc2_app_kit::{
+    NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
 
@@ -104,6 +106,24 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, radius: f64) 
             } else {
                 warn!("round_window_corners: contentView produced no layer");
             }
+            // Make the window backing transparent so AppKit's
+            // window-level shadow follows the rounded contentView
+            // alpha mask instead of the full rectangle, and so the
+            // four rounded-corner cut-outs above the mask are truly
+            // transparent (no white halo, no rectangular boundary).
+            nswindow.setOpaque(false);
+            let clear = NSColor::clearColor();
+            nswindow.setBackgroundColor(Some(&clear));
+            // OS-level drop shadow renders OUTSIDE the window bounds
+            // and follows the alpha mask. This gives the pill visible
+            // separation from same-coloured backdrops (e.g. white
+            // Store) without re-introducing a padded host window. We
+            // re-enable + invalidate explicitly because some popup
+            // window kinds disable hasShadow by default and we need
+            // AppKit to recompute the shadow against the new rounded
+            // alpha mask we just installed via cornerRadius.
+            nswindow.setHasShadow(true);
+            nswindow.invalidateShadow();
         }
     });
     if let Err(err) = result {
