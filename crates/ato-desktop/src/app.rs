@@ -369,10 +369,14 @@ pub fn run() {
                 );
                 return;
             }
-            let route = crate::state::GuestRoute::ExternalUrl(
-                url::Url::parse("https://ato.run/")
-                    .expect("https://ato.run/ is a valid URL"),
-            );
+            // Spawn with a CapsuleHandle route so the AppWindow's title
+            // block renders the capsule label ("WasedaP2P") rather than
+            // a host URL. Mirrors the reference mockup where the focus
+            // is a capsule, not a generic web page.
+            let route = crate::state::GuestRoute::CapsuleHandle {
+                handle: "github.com/Koh0920/WasedaP2P".to_string(),
+                label: "WasedaP2P".to_string(),
+            };
             tracing::info!("calling open_app_window");
             match crate::window::open_app_window(cx, route) {
                 Ok(_) => tracing::info!("open_app_window returned Ok"),

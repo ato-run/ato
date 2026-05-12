@@ -325,7 +325,30 @@ fn terminal_panel() -> impl IntoElement {
 /// the App Window so the two visually read as a unit until the real
 /// `addChildWindow:` plumbing lands.
 pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<()> {
-    let app_bounds = Bounds::centered(None, size(px(1100.0), px(720.0)), cx);
+    // Compute bounds explicitly rather than `Bounds::centered` so we
+    // can reserve breathing room ABOVE the AppWindow for the floating
+    // Control Bar — otherwise the bar sits flush against the macOS
+    // menu bar and visually fuses with system chrome.
+    let display = cx.primary_display();
+    let app_w = px(1100.0);
+    let app_h = px(720.0);
+    // Bar window is ~92px tall (60 bar + 2*16 padding); we want at
+    // least the bar's height plus a visual gap between menu bar and
+    // bar, plus a gap between bar and the parent title bar.
+    let top_reserve = px(140.0);
+    let app_bounds = match display {
+        Some(d) => {
+            let display_bounds = d.bounds();
+            let left = display_bounds.origin.x
+                + (display_bounds.size.width - app_w) / 2.0;
+            let top = display_bounds.origin.y + top_reserve;
+            Bounds {
+                origin: gpui::point(left, top),
+                size: size(app_w, app_h),
+            }
+        }
+        None => Bounds::centered(None, size(app_w, app_h), cx),
+    };
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
         focus: true,
