@@ -307,15 +307,16 @@ pub fn run() {
             // session); Cmd+Shift+W is the explicit "stop session"
             // action that actively kills the process.
             KeyBinding::new("cmd-shift-w", StopActiveSession, Some("AtoDesktopShell")),
-            // #169 — open a multi-window experiment window. Handler
-            // checks `ATO_DESKTOP_MULTI_WINDOW` and no-ops when off.
-            KeyBinding::new(
-                "cmd-shift-n",
-                OpenAppWindowExperiment,
-                Some("AtoDesktopShell"),
-            ),
-            // #170 — open / focus the Launcher window (placeholder
-            // until the DesktopShell → LauncherShell rename lands).
+            // #169 / #170 / #173 — Focus View companion windows.
+            // Keystroke bindings are intentionally limited to
+            // in-Focus navigation (Launcher, Card Switcher). The
+            // legacy ↔ Focus mode itself is chosen at startup via
+            // `ATO_DESKTOP_MULTI_WINDOW`; there is no in-session
+            // toggle. `OpenAppWindowExperiment` survives as an
+            // action handler (reachable via the automation socket
+            // `host_dispatch_action` for AODD scripts that need to
+            // spawn an additional Focus AppWindow), but has no key
+            // binding.
             KeyBinding::new(
                 "cmd-shift-k",
                 OpenLauncherWindow,
@@ -416,27 +417,49 @@ pub fn run() {
             }
         });
 
-        let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
-
-        // Let GPUI draw the shell chrome so the window feels like an in-app surface.
-        cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitleBar::title_bar_options()),
-                focus: true,
-                show: true,
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_decorations: Some(WindowDecorations::Client),
-                ..Default::default()
-            },
-            {
-                let open_url_bridge = open_url_bridge.clone();
-                move |window, cx| {
-                    let shell = cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
-                    cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        // ATO_DESKTOP_MULTI_WINDOW selects the entire startup surface.
+        // The two modes are mutually exclusive — there is no in-session
+        // toggle, only a process-lifetime choice. Multi-window mode
+        // opens the redesigned Focus View (AppWindow + Control Bar)
+        // directly; single-window mode opens the legacy `DesktopShell`
+        // and never touches the new code paths.
+        if crate::window::is_multi_window_enabled() {
+            tracing::info!("ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode");
+            let route = crate::state::GuestRoute::CapsuleHandle {
+                handle: "github.com/Koh0920/WasedaP2P".to_string(),
+                label: "WasedaP2P".to_string(),
+            };
+            match crate::window::open_app_window(cx, route) {
+                Ok(_) => tracing::info!("Focus View AppWindow opened at startup"),
+                Err(err) => {
+                    tracing::error!(error = %err, "Focus View startup failed; quitting");
+                    cx.quit();
+                    return;
                 }
-            },
-        )
-        .expect("failed to open ato-desktop window");
+            }
+        } else {
+            tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
+            let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    titlebar: Some(TitleBar::title_bar_options()),
+                    focus: true,
+                    show: true,
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_decorations: Some(WindowDecorations::Client),
+                    ..Default::default()
+                },
+                {
+                    let open_url_bridge = open_url_bridge.clone();
+                    move |window, cx| {
+                        let shell =
+                            cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
+                        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+                    }
+                },
+            )
+            .expect("failed to open ato-desktop window");
+        }
 
         cx.activate(true);
     });
