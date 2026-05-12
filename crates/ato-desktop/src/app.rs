@@ -362,8 +362,9 @@ pub fn run() {
         // When the flag is off this is a no-op so the binding never
         // surprises users who haven't opted in.
         cx.on_action(|_: &OpenAppWindowExperiment, cx: &mut App| {
+            tracing::info!("OpenAppWindowExperiment handler entered");
             if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
+                tracing::warn!(
                     "OpenAppWindowExperiment dispatched but multi-window flag is off"
                 );
                 return;
@@ -372,8 +373,10 @@ pub fn run() {
                 url::Url::parse("https://ato.run/")
                     .expect("https://ato.run/ is a valid URL"),
             );
-            if let Err(err) = crate::window::open_app_window(cx, route) {
-                tracing::error!(error = %err, "failed to open app window experiment");
+            tracing::info!("calling open_app_window");
+            match crate::window::open_app_window(cx, route) {
+                Ok(_) => tracing::info!("open_app_window returned Ok"),
+                Err(err) => tracing::error!(error = %err, "open_app_window failed"),
             }
         });
 

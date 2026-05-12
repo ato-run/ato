@@ -1207,6 +1207,12 @@ pub struct AppState {
     /// is unread by the renderer.
     #[allow(dead_code)]
     pub app_windows: AppWindowRegistry,
+    /// FIFO queue of host-level GPUI actions requested by the
+    /// automation socket (MCP `host_dispatch_action`). Drained on
+    /// every `DesktopShell::render` pass. Bypasses macOS Accessibility
+    /// permission requirements that block osascript-based keystroke
+    /// synthesis.
+    pub pending_host_actions: VecDeque<String>,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -1310,6 +1316,7 @@ impl AppState {
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
             app_windows: AppWindowRegistry::default(),
+            pending_host_actions: VecDeque::new(),
             next_task_id: 2,
             next_pane_id: 2,
             next_new_tab_index: 1,
@@ -1500,6 +1507,7 @@ impl AppState {
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
             app_windows: AppWindowRegistry::default(),
+            pending_host_actions: VecDeque::new(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
