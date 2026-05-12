@@ -26,10 +26,14 @@ impl Render for LauncherShellPlaceholder {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Same light theme as the redesign reference. Real Launcher
+        // content (rail + capsule store + settings tabs + retention
+        // pill) migrates in once the DesktopShell → LauncherShell
+        // rename portion of #170 lands.
         div()
             .size_full()
-            .bg(rgb(0x09090b))
-            .text_color(rgb(0xd4d4d8))
+            .bg(rgb(0xfafafa))
+            .text_color(rgb(0x52525b))
             .flex()
             .flex_col()
             .items_center()
@@ -38,6 +42,7 @@ impl Render for LauncherShellPlaceholder {
             .child(
                 div()
                     .text_lg()
+                    .text_color(rgb(0x18181b))
                     .child("Launcher placeholder (Focus View redesign — #170)"),
             )
             .child(

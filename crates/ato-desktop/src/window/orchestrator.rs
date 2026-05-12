@@ -36,10 +36,12 @@ impl Render for AppWindowShell {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Light backdrop matching the redesign reference mockups; the
+        // real running-app WKWebView mounts here in a follow-up commit.
         div()
             .size_full()
-            .bg(rgb(0x111113))
-            .text_color(rgb(0xd4d4d8))
+            .bg(rgb(0xf4f4f5))
+            .text_color(rgb(0x52525b))
             .flex()
             .flex_col()
             .items_center()
@@ -48,6 +50,7 @@ impl Render for AppWindowShell {
             .child(
                 div()
                     .text_lg()
+                    .text_color(rgb(0x18181b))
                     .child("App window placeholder (Focus View redesign — #169)"),
             )
             .child(
