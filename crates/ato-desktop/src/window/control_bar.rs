@@ -11,9 +11,9 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, point, px, rgb, size, App, Bounds, BoxShadow, Context, FontWeight, IntoElement,
-    MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions,
+    div, hsla, point, px, rgb, size, AnyWindowHandle, App, Bounds, BoxShadow, Context, FontWeight,
+    IntoElement, MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowKind, WindowOptions,
 };
 use gpui_component::{Icon, IconName};
 
@@ -174,15 +174,16 @@ fn url_pill(url: SharedString) -> impl IntoElement {
         .child(Icon::new(IconName::ChevronDown).size(px(14.0)))
 }
 
-/// Open the bar anchored above a parent app window's bounds. The
-/// position is computed once at spawn time; OS-managed tracking
-/// across drag / Spaces / fullscreen depends on the
-/// `addChildWindow:ordered:` plumbing scheduled for a follow-up.
+/// Open the bar anchored above a parent app window's bounds. Returns
+/// the new bar's `AnyWindowHandle` so the orchestrator can pass it
+/// to `crate::window::macos::attach_as_child` together with the
+/// parent handle — that's where the real `addChildWindow:ordered:`
+/// plumbing happens.
 pub fn open_control_bar_window_at(
     cx: &mut App,
     parent_bounds: Bounds<Pixels>,
     route: GuestRoute,
-) -> Result<()> {
+) -> Result<AnyWindowHandle> {
     let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
     let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
     // Center horizontally on the parent; sit just above the parent's top edge.
@@ -197,11 +198,9 @@ pub fn open_control_bar_window_at(
     open_control_bar_inner(cx, bounds, route)
 }
 
-/// Standalone bar opener — used by the legacy `OpenAppWindowExperiment`
-/// path where no parent bounds are known. Centers the bar on the
-/// screen. Will be removed once every spawn goes through
-/// `open_control_bar_window_at`.
-pub fn open_control_bar_window(cx: &mut App) -> Result<()> {
+/// Standalone bar opener — keeps the legacy code path callable
+/// (e.g. AODD scripts) without parent bounds. Centers on screen.
+pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
     let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
     let bounds = Bounds::centered(None, size(bar_w, bar_h), cx);
@@ -218,7 +217,7 @@ fn open_control_bar_inner(
     cx: &mut App,
     bounds: Bounds<Pixels>,
     route: GuestRoute,
-) -> Result<()> {
+) -> Result<AnyWindowHandle> {
     let options = WindowOptions {
         titlebar: None,
         focus: false,
@@ -231,9 +230,9 @@ fn open_control_bar_inner(
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
-    cx.open_window(options, move |window, cx| {
+    let handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|_cx| ControlBarShellPlaceholder::new(&route));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
-    Ok(())
+    Ok(*handle)
 }

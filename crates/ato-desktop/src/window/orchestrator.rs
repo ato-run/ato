@@ -422,19 +422,30 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<()> {
         ..Default::default()
     };
     let route_for_view = route.clone();
-    cx.open_window(options, move |window, cx| {
+    let app_handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|_cx| AppWindowShell::new(&route_for_view));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
     // Pair every spawned app window with its Control Bar window,
-    // positioned just above the app window's top edge so the two
-    // surfaces read as a single composition. `addChildWindow:` will
-    // replace this static positioning with true OS-managed tracking
-    // once the lower-level plumbing lands.
+    // positioned just above the app window's top edge.
     let route_for_bar = route.clone();
-    if let Err(err) = super::control_bar::open_control_bar_window_at(cx, app_bounds, route_for_bar) {
-        tracing::error!(error = %err, "failed to open control bar window");
+    match super::control_bar::open_control_bar_window_at(cx, app_bounds, route_for_bar) {
+        Ok(bar_handle) => {
+            // macOS: glue the bar to the parent via addChildWindow so
+            // the OS handles co-movement (drag, resize, Spaces,
+            // fullscreen). Best-effort — failures are logged but do
+            // not block the window from being usable on its own.
+            #[cfg(target_os = "macos")]
+            if let Err(err) =
+                super::macos::attach_as_child(cx, *app_handle, bar_handle)
+            {
+                tracing::warn!(error = %err, "addChildWindow attach failed; bar will not co-move");
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "failed to open control bar window");
+        }
     }
     Ok(())
 }

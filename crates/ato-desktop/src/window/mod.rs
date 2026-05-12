@@ -17,6 +17,8 @@ pub mod card_switcher;
 pub mod control_bar;
 pub mod gestures;
 pub mod launcher;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod orchestrator;
 
 pub use card_switcher::{open_card_switcher_window, CardSwitcherShellPlaceholder};
