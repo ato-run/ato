@@ -61,41 +61,87 @@ impl Render for AppWindowShell {
         let route_label = self.route_label.clone();
         div()
             .size_full()
-            .bg(linear_gradient(
-                135.0,
-                linear_color_stop(hsla(210.0 / 360.0, 0.65, 0.94, 1.0), 0.0),
-                linear_color_stop(hsla(345.0 / 360.0, 0.55, 0.95, 1.0), 1.0),
-            ))
+            .bg(rgb(0xfafafa))
             .text_color(rgb(0x18181b))
             .flex()
             .flex_col()
-            .p(px(24.0))
-            .gap(px(20.0))
-            .child(top_card_row())
-            .child(title_block(title, route_label))
+            .p(px(20.0))
+            .gap(px(16.0))
+            .child(hero_banner(title, route_label))
             .child(bottom_panel_row())
     }
 }
 
-fn top_card_row() -> impl IntoElement {
+/// Banner that owns the upper half of the AppWindow surface. Strong
+/// blue→pink diagonal gradient with preview cards + Safety summary
+/// floating at the top and the capsule title block anchored at
+/// bottom-left, matching the reference mockup's "WasedaP2P" hero.
+fn hero_banner(title: SharedString, route_label: SharedString) -> impl IntoElement {
     div()
-        .flex()
-        .gap(px(16.0))
-        .items_stretch()
-        .child(preview_card(
-            "CodeLab",
-            IconName::SquareTerminal,
-            0x6366f1,
-            code_preview_body().into_any_element(),
+        .h(px(300.0))
+        .w_full()
+        .rounded(px(16.0))
+        .relative()
+        .overflow_hidden()
+        .bg(linear_gradient(
+            135.0,
+            linear_color_stop(hsla(210.0 / 360.0, 0.70, 0.92, 1.0), 0.0),
+            linear_color_stop(hsla(345.0 / 360.0, 0.60, 0.94, 1.0), 1.0),
         ))
-        .child(preview_card(
-            "Discover",
-            IconName::ChartPie,
-            0x10b981,
-            chart_preview_body().into_any_element(),
-        ))
-        .child(div().flex_1())
-        .child(safety_summary_card())
+        // Cards row floating at top
+        .child(
+            div()
+                .absolute()
+                .top(px(20.0))
+                .left(px(20.0))
+                .right(px(20.0))
+                .flex()
+                .gap(px(14.0))
+                .items_stretch()
+                .child(preview_card(
+                    "CodeLab",
+                    IconName::SquareTerminal,
+                    0x6366f1,
+                    code_preview_body().into_any_element(),
+                ))
+                .child(preview_card(
+                    "Discover",
+                    IconName::ChartPie,
+                    0x10b981,
+                    chart_preview_body().into_any_element(),
+                ))
+                .child(div().flex_1())
+                .child(safety_summary_card()),
+        )
+        // Title anchored at bottom-left of the banner
+        .child(
+            div()
+                .absolute()
+                .bottom(px(20.0))
+                .left(px(28.0))
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(36.0))
+                        .font_weight(FontWeight(700.0))
+                        .text_color(rgb(0x18181b))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x52525b))
+                        .child("安全・シンプル・つながる"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x71717a))
+                        .child(route_label),
+                ),
+        )
 }
 
 fn preview_card(
@@ -250,7 +296,10 @@ fn safety_summary_card() -> impl IntoElement {
         .child(row("Security score", "92/100", 0xf59e0b))
 }
 
+#[allow(dead_code)]
 fn title_block(title: SharedString, route_label: SharedString) -> impl IntoElement {
+    // Retained for reference / future use. The active layout puts
+    // the title block inside the hero banner via `hero_banner`.
     div()
         .flex()
         .flex_col()
@@ -267,12 +316,6 @@ fn title_block(title: SharedString, route_label: SharedString) -> impl IntoEleme
                 .text_color(rgb(0x71717a))
                 .child(route_label),
         )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(0xa1a1aa))
-                .child("App window placeholder — real WKWebView attaches in a follow-up"),
-        )
 }
 
 fn bottom_panel_row() -> impl IntoElement {
@@ -280,30 +323,16 @@ fn bottom_panel_row() -> impl IntoElement {
         .flex_1()
         .flex()
         .gap(px(16.0))
-        .child(stat_panel(
-            "ネットワーク",
-            &[("Peers", "128"), ("Documents", "368"), ("Videos", "96")],
-            0x6366f1,
-        ))
-        .child(stat_panel(
-            "転送状況",
-            &[("Upload", "1.2 TB"), ("Download", "688 GB"), ("Protected", "1,240")],
-            0x10b981,
-        ))
-        .child(stat_panel(
-            "ストレージ",
-            &[("Documents", "32%"), ("Videos", "28%"), ("Images", "18%")],
-            0xf59e0b,
-        ))
+        .child(network_panel())
+        .child(transfer_panel())
+        .child(storage_panel())
         .child(terminal_panel())
 }
 
-fn stat_panel(
-    title: &'static str,
-    rows: &[(&'static str, &'static str)],
-    accent: u32,
-) -> gpui::Div {
-    let mut body = div()
+/// Reusable panel chrome — title strip + body. Mirrors the
+/// reference mockup's card styling.
+fn panel_card(accent: u32, title: &'static str) -> gpui::Div {
+    div()
         .flex_1()
         .bg(rgb(0xffffff))
         .border_1()
@@ -312,7 +341,7 @@ fn stat_panel(
         .p(px(14.0))
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(px(8.0))
         .child(
             div()
                 .flex()
@@ -331,24 +360,175 @@ fn stat_panel(
                         .font_weight(FontWeight(600.0))
                         .child(title),
                 ),
-        );
-    for (label, value) in rows {
-        body = body.child(
+        )
+}
+
+/// `ネットワーク` panel — a small radial peer dot cluster suggesting
+/// a P2P mesh, plus a legend mapping colours to peer categories.
+fn network_panel() -> gpui::Div {
+    let legend_row =
+        |color: u32, label: &'static str, value: &'static str| -> gpui::Div {
             div()
                 .flex()
                 .items_center()
-                .text_sm()
+                .gap(px(6.0))
+                .text_xs()
                 .text_color(rgb(0x52525b))
-                .child(div().flex_1().child(*label))
+                .child(
+                    div()
+                        .w(px(6.0))
+                        .h(px(6.0))
+                        .rounded_full()
+                        .bg(rgb(color)),
+                )
+                .child(div().flex_1().child(label))
                 .child(
                     div()
                         .font_weight(FontWeight(600.0))
                         .text_color(rgb(0x18181b))
-                        .child(*value),
+                        .child(value),
+                )
+        };
+    panel_card(0x6366f1, "ネットワーク")
+        .child(
+            div()
+                .flex()
+                .gap(px(10.0))
+                .items_stretch()
+                .child(peer_cluster_graph())
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(legend_row(0x6366f1, "Peers", "128"))
+                        .child(legend_row(0xf472b6, "Documents", "368"))
+                        .child(legend_row(0x10b981, "Videos", "96"))
+                        .child(legend_row(0x60a5fa, "Images", "312"))
+                        .child(legend_row(0xa1a1aa, "Others", "64")),
                 ),
-        );
-    }
-    body
+        )
+}
+
+/// Tiny peer-mesh dot graph — colours match the legend.
+fn peer_cluster_graph() -> gpui::Div {
+    let dot = |x: f32, y: f32, color: u32, sz: f32| -> gpui::Div {
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(sz))
+            .h(px(sz))
+            .rounded_full()
+            .bg(rgb(color))
+    };
+    div()
+        .relative()
+        .w(px(96.0))
+        .h(px(96.0))
+        // central node
+        .child(dot(42.0, 42.0, 0x6366f1, 12.0))
+        // satellites
+        .child(dot(10.0, 18.0, 0x60a5fa, 8.0))
+        .child(dot(72.0, 12.0, 0xf472b6, 8.0))
+        .child(dot(78.0, 56.0, 0x10b981, 8.0))
+        .child(dot(20.0, 72.0, 0xa1a1aa, 8.0))
+        .child(dot(54.0, 80.0, 0xf472b6, 6.0))
+        .child(dot(4.0, 50.0, 0x10b981, 6.0))
+}
+
+/// `転送状況` panel — three labelled progress bars matching the
+/// reference's Upload / Download / Files-protected rows.
+fn transfer_panel() -> gpui::Div {
+    let bar = |label: &'static str,
+               value: &'static str,
+               filled: f32,
+               accent: u32|
+     -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .text_xs()
+                    .text_color(rgb(0x52525b))
+                    .child(div().flex_1().child(label))
+                    .child(
+                        div()
+                            .font_weight(FontWeight(600.0))
+                            .text_color(rgb(0x18181b))
+                            .child(value),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .h(px(6.0))
+                    .w_full()
+                    .rounded_full()
+                    .bg(rgb(0xe4e4e7))
+                    .child(
+                        div()
+                            .h(px(6.0))
+                            .w(gpui::relative(filled))
+                            .rounded_full()
+                            .bg(rgb(accent)),
+                    ),
+            )
+    };
+    panel_card(0x10b981, "転送状況")
+        .child(bar("Upload 1.2 TB", "68%", 0.68, 0x10b981))
+        .child(bar("Download 688 GB", "42%", 0.42, 0x3b82f6))
+        .child(bar("Files protected 1,240", "88%", 0.88, 0x6366f1))
+}
+
+/// `ストレージ` panel — horizontal stacked bar (donut approximation
+/// since GPUI lacks built-in arc rendering) + legend.
+fn storage_panel() -> gpui::Div {
+    let legend_row =
+        |color: u32, label: &'static str, value: &'static str| -> gpui::Div {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_xs()
+                .text_color(rgb(0x52525b))
+                .child(
+                    div()
+                        .w(px(8.0))
+                        .h(px(8.0))
+                        .rounded(px(2.0))
+                        .bg(rgb(color)),
+                )
+                .child(div().flex_1().child(label))
+                .child(
+                    div()
+                        .font_weight(FontWeight(600.0))
+                        .text_color(rgb(0x18181b))
+                        .child(value),
+                )
+        };
+    panel_card(0xf59e0b, "ストレージ")
+        .child(
+            div()
+                .h(px(12.0))
+                .w_full()
+                .rounded_full()
+                .overflow_hidden()
+                .flex()
+                .child(div().w(gpui::relative(0.32)).h_full().bg(rgb(0x6366f1)))
+                .child(div().w(gpui::relative(0.28)).h_full().bg(rgb(0x3b82f6)))
+                .child(div().w(gpui::relative(0.18)).h_full().bg(rgb(0xf59e0b)))
+                .child(div().w(gpui::relative(0.22)).h_full().bg(rgb(0xa1a1aa))),
+        )
+        .child(legend_row(0x6366f1, "Documents", "32%"))
+        .child(legend_row(0x3b82f6, "Videos", "28%"))
+        .child(legend_row(0xf59e0b, "Images", "18%"))
+        .child(legend_row(0xa1a1aa, "Others", "22%"))
 }
 
 fn terminal_panel() -> impl IntoElement {

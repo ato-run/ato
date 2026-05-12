@@ -1,0 +1,72 @@
+usecase: "Reduce the visual gap between the AppWindow placeholder and the redesign reference (concept doc image 3) by adding real data viz to the bottom panels and restructuring the upper half as a hero banner"
+actor: "Autonomous Claude Operator + Fixer roles using host_dispatch_action / host_take_screenshot via the Focus-mode MCP socket"
+goal: "Bottom panels carry recognisable viz (peer graph, progress bars, stacked breakdown). Upper half presents a gradient banner with cards floating at top and a large `WasedaP2P` title anchored bottom-left."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1) startup, AppWindow auto-spawned with the WasedaP2P CapsuleHandle route"
+out_of_scope:
+  - "Stacked / size-differentiated card switcher inside the banner (reference shows CodeLab + Discover small / WasedaP2P large+subnav / DesignHub small)"
+  - "Pagination dots below the banner card row"
+  - "Real WKWebView mounting (deferred — receipt R7 carries the per-window WebViewManager migration as a follow-up)"
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Iter A: launch Focus mode, screenshot baseline"
+    observation: |
+      AppWindow renders with a flat top: two preview cards
+      (CodeLab, Discover) + Safety summary side by side, then a
+      WasedaP2P title block, then four bottom panels of plain
+      key-value rows. Compared to the reference, the gradient is too
+      subtle, the title sits at top-left (reference: bottom-left of
+      a banner), and the four panels have no visualisation at all.
+
+  - action: "Iter B: replace the four `stat_panel` rows with three viz-bearing panels"
+    observation: |
+      - `network_panel` — small radial peer-dot cluster on the left
+        plus a five-row legend on the right (Peers / Documents /
+        Videos / Images / Others with counts).
+      - `transfer_panel` — three labelled progress bars (Upload /
+        Download / Files protected) with filled widths matching the
+        reference's 68% / 42% / 88%.
+      - `storage_panel` — horizontal four-segment stacked bar plus a
+        colour-coded legend (32% / 28% / 18% / 22%). Stacked bar is
+        a donut approximation; true arc rendering is deferred until
+        we have an SVG path renderer hooked up.
+      - `terminal_panel` unchanged (already matches reference).
+
+  - action: "Iter C: restructure the upper half as a hero banner"
+    observation: |
+      New `hero_banner` function — 300px-tall rounded panel with a
+      strong 135° blue → pink gradient. Cards float at the top
+      (`absolute` positioning at top:20px). WasedaP2P title block
+      anchored at bottom-left (`absolute` bottom:20px / left:28px)
+      with subtitle `安全・シンプル・つながる` per the reference.
+      The legacy `title_block` helper is preserved (`#[allow(dead_code)]`)
+      for future reuse.
+
+  - action: "Rebuild, restart hermetic Focus mode, host_take_screenshot"
+    observation: |
+      See iterC-hero-banner.png. Banner gradient is prominent, title
+      sits bottom-left, cards float at top of banner with their
+      preview bodies (code / chart) visible. Bottom row shows the
+      new viz panels. The overall composition is markedly closer to
+      reference image 3 than the R7 baseline.
+
+agent_observation:
+  user_visible_problem: |
+    None blocking. The AppWindow now reads as a WasedaP2P-style
+    dashboard at a glance rather than a generic placeholder. The
+    remaining differences from the reference are smaller, more
+    detailed components — see suggested_fix.
+
+  likely_cause: "n/a — these are reference-driven design iterations, not regressions."
+
+  suggested_fix:
+    - "Already shipped this round: viz-bearing network / transfer / storage panels + hero_banner with bottom-left title and floating cards."
+    - "Defer to next iteration: replace the static CodeLab + Discover + Safety-summary card row with a horizontal task-switcher style — small CodeLab + Discover peeking from left, WasedaP2P expanded centre with subnav (概要 / 共有 / ストレージ / セキュリティ / 設定), DesignHub peeking right. Plus pagination dots."
+    - "Defer: GPUI does not have a built-in pie / donut renderer; once we wire an SVG element we can replace the storage stacked bar with a real donut to match the reference more closely."
+
+evidence:
+  - iterC-hero-banner.png
+
+status: "fixed"
