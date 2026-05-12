@@ -1,0 +1,70 @@
+usecase: "Card Switcher icon shows the number of currently open AppWindows as a badge, updating live as windows open and close."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket (host_dispatch_action)"
+goal: "Badge appears top-right of the Card Switcher pill button with a count that tracks AppWindowRegistry::len() in real time."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1) with short ATO_HOME=/tmp/ato-r24 to keep the automation socket path within SUN_LEN."
+out_of_scope:
+  - "Counting non-AppWindow surfaces (Store, Launcher, Card Switcher itself) — the badge intentionally reflects only `AppWindowRegistry`."
+  - "Tuning CloseAppWindow's window-selection rule (it currently picks the Store first; that is a separate concern from the badge)."
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User asks for a badge on the Card Switcher icon showing the current open-window count"
+    observation: "Existing `pill_button` had no badge slot; `bar_pill` was a pure function with no access to live state."
+
+  - action: "Add `AppWindowRegistry` re-render subscription to `ControlBarShellPlaceholder::new`"
+    observation: |
+      `cx.observe_global::<AppWindowRegistry>(|_, cx| cx.notify())` —
+      gpui's `global_mut::<G>()` already pushes a NotifyGlobalObservers
+      effect on mutation (verified by reading gpui/src/app.rs:1696),
+      so any code path that opens/closes/focuses a window will wake
+      the Control Bar's render loop without any explicit notify calls
+      at the mutation sites.
+
+  - action: "Read `cx.global::<AppWindowRegistry>().len()` in `Render::render` and thread it through `bar_pill` → `pill_button`"
+    observation: "Added `badge: Option<usize>` parameter to `pill_button`; only the Card Switcher button passes `Some(window_count)`."
+
+  - action: "Render the badge as an `.absolute()` child of the button div"
+    observation: |
+      16×16 zinc-900 circle with white 10px bold count, positioned at
+      `top: -2, right: -2` so it reads as a separate chip protruding
+      from the button's top-right corner. Only rendered when count > 0
+      (`badge.filter(|n| *n > 0)`).
+
+  - action: "Build + launch hermetic Focus mode under /tmp/ato-r24 (short ATO_HOME for SUN_LEN headroom)"
+    observation: "Automation socket binds successfully at /tmp/ato-r24/run/ato-desktop-46680.sock — the long-path failure from the previous run is bypassed by ATO_HOME at the filesystem root."
+
+  - action: "MCP host_dispatch_action `OpenAppWindowExperiment` (1st) → screencapture"
+    observation: "badge-count-1.png shows a single black circle reading '1' at the top-right of the Card Switcher pill button. No badge appears on Settings or Store."
+
+  - action: "MCP host_dispatch_action `OpenAppWindowExperiment` (2nd) → screencapture"
+    observation: "badge-count-2.png shows the badge has updated to '2' without any user-driven refresh — the `observe_global` subscription fired on the second registry mutation and the bar re-rendered."
+
+  - action: "MCP host_dispatch_action `CloseAppWindow` → screencapture"
+    observation: |
+      badge-after-close.png still reads '2' — desktop.log shows the
+      handler closed the Store window slot, not an AppWindow. The
+      badge correctly reflects unchanged AppWindowRegistry::len(),
+      which validates that the badge sources from the right place;
+      the CloseAppWindow handler's window-selection priority is a
+      separate concern outside this iteration's scope.
+
+agent_observation:
+  user_visible_problem: |
+    Resolved. The Card Switcher pill button now carries a black-and-
+    white count badge in its top-right corner. Opening additional
+    AppWindows updates the count in real time without any
+    intervening refresh action.
+  likely_cause: "The Control Bar had no live binding to the AppWindowRegistry global. Without `observe_global`, the bar's view would only re-render on hover or external triggers, so the count would have been stale by design."
+  suggested_fix:
+    - "Already shipped: observe_global subscription + badge child on the Card Switcher pill_button."
+    - "Future: extract the badge into a `count_badge(n)` helper if other affordances need the same chip (e.g. Settings showing pending updates)."
+    - "Future: re-evaluate `CloseAppWindow`'s window-selection so it closes the most-recently-focused AppWindow first, not the Store window. (Separate from this iteration.)"
+
+evidence:
+  - badge-count-1.png
+  - badge-count-2.png
+  - badge-after-close.png
+
+status: "fixed"

@@ -20,7 +20,7 @@ use gpui::{
 use gpui_component::{Icon, IconName};
 
 use crate::app::{OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings};
-use crate::state::GuestRoute;
+use crate::state::{AppWindowRegistry, GuestRoute};
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
@@ -36,7 +36,16 @@ pub struct ControlBarShellPlaceholder {
 }
 
 impl ControlBarShellPlaceholder {
-    pub fn new(route: &GuestRoute) -> Self {
+    pub fn new(route: &GuestRoute, cx: &mut Context<Self>) -> Self {
+        // Re-render whenever the AppWindowRegistry changes so the
+        // Card Switcher badge reflects the live open-window count.
+        // `global_mut::<AppWindowRegistry>()` (used by app.rs +
+        // orchestrator.rs whenever a window opens/closes/focuses)
+        // pushes a NotifyGlobalObservers effect that fires this.
+        cx.observe_global::<AppWindowRegistry>(|_view, cx| {
+            cx.notify();
+        })
+        .detach();
         Self {
             url_display: SharedString::from(display_url_from_route(route)),
         }
@@ -59,16 +68,20 @@ impl Render for ControlBarShellPlaceholder {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Count of currently open app windows — surfaced as a badge
+        // on the Card Switcher pill button so users see at a glance
+        // how many windows the switcher would reveal.
+        let window_count = cx.global::<AppWindowRegistry>().len();
         // The host window is the pill — no padding ring, no centring
         // wrapper. `bar_pill` is the entire content and uses
         // `.size_full()` to inherit the window's dimensions.
-        bar_pill(self.url_display.clone())
+        bar_pill(self.url_display.clone(), window_count)
     }
 }
 
-fn bar_pill(url: SharedString) -> impl IntoElement {
+fn bar_pill(url: SharedString, window_count: usize) -> impl IntoElement {
     div()
         .size_full()
         .px(px(6.0))
@@ -91,6 +104,7 @@ fn bar_pill(url: SharedString) -> impl IntoElement {
             Some(PillIcon::Builtin(IconName::Settings)),
             Some("設定"),
             ActionTarget::Settings,
+            None,
         ))
         .child(url_pill(url))
         .child(pill_button(
@@ -98,12 +112,14 @@ fn bar_pill(url: SharedString) -> impl IntoElement {
             Some(PillIcon::Builtin(IconName::GalleryVerticalEnd)),
             None,
             ActionTarget::CardSwitcher,
+            Some(window_count),
         ))
         .child(pill_button(
             "store",
             Some(PillIcon::Custom("icons/shopping-bag.svg")),
             Some("ストア"),
             ActionTarget::Store,
+            None,
         ))
         .child(info_dots())
 }
@@ -130,14 +146,18 @@ fn pill_button(
     icon: Option<PillIcon>,
     label: Option<&'static str>,
     target: ActionTarget,
+    badge: Option<usize>,
 ) -> impl IntoElement {
     // Bare icon affordance — no fill, no border — sits directly on
     // the pill's white background. Reveals a subtle zinc-100 fill on
     // hover so the click target is still discoverable. Mirrors the
     // reference mockup where Settings / Card Switcher / Store look
-    // identical to the pill surface at rest.
+    // identical to the pill surface at rest. `.relative()` makes the
+    // button the positioning parent for any `.absolute()` overlay
+    // (currently: the Card Switcher window-count badge).
     let mut body = div()
         .id(id)
+        .relative()
         .h(px(36.0))
         .px(px(if label.is_some() { 12.0 } else { 10.0 }))
         .flex()
@@ -181,6 +201,30 @@ fn pill_button(
     }
     if let Some(label) = label {
         body = body.child(div().child(label));
+    }
+    // Window-count badge — only shown when count > 0. Positioned at
+    // the button's top-right corner, slightly outdented so it reads
+    // as a separate chip rather than an inset label. Zinc-900 fill
+    // with white text matches the reference mockup language used for
+    // other "live count" affordances elsewhere in the shell.
+    if let Some(count) = badge.filter(|n| *n > 0) {
+        body = body.child(
+            div()
+                .absolute()
+                .top(px(-2.0))
+                .right(px(-2.0))
+                .w(px(16.0))
+                .h(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(0x18181b))
+                .text_color(rgb(0xffffff))
+                .text_size(px(10.0))
+                .font_weight(FontWeight(700.0))
+                .child(SharedString::from(count.to_string())),
+        );
     }
     body
 }
@@ -327,7 +371,7 @@ fn open_control_bar_inner(
         ..Default::default()
     };
     let handle = cx.open_window(options, move |window, cx| {
-        let shell = cx.new(|_cx| ControlBarShellPlaceholder::new(&route));
+        let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, cx));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     // Round the NSWindow's contentView layer so the underlying
