@@ -17,7 +17,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName};
 
-use crate::app::{OpenCardSwitcher, OpenLauncherWindow, ShowSettings};
+use crate::app::{OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings};
 use crate::state::GuestRoute;
 
 const BAR_WIDTH: f32 = 840.0;
@@ -142,7 +142,7 @@ fn pill_button(
                 window.dispatch_action(Box::new(ShowSettings), cx);
             }
             ActionTarget::Store => {
-                window.dispatch_action(Box::new(OpenLauncherWindow), cx);
+                window.dispatch_action(Box::new(OpenStoreWindow), cx);
             }
             ActionTarget::CardSwitcher => {
                 window.dispatch_action(Box::new(OpenCardSwitcher), cx);

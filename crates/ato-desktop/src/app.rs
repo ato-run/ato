@@ -96,7 +96,12 @@ actions!(
         // portion of #170 lands.
         OpenLauncherWindow,
         // #173 — opens the Card Switcher overlay window.
-        OpenCardSwitcher
+        OpenCardSwitcher,
+        // Opens the Store window — a Wry WebView pointed at
+        // https://ato.run/. Re-clicks focus the existing window
+        // rather than stacking duplicates. Gated on the multi-window
+        // flag.
+        OpenStoreWindow
     ]
 );
 
@@ -285,9 +290,13 @@ pub fn run() {
         // rather than stack overlays.
         cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
         // Slot tracking the currently-open Launcher window so the
-        // Control Bar's Settings / Store buttons focus the existing
-        // window on a 2nd+ click instead of spawning a new one.
+        // Control Bar's Settings button focuses the existing window
+        // on a 2nd+ click instead of spawning a new one.
         cx.set_global(crate::window::launcher::LauncherWindowSlot::default());
+        // Slot tracking the currently-open Store window (Wry WebView
+        // on ato.run). Same focus-on-existing behaviour as the
+        // Launcher slot.
+        cx.set_global(crate::window::store::StoreWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
@@ -401,6 +410,13 @@ pub fn run() {
                 );
                 tracing::info!("Card Switcher window closed; slot cleared");
             }
+            let store_slot = cx
+                .global::<crate::window::store::StoreWindowSlot>()
+                .0;
+            if store_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(crate::window::store::StoreWindowSlot(None));
+                tracing::info!("Store window closed; slot cleared");
+            }
 
             // In Focus mode the Control Bar is a process-lifetime
             // singleton with its own lifecycle, decoupled from any
@@ -470,6 +486,19 @@ pub fn run() {
             }
             if let Err(err) = crate::window::open_card_switcher_window(cx) {
                 tracing::error!(error = %err, "failed to open card switcher window");
+            }
+        });
+
+        // Open / focus the Store window (Wry WebView → ato.run).
+        cx.on_action(|_: &OpenStoreWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenStoreWindow dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::store::open_store_window(cx) {
+                tracing::error!(error = %err, "failed to open store window");
             }
         });
 
