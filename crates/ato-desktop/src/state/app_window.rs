@@ -14,10 +14,42 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::state::{GuestRoute, PaneBounds};
+
+/// Set of GPUI WindowIds for "user-facing content windows" — every
+/// window the user could navigate to (AppWindow, StoreWindow,
+/// StartWindow, Launcher). Excludes chrome (Control Bar, Card Switcher
+/// overlay). Used by the Control Bar's Card Switcher badge to surface
+/// the live open-window count.
+///
+/// Registration happens at each window's spawn site; eviction happens
+/// in `app::on_window_closed` so a single code path handles both
+/// user-triggered close (red traffic light) and programmatic close.
+///
+/// Distinct from `AppWindowRegistry`, which is AppWindow-only and
+/// drives Card Switcher MRU cards.
+#[derive(Default, Clone, Debug)]
+pub struct OpenContentWindows {
+    ids: HashSet<u64>,
+}
+
+impl OpenContentWindows {
+    pub fn insert(&mut self, gpui_window_id: u64) -> bool {
+        self.ids.insert(gpui_window_id)
+    }
+    pub fn remove(&mut self, gpui_window_id: u64) -> bool {
+        self.ids.remove(&gpui_window_id)
+    }
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+}
 
 pub type AppWindowId = usize;
 

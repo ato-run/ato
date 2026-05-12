@@ -62,9 +62,14 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
-    cx.open_window(options, |window, cx| {
+    let handle = cx.open_window(options, |window, cx| {
         let shell = cx.new(|_cx| StartWindowShell);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+    // Register the new window in the cross-window content set so the
+    // Control Bar Card Switcher badge increments. Eviction is handled
+    // in `app::on_window_closed` keyed by the GPUI WindowId.
+    cx.global_mut::<crate::state::OpenContentWindows>()
+        .insert(handle.window_id().as_u64());
     Ok(())
 }

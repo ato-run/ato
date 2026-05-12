@@ -29,6 +29,7 @@ pub mod store;
 // lives here (not in `state/`) so the state module stays free of
 // UI-framework dependencies.
 impl gpui::Global for crate::state::AppWindowRegistry {}
+impl gpui::Global for crate::state::OpenContentWindows {}
 
 pub use card_switcher::{open_card_switcher_window, CardSwitcherShellPlaceholder};
 pub use control_bar::{

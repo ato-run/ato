@@ -289,6 +289,7 @@ pub fn run() {
         // read by Card Switcher (#173) to render real entries instead
         // of hardcoded placeholders.
         cx.set_global(crate::state::AppWindowRegistry::default());
+        cx.set_global(crate::state::OpenContentWindows::default());
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
@@ -392,6 +393,20 @@ pub fn run() {
                     app_window_id = id,
                     gpui_window_id = closed_id,
                     "AppWindow evicted from registry on close"
+                );
+            }
+
+            // Evict from the cross-window content set so the Card
+            // Switcher badge decrements. No-op for chrome windows
+            // (Control Bar, Card Switcher overlay) since they never
+            // registered.
+            if cx
+                .global_mut::<crate::state::OpenContentWindows>()
+                .remove(closed_id)
+            {
+                tracing::info!(
+                    gpui_window_id = closed_id,
+                    "content window evicted from open set on close"
                 );
             }
 

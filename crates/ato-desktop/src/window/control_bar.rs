@@ -20,7 +20,7 @@ use gpui::{
 use gpui_component::{Icon, IconName};
 
 use crate::app::{OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings};
-use crate::state::{AppWindowRegistry, GuestRoute};
+use crate::state::{GuestRoute, OpenContentWindows};
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
@@ -37,12 +37,13 @@ pub struct ControlBarShellPlaceholder {
 
 impl ControlBarShellPlaceholder {
     pub fn new(route: &GuestRoute, cx: &mut Context<Self>) -> Self {
-        // Re-render whenever the AppWindowRegistry changes so the
-        // Card Switcher badge reflects the live open-window count.
-        // `global_mut::<AppWindowRegistry>()` (used by app.rs +
-        // orchestrator.rs whenever a window opens/closes/focuses)
-        // pushes a NotifyGlobalObservers effect that fires this.
-        cx.observe_global::<AppWindowRegistry>(|_view, cx| {
+        // Re-render whenever the OpenContentWindows set changes so
+        // the Card Switcher badge reflects the live count. Every
+        // user-facing content window (AppWindow, Store, StartWindow,
+        // Launcher) inserts/removes from this set at spawn/close;
+        // `global_mut` pushes a NotifyGlobalObservers effect that
+        // wakes this subscription.
+        cx.observe_global::<OpenContentWindows>(|_view, cx| {
             cx.notify();
         })
         .detach();
@@ -70,10 +71,12 @@ impl Render for ControlBarShellPlaceholder {
         _window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Count of currently open app windows — surfaced as a badge
-        // on the Card Switcher pill button so users see at a glance
-        // how many windows the switcher would reveal.
-        let window_count = cx.global::<AppWindowRegistry>().len();
+        // Count of currently open content windows (AppWindow, Store,
+        // StartWindow, Launcher) — surfaced as a badge on the Card
+        // Switcher pill button so users see at a glance how many
+        // windows are in play. Chrome windows (Control Bar itself,
+        // Card Switcher overlay) are excluded.
+        let window_count = cx.global::<OpenContentWindows>().len();
         // The host window is the pill — no padding ring, no centring
         // wrapper. `bar_pill` is the entire content and uses
         // `.size_full()` to inherit the window's dimensions.

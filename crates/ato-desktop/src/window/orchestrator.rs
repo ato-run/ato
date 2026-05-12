@@ -627,6 +627,10 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
     {
         entry.gpui_window_id = Some(gpui_window_id);
     }
+    // Register in the cross-window content set so the Control Bar
+    // Card Switcher badge increments.
+    cx.global_mut::<crate::state::OpenContentWindows>()
+        .insert(gpui_window_id);
 
     // The Control Bar is intentionally NOT spawned as a child of
     // this AppWindow. It has a separate lifecycle (Focus-mode shell
