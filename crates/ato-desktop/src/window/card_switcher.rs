@@ -8,8 +8,9 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, size, App, Bounds, Context, FontWeight, IntoElement, Render, SharedString,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    div, hsla, px, rgb, size, App, Bounds, Context, FocusHandle, Focusable, FontWeight,
+    IntoElement, MouseButton, Render, SharedString, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions,
 };
 
 use crate::state::{AppWindowRegistry, GuestRoute};
@@ -25,11 +26,21 @@ struct CardEntry {
 
 pub struct CardSwitcherShellPlaceholder {
     cards: Vec<CardEntry>,
+    focus_handle: FocusHandle,
 }
 
 impl CardSwitcherShellPlaceholder {
-    fn new(cards: Vec<CardEntry>) -> Self {
-        Self { cards }
+    fn new(cards: Vec<CardEntry>, cx: &mut Context<Self>) -> Self {
+        Self {
+            cards,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+}
+
+impl Focusable for CardSwitcherShellPlaceholder {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -39,7 +50,24 @@ impl Render for CardSwitcherShellPlaceholder {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // Backdrop catches:
+        //   - left mouse down → close the switcher
+        //   - Escape key      → close the switcher
+        // Cards inside the row call `cx.stop_propagation()` on
+        // mouse down so clicking a card does NOT also close — that
+        // pathway is reserved for the future "switch to this
+        // AppWindow" select action.
         let backdrop = div()
+            .id("card-switcher-backdrop")
+            .track_focus(&self.focus_handle)
+            .on_mouse_down(MouseButton::Left, |_, window, _cx| {
+                window.remove_window();
+            })
+            .on_key_down(|event, window, _cx| {
+                if event.keystroke.key == "escape" {
+                    window.remove_window();
+                }
+            })
             .size_full()
             .bg(hsla(0.0, 0.0, 0.0, 0.7))
             .text_color(rgb(0xfafafa))
@@ -52,20 +80,21 @@ impl Render for CardSwitcherShellPlaceholder {
         } else {
             let mut row = backdrop;
             for (idx, card) in self.cards.iter().enumerate() {
-                row = row.child(mru_card(card.clone(), idx == 0));
+                row = row.child(mru_card(card.clone(), idx, idx == 0));
             }
             row
         }
     }
 }
 
-fn mru_card(card: CardEntry, is_active: bool) -> impl IntoElement {
+fn mru_card(card: CardEntry, idx: usize, is_active: bool) -> impl IntoElement {
     let border_color = if is_active {
         rgb(0x6366f1)
     } else {
         rgb(0x3f3f46)
     };
     div()
+        .id(("card", idx))
         .w(px(320.0))
         .h(px(200.0))
         .bg(rgb(0x18181b))
@@ -76,6 +105,12 @@ fn mru_card(card: CardEntry, is_active: bool) -> impl IntoElement {
         .flex()
         .flex_col()
         .justify_between()
+        // Cards swallow the click so clicking a card does not bubble
+        // up to the backdrop's close handler. Future iteration will
+        // route the click into "switch to this AppWindow".
+        .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+            cx.stop_propagation();
+        })
         .child(
             div()
                 .text_sm()
@@ -171,7 +206,11 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
     cx.open_window(options, |window, cx| {
-        let shell = cx.new(|_cx| CardSwitcherShellPlaceholder::new(cards));
+        let shell = cx.new(|cx| CardSwitcherShellPlaceholder::new(cards, cx));
+        // Focus the backdrop so the `on_key_down` Escape handler
+        // fires without the user having to click first.
+        let focus = shell.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     Ok(())
