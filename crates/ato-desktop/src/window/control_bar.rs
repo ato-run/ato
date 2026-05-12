@@ -11,7 +11,7 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, size, AnyWindowHandle, App, Bounds, Context, FontWeight, IntoElement,
+    div, hsla, px, rgb, size, svg, AnyWindowHandle, App, Bounds, Context, FontWeight, IntoElement,
     MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance, WindowBounds,
     WindowDecorations, WindowKind, WindowOptions,
 };
@@ -88,20 +88,26 @@ fn bar_pill(url: SharedString) -> impl IntoElement {
         .rounded(px(BAR_HEIGHT / 2.0))
         .child(pill_button(
             "settings",
-            Some(IconName::Settings),
+            Some(PillIcon::Builtin(IconName::Settings)),
             Some("設定"),
             ActionTarget::Settings,
         ))
         .child(url_pill(url))
         .child(pill_button(
             "card-switcher",
-            Some(IconName::GalleryVerticalEnd),
+            Some(PillIcon::Builtin(IconName::GalleryVerticalEnd)),
             None,
             ActionTarget::CardSwitcher,
         ))
         .child(pill_button(
             "store",
-            Some(IconName::Inbox),
+            // Custom Lucide-style "shopping bag" SVG shipped under
+            // `assets/icons/shopping-bag.svg`. gpui_component's
+            // IconName enum is auto-generated from its bundled icon
+            // set which has no shopping-bag glyph; routing through
+            // gpui's `svg()` element lets us load our own asset
+            // without forking the upstream icon catalogue.
+            Some(PillIcon::Custom("icons/shopping-bag.svg")),
             Some("ストア"),
             ActionTarget::Store,
         ))
@@ -114,9 +120,21 @@ enum ActionTarget {
     CardSwitcher,
 }
 
+/// Icon source for `pill_button`. `Builtin` uses gpui_component's
+/// auto-generated `IconName` set; `Custom` resolves an SVG path via
+/// the app's asset source (local `assets/` first, gpui_component
+/// bundle fallback). Custom is for glyphs the upstream catalogue
+/// does not ship (e.g. shopping bag). Cannot derive `Copy` because
+/// `IconName` itself is not `Copy`.
+#[derive(Clone)]
+enum PillIcon {
+    Builtin(IconName),
+    Custom(&'static str),
+}
+
 fn pill_button(
     id: &'static str,
-    icon: Option<IconName>,
+    icon: Option<PillIcon>,
     label: Option<&'static str>,
     target: ActionTarget,
 ) -> impl IntoElement {
@@ -148,8 +166,19 @@ fn pill_button(
                 window.dispatch_action(Box::new(OpenCardSwitcher), cx);
             }
         });
-    if let Some(icon) = icon {
-        body = body.child(Icon::new(icon).size(px(16.0)));
+    match icon {
+        Some(PillIcon::Builtin(name)) => {
+            body = body.child(Icon::new(name).size(px(16.0)));
+        }
+        Some(PillIcon::Custom(path)) => {
+            body = body.child(
+                svg()
+                    .path(SharedString::from(path))
+                    .size(px(16.0))
+                    .text_color(rgb(0x18181b)),
+            );
+        }
+        None => {}
     }
     if let Some(label) = label {
         body = body.child(div().child(label));
