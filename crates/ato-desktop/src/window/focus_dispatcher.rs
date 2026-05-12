@@ -99,6 +99,18 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 );
                                                 Ok(())
                                             }
+                                            "CloseAppWindow" => {
+                                                // Programmatic close used by
+                                                // AODD verification of the
+                                                // on_window_closed → Launcher
+                                                // recovery path. Equivalent to
+                                                // the user clicking the red
+                                                // traffic light on the
+                                                // AppWindow.
+                                                let _ = cx;
+                                                window.remove_window();
+                                                Ok(())
+                                            }
                                             other => Err(format!(
                                                 "unknown action '{other}' — add it to focus_dispatcher::start"
                                             )),

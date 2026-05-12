@@ -38,6 +38,10 @@ pub struct AppWindow {
     /// `WebViewManager` per-window singleton (#169) can resize without
     /// a separate state field.
     pub bounds: Option<PaneBounds>,
+    /// Opaque GPUI WindowId stored as `u64` (via `WindowId::as_u64`).
+    /// Lets `cx.on_window_closed` map the closed window back to its
+    /// registry entry so we can remove it on close.
+    pub gpui_window_id: Option<u64>,
 }
 
 impl AppWindow {
@@ -48,6 +52,7 @@ impl AppWindow {
             last_focused_at: Instant::now(),
             retention_until: None,
             bounds: None,
+            gpui_window_id: None,
         }
     }
 }
@@ -119,6 +124,16 @@ impl AppWindowRegistry {
 
     pub fn iter(&self) -> impl Iterator<Item = &AppWindow> {
         self.windows.values()
+    }
+
+    /// Find the registry entry whose `gpui_window_id` matches the
+    /// given raw id, if any. Used by `cx.on_window_closed` to map a
+    /// GPUI close event back to the registry slot to evict.
+    pub fn find_by_gpui_window_id(&self, gpui_window_id: u64) -> Option<AppWindowId> {
+        self.windows
+            .iter()
+            .find(|(_, w)| w.gpui_window_id == Some(gpui_window_id))
+            .map(|(id, _)| *id)
     }
 
     /// Open windows ordered most-recently-focused first.

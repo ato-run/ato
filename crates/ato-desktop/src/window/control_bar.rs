@@ -213,6 +213,41 @@ pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
     )
 }
 
+/// Open the Focus-mode Control Bar as a process-lifetime singleton.
+/// Positioned near the top-centre of the primary display so it reads
+/// as the global navigation chrome — independent of any AppWindow's
+/// lifecycle. Called once from `app::run`'s Focus branch.
+pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
+    let bar_w = px(BAR_WIDTH + 2.0 * WINDOW_PAD);
+    let bar_h = px(BAR_HEIGHT + 2.0 * WINDOW_PAD);
+    let bounds = match cx.primary_display() {
+        Some(d) => {
+            let display_bounds = d.bounds();
+            // Top centre of the display, with a small offset from
+            // the system menu bar so the pill reads as floating.
+            let left =
+                display_bounds.origin.x + (display_bounds.size.width - bar_w) / 2.0;
+            let top = display_bounds.origin.y + px(36.0);
+            Bounds {
+                origin: gpui::point(left, top),
+                size: size(bar_w, bar_h),
+            }
+        }
+        None => Bounds::centered(None, size(bar_w, bar_h), cx),
+    };
+    open_control_bar_inner(
+        cx,
+        bounds,
+        // Placeholder route — once AppState wiring publishes the
+        // active AppWindow's route to the bar, this initial value
+        // gets replaced on first render.
+        GuestRoute::CapsuleHandle {
+            handle: "github.com/Koh0920/WasedaP2P".to_string(),
+            label: "WasedaP2P".to_string(),
+        },
+    )
+}
+
 fn open_control_bar_inner(
     cx: &mut App,
     bounds: Bounds<Pixels>,

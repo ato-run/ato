@@ -606,7 +606,7 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
     // the Card Switcher (#173) can surface real entries. Population
     // happens BEFORE `cx.open_window` so that even if the GPUI open
     // fails the registry stays consistent — we'd remove on failure.
-    let _app_window_id = cx
+    let app_window_id = cx
         .global_mut::<crate::state::AppWindowRegistry>()
         .open(route.clone());
 
@@ -616,25 +616,26 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
-    // Pair every spawned app window with its Control Bar window,
-    // positioned just above the app window's top edge.
-    let route_for_bar = route.clone();
-    match super::control_bar::open_control_bar_window_at(cx, app_bounds, route_for_bar) {
-        Ok(bar_handle) => {
-            // macOS: glue the bar to the parent via addChildWindow so
-            // the OS handles co-movement (drag, resize, Spaces,
-            // fullscreen). Best-effort — failures are logged but do
-            // not block the window from being usable on its own.
-            #[cfg(target_os = "macos")]
-            if let Err(err) =
-                super::macos::attach_as_child(cx, *app_handle, bar_handle)
-            {
-                tracing::warn!(error = %err, "addChildWindow attach failed; bar will not co-move");
-            }
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "failed to open control bar window");
-        }
+    // Stamp the GPUI WindowId on the registry entry so
+    // `cx.on_window_closed` in `app.rs` can map a close event back
+    // to the registry slot and evict the entry. Without this the
+    // registry would grow monotonically as AppWindows come and go.
+    let gpui_window_id = app_handle.window_id().as_u64();
+    if let Some(entry) = cx
+        .global_mut::<crate::state::AppWindowRegistry>()
+        .get_mut(app_window_id)
+    {
+        entry.gpui_window_id = Some(gpui_window_id);
     }
+
+    // The Control Bar is intentionally NOT spawned as a child of
+    // this AppWindow. It has a separate lifecycle (Focus-mode shell
+    // singleton, opened once at startup by `open_focus_control_bar`)
+    // so that closing an AppWindow does not also tear the bar down
+    // via macOS's `addChildWindow:` auto-close contract. Tracking
+    // co-movement is sacrificed in exchange for lifecycle clarity:
+    // the user has a single, persistent Control Bar across all
+    // AppWindow open/close cycles.
+    let _ = app_bounds; // bar positioning moved out of this function
     Ok(*app_handle)
 }

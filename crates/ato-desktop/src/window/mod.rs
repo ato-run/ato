@@ -29,7 +29,9 @@ pub mod orchestrator;
 impl gpui::Global for crate::state::AppWindowRegistry {}
 
 pub use card_switcher::{open_card_switcher_window, CardSwitcherShellPlaceholder};
-pub use control_bar::{open_control_bar_window, ControlBarShellPlaceholder};
+pub use control_bar::{
+    open_control_bar_window, open_focus_control_bar, ControlBarShellPlaceholder,
+};
 pub use launcher::{open_launcher_window, LauncherShellPlaceholder};
 pub use orchestrator::{open_app_window, AppWindowShell};
 

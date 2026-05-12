@@ -355,7 +355,30 @@ pub fn run() {
             }
             cx.quit();
         });
-        cx.on_window_closed(|cx, _window_id| {
+        cx.on_window_closed(|cx, window_id| {
+            // Evict the closed window from the AppWindow registry so
+            // Card Switcher / MRU stay accurate. The registry uses
+            // the GPUI WindowId u64 it stamped at open time.
+            let closed_id = window_id.as_u64();
+            let removed_id = cx
+                .global_mut::<crate::state::AppWindowRegistry>()
+                .find_by_gpui_window_id(closed_id);
+            if let Some(id) = removed_id {
+                cx.global_mut::<crate::state::AppWindowRegistry>()
+                    .close(id);
+                tracing::info!(
+                    app_window_id = id,
+                    gpui_window_id = closed_id,
+                    "AppWindow evicted from registry on close"
+                );
+            }
+
+            // In Focus mode the Control Bar is a process-lifetime
+            // singleton with its own lifecycle, decoupled from any
+            // AppWindow. Closing the last AppWindow therefore should
+            // NOT auto-open a Launcher — the bar is already there as
+            // the user's landing surface. We quit only when every
+            // remaining window (including the Control Bar) is gone.
             if cx.windows().is_empty() {
                 cx.quit();
             }
@@ -429,6 +452,19 @@ pub fn run() {
         // and never touches the new code paths.
         if crate::window::is_multi_window_enabled() {
             tracing::info!("ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode");
+            // Spawn the Control Bar FIRST as a Focus-mode singleton.
+            // Its lifecycle is independent of any AppWindow: closing
+            // the active AppWindow does not close the bar; opening a
+            // new AppWindow re-uses the existing bar. The bar stays
+            // until the user explicitly closes it or the process
+            // exits.
+            if let Err(err) = crate::window::open_focus_control_bar(cx) {
+                tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
+                cx.quit();
+                return;
+            }
+            tracing::info!("Focus View Control Bar opened at startup");
+
             let route = crate::state::GuestRoute::CapsuleHandle {
                 handle: "github.com/Koh0920/WasedaP2P".to_string(),
                 label: "WasedaP2P".to_string(),
