@@ -32,22 +32,54 @@ use crate::app::OpenAppWindowExperiment;
 pub struct LauncherWindowSlot(pub Option<AnyWindowHandle>);
 impl gpui::Global for LauncherWindowSlot {}
 
+/// Which view the Launcher is currently rendering. The Control Bar's
+/// Settings cog dispatches `ShowSettings`, which flips this global to
+/// `Settings`. The Launcher's `observe_global` subscription wakes the
+/// render loop so the view swap happens automatically.
+#[derive(Default, Clone, Copy, PartialEq)]
+pub enum LauncherView {
+    #[default]
+    Start,
+    Settings,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct LauncherViewState(pub LauncherView);
+impl gpui::Global for LauncherViewState {}
+
 pub struct LauncherShellPlaceholder;
+
+impl LauncherShellPlaceholder {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        // Re-render when the launcher view request flips (e.g. Control
+        // Bar dispatches ShowSettings). Same pattern as the Control
+        // Bar's AppWindowRegistry subscription.
+        cx.observe_global::<LauncherViewState>(|_view, cx| {
+            cx.notify();
+        })
+        .detach();
+        Self
+    }
+}
 
 impl Render for LauncherShellPlaceholder {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
+        let view = cx.global::<LauncherViewState>().0;
+        let root = div()
             .size_full()
             .bg(rgb(0xf5f3ff))
             .text_color(rgb(0x18181b))
             .flex()
             .flex_col()
-            .items_center()
-            .child(launcher_content())
+            .items_center();
+        match view {
+            LauncherView::Start => root.child(launcher_content()),
+            LauncherView::Settings => root.child(settings_content()),
+        }
     }
 }
 
@@ -526,6 +558,475 @@ fn footer_text() -> impl IntoElement {
         .child("Tabキーでカプセルを切り替え、新しいウィンドウは ⌘N で開けます")
 }
 
+// ---------- Settings view ----------
+
+fn settings_content() -> impl IntoElement {
+    // Full-bleed two-column layout. Left nav rail + main panel,
+    // contained inside a single rounded card so the settings surface
+    // visually sits as one element on the violet wash, matching the
+    // reference. Total max width ~960 to stay readable inside the
+    // 1100px Launcher window.
+    div()
+        .w(px(960.0))
+        .h_full()
+        .py(px(24.0))
+        .child(
+            div()
+                .h_full()
+                .rounded_2xl()
+                .bg(rgb(0xffffff))
+                .border_1()
+                .border_color(rgb(0xe4e4e7))
+                .overflow_hidden()
+                .flex()
+                .child(settings_nav())
+                .child(settings_main_panel()),
+        )
+}
+
+fn settings_nav() -> impl IntoElement {
+    let mut col = div()
+        .w(px(180.0))
+        .h_full()
+        .px(px(12.0))
+        .py(px(16.0))
+        .bg(rgb(0xfafafa))
+        .border_r_1()
+        .border_color(rgb(0xe4e4e7))
+        .flex()
+        .flex_col()
+        .gap(px(2.0));
+    // The first nav item is a "back to start" affordance — clicking
+    // it flips LauncherViewState back to Start so the user can return
+    // to the start view without closing the window.
+    col = col.child(nav_back_to_start());
+    col = col.child(div().h(px(8.0)));
+    for (label, active) in [
+        ("一般", false),
+        ("セキュリティ", true),
+        ("ターミナル", false),
+        ("ネットワーク", false),
+        ("ランタイム", false),
+        ("ストレージ", false),
+        ("ストア", false),
+        ("同期", false),
+        ("このアプリについて", false),
+    ] {
+        col = col.child(nav_item(label, active));
+    }
+    col
+}
+
+fn nav_back_to_start() -> impl IntoElement {
+    div()
+        .id("nav-back-start")
+        .w_full()
+        .h(px(32.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded_md()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(rgb(0x71717a))
+        .hover(|s| s.bg(rgb(0xf4f4f5)))
+        .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+            cx.set_global(LauncherViewState(LauncherView::Start));
+        })
+        .child(
+            Icon::new(IconName::ChevronLeft)
+                .size(px(14.0))
+                .text_color(rgb(0x71717a)),
+        )
+        .child("スタートに戻る")
+}
+
+fn nav_item(label: &'static str, active: bool) -> impl IntoElement {
+    let (bg, text, weight) = if active {
+        (rgb(0xeef2ff), rgb(0x4f46e5), FontWeight(600.0))
+    } else {
+        (rgb(0xfafafa), rgb(0x52525b), FontWeight(500.0))
+    };
+    div()
+        .id(SharedString::from(format!("nav-{label}")))
+        .w_full()
+        .h(px(36.0))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .rounded_md()
+        .bg(bg)
+        .text_color(text)
+        .text_sm()
+        .font_weight(weight)
+        .cursor_pointer()
+        .hover(|s| if active { s } else { s.bg(rgb(0xf4f4f5)) })
+        .child(label)
+}
+
+fn settings_main_panel() -> impl IntoElement {
+    div()
+        .flex_1()
+        .h_full()
+        .px(px(28.0))
+        .py(px(24.0))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap(px(20.0))
+        .child(
+            div()
+                .text_size(px(20.0))
+                .font_weight(FontWeight(700.0))
+                .text_color(rgb(0x18181b))
+                .child("設定"),
+        )
+        .child(security_summary_block())
+        .child(startup_behaviour_block())
+        .child(publishers_block())
+        .child(privacy_cards_row())
+}
+
+fn security_summary_block() -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .gap(px(12.0))
+        // Main security card (60%)
+        .child(
+            div()
+                .flex_1()
+                .px(px(16.0))
+                .py(px(16.0))
+                .rounded_xl()
+                .bg(rgb(0xfafafa))
+                .border_1()
+                .border_color(rgb(0xe4e4e7))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x71717a))
+                        .child("セキュリティレベル"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .h(px(36.0))
+                                .rounded_full()
+                                .bg(rgb(0xeef2ff))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::new(IconName::CircleCheck)
+                                        .size(px(20.0))
+                                        .text_color(rgb(0x4f46e5)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(18.0))
+                                        .font_weight(FontWeight(700.0))
+                                        .text_color(rgb(0x18181b))
+                                        .child("標準"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x71717a))
+                                        .child("推奨されるバランスのとれた設定です"),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x4f46e5))
+                        .child("レベルを変更する →"),
+                ),
+        )
+        .child(security_stats_column())
+}
+
+fn security_stats_column() -> impl IntoElement {
+    div()
+        .w(px(260.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(stat_row("Files processed", "1,240"))
+        .child(stat_row("Network checks", "308"))
+        .child(stat_row("Security score", "92/100"))
+}
+
+fn stat_row(label: &'static str, value: &'static str) -> impl IntoElement {
+    div()
+        .w_full()
+        .h(px(40.0))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded_lg()
+        .bg(rgb(0xfafafa))
+        .border_1()
+        .border_color(rgb(0xe4e4e7))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x71717a))
+                .child(label),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight(700.0))
+                .text_color(rgb(0x18181b))
+                .child(value),
+        )
+}
+
+fn startup_behaviour_block() -> impl IntoElement {
+    div()
+        .w_full()
+        .px(px(16.0))
+        .py(px(16.0))
+        .rounded_xl()
+        .bg(rgb(0xfafafa))
+        .border_1()
+        .border_color(rgb(0xe4e4e7))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight(700.0))
+                .text_color(rgb(0x18181b))
+                .child("起動時の挙動"),
+        )
+        .child(toggle_row("ログインで自動起動", true))
+        .child(toggle_row("最後のセッションを復元", true))
+        .child(toggle_row("ネットワークアクセスをデフォルトで許可", false))
+}
+
+fn toggle_row(label: &'static str, enabled: bool) -> impl IntoElement {
+    let (track_bg, knob_align) = if enabled {
+        (rgb(0x4f46e5), "right")
+    } else {
+        (rgb(0xd4d4d8), "left")
+    };
+    let knob = div()
+        .w(px(16.0))
+        .h(px(16.0))
+        .rounded_full()
+        .bg(rgb(0xffffff));
+    let track = if knob_align == "right" {
+        div()
+            .w(px(36.0))
+            .h(px(20.0))
+            .rounded_full()
+            .bg(track_bg)
+            .px(px(2.0))
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(knob)
+    } else {
+        div()
+            .w(px(36.0))
+            .h(px(20.0))
+            .rounded_full()
+            .bg(track_bg)
+            .px(px(2.0))
+            .flex()
+            .items_center()
+            .justify_start()
+            .child(knob)
+    };
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x18181b))
+                .child(label),
+        )
+        .child(track)
+}
+
+fn publishers_block() -> impl IntoElement {
+    div()
+        .w_full()
+        .px(px(16.0))
+        .py(px(16.0))
+        .rounded_xl()
+        .bg(rgb(0xfafafa))
+        .border_1()
+        .border_color(rgb(0xe4e4e7))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight(700.0))
+                        .text_color(rgb(0x18181b))
+                        .child("信頼済みの発行元"),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x4f46e5))
+                        .child("管理 →"),
+                ),
+        )
+        .child(publisher_row("Ato Labs", 0x4f46e5))
+        .child(publisher_row("Waseda University", 0x0ea5e9))
+        .child(publisher_row("DataMesh Inc.", 0x10b981))
+}
+
+fn publisher_row(name: &'static str, accent: u32) -> impl IntoElement {
+    let initial: SharedString = SharedString::from(
+        name.chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_string()),
+    );
+    div()
+        .w_full()
+        .h(px(36.0))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .child(
+            div()
+                .w(px(24.0))
+                .h(px(24.0))
+                .rounded_md()
+                .bg(rgb(accent))
+                .text_color(rgb(0xffffff))
+                .text_xs()
+                .font_weight(FontWeight(700.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(initial),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_sm()
+                .text_color(rgb(0x18181b))
+                .child(name),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x10b981))
+                .child("検証済み"),
+        )
+}
+
+fn privacy_cards_row() -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .gap(px(12.0))
+        .child(privacy_card(
+            IconName::CircleCheck,
+            "プライバシー保護",
+            "ローカル処理を優先",
+            0x4f46e5,
+        ))
+        .child(privacy_card(
+            IconName::HardDrive,
+            "データ保護",
+            "送信前に同意を要求",
+            0x0ea5e9,
+        ))
+        .child(privacy_card(
+            IconName::Folder,
+            "ローカル優先",
+            "オフラインでも利用可",
+            0x10b981,
+        ))
+}
+
+fn privacy_card(
+    icon: IconName,
+    title: &'static str,
+    subtitle: &'static str,
+    accent: u32,
+) -> impl IntoElement {
+    let accent_rgb = rgb(accent);
+    let accent_wash = hsla_with_alpha(accent, 0.12);
+    div()
+        .flex_1()
+        .h(px(80.0))
+        .px(px(14.0))
+        .py(px(12.0))
+        .rounded_xl()
+        .bg(rgb(0xffffff))
+        .border_1()
+        .border_color(rgb(0xe4e4e7))
+        .flex()
+        .items_center()
+        .gap(px(12.0))
+        .child(
+            div()
+                .w(px(36.0))
+                .h(px(36.0))
+                .rounded_md()
+                .bg(accent_wash)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(icon).size(px(20.0)).text_color(accent_rgb)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight(700.0))
+                        .text_color(rgb(0x18181b))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x71717a))
+                        .child(subtitle),
+                ),
+        )
+}
+
+// ---------- shared ----------
+
 /// Build an hsla colour derived from an RGB integer, with the given
 /// alpha. Mirrors the helper in `card_switcher.rs` — kept duplicated
 /// to avoid a cross-window dependency on that module's accent helpers.
@@ -585,7 +1086,7 @@ pub fn open_launcher_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
     let handle = cx.open_window(options, |window, cx| {
-        let shell = cx.new(|_cx| LauncherShellPlaceholder);
+        let shell = cx.new(|cx| LauncherShellPlaceholder::new(cx));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     cx.set_global(LauncherWindowSlot(Some(*handle)));

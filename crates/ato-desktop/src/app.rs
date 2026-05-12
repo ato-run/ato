@@ -293,6 +293,7 @@ pub fn run() {
         // Control Bar's Settings button focuses the existing window
         // on a 2nd+ click instead of spawning a new one.
         cx.set_global(crate::window::launcher::LauncherWindowSlot::default());
+        cx.set_global(crate::window::launcher::LauncherViewState::default());
         // Slot tracking the currently-open Store window (Wry WebView
         // on ato.run). Same focus-on-existing behaviour as the
         // Launcher slot.
@@ -470,6 +471,21 @@ pub fn run() {
             if let Err(err) = crate::window::open_launcher_window(cx) {
                 tracing::error!(error = %err, "failed to open launcher window");
             }
+        });
+
+        // Settings cog routing in Focus mode: the Control Bar's
+        // Settings click dispatches OpenLauncherWindow followed by
+        // ShowSettings. Flip the Launcher's view-state global so the
+        // freshly-opened (or focused) Launcher renders the Settings
+        // view instead of the Start view. The Launcher subscribes to
+        // this global via observe_global and re-renders automatically.
+        cx.on_action(|_: &ShowSettings, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            cx.set_global(crate::window::launcher::LauncherViewState(
+                crate::window::launcher::LauncherView::Settings,
+            ));
         });
 
         // #173 — open Card Switcher overlay. No-op when multi-window
