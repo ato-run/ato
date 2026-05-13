@@ -73,6 +73,46 @@ struct CardDto {
     /// CSS-only kind-specific mock.
     #[serde(rename = "previewDataUrl", skip_serializing_if = "Option::is_none")]
     preview_data_url: Option<String>,
+    /// Identifier for the glyph the switcher / dock should render
+    /// inside the small badge for this entry. Values map 1:1 to
+    /// keys in switcher.html's `GLYPH` library. Mirrors the
+    /// per-kind icon vocabulary the legacy sidebar used to render
+    /// (`SystemPageIcon::Console` → terminal, etc).
+    glyph: &'static str,
+}
+
+/// Map a content window's (title, kind) to a glyph identifier
+/// rendered as an SVG inside the switcher card badge and the dock
+/// tile. Carries forward the visual identity each running app had
+/// in the legacy sidebar:
+///   - System surfaces (Store / Launcher / Start) get a fixed
+///     thematic glyph
+///   - AppWindow titles are matched by keyword heuristic against
+///     a small fixed glyph palette (chart / terminal / search /
+///     chat / cpu / code) — the same palette `start.html`'s dock
+///     and "最近使ったカプセル" rows already use
+fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
+    match kind {
+        ContentWindowKind::Store => "store",
+        ContentWindowKind::Start => "sparkle",
+        ContentWindowKind::Launcher => "panel",
+        ContentWindowKind::AppWindow { .. } => {
+            let lower = title.to_lowercase();
+            if lower.contains("code") || lower.contains("term") || lower.contains("shell") {
+                "terminal"
+            } else if lower.contains("query") || lower.contains("search") {
+                "search"
+            } else if lower.contains("chat") || lower.contains("ai") {
+                "chat"
+            } else if lower.contains("ml") || lower.contains("model") {
+                "cpu"
+            } else {
+                // Default for capsule-like AppWindows: bar chart —
+                // matches WasedaP2P's data-sharing/visualisation role.
+                "chart"
+            }
+        }
+    }
 }
 
 /// Capture a PNG screenshot of the OS window that backs `handle` and
@@ -165,12 +205,14 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         .map(|e| {
             let window_id = e.handle.window_id().as_u64();
             let preview_data_url = snapshot_window(cx, e.handle);
+            let glyph = glyph_for(e.title.as_ref(), &e.kind);
             CardDto {
                 window_id,
                 title: e.title.to_string(),
                 subtitle: e.subtitle.to_string(),
                 kind: kind_tag(&e.kind),
                 preview_data_url,
+                glyph,
             }
         })
         .collect();
