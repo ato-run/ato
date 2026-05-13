@@ -100,6 +100,15 @@ pub fn dispatch(
                     }
                 };
 
+                // Re-activate the boot wizard: open_app_window opens with
+                // focus: true, which steals focus and puts the app window on
+                // top of the boot wizard. The boot wizard must be the dominant
+                // UI during the boot phase.
+                if let Some(bh) = boot_handle {
+                    let _ = bh.update(cx, |_, window, _| window.activate_window());
+                    tracing::debug!("ato_launch: boot wizard re-activated after app window opened");
+                }
+
                 // Register both handles in the global slot so AbortBoot and
                 // AppCapsuleShell's polling task can close them.
                 //
