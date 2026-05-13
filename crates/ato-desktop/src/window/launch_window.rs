@@ -160,9 +160,9 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
     let (display_name, display_handle, display_url) = match &route {
         GuestRoute::CapsuleHandle { handle, label } => {
             let pretty_name = label
-                .split(|c: char| c == '/' || c == '@' || c == '-' || c == '_')
+                .split(['/', '@', '-', '_'])
                 .filter(|s| !s.is_empty())
-                .last()
+                .next_back()
                 .unwrap_or(label.as_str())
                 .to_string();
             (

@@ -37,7 +37,7 @@ use crate::window::launch_window::BootWindowSlot;
 
 enum CapsuleBootState {
     Booting,
-    Ready { session: GuestLaunchSession },
+    Ready { session: Box<GuestLaunchSession> },
     Failed { error: String },
 }
 
@@ -102,7 +102,7 @@ impl AppCapsuleShell {
                         be.timer(Duration::from_millis(100)).await;
                         match rx.try_recv() {
                             Ok(result) => {
-                                let _ = aa.update(|cx: &mut App| {
+                                aa.update(|cx: &mut App| {
                                     // Close the boot wizard and clear the slot.
                                     close_boot_window(cx);
 
@@ -131,7 +131,7 @@ impl AppCapsuleShell {
                             }
                             Err(TryRecvError::Disconnected) => {
                                 // Thread aborted before sending (abort_flag was set).
-                                let _ = aa.update(|cx: &mut App| {
+                                aa.update(|cx: &mut App| {
                                     close_boot_window(cx);
                                 });
                                 break;
@@ -140,7 +140,7 @@ impl AppCapsuleShell {
                                 if abort_poll.load(Ordering::Acquire) {
                                     // Abort flagged before result arrived; the
                                     // background thread will stop the session.
-                                    let _ = aa.update(|cx: &mut App| {
+                                    aa.update(|cx: &mut App| {
                                         close_boot_window(cx);
                                     });
                                     break;
@@ -204,7 +204,7 @@ impl AppCapsuleShell {
                         );
                         self.webview = Some(webview);
                         self.window_size = win_size;
-                        self.boot_state = CapsuleBootState::Ready { session };
+                        self.boot_state = CapsuleBootState::Ready { session: Box::new(session) };
                     }
                     Err(err) => {
                         // Session started but WebView failed; stop the session.
