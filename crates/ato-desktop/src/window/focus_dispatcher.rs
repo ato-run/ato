@@ -241,14 +241,16 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                     CapabilityBroker, SystemCapsuleId,
                                                     SystemCommand,
                                                 };
+                                                // Test that AtoWindows cannot invoke SettingsWrite commands
+                                                // (it only has WindowsCreate/Close in its manifest).
                                                 let result = CapabilityBroker::dispatch(
                                                     cx,
                                                     app_handle,
                                                     SystemCapsuleId::AtoWindows,
                                                     SystemCommand::AtoSettings(
-                                                        SettingsCommand::SetToggle {
-                                                            key: "test".to_string(),
-                                                            value: true,
+                                                        SettingsCommand::PatchGlobalSettings {
+                                                            request_id: None,
+                                                            patch: serde_json::json!({"theme": "dark"}),
                                                         },
                                                     ),
                                                 );

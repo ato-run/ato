@@ -52,10 +52,11 @@ const TABLE: &[SystemCapsuleManifest] = &[
         id: SystemCapsuleId::AtoSettings,
         slug: "ato-settings",
         display_name: "Settings",
-        // SettingsWrite is intentionally NOT granted in Phase 1.
-        // Phase 2 will gate writes through a consent prompt before
-        // adding it here.
-        allowed_capabilities: &[Capability::SettingsRead],
+        allowed_capabilities: &[
+            Capability::SettingsRead,
+            Capability::SettingsWrite,
+            Capability::WindowsClose,
+        ],
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoWebViewer,

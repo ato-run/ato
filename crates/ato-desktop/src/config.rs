@@ -26,6 +26,8 @@ pub struct DesktopConfig {
     pub delivery: DeliverySettings,
     #[serde(default)]
     pub developer: DeveloperSettings,
+    #[serde(default)]
+    pub desktop: DesktopSettings,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +132,105 @@ pub struct DeveloperSettings {
     pub auto_open_devtools: bool,
     #[serde(default)]
     pub feature_flags: HashSet<String>,
+}
+
+/// Desktop-shell specific settings (Control Bar, Focus View, window behaviour).
+///
+/// Defaults match the current hardcoded behaviour so existing users see no
+/// change after the config section is introduced.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DesktopSettings {
+    /// Whether the Focus View (multi-window) mode is enabled.
+    /// Env `ATO_DESKTOP_MULTI_WINDOW` takes precedence over this value during
+    /// the migration period.
+    #[serde(default = "default_focus_view_enabled")]
+    pub focus_view_enabled: bool,
+    /// Which surface is shown after the app starts.
+    #[serde(default)]
+    pub startup_surface: StartupSurface,
+    /// Initial presentation mode for content windows opened by Focus View.
+    #[serde(default)]
+    pub content_window_default_presentation: ContentWindowPresentation,
+    /// Whether to restore the last window frames (position/size) on launch.
+    #[serde(default)]
+    pub restore_window_frames: bool,
+    #[serde(default)]
+    pub control_bar: ControlBarSettings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ControlBarSettings {
+    /// Whether the Control Bar floats above all other windows.
+    #[serde(default = "default_control_bar_always_on_top")]
+    pub always_on_top: bool,
+    /// Whether the Control Bar is shown when the app starts.
+    #[serde(default = "default_control_bar_visible_on_startup")]
+    pub visible_on_startup: bool,
+    #[serde(default)]
+    pub position: ControlBarPosition,
+    /// Automatically hide the Control Bar when not in use.
+    #[serde(default)]
+    pub auto_hide: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartupSurface {
+    #[default]
+    Store,
+    Start,
+    Blank,
+    RestoreLast,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContentWindowPresentation {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlBarPosition {
+    #[default]
+    Top,
+    Bottom,
+}
+
+fn default_focus_view_enabled() -> bool {
+    true
+}
+fn default_control_bar_always_on_top() -> bool {
+    true
+}
+fn default_control_bar_visible_on_startup() -> bool {
+    true
+}
+
+impl Default for DesktopSettings {
+    fn default() -> Self {
+        Self {
+            focus_view_enabled: default_focus_view_enabled(),
+            startup_surface: StartupSurface::Store,
+            content_window_default_presentation: ContentWindowPresentation::Windowed,
+            restore_window_frames: false,
+            control_bar: ControlBarSettings::default(),
+        }
+    }
+}
+
+impl Default for ControlBarSettings {
+    fn default() -> Self {
+        Self {
+            always_on_top: default_control_bar_always_on_top(),
+            visible_on_startup: default_control_bar_visible_on_startup(),
+            position: ControlBarPosition::Top,
+            auto_hide: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -300,6 +401,7 @@ fn default_registry_enabled() -> bool {
     true
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
@@ -311,6 +413,7 @@ impl Default for DesktopConfig {
             registry: RegistrySettings::default(),
             delivery: DeliverySettings::default(),
             developer: DeveloperSettings::default(),
+            desktop: DesktopSettings::default(),
         }
     }
 }
@@ -429,6 +532,8 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             #[serde(default)]
             developer: DeveloperSettings,
             #[serde(default)]
+            desktop: DesktopSettings,
+            #[serde(default)]
             theme: Option<ThemeConfig>,
             #[serde(default)]
             default_egress_allow: Option<Vec<String>>,
@@ -450,6 +555,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             registry: helper.registry,
             delivery: helper.delivery,
             developer: helper.developer,
+            desktop: helper.desktop,
         };
 
         if let Some(theme) = helper.theme {
@@ -1017,5 +1123,56 @@ mod tests {
         store.set_config("capsule.x", "MODEL".into(), "gpt-5".into());
         let configs = store.configs_for_capsule("capsule.x");
         assert_eq!(configs, vec![("MODEL".to_string(), "gpt-5".to_string())]);
+    }
+
+    #[test]
+    fn desktop_settings_default_values() {
+        let config = DesktopConfig::default();
+        let d = &config.desktop;
+        assert!(d.focus_view_enabled, "focus_view_enabled default must be true");
+        assert_eq!(d.startup_surface, StartupSurface::Store);
+        assert_eq!(
+            d.content_window_default_presentation,
+            ContentWindowPresentation::Windowed
+        );
+        assert!(!d.restore_window_frames);
+        assert!(d.control_bar.always_on_top);
+        assert!(d.control_bar.visible_on_startup);
+        assert_eq!(d.control_bar.position, ControlBarPosition::Top);
+        assert!(!d.control_bar.auto_hide);
+    }
+
+    #[test]
+    fn desktop_settings_roundtrip_json() {
+        let mut config = DesktopConfig::default();
+        config.desktop.startup_surface = StartupSurface::RestoreLast;
+        config.desktop.content_window_default_presentation = ContentWindowPresentation::Fullscreen;
+        config.desktop.control_bar.position = ControlBarPosition::Bottom;
+        config.desktop.control_bar.auto_hide = true;
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::RestoreLast);
+        assert_eq!(
+            parsed.desktop.content_window_default_presentation,
+            ContentWindowPresentation::Fullscreen
+        );
+        assert_eq!(parsed.desktop.control_bar.position, ControlBarPosition::Bottom);
+        assert!(parsed.desktop.control_bar.auto_hide);
+    }
+
+    #[test]
+    fn config_without_desktop_section_migrates_to_default_desktop() {
+        // Existing config files that pre-date the desktop section must
+        // deserialise cleanly and produce default desktop settings.
+        let json = r#"{"general": {"theme": "light"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.general.theme, ThemeConfig::Light);
+        assert!(
+            parsed.desktop.focus_view_enabled,
+            "missing desktop section must default to focus_view_enabled=true"
+        );
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Store);
+        assert!(parsed.desktop.control_bar.always_on_top);
     }
 }
