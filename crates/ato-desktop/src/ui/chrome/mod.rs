@@ -1,7 +1,10 @@
 mod window_controls;
 
 use gpui::prelude::*;
-use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
+use gpui::{
+    div, hsla, point, px, svg, BoxShadow, Entity, FontWeight, IntoElement, MouseButton,
+    SharedString, Window,
+};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Icon, IconName};
 
@@ -267,10 +270,17 @@ fn render_omnibar(
         .w_full()
         .max_w(px(560.0))
         .child(
+            // Pill shape lowered from .tmp/gpui-html/omnibar-pill.html:
+            //   <div class="w-full h-8 rounded-full border px-3 flex
+            //               items-center gap-2"></div>
+            // (see .tmp/gpui-html/omnibar-pill.generated.rs). Production
+            // adds the cursor / mouse-down / theme-driven bg+border /
+            // focus-shadow / leading-icon + input children that gpui-html
+            // doesn't lower.
             div()
-                .h(px(30.0))
+                .h_8()
                 .w_full()
-                .rounded(px(8.0))
+                .rounded_full()
                 .px_3()
                 .flex()
                 .items_center()
@@ -296,10 +306,15 @@ fn render_omnibar(
                     }])
                 })
                 .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(if command_bar { icon_active } else { icon_rest })
-                        .child("⌕"),
+                    // Lock SVG matches the mockup's leading-icon glyph
+                    // (header.html `<!-- Security Lock Icon -->` block).
+                    // Asset lives at crates/ato-desktop/assets/icons/
+                    // lock.svg; LocalAssetSource resolves it ahead of
+                    // gpui_component_assets in the loader chain.
+                    svg()
+                        .path(SharedString::new_static("icons/lock.svg"))
+                        .size(px(14.0))
+                        .text_color(if command_bar { icon_active } else { icon_rest }),
                 )
                 .child(
                     div()
