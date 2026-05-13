@@ -127,6 +127,7 @@
 
   <div class="header">
     <h1>Capsule を起動中…</h1>
+    <p id="boot-handle" style="font-size:11px;color:var(--soft);margin:0;font-family:'SF Mono',ui-monospace,monospace;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;"></p>
     <p>安全な動作環境を準備しています</p>
   </div>
 
@@ -178,6 +179,14 @@
     ? (m) => window.ipc.postMessage(JSON.stringify(m))
     : (m) => console.log('[no bridge]', m);
   const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
+
+  // Inject real capsule identity when the host provides __ATO_BOOT.
+  const boot = (window.__ATO_BOOT && typeof window.__ATO_BOOT === 'object')
+    ? window.__ATO_BOOT : null;
+  if (boot) {
+    const el = document.getElementById('boot-handle');
+    if (el) el.textContent = boot.handle || boot.name || '';
+  }
 
   // Phase 1: auto-cycle through the pending steps every 1.2s so the
   // wizard is visually demonstrable. Phase 2 will be driven by real
