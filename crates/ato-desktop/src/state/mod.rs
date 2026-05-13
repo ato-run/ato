@@ -4,9 +4,7 @@ pub(crate) mod persistence;
 // `ShellSurface` is re-exported now so #169 can flip the renderer over to it
 // without churning the public path. It is intentionally unused in this PR.
 #[allow(unused_imports)]
-pub use app_window::{
-    AppWindow, AppWindowId, AppWindowRegistry, OpenContentWindows, ShellSurface,
-};
+pub use app_window::{AppWindow, AppWindowId, AppWindowRegistry, ShellSurface};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;

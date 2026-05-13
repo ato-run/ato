@@ -51,6 +51,30 @@ fn short_title_from_route(route: &GuestRoute) -> String {
     }
 }
 
+/// (title, subtitle) pair used by the cross-window content registry
+/// to render Card Switcher entries for AppWindows. Subtitle is the
+/// handle / URL / session ID so users can disambiguate two cards with
+/// the same display label.
+fn title_subtitle_for_route(route: &GuestRoute) -> (SharedString, SharedString) {
+    use crate::state::GuestRoute as R;
+    let (title, subtitle) = match route {
+        R::CapsuleHandle { handle, label } => (label.clone(), handle.clone()),
+        R::CapsuleUrl { label, url, .. } => (label.clone(), url.to_string()),
+        R::ExternalUrl(url) => (
+            url.host_str()
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| url.as_str().to_string()),
+            url.as_str().to_string(),
+        ),
+        R::Capsule { session, .. } => (session.clone(), format!("capsule://{session}/")),
+        R::Terminal { session_id } => (
+            format!("terminal/{session_id}"),
+            format!("terminal://{session_id}/"),
+        ),
+    };
+    (SharedString::from(title), SharedString::from(subtitle))
+}
+
 impl Render for AppWindowShell {
     fn render(
         &mut self,
@@ -627,10 +651,23 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
     {
         entry.gpui_window_id = Some(gpui_window_id);
     }
-    // Register in the cross-window content set so the Control Bar
-    // Card Switcher badge increments.
-    cx.global_mut::<crate::state::OpenContentWindows>()
-        .insert(gpui_window_id);
+    // Register in the cross-window content registry so the Control
+    // Bar badge increments AND the Card Switcher renders a card for
+    // this AppWindow. Title/subtitle derive from the route.
+    use crate::window::content_windows::{
+        ContentWindowEntry, ContentWindowKind, OpenContentWindows,
+    };
+    let (entry_title, entry_subtitle) = title_subtitle_for_route(&route);
+    cx.global_mut::<OpenContentWindows>().insert(
+        gpui_window_id,
+        ContentWindowEntry {
+            handle: *app_handle,
+            kind: ContentWindowKind::AppWindow { route: route.clone() },
+            title: entry_title,
+            subtitle: entry_subtitle,
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
 
     // The Control Bar is intentionally NOT spawned as a child of
     // this AppWindow. It has a separate lifecycle (Focus-mode shell

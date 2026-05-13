@@ -24,7 +24,7 @@ use gpui::{
 };
 use gpui_component::{Icon, IconName};
 
-use crate::state::{AppWindowRegistry, GuestRoute};
+use crate::window::content_windows::OpenContentWindows;
 
 /// Process-wide slot for the currently-open Card Switcher window so
 /// the Control Bar's switcher button can behave as a toggle: a
@@ -35,8 +35,10 @@ pub struct CardSwitcherWindowSlot(pub Option<AnyWindowHandle>);
 impl gpui::Global for CardSwitcherWindowSlot {}
 
 /// Snapshot of one registry entry for rendering in the switcher.
-/// Detached from `AppWindow` so the switcher's data is immutable for
-/// the lifetime of the overlay window.
+/// Detached from `OpenContentWindows` so the switcher's data is
+/// immutable for the lifetime of the overlay window. `handle` is
+/// carried so the card click can route to `activate_window()` on the
+/// target window.
 #[derive(Clone)]
 struct CardEntry {
     title: SharedString,
@@ -48,6 +50,8 @@ struct CardEntry {
     /// each card reads as visually distinct without needing real
     /// branded assets. RGB integer.
     accent: u32,
+    /// Window handle for click-to-focus.
+    handle: AnyWindowHandle,
 }
 
 pub struct CardSwitcherShellPlaceholder {
@@ -192,6 +196,7 @@ fn preview_card(card: CardEntry, idx: usize, is_active: bool) -> impl IntoElemen
     };
     let accent = rgb(card.accent);
     let accent_wash = hsla_from_rgb_with_alpha(card.accent, 0.10);
+    let target_handle = card.handle;
 
     div()
         .id(("card", idx))
@@ -204,11 +209,15 @@ fn preview_card(card: CardEntry, idx: usize, is_active: bool) -> impl IntoElemen
         .overflow_hidden()
         .flex()
         .flex_col()
-        // Card click is reserved for "switch to this AppWindow" (to
-        // land in a future iteration). For now it merely swallows the
-        // event so the backdrop close does not fire.
-        .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+        .cursor_pointer()
+        // Click → raise the target window to the foreground via
+        // `activate_window`, then dismiss the switcher. The handle
+        // is captured by Copy (AnyWindowHandle is Copy).
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
+            let _ = target_handle.update(cx, |_, w, _| w.activate_window());
+            cx.set_global(CardSwitcherWindowSlot(None));
+            window.remove_window();
         })
         // Header row
         .child(
@@ -380,6 +389,7 @@ fn bottom_dock(cards: &[CardEntry]) -> impl IntoElement {
 
 fn dock_tile(card: CardEntry, idx: usize) -> impl IntoElement {
     let accent = rgb(card.accent);
+    let target_handle = card.handle;
     div()
         .id(("dock", idx))
         .w(px(40.0))
@@ -393,8 +403,12 @@ fn dock_tile(card: CardEntry, idx: usize) -> impl IntoElement {
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+        // Same click route as the large card.
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
+            let _ = target_handle.update(cx, |_, w, _| w.activate_window());
+            cx.set_global(CardSwitcherWindowSlot(None));
+            window.remove_window();
         })
         .child(card.initial.clone())
 }
@@ -425,40 +439,24 @@ fn dock_new_window_tile() -> impl IntoElement {
         .child(Icon::new(IconName::Plus).size(px(18.0)))
 }
 
-/// Convert a route into a (title, subtitle, initial, accent) tuple
-/// for card rendering. Mirrors the same logic AppWindowShell uses,
-/// kept duplicated to avoid a cross-window dependency on the App
-/// view module. Accent colour is a deterministic hash of the handle
-/// so cards stay visually distinct without bundled brand assets.
-fn entry_from_route(route: &GuestRoute) -> CardEntry {
-    let (title, subtitle) = match route {
-        GuestRoute::CapsuleHandle { handle, label } => (label.clone(), handle.clone()),
-        GuestRoute::CapsuleUrl { label, url, .. } => (label.clone(), url.to_string()),
-        GuestRoute::ExternalUrl(url) => (
-            url.host_str()
-                .map(|h| h.to_string())
-                .unwrap_or_else(|| url.as_str().to_string()),
-            url.as_str().to_string(),
-        ),
-        GuestRoute::Capsule { session, .. } => {
-            (session.clone(), format!("capsule://{session}/"))
-        }
-        GuestRoute::Terminal { session_id } => (
-            format!("terminal/{session_id}"),
-            format!("terminal://{session_id}/"),
-        ),
-    };
-    let initial = title
+/// Convert a `ContentWindowEntry` from the cross-window registry into
+/// a `CardEntry` for rendering. Adds the initial letter + deterministic
+/// accent that the card visuals need, on top of the title/subtitle/
+/// handle the registry already carries.
+fn card_entry_from(entry: &crate::window::content_windows::ContentWindowEntry) -> CardEntry {
+    let initial = entry
+        .title
         .chars()
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string());
-    let accent = accent_for(&title);
+    let accent = accent_for(entry.title.as_ref());
     CardEntry {
-        title: SharedString::from(title),
-        subtitle: SharedString::from(subtitle),
+        title: entry.title.clone(),
+        subtitle: entry.subtitle.clone(),
         initial: SharedString::from(initial),
         accent,
+        handle: entry.handle,
     }
 }
 
@@ -538,15 +536,14 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         // open a fresh switcher.
     }
 
-    let cards: Vec<CardEntry> = {
-        let registry = cx.global::<AppWindowRegistry>();
-        registry
-            .mru_order()
-            .into_iter()
-            .filter_map(|id| registry.get(id))
-            .map(|w| entry_from_route(&w.route))
-            .collect()
-    };
+    // Snapshot the cross-window content registry into card entries.
+    // MRU order is preserved by the registry's `mru_order()`.
+    let cards: Vec<CardEntry> = cx
+        .global::<OpenContentWindows>()
+        .mru_order()
+        .iter()
+        .map(card_entry_from)
+        .collect();
 
     let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), cx);
     let options = WindowOptions {

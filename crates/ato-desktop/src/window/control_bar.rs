@@ -20,7 +20,8 @@ use gpui::{
 use gpui_component::{Icon, IconName};
 
 use crate::app::{OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings};
-use crate::state::{GuestRoute, OpenContentWindows};
+use crate::state::GuestRoute;
+use crate::window::content_windows::OpenContentWindows;
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;

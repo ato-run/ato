@@ -1093,10 +1093,20 @@ pub fn open_launcher_window(cx: &mut App) -> Result<()> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     cx.set_global(LauncherWindowSlot(Some(*handle)));
-    // Register in the cross-window content set so the Control Bar
-    // Card Switcher badge increments. Eviction is handled in
-    // `app::on_window_closed` keyed by the GPUI WindowId.
-    cx.global_mut::<crate::state::OpenContentWindows>()
-        .insert(handle.window_id().as_u64());
+    // Register in the cross-window content registry so the Control
+    // Bar badge increments AND the Card Switcher renders a card.
+    use crate::window::content_windows::{
+        ContentWindowEntry, ContentWindowKind, OpenContentWindows,
+    };
+    cx.global_mut::<OpenContentWindows>().insert(
+        handle.window_id().as_u64(),
+        ContentWindowEntry {
+            handle: *handle,
+            kind: ContentWindowKind::Launcher,
+            title: gpui::SharedString::from("Launcher"),
+            subtitle: gpui::SharedString::from("設定 · 検索 · ストア"),
+            last_focused_at: std::time::Instant::now(),
+        },
+    );
     Ok(())
 }
