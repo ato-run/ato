@@ -93,36 +93,39 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
+/// Stage A: translate the legacy `BridgeAction` into the typed
+/// system-capsule vocabulary and route through `CapabilityBroker`.
+/// The actual side effects (window remove, open_app_window,
+/// open_store_window) live behind per-capsule modules in
+/// `crate::system_capsule::{ato_windows, ato_store}`. Stage B will
+/// switch the HTML envelope so this translation step disappears.
 fn dispatch(cx: &mut App, host: gpui::AnyWindowHandle, action: BridgeAction) {
-    match action {
-        BridgeAction::CloseStartWindow => {
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-        }
-        BridgeAction::OpenAppWindow => {
-            // Mirror the OpenAppWindowExperiment handler in app.rs:
-            // spawn an AppWindow with the demo route. Closing the
-            // StartWindow after dispatching avoids leaving a stale
-            // composition surface behind.
-            let route = crate::state::GuestRoute::CapsuleHandle {
-                handle: "github.com/Koh0920/WasedaP2P".to_string(),
-                label: "WasedaP2P".to_string(),
-            };
-            if let Err(err) = crate::window::open_app_window(cx, route) {
-                tracing::error!(error = %err, "OpenAppWindow from StartWindow failed");
-            }
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-        }
-        BridgeAction::OpenStore => {
-            if let Err(err) = crate::window::store::open_store_window(cx) {
-                tracing::error!(error = %err, "OpenStore from StartWindow failed");
-            }
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-        }
-        // Switcher-only actions arriving here are a no-op.
+    use crate::system_capsule::ato_store::StoreCommand;
+    use crate::system_capsule::ato_windows::WindowsCommand;
+    use crate::system_capsule::{CapabilityBroker, SystemCapsuleId, SystemCommand};
+
+    let (capsule, command) = match action {
+        BridgeAction::CloseStartWindow => (
+            SystemCapsuleId::AtoWindows,
+            SystemCommand::AtoWindows(WindowsCommand::CloseStartWindow),
+        ),
+        BridgeAction::OpenAppWindow => (
+            SystemCapsuleId::AtoWindows,
+            SystemCommand::AtoWindows(WindowsCommand::OpenAppWindow),
+        ),
+        BridgeAction::OpenStore => (
+            SystemCapsuleId::AtoStore,
+            SystemCommand::AtoStore(StoreCommand::Open),
+        ),
+        // Switcher-only IPC arriving here is a no-op.
         BridgeAction::CloseSwitcher
         | BridgeAction::ActivateWindow { .. }
         | BridgeAction::OpenStartWindow => {
-            tracing::debug!(?action, "ignored — not a StartWindow action");
+            tracing::debug!(?action, "start_window: ignored — not a StartWindow action");
+            return;
         }
+    };
+    if let Err(err) = CapabilityBroker::dispatch(cx, host, capsule, command) {
+        tracing::warn!(?err, "start_window: broker rejected dispatch");
     }
 }

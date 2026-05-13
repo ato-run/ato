@@ -262,48 +262,41 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
 
 /// Translate one bridge action into the corresponding `&mut App`
 /// operation. Runs on the GPUI main thread (the drain loop
-/// trampolines onto it via `AsyncApp::update`), so it has full
-/// access to globals and window APIs.
+/// trampolines onto it via `AsyncApp::update`).
+///
+/// Stage A: this no longer holds the dispatch logic itself.
+/// Instead it translates the legacy `BridgeAction` into a typed
+/// `SystemCommand` and routes through `CapabilityBroker`, which
+/// in turn calls into `ato_windows::dispatch`. The actual side
+/// effects (window remove, MRU focus, etc.) live in the broker's
+/// per-capsule module. Stage B will swap the HTML envelope to
+/// `{capsule, command}` directly and remove this translation step.
 fn dispatch(cx: &mut App, host: AnyWindowHandle, action: BridgeAction) {
-    match action {
-        BridgeAction::CloseSwitcher => {
-            cx.set_global(CardSwitcherWindowSlot(None));
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-        }
+    use crate::system_capsule::ato_windows::WindowsCommand;
+    use crate::system_capsule::{CapabilityBroker, SystemCapsuleId, SystemCommand};
+
+    let translated = match action {
+        BridgeAction::CloseSwitcher => Some(WindowsCommand::CloseSwitcher),
         BridgeAction::ActivateWindow { window_id } => {
-            // Look up the target handle in the cross-window registry.
-            // Missing IDs (e.g. a window that closed between the
-            // snapshot being injected and the click firing) are a
-            // no-op — just close the switcher.
-            let target = cx
-                .global::<OpenContentWindows>()
-                .get(window_id)
-                .map(|e| e.handle);
-            if let Some(target) = target {
-                // Bump MRU so the Control Bar's omnibar reflects this
-                // window's URL after the activate. `focus()` only
-                // updates `last_focused_at`; the activate_window call
-                // below does the actual `makeKeyAndOrderFront:`.
-                cx.global_mut::<OpenContentWindows>().focus(window_id);
-                let _ = target.update(cx, |_, window, _| window.activate_window());
-            }
-            cx.set_global(CardSwitcherWindowSlot(None));
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            Some(WindowsCommand::ActivateWindow { window_id })
         }
-        BridgeAction::OpenStartWindow => {
-            if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                tracing::error!(error = %err, "failed to open start window from switcher");
-            }
-            cx.set_global(CardSwitcherWindowSlot(None));
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-        }
-        // Switcher does not expose these actions; treat as no-ops if
-        // they somehow arrive (extra safety, unparseable variants
-        // are already dropped at the bridge boundary).
+        BridgeAction::OpenStartWindow => Some(WindowsCommand::OpenStart),
+        // The switcher's HTML does not emit these; if it ever does,
+        // log + drop (parity with the previous behaviour).
         BridgeAction::CloseStartWindow
         | BridgeAction::OpenAppWindow
         | BridgeAction::OpenStore => {
-            tracing::debug!(?action, "ignored — not a switcher action");
+            tracing::debug!(?action, "card_switcher: ignored — not a switcher action");
+            None
         }
+    };
+    let Some(command) = translated else { return };
+    if let Err(err) = CapabilityBroker::dispatch(
+        cx,
+        host,
+        SystemCapsuleId::AtoWindows,
+        SystemCommand::AtoWindows(command),
+    ) {
+        tracing::warn!(?err, "card_switcher: broker rejected dispatch");
     }
 }

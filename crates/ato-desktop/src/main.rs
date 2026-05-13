@@ -12,6 +12,7 @@ mod retention;
 mod settings;
 mod state;
 mod surface_timing;
+mod system_capsule;
 mod terminal;
 mod ui;
 mod userland;
