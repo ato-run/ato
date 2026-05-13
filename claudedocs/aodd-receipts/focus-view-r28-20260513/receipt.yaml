@@ -1,0 +1,79 @@
+usecase: "Settings view inside Launcher matches the .tmp/settings-window.png reference; Control Bar's Settings cog routes to it via ShowSettings."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "ShowSettings action flips the Launcher to render a Settings view with left-nav rail + security card + stats + toggles + publishers + privacy cards."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r28"
+out_of_scope:
+  - "Wiring toggles to real AppState settings (visual-only)."
+  - "Live security telemetry (stats are hardcoded placeholders)."
+  - "Routing nav items other than the 'スタートに戻る' affordance (Settings panel renders the same content regardless of which nav item is highlighted)."
+time_budget: "40 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Introduce LauncherView enum + LauncherViewState global, register default at startup"
+    observation: |
+      Two-state enum (Start | Settings) gated by a gpui Global. App
+      bootstrap calls `cx.set_global(LauncherViewState::default())`
+      so the launcher can read it on first render.
+
+  - action: "Add observe_global subscription in LauncherShellPlaceholder::new"
+    observation: |
+      `cx.observe_global::<LauncherViewState>(|_, cx| cx.notify())` —
+      same pattern used by the Control Bar for AppWindowRegistry.
+      gpui's set_global pushes NotifyGlobalObservers, so the launcher
+      re-renders automatically when ShowSettings flips the state.
+
+  - action: "Wire ShowSettings handler in app.rs"
+    observation: |
+      `cx.on_action(|_: &ShowSettings, cx| cx.set_global(LauncherViewState(Settings)))`,
+      gated by the multi-window flag. The Control Bar's Settings cog
+      dispatches OpenLauncherWindow followed by ShowSettings, so a
+      single click reaches the Settings view even from a cold start.
+
+  - action: "Render settings_content with two-column layout"
+    observation: |
+      Top-level wrapper is a 960px-wide rounded card containing:
+        - settings_nav (180px): スタートに戻る + 9 nav items, セキュリティ
+          highlighted in indigo as the current section
+        - settings_main_panel: 設定 header, security_summary_block
+          (security level card + 3-row stats column), startup_behaviour_block
+          (3 toggles), publishers_block (3 verified publishers with
+          green 検証済み tag), privacy_cards_row (3 bottom cards)
+
+  - action: "Fix two IconName name collisions"
+    observation: |
+      `IconName::ShieldCheck` and `IconName::Database` do not exist in
+      gpui_component's auto-generated icon enum. Substituted
+      `IconName::CircleCheck` (security card + privacy first card) and
+      `IconName::HardDrive` (data privacy card). All other icons
+      (Folder, ChevronLeft, Plus, etc.) resolved without change.
+
+  - action: "Build → launch hermetic Focus mode → MCP OpenLauncherWindow + ShowSettings → screencap"
+    observation: |
+      settings-view.png shows the Launcher in Settings mode:
+        - Left rail with 'スタートに戻る' at top, 'セキュリティ' active in
+          indigo, other 8 nav items in zinc
+        - Main panel: 設定 header, security level card with the
+          CircleCheck shield-equivalent puck, 'レベルを変更する →' link,
+          stats column (Files processed 1,240 / Network checks 308 /
+          Security score 92/100), 起動時の挙動 with 3 indigo/grey
+          toggles, 信頼済みの発行元 with 3 publishers (Ato Labs /
+          Waseda University / DataMesh Inc.) each tagged green 検証済み,
+          and 3 bottom privacy cards (プライバシー保護 / データ保護 /
+          ローカル優先).
+      Visual hierarchy and density match the reference.
+
+agent_observation:
+  user_visible_problem: "Resolved. Clicking the Settings cog on the Control Bar now reaches a real Settings view, not a placeholder. The settings surface matches the reference layout."
+  likely_cause: "ShowSettings was a dispatched action with no handler, so the Control Bar's Settings click just opened the Launcher (which itself was a placeholder). This iteration adds both the handler routing and the destination view."
+  suggested_fix:
+    - "Already shipped: LauncherView state + observe_global re-render + ShowSettings handler + Settings render."
+    - "Future: route the left-nav items so each shows a different sub-panel (一般 / ターミナル / etc.) instead of all rendering the same content."
+    - "Future: wire toggles to real AppState (settings persistence; affects boot path)."
+    - "Future: replace hardcoded stats with live telemetry counters."
+
+evidence:
+  - settings-view.png
+
+status: "fixed"

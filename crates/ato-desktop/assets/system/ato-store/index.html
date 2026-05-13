@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Store</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    color: #71717a;
+  }
+</style>
+</head>
+<body>
+<!--
+  Phase 1: ato-store's actual UI is hosted at https://ato.run/, which
+  `crate::window::store::open_store_window` loads directly via
+  `WebViewBuilder::with_url(...)`. This file exists so the
+  `assets/system/<name>/` directory structure stays consistent
+  across system capsules; it is NOT loaded today.
+
+  Phase 2 will (a) host the registry frontend locally and (b) wire
+  IPC for "click capsule card → open AppWindow" via the
+  `ato-store::StoreCommand` vocabulary already defined in
+  `system_capsule::ato_store`.
+-->
+<p>Redirecting to <a href="https://ato.run/">ato.run</a>…</p>
+<script>window.location.replace('https://ato.run/');</script>
+</body>
+</html>

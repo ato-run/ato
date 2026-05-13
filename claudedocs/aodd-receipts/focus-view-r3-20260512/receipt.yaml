@@ -1,0 +1,100 @@
+usecase: "Iteratively brush up the Focus View placeholder until the AppWindow + Control Bar visually approach the reference mockup"
+actor: "Autonomous Claude Operator looping host_dispatch_action → host_take_screenshot → multimodal Read → code fix → rebuild → repeat"
+goal: "Two specific gaps closed against the reference: (1) AppWindow title block reads the capsule label, (2) Control Bar pill no longer overlaps the macOS menu bar and reads as floating ABOVE the AppWindow"
+entry_point: "Hermetic ATO_HOME=/tmp/ato-aodd/ato-home, ATO_DESKTOP_MULTI_WINDOW=1, real HOME preserved"
+out_of_scope:
+  - "Real WKWebView attachment (deferred — receipt R2 already documents this)"
+  - "Card switcher MRU binding (deferred)"
+  - "addChildWindow:ordered: parent-child plumbing (deferred — would let the bar literally co-move with parent)"
+time_budget: "15 minutes"
+
+result: "degraded"
+
+steps:
+  - action: "Iter A — host_dispatch_action OpenAppWindowExperiment + screenshot"
+    observation: |
+      Baseline (not saved to evidence/, wiped during iter B+C cleanup; observation
+      preserved here). The AppWindow opened in the centre of the screen via
+      `Bounds::centered`. The paired Control Bar window sat at parent.y - bar_h +
+      gap which on a typical Mac display computed to y≈22px — colliding with the
+      macOS menu bar. AppWindow title block read 'ato.run' because the spawn
+      handler used `GuestRoute::ExternalUrl("https://ato.run/")`. URL pill text
+      said `https://ato.run/`.
+    stuck_at: "Control Bar overlaps macOS menu bar; title block says 'ato.run' not 'WasedaP2P'"
+
+  - action: "Iter B — switch OpenAppWindowExperiment handler to spawn with CapsuleHandle route"
+    observation: |
+      Changed `app.rs` so the handler builds `GuestRoute::CapsuleHandle { handle:
+      'github.com/Koh0920/WasedaP2P', label: 'WasedaP2P' }`. AppWindowShell's
+      `short_title_from_route` already prefers the capsule label, and
+      ControlBarShellPlaceholder's `display_url_from_route` formats it as
+      `ato.app/shell://github.com/Koh0920/WasedaP2P`. Mirrors the reference
+      mockup's primary capsule subject.
+
+  - action: "Iter C — replace `Bounds::centered` in `open_app_window` with explicit bounds that reserve 140px above the AppWindow for the Control Bar"
+    observation: |
+      Uses `cx.primary_display()` to anchor the AppWindow at
+      `display.origin.y + 140` (with display fallback to centered if the
+      query returns None). The Control Bar window opens at `parent.y -
+      bar_h + 12 = ~60`, so it sits ~36px below the menu bar with a
+      visible gap and a further gap above the parent's traffic lights.
+
+  - action: "Iter B+C — rebuild, restart hermetic desktop, host_dispatch_action OpenAppWindowExperiment, screenshot"
+    observation: |
+      See evidence/iterBC-fixed-app-window.png. Visible:
+      - Floating Control Bar pill below the menu bar, not overlapping it.
+      - AppWindow title bar (traffic lights) clearly visible below the Control Bar.
+      - URL pill shows 'ato.app/shell://github.com/Koh0920/WasedaP2P'.
+      - Title block reads 'WasedaP2P' / 'WasedaP2P' (capsule label twice — the route_label and short_title both derive from the capsule, which is intentional for this slice; final design will distinguish 'WasedaP2P' (display name) from 'github.com/Koh0920/WasedaP2P' (canonical handle)).
+      - Mock dashboard panels and gradient backdrop unchanged from R2.
+
+  - action: "host_dispatch_action OpenCardSwitcher + screenshot"
+    observation: |
+      See evidence/iterBC-card-switcher.png. Card Switcher overlay opens
+      above the AppWindow, ~70% black backdrop, three rounded card
+      placeholders ('WasedaP2P (most recent)', 'example.com',
+      'Launcher'). Cards are still hardcoded — MRU binding to
+      AppState::app_window_mru_order is the next iteration.
+
+agent_observation:
+  user_visible_problem: |
+    None blocking. Two visual gaps from R2 are now closed. The Operator
+    can run the AODD loop end-to-end via the MCP and the resulting
+    screenshots are visibly closer to the reference mockup. Result is
+    'degraded' (not 'complete') because there are still observable
+    differences from the reference:
+    - Preview cards (CodeLab, Discover) are empty grey rectangles
+      where the reference shows mock code / chart content. Visual
+      polish, not blocking.
+    - Card Switcher cards are hardcoded labels rather than MRU-bound
+      live snapshots of open app windows. Data-binding work,
+      separately scoped.
+    - The legacy DesktopShell is still visible behind the AppWindow.
+      Will go away when the Launcher migration extracts the main
+      shell into its own Launcher-mode window.
+
+  likely_cause: |
+    Each remaining gap is a known deferred scope item per the redesign
+    plan, not a regression. They were captured in receipt R2's
+    `remaining_friction` and are now confirmed unchanged.
+
+  suggested_fix:
+    - "Already shipped this round: CapsuleHandle route in OpenAppWindowExperiment; primary-display anchored AppWindow bounds in open_app_window."
+    - "Next iteration (low risk, visual): fill the CodeLab / Discover preview cards with simple code-frame / bar-chart svg or div mockups so the dashboard reads as 'WasedaP2P-like' rather than 'mostly empty'."
+    - "Next iteration (medium risk, data): bind Card Switcher cards to AppState::app_window_mru_order so opening a second AppWindow with a different route adds a real entry."
+    - "Next iteration (high risk, plumbing): wire addChildWindow:ordered: so the Control Bar literally tracks the AppWindow's geometry across drag / Spaces / fullscreen — current behaviour is a static one-shot positioning."
+
+evidence:
+  - iterBC-fixed-app-window.png
+  - iterBC-card-switcher.png
+  - desktop-log-excerpt: |
+      ato-desktop starting version=0.5.1 pid=50253
+      automation socket listening socket=/tmp/ato-aodd/ato-home/run/ato-desktop-50253.sock
+      host action dispatched via automation socket action=OpenAppWindowExperiment
+      OpenAppWindowExperiment handler entered
+      calling open_app_window
+      open_app_window returned Ok
+      host action dispatched via automation socket action=OpenCardSwitcher
+      ...
+
+status: "open"

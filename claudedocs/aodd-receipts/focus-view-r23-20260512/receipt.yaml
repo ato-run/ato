@@ -1,0 +1,88 @@
+usecase: "Pill bar reads as a soft floating element — visible drop shadow for separation from same-colour backdrops, and zero rectangular boundary leak."
+actor: "Autonomous Claude Operator + Fixer (visual inspection via screencapture)"
+goal: "Bar shows OS-level drop shadow following the rounded contentView alpha mask; no rectangular NSWindow boundary visible against the white Store backdrop."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1) with isolated ATO_HOME"
+out_of_scope:
+  - "Sharper / heavier shadow tuning (NSWindow auto-shadow is what AppKit offers; CALayer shadow stack would re-introduce window padding)"
+  - "Restoring the in-process automation socket (defeated by hermetic ATO_HOME path length, SUN_LEN; visual verification used screencapture instead)"
+time_budget: "25 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports two residual defects after R22"
+    observation: |
+      1. ウィンドウ透明部分の境界が見えてしまっています
+         (Boundary of the transparent area is still visible.)
+      2. ウィンドウの影がないと同じ色の時に重なって見えます
+         (Without a window shadow, when the backdrop is the same colour, the
+         bar visually merges with it.)
+    stuck_at: "AppKit shadow missing or stale; transparent backing not asserted"
+
+  - action: "Diagnose: R22 set cornerRadius+masksToBounds but left NSWindow shadow disabled (PopUp default) and never invalidated the shadow path"
+    observation: |
+      AppKit draws the window-level drop shadow OUTSIDE the contentView,
+      using the contentView's alpha as the shadow shape. Without
+      `setHasShadow(true)` + `invalidateShadow()` the rounded alpha mask
+      we installed in R22 was not reflected in any shadow. Additionally
+      we never explicitly set the window backing to clear, leaving AppKit
+      free to draw a rectangular white background under our masked
+      content — visible as the boundary the user reported.
+
+  - action: "Extend `round_window_corners` in `crates/ato-desktop/src/window/macos.rs`"
+    observation: |
+      After the cornerRadius+masksToBounds calls, the helper now also:
+        - `nswindow.setOpaque(false)` — declare backing transparent
+        - `nswindow.setBackgroundColor(Some(&NSColor::clearColor()))` —
+          erase any default opaque fill so the four corner cut-outs are
+          truly transparent
+        - `nswindow.setHasShadow(true)` — opt back in to AppKit's
+          window-level drop shadow (PopUp kind ships with hasShadow=false
+          by default)
+        - `nswindow.invalidateShadow()` — recompute the shadow against
+          the new rounded alpha mask
+      Added `NSColor` to the objc2_app_kit imports.
+
+  - action: "`cargo build --bin ato-desktop --bin ato-desktop-mcp`"
+    observation: "Finished in 5.81s — incremental over R22. No new warnings tied to the new objc2 calls."
+
+  - action: "Launch hermetic Focus mode and screencapture full screen + tight crop"
+    observation: |
+      Full-screen capture saved as window-shadow-and-rounding.png; tight
+      crop of the bar region saved as bar-crop.png. The crop shows:
+        - Pill ends are full half-circles (R22 cornerRadius confirmed)
+        - A subtle drop shadow bleeds out from all edges of the pill,
+          most visible under the bottom edge and around the corners
+        - The shadow ALSO follows the rounded shape (no rectangular
+          shadow fringe — the silhouette is the pill, not the window
+          rect)
+        - Where the pill crosses the Store's white content the shadow
+          provides clear separation; where the pill crosses the Store's
+          blue title bar there is no awkward white halo
+      No rectangular boundary visible anywhere in the captures.
+
+agent_observation:
+  user_visible_problem: |
+    Resolved. The bar now reads as a true floating capsule with OS-level
+    drop shadow — it sits cleanly above same-coloured backdrops without
+    blending in, and the previously-visible rectangle has been replaced
+    by a silhouette that matches the pill exactly.
+  likely_cause: |
+    Two compounding settings carried over from R22:
+      - PopUp NSWindow ships with `hasShadow=false`, so no shadow was
+        ever drawn around the bar.
+      - The NSWindow backing was nominally transparent (via gpui's
+        `WindowBackgroundAppearance::Transparent`), but AppKit's
+        shadow shape is derived from the contentView's alpha at the
+        moment `invalidateShadow()` is called. R22 never called it,
+        so even if a shadow had been on, it would have been
+        rectangular.
+  suggested_fix:
+    - "Already shipped: setOpaque(false) + clearColor backing + setHasShadow(true) + invalidateShadow() in `round_window_corners`."
+    - "Future: if AppKit's auto-shadow is too soft for the brand, render a layer-level CALayer shadow with explicit shadowRadius/shadowOpacity on a wrapper layer that is NOT masked to bounds, with the gpui-content layer nested inside as the masked child."
+
+evidence:
+  - window-shadow-and-rounding.png
+  - bar-crop.png
+
+status: "fixed"

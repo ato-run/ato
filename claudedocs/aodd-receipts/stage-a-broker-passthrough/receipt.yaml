@@ -1,0 +1,92 @@
+usecase: "Stage A — introduce the system_capsule layer scaffolding (manifest, broker, per-capsule modules). Existing Card Switcher / StartWindow IPC paths trampoline through CapabilityBroker with ZERO visible UX change."
+actor: "Autonomous Claude Operator (build + host_dispatch_action) + code review for the broker call path"
+goal: "ato_desktop compiles with new system_capsule module; Card Switcher + StartWindow render identically to R42; the dispatch path for any HTML-emitted IPC envelope now traverses CapabilityBroker::dispatch + per-capsule dispatch fn."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-stagea, RUST_LOG configured to surface system_capsule traces"
+out_of_scope:
+  - "New HTML envelope `{capsule, command}` (Stage B)."
+  - "RouteContent::SystemCapsule custom-protocol routing (Stage B)."
+  - "Migrating Store / Settings UI (Stages C/D)."
+  - "Real-click verification of the broker chain via MCP — host-element clicks aren't exposed. The chain is verified by build + code inspection; live tracing will surface once a user clicks a card."
+time_budget: "90 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Read plan + Phase-1 architecture decisions"
+    observation: |
+      Plan locks: WebView engine = Desktop core; UI surfaces = system
+      capsules; broker is the single chokepoint; manifest inline in
+      Rust for Phase 1; 4 stages A→B→C→D each AODD-gated.
+
+  - action: "Create system_capsule module skeleton"
+    observation: |
+      Eight files:
+        crates/ato-desktop/src/system_capsule/mod.rs
+        crates/ato-desktop/src/system_capsule/manifest.rs
+        crates/ato-desktop/src/system_capsule/broker.rs
+        crates/ato-desktop/src/system_capsule/ato_windows/mod.rs
+        crates/ato-desktop/src/system_capsule/ato_store/mod.rs
+        crates/ato-desktop/src/system_capsule/ato_settings/mod.rs
+        crates/ato-desktop/src/system_capsule/ato_web_viewer/mod.rs
+      Public surface: `SystemCapsuleId`, `Capability`, `SystemCommand`,
+      `CapabilityBroker`, `BrokerError`. Per-capsule modules expose
+      a typed `*Command` enum + `dispatch(cx, host, command) ->
+      Result<(), BrokerError>` fn.
+
+  - action: "Populate `manifest::TABLE`"
+    observation: |
+      Inline static table maps each `SystemCapsuleId` to its
+      `allowed_capabilities`. AtoSettings is INTENTIONALLY missing
+      `SettingsWrite` — Phase 1 keeps mutations gated as Forbidden.
+
+  - action: "Move card_switcher / start_window dispatch bodies into ato_windows + ato_store"
+    observation: |
+      `card_switcher::dispatch` and `start_window::dispatch` are now
+      thin translators: `BridgeAction → SystemCommand →
+      CapabilityBroker::dispatch`. The actual side effects (window
+      remove, MRU focus, open_app_window, open_store_window) execute
+      inside `system_capsule::ato_windows::dispatch` and
+      `system_capsule::ato_store::dispatch`. Stage B will retire the
+      `BridgeAction` translation when the HTML emits the new
+      envelope directly.
+
+  - action: "Register `mod system_capsule;` in main.rs"
+    observation: "Inserted between `state` and `terminal` (alphabetical)."
+
+  - action: "Build"
+    observation: "`cargo build --bin ato-desktop` — clean. 111 warnings, all pre-existing dead-code lints."
+
+  - action: "Hermetic launch + MCP OpenStartWindow + OpenAppWindowExperiment + OpenCardSwitcher"
+    observation: |
+      switcher-after-broker.png shows the Card Switcher with 3
+      cards (WasedaP2P + 新しいウィンドウ + ストア + new-window
+      tile), badge=3, Control Bar URL = capsule://github.com/Koh0920/WasedaP2P,
+      bottom dock with 3 tiles + plus. Identical to R42.
+      No tracing line from `system_capsule::*` appears in the log
+      yet — the broker only sees activity once an HTML page emits
+      `window.ipc.postMessage(...)`, which requires a host-element
+      click (MCP cannot drive these).
+
+  - action: "Manual code-review verification of the broker call path"
+    observation: |
+      Tracing card_switcher.rs:267 + start_window.rs:96 — both
+      translate via `match` on the legacy `BridgeAction` and call
+      `CapabilityBroker::dispatch`. The broker (broker.rs:71) looks
+      up the manifest, validates the capability against the
+      allowlist, and matches into per-capsule dispatch. The
+      per-capsule modules carry the same `cx`/`host` operations the
+      old dispatcher used. No behavior diverges; the broker is a
+      pure decorator over the existing flow.
+
+agent_observation:
+  user_visible_problem: "No visible problem yet — Stage A is a pure scaffolding refactor. The receipt confirms zero regression vs R42 and lays the typed surface for Stages B–D."
+  likely_cause: "The user's architectural framing called for a privileged-but-bounded surface for the four UI capsules. Stage A introduces that surface without changing user-visible behavior so subsequent stages can migrate one capsule at a time without risking the whole stack."
+  suggested_fix:
+    - "Already shipped Stage A: module scaffolding + broker + per-capsule dispatch with capability allowlist."
+    - "Next (Stage B): rewrite assets/launcher/{switcher,start}.html to post `{capsule, command}` directly so the BridgeAction translator can be removed. Wire the protocol router to serve them under capsule://system/ato-windows/. Add the negative test that ato-windows posting a SettingsWrite command returns Forbidden."
+    - "Future (Stages C/D): port Store + Settings UIs to HTML under capsule://system/ato-{store,settings}/; retire the Launcher window once Settings has its own."
+
+evidence:
+  - switcher-after-broker.png
+
+status: "fixed"

@@ -551,6 +551,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-web-kit",
  "portable-pty",
+ "raw-window-handle",
  "resvg",
  "semver",
  "serde",

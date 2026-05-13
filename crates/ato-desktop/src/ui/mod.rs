@@ -1837,10 +1837,49 @@ impl DesktopShell {
         }
         true
     }
+
+    /// Drains host-level action requests queued by the MCP automation
+    /// socket (`host_dispatch_action`). Each entry is invoked here so
+    /// the originating Operator never needed macOS Accessibility
+    /// permission. Bound to the redesign's window-open helpers; unknown
+    /// names log a warning rather than panic.
+    fn drain_pending_host_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.pending_host_actions.is_empty() {
+            return;
+        }
+        let actions: Vec<String> = self.state.pending_host_actions.drain(..).collect();
+        for name in actions {
+            tracing::info!(action = %name, "host action dispatched via automation socket");
+            match name.as_str() {
+                "OpenAppWindowExperiment" => {
+                    window.dispatch_action(
+                        Box::new(crate::app::OpenAppWindowExperiment),
+                        cx,
+                    );
+                }
+                // "OpenLauncherWindow" was retired in Stage D of the
+                // system-capsule refactor — ShowSettings now reaches
+                // the ato-settings system capsule directly.
+                "OpenCardSwitcher" => {
+                    window.dispatch_action(Box::new(crate::app::OpenCardSwitcher), cx);
+                }
+                "ShowSettings" => {
+                    window.dispatch_action(Box::new(crate::app::ShowSettings), cx);
+                }
+                other => {
+                    tracing::warn!(
+                        action = %other,
+                        "host action not recognized — extend drain_pending_host_actions to add it"
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drain_pending_host_actions(window, cx);
         let handled_open_urls = self.drain_open_urls();
         let size = window.bounds().size;
         let stage_bounds =

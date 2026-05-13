@@ -1,0 +1,56 @@
+usecase: "Add a round Identity / Account button at the right end of the Control Bar. Phase 1 is the entry point only — the popover menu (Profile / Account / Workspace / Trust / Preferences / Help / About) lands in Phase 2."
+actor: "Autonomous Claude Operator (build + visual check)"
+goal: |
+  (a) Bar shows a 36px circular indigo-tinted chip with a user-
+  silhouette glyph after the ストア button on the right.
+  (b) Clicking dispatches `OpenIdentityMenu`, which the new app.rs
+  handler logs at INFO.
+  (c) Settings cog stays on the left (案A from the user's design
+  note — Settings is a separate entry from the Identity menu).
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-identity"
+out_of_scope:
+  - "Real popover with Profile / Account / Workspace / Trust / Preferences / Help / About — Phase 2 work."
+  - "Avatar photo / login-state state machine. Phase 1 uses the user-silhouette glyph regardless of auth state."
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Add `assets/icons/identity.svg`"
+    observation: "Lucide-style user circle: head circle + shoulders arc. Single-colour SVG taking currentColor so the bar tints it via text_color."
+
+  - action: "Add `OpenIdentityMenu` action + handler in app.rs"
+    observation: |
+      Action declared in the `actions!` macro alongside the other
+      Open* actions. Handler is gated on `is_multi_window_enabled()`
+      and logs at INFO. Real popover wiring is documented as Phase 2.
+
+  - action: "Add `identity_button()` in control_bar.rs + use it in bar_pill"
+    observation: |
+      36px round chip after the ストア pill button. Indigo-tinted
+      (bg #eef2ff, border #e0e7ff, glyph #4f46e5) so it's visually
+      distinct from the left-side action affordances without
+      competing with the URL pill's accent. `cursor_pointer` +
+      hover state. Click dispatches `OpenIdentityMenu`.
+
+  - action: "Build + hermetic launch + crop the bar"
+    observation: |
+      bar-with-identity.png shows the bar with the new circular
+      button at the right end. Layout order:
+        設定 · URL pill · Card Switcher · ストア · Identity
+      Per the user's "案A" choice, Settings stays as a left-side
+      entry; Identity is a separate identity-scope entry.
+
+agent_observation:
+  user_visible_problem: "The bar now has a dedicated entry point for user / account / workspace concerns, isolated from the left-side action affordances. Real menu functionality is a Phase 2 expansion — the button is honest about being a placeholder (it logs but doesn't open a popover yet)."
+  likely_cause: "Per the user's design note, identity-scope operations (profile, account, workspace, trust) need their own right-end entry so they don't tangle with the action-scope affordances on the left."
+  suggested_fix:
+    - "Already shipped: identity.svg + OpenIdentityMenu action + identity_button() + hooked into bar_pill."
+    - "Phase 2: implement the popover. gpui_component::Popover or a custom GPUI menu surface. Items: Profile / Account / Workspace / Trust & Identity / Preferences / Help / About Ato."
+    - "Phase 2: surface a small badge on the avatar (e.g. green dot for online, indigo dot for dev mode)."
+    - "Phase 2: replace the user-silhouette glyph with the user's initials once profile data exists; replace with the user's avatar image when one is uploaded."
+
+evidence:
+  - bar-with-identity.png
+
+status: "fixed"

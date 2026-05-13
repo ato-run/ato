@@ -926,6 +926,24 @@ impl WebViewManager {
                     })));
                     continue;
                 }
+                HostDispatchAction { action } => {
+                    // Push onto the queue; `DesktopShell::render` drains
+                    // it on the next paint and invokes the matching
+                    // window::open_* helper. This bypasses macOS
+                    // Accessibility permission entirely.
+                    state.pending_host_actions.push_back(action.clone());
+                    // The render loop is event-driven — without an
+                    // explicit notify the shell might not repaint until
+                    // some other event fires (user input, timer). Kick
+                    // a refresh so the queued action gets drained
+                    // promptly.
+                    notify_window(self.async_app.clone(), self.window_handle);
+                    req.send(Ok(serde_json::json!({
+                        "ok": true,
+                        "queued_action": action,
+                    })));
+                    continue;
+                }
                 _ => {}
             }
 
@@ -4883,7 +4901,8 @@ fn dispatch_automation_command(
         | OpenUrl { .. }
         | SetCapsuleSecrets { .. }
         | ApproveExecutionPlanConsent { .. }
-        | StopActiveSession => {
+        | StopActiveSession
+        | HostDispatchAction { .. } => {
             unreachable!()
         }
     }

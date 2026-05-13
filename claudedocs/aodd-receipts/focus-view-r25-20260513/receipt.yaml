@@ -1,0 +1,71 @@
+usecase: "Card Switcher carries a user-facing tile that opens a new AppWindow without going through the omnibar / keyboard shortcut."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "A '+ 新しいウィンドウ' tile renders at the trailing end of the switcher row, regardless of whether MRU cards exist, and clicking it spawns an AppWindow + dismisses the switcher."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r25 (short path for socket binding)"
+out_of_scope:
+  - "Simulating the tile's click via MCP — host element clicks are not exposed; the wired action (`OpenAppWindowExperiment`) is the same code path proven in R24 to spawn an AppWindow."
+  - "Card Switcher styling rework (existing dark-backdrop translucent overlay kept)."
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User asks for a 'new window' button inside the task list (Card Switcher)"
+    observation: "Switcher previously had no affordance to open a new AppWindow; empty state was a developer-facing message instructing the user to invoke an MCP action by name."
+
+  - action: "Add `new_window_card()` to `crates/ato-desktop/src/window/card_switcher.rs` and append it as a child of the backdrop row"
+    observation: |
+      Tile is sized 320×200 to match `mru_card`. Visual language differs:
+        - bg: hsla(0,0,1,0.06) translucent fill (mru is solid zinc-900)
+        - border: zinc-600 2px, indigo on hover (mru active is indigo)
+        - centre: 48×48 white-translucent puck holding `IconName::Plus` 24px
+        - label: 14px/600 '新しいウィンドウ'
+      The tile is appended unconditionally — when no MRU entries exist
+      it doubles as the empty-state CTA, replacing the old developer
+      message.
+
+  - action: "Wire `on_mouse_down`"
+    observation: |
+      Order in the handler:
+        1. `cx.stop_propagation()` — backdrop close-on-click must not fire
+        2. `window.dispatch_action(Box::new(OpenAppWindowExperiment), cx)` —
+           queues the action on the GPUI action queue (same handler the
+           Control Bar and MCP route through)
+        3. `cx.set_global(CardSwitcherWindowSlot(None))` — release the slot
+           so the next Card Switcher click is a fresh open, not a stale
+           toggle
+        4. `window.remove_window()` — close the switcher immediately so the
+           new AppWindow is unobstructed
+      The action is dispatched BEFORE remove_window so the queued action
+      survives the window teardown.
+
+  - action: "Delete the old `empty_state_card()` (now superseded)"
+    observation: "Removed developer-facing copy 'Open one via host_dispatch_action OpenAppWindowExperiment' — the tile itself is the empty-state CTA."
+
+  - action: "Build + launch hermetic Focus mode → MCP `OpenCardSwitcher` → screencap"
+    observation: "switcher-empty-state.png shows the tile centered against the dark backdrop with no MRU cards present. Plus icon + label render as expected."
+
+  - action: "MCP `OpenCardSwitcher` (toggle off) → `OpenAppWindowExperiment` (creates MRU entry) → `OpenCardSwitcher` (toggle on) → screencap"
+    observation: |
+      switcher-with-mru-plus-new.png shows two tiles side by side:
+        - WasedaP2P MRU card (active, indigo border)
+        - '+ 新しいウィンドウ' tile (translucent, zinc border)
+      The Card Switcher icon in the Control Bar concurrently shows the
+      R24 badge reading '1', confirming both features cohabit cleanly.
+
+agent_observation:
+  user_visible_problem: |
+    Resolved at the UI layer. Users now have a discoverable, click-driven
+    path to spawn a new AppWindow from inside the Card Switcher — the
+    same place they'd naturally look when juggling multiple windows.
+  likely_cause: "The Card Switcher's empty state targeted developers (instructed them to invoke an MCP action by name). Users had no in-product affordance to open a new window from the task list."
+  suggested_fix:
+    - "Already shipped: `new_window_card()` tile rendered unconditionally as the trailing element of the switcher row."
+    - "Future: surface a similar new-window affordance in the Launcher so first-run users can open an AppWindow without ever opening the switcher."
+    - "Future: keyboard shortcut (e.g. `cmd-n` while the switcher is focused) that dispatches the same action."
+
+evidence:
+  - switcher-empty-state.png
+  - switcher-with-mru-plus-new.png
+
+status: "fixed"

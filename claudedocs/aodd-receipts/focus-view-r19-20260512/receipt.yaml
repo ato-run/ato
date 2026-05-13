@@ -1,0 +1,54 @@
+usecase: "Focus mode boot should land in the Store (ato.run) rather than the WasedaP2P mock dashboard"
+actor: "Autonomous Claude Operator screenshotting the boot screen via the Focus-mode MCP socket"
+goal: "First-run screen shows Control Bar + Store (Wry WebView on ato.run); no WasedaP2P placeholder dashboard"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Removing the OpenAppWindowExperiment action / WasedaP2P AppWindowShell code (still reachable via host_dispatch_action for AODD scripts)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User asks for the initial AppWindow to be the Store"
+    observation: "`app::run` Focus branch opens `open_app_window(GuestRoute::CapsuleHandle{WasedaP2P})` after the Control Bar. The Store window must replace it as the boot landing surface."
+
+  - action: "Change `open_store_window` to return `Result<AnyWindowHandle>`"
+    observation: |
+      Mirrors `open_app_window` (R6) so the boot path can hand the
+      handle to `focus_dispatcher::start`. Both the focus path (slot
+      already populated) and the open-new path return their handle
+      now.
+
+  - action: "Swap the boot call in `app::run`"
+    observation: |
+      Replace the WasedaP2P CapsuleHandle open_app_window call with
+      `open_store_window(cx)?`. Log line updated to "Focus View
+      Store window opened at startup". The dispatcher receives the
+      Store handle — actions are App-level so any window handle
+      routes dispatches to the registered handlers.
+
+  - action: "Build, launch hermetic Focus mode, host_take_screenshot"
+    observation: |
+      store-as-boot-window.png shows the boot screen:
+        - Control Bar pill at the top (with the new shopping-bag
+          icon from R18).
+        - Store window directly below loading ato.run (logo, "Search
+          for ..." pill, ollama / jupyter / claude tag chips,
+          "Public registry for CLI tools, agents and apps..." line).
+        - No WasedaP2P mock dashboard.
+      Desktop log records the sequence:
+        ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+        Focus View Control Bar opened at startup
+        Focus View Store window opened at startup
+
+agent_observation:
+  user_visible_problem: "Resolved. Boot lands the user in the catalogue rather than a placeholder dashboard."
+  likely_cause: "n/a — the WasedaP2P AppWindow was the scaffolding default. Store ato.run is now the production-feeling first surface."
+  suggested_fix:
+    - "Already shipped: open_store_window returns AnyWindowHandle; app::run uses it as the initial window; focus_dispatcher receives the Store handle."
+    - "Future: when the user actually picks a capsule from the Store catalogue, dispatch open_app_window with that capsule's CapsuleHandle route — currently OpenAppWindowExperiment is hardcoded to WasedaP2P, useful only as AODD scaffolding."
+
+evidence:
+  - store-as-boot-window.png
+
+status: "fixed"

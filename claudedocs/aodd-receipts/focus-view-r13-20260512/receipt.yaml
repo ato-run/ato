@@ -1,0 +1,52 @@
+usecase: "User should be able to close the Card Switcher (task list) once it is open"
+actor: "Autonomous Claude Operator + Fixer via Focus-mode MCP socket (close verification deferred to user since AppKit Accessibility is needed for synthetic keystroke / click)"
+goal: "Backdrop click and Escape both dismiss the Card Switcher window; clicking a card does NOT dismiss (reserved for future 'select this AppWindow')"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1) → host_dispatch_action OpenCardSwitcher"
+out_of_scope:
+  - "Wiring card-click → 'switch to this AppWindow' (separate concern; today the click is just consumed)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: task list screen has no close button / cannot be closed"
+    observation: "Prior `CardSwitcherShellPlaceholder` rendered the backdrop and cards but had no `on_mouse_down`, no `on_key_down`, no focus handle. Once open the user could only kill the host process to dismiss."
+    stuck_at: "No dismiss path"
+
+  - action: "Add `FocusHandle` to `CardSwitcherShellPlaceholder` + `impl Focusable`"
+    observation: "Constructor allocates the handle via `cx.focus_handle()`. Render `.track_focus(&self.focus_handle)` so the backdrop is the focused element when the window opens."
+
+  - action: "Wire backdrop dismiss: left-mouse-down + escape key"
+    observation: |
+      Backdrop div now has:
+        - .on_mouse_down(MouseButton::Left, |_, window, _| window.remove_window())
+        - .on_key_down(|event, window, _| if event.keystroke.key == "escape" { window.remove_window() })
+
+  - action: "Cards swallow their own click so they do NOT bubble up to the backdrop's dismiss"
+    observation: "Each card div now has `.id(('card', idx))` + `.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())`. Future iteration replaces the stop with a real `SelectTask` dispatch."
+
+  - action: "Focus the backdrop on open so Escape works without a prior click"
+    observation: "`open_card_switcher_window`: after `cx.new(...)` builds the entity, fetches its focus handle and calls `window.focus(&focus, cx)`."
+
+  - action: "AODD: host_dispatch_action OpenCardSwitcher + screenshot"
+    observation: |
+      switcher-open.png shows the Card Switcher overlay rendered with
+      one WasedaP2P card. Control Bar visible above. Log records
+      `focus dispatcher routes action action=OpenCardSwitcher`.
+      User-driven backdrop click / Escape verification is deferred —
+      synthetic keystroke is gated on macOS Accessibility which the
+      host terminal does not have. The wiring is straightforward
+      `window.remove_window()` calls; user can confirm by clicking
+      outside the card or pressing Escape on the running build.
+
+agent_observation:
+  user_visible_problem: "Resolved at the code level. Two standard dismiss affordances (backdrop click, Escape) are now wired."
+  likely_cause: "n/a — the Card Switcher scaffolding shipped without dismiss handlers."
+  suggested_fix:
+    - "Already shipped: FocusHandle + on_mouse_down on backdrop + on_key_down for Escape + stop_propagation on cards + focus the backdrop on open."
+    - "Defer: real card-click handler that dispatches `SelectTask`-equivalent (switch focused AppWindow to the clicked card's AppWindowId)."
+
+evidence:
+  - switcher-open.png
+
+status: "fixed"

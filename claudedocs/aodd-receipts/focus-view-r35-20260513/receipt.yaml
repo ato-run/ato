@@ -1,0 +1,110 @@
+usecase: "StartWindow renders the start-window.png design exactly: spacious quick-action tiles, two-panel section (最近のカプセル + おすすめ) with time-stamped rows, large dock with app-like SVG icons + labels."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Visual match against the actual reference image the user supplied — every structural element present, every glyph SVG, every time stamp visible."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r35c, window sized 1200×880"
+out_of_scope:
+  - "Card Switcher polish (R34 already brought it to a reasonable shape; user's pushback was about start-window specifically)."
+  - "Real per-app brand SVG assets — using generic glyphs (chart bars / terminal / search / chat / cpu / code) as universally-recognisable placeholders."
+  - "Wiring placeholder data to real AppState retention."
+time_budget: "45 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User supplied the actual reference image as fresh evidence — said the current implementation is 完全に違う (completely different)"
+    observation: |
+      Side-by-side diff between R34 output and the supplied reference:
+        - Quick actions: R34 tiles were small/cramped (96px tall, tiny
+          pucks). Reference tiles are spacious (cards with 52px pucks
+          on top, title+sub centered below).
+        - Recents: R34 was a bare row list with no time stamps and
+          letter-only icons. Reference has the rows inside a bordered
+          panel card with section header + 'すべて表示' link, real
+          glyph icons (chart bars for WasedaP2P, terminal for CodeLab,
+          search for QueryKit, chat for Local AI Chat), and a time
+          stamp on the right (2分前, 15分前, 1時間前, 3時間前).
+        - Right column: R34 showed 'ストア' with placeholder rows.
+          Reference shows 'おすすめ' with three category rows
+          (データ分析 / AIアシスタント / 開発ツール) each with its
+          own glyph + description.
+        - Dock: R34 dock was tiny letter tiles. Reference dock is
+          large 56px tiles with real glyph icons + visible labels
+          under each tile (WasedaP2P / CodeLab / QueryKit / Local
+          AI Chat / 新しいウィンドウ), plus tile has a small dot
+          indicator below the icon.
+        - Footer: R34 had no footer. Reference has a light-bulb icon
+          + 'Dockからカプセルを切り替えたり、新しいウィンドウを追加できます'.
+        - Background: R34 was a flat-ish wash. Reference has soft
+          radial-gradient blobs in top-right + bottom-left.
+        - Spacing: R34 was dense. Reference is spacious.
+
+  - action: "Full rewrite of `assets/launcher/start.html` matching the reference layout exactly"
+    observation: |
+      - body: radial-gradient blobs over a near-white lavender base
+        (#f7f5fb) for the wash effect
+      - container width bumped to 1080px, padding 36 / 56 / 24
+      - header: 56×56 indigo gradient puck (#818cf8 → #6366f1) with
+        the panel-icon SVG, 26px bold title, 14px muted subtitle
+      - search: 56px pill with 20px globe glyph + disabled input +
+        'kbd' chip rendering '⌘ K'
+      - 4 quick-action tiles (CSS grid 4 cols, 16px gap):
+        - Each tile: 22/20px padding, 18px radius, flex column,
+          52×52 gradient puck on top + title (15px/700) + sub (12px
+          muted) below
+        - Per-action accent: qa-sky (URLから開く), qa-amber (ローカル
+          から開く), qa-violet (ストアで探す), qa-indigo (新しく始める)
+      - two-column block, each column a `.panel` card with 16px
+        padding + header (title + すべて表示 link) + row list
+      - row layout: 36px icon block + title + sub + (optional) time
+        + chevron; hover shows soft zinc background
+      - glyph library: chart, terminal, search, chat, cpu, code — all
+        small Lucide-style stroked SVGs
+      - dock: 16/24/18 padding, 22px gap, rgba(255,255,255,0.7) with
+        backdrop-blur. Each cell = 56×56 gradient icon + 11.5px label
+        below. Plus cell uses white dashed-border icon + dot indicator
+        positioned at bottom-center of the puck.
+      - footer: light-bulb SVG + Japanese hint
+
+  - action: "Bump window size from 1100×760 to 1200×880 to fit the new spacious layout"
+    observation: |
+      Without the bump the dock + footer were below the viewport.
+      Reduced container vertical padding (44/36 → 36/24) and gap
+      (32 → 24) to keep things tight even with the larger frame.
+
+  - action: "Reposition the dock plus-tile dot indicator"
+    observation: |
+      The original CSS placed the dot top-right (notification-bubble
+      style). Reference places it at bottom-center of the puck (more
+      like a macOS dock 'running' indicator). Updated to bottom: 6px;
+      left: 50%; transform: translateX(-50%); 6×6px.
+
+  - action: "Build + launch + screencap"
+    observation: |
+      start-window-v2.png shows every reference element present:
+        - Indigo gradient header puck with panel-icon
+        - '新しいウィンドウ' title + subtitle
+        - Search pill with globe + placeholder + ⌘K kbd
+        - Four large quick-action tiles with their gradient pucks
+          and per-tile sub-labels
+        - 最近使ったカプセル panel with WasedaP2P (chart, 2分前) /
+          CodeLab (terminal, 15分前) / QueryKit (search, 1時間前) /
+          Local AI Chat (chat, 3時間前)
+        - おすすめ panel with データ分析 / AIアシスタント / 開発ツール
+        - Bottom dock with real glyph tiles + labels + plus + dot
+        - Footer light-bulb + hint visible at the bottom edge
+
+agent_observation:
+  user_visible_problem: "Resolved at the visual layer. The StartWindow now reads as a faithful implementation of the supplied reference — same structure, same spacing, same icons, same time stamps, same dock format."
+  likely_cause: "R34's approach focused on micro-polish (gradients, shadows) over structural alignment. The actual gap was bigger — entire elements like the おすすめ panel, time stamps, real SVG row icons, dock labels, and footer were missing or sized wrong. Rewriting from the reference with the right primitives (panel cards, glyph library, large dock cells with labels) closed the gap."
+  suggested_fix:
+    - "Already shipped: full start.html rewrite + window size bump + dot reposition."
+    - "Future: re-evaluate Card Switcher against the user's window-list.png reference once they confirm StartWindow is acceptable."
+    - "Future: wire recents + おすすめ rows to real AppState (retention table + capsule discovery)."
+    - "Future: real per-app brand SVGs in place of the generic chart / terminal / search / chat glyphs."
+
+evidence:
+  - start-window-rebuilt.png
+  - start-window-final.png
+  - start-window-v2.png
+
+status: "fixed"
