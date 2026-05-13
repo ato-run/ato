@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Capsule を起動中…</title>
+<style>
+  :root {
+    --bg-base:   #f7f4ff;
+    --card:      #ffffff;
+    --border:    #ececf1;
+    --text:      #1a1a1f;
+    --muted:     #6b6b78;
+    --soft:      #a3a3b0;
+    --accent:    #6366f1;
+    --emerald:   #10b981;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(720px 380px at 88% 6%,  #e8e1ff 0%, transparent 60%),
+      radial-gradient(640px 360px at 10% 95%, #f3edff 0%, transparent 65%),
+      var(--bg-base);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    display: flex; align-items: center; justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .frame {
+    width: min(440px, 100%);
+    padding: 28px 30px 22px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    box-shadow: 0 22px 50px rgba(28, 25, 65, 0.18);
+    display: flex; flex-direction: column; gap: 20px;
+  }
+
+  /* CAPSULE BADGE */
+  .badge-wrap { display: flex; justify-content: center; }
+  .badge {
+    width: 88px; height: 88px; border-radius: 50%;
+    background: conic-gradient(from 0deg, #c4b5fd 0deg, #6366f1 300deg, transparent 360deg);
+    display: flex; align-items: center; justify-content: center;
+    animation: spin 1.4s linear infinite;
+  }
+  .badge-inner {
+    width: 78px; height: 78px; border-radius: 50%;
+    background: var(--card);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .badge-inner .capsule {
+    width: 44px; height: 24px; border-radius: 999px;
+    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+    position: relative;
+    box-shadow: 0 4px 10px rgba(99,102,241,0.40);
+  }
+  .badge-inner .capsule::after {
+    content: ""; position: absolute;
+    left: 50%; top: 0; bottom: 0;
+    width: 2px; background: rgba(255,255,255,0.6);
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* HEADER */
+  .header { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .header h1 { margin: 0; font-size: 18px; font-weight: 700; }
+  .header p  { margin: 0; font-size: 12.5px; color: var(--muted); }
+
+  /* STEP LIST */
+  .steps { display: flex; flex-direction: column; gap: 8px; }
+  .step {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 12.5px;
+  }
+  .step.done    { color: var(--text); }
+  .step.active  { color: var(--text); background: #eef2ff; }
+  .step.pending { color: var(--muted); }
+
+  .step-tick {
+    width: 18px; height: 18px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step.done .step-tick {
+    background: var(--emerald); color: #fff;
+    border-radius: 50%;
+  }
+  .step.done .step-tick svg { width: 11px; height: 11px; }
+  .step.active .step-tick {
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  .step.pending .step-tick {
+    border: 1.5px solid var(--soft);
+    border-radius: 50%;
+  }
+  .step-label { flex: 1; }
+  .step-time  { font-size: 11px; color: var(--soft); font-family: "SF Mono", ui-monospace, monospace; }
+
+  /* FOOTER */
+  .footer {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 11px; color: var(--soft);
+  }
+  .footer svg { width: 11px; height: 11px; color: var(--soft); }
+
+  /* CANCEL */
+  .abort {
+    background: transparent; border: 0; cursor: pointer;
+    font-size: 12px; color: var(--soft);
+    align-self: center; padding: 2px 8px;
+  }
+  .abort:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="frame">
+  <div class="badge-wrap">
+    <div class="badge"><div class="badge-inner"><div class="capsule"></div></div></div>
+  </div>
+
+  <div class="header">
+    <h1>Capsule を起動中…</h1>
+    <p>安全な動作環境を準備しています</p>
+  </div>
+
+  <div class="steps" id="steps">
+    <div class="step done">
+      <span class="step-tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+      <span class="step-label">Capsule を取得中</span>
+      <span class="step-time">完了</span>
+    </div>
+    <div class="step done">
+      <span class="step-tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+      <span class="step-label">依存関係を解決中</span>
+      <span class="step-time">完了</span>
+    </div>
+    <div class="step active">
+      <span class="step-tick"></span>
+      <span class="step-label">起動環境を準備中</span>
+      <span class="step-time">進行中</span>
+    </div>
+    <div class="step pending">
+      <span class="step-tick"></span>
+      <span class="step-label">セキュリティ確認</span>
+      <span class="step-time">待機</span>
+    </div>
+    <div class="step pending">
+      <span class="step-tick"></span>
+      <span class="step-label">データ保護</span>
+      <span class="step-time">待機</span>
+    </div>
+    <div class="step pending">
+      <span class="step-tick"></span>
+      <span class="step-label">プライバシー設定</span>
+      <span class="step-time">待機</span>
+    </div>
+  </div>
+
+  <div class="footer">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>
+    </svg>
+    <span>ato-desktop · 安全な起動環境</span>
+  </div>
+
+  <button class="abort" id="abort">中断する</button>
+</div>
+
+<script>
+  const POST = (window.ipc && window.ipc.postMessage)
+    ? (m) => window.ipc.postMessage(JSON.stringify(m))
+    : (m) => console.log('[no bridge]', m);
+  const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
+
+  // Phase 1: auto-cycle through the pending steps every 1.2s so the
+  // wizard is visually demonstrable. Phase 2 will be driven by real
+  // orchestrator events (host pushes "step N done" over a future
+  // protocol-direction-reverse channel; for now this is decorative).
+  const stepNodes = Array.from(document.querySelectorAll('#steps .step'));
+  let activeIndex = stepNodes.findIndex(n => n.classList.contains('active'));
+  setInterval(() => {
+    if (activeIndex < 0 || activeIndex >= stepNodes.length) return;
+    const cur = stepNodes[activeIndex];
+    cur.classList.remove('active');
+    cur.classList.add('done');
+    cur.querySelector('.step-time').textContent = '完了';
+    cur.querySelector('.step-tick').innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    activeIndex++;
+    const next = stepNodes[activeIndex];
+    if (next) {
+      next.classList.remove('pending');
+      next.classList.add('active');
+      next.querySelector('.step-tick').innerHTML = '';
+      next.querySelector('.step-time').textContent = '進行中';
+    }
+  }, 1200);
+
+  document.getElementById('abort').addEventListener('click', () => {
+    BRIDGE({ kind: 'abort_boot' });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') BRIDGE({ kind: 'abort_boot' });
+  });
+</script>
+
+</body>
+</html>

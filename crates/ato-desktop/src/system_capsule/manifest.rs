@@ -67,6 +67,22 @@ const TABLE: &[SystemCapsuleManifest] = &[
             Capability::LaunchSystemCapsule,
         ],
     },
+    SystemCapsuleManifest {
+        id: SystemCapsuleId::AtoLaunch,
+        slug: "ato-launch",
+        display_name: "Launch",
+        // ato-launch needs WebviewCreate so its `Approve` command
+        // can spawn the target AppWindow on the user's behalf. It
+        // also closes its own window after the approve/cancel
+        // decision (WindowsClose). LaunchSystemCapsule lets it
+        // hand off to other system capsules if needed (e.g.
+        // showing settings before approving).
+        allowed_capabilities: &[
+            Capability::WebviewCreate,
+            Capability::WindowsClose,
+            Capability::LaunchSystemCapsule,
+        ],
+    },
 ];
 
 pub fn lookup(id: SystemCapsuleId) -> &'static SystemCapsuleManifest {

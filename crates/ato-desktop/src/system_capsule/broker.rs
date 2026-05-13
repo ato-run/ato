@@ -13,7 +13,7 @@
 
 use gpui::{AnyWindowHandle, App};
 
-use super::{ato_settings, ato_store, ato_web_viewer, ato_windows, manifest};
+use super::{ato_launch, ato_settings, ato_store, ato_web_viewer, ato_windows, manifest};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum SystemCapsuleId {
@@ -21,6 +21,10 @@ pub enum SystemCapsuleId {
     AtoWebViewer,
     AtoSettings,
     AtoWindows,
+    /// Pre-flight consent wizard + mid-flight boot progress for
+    /// capsule launches. Two HTML views inside the same capsule:
+    /// `assets/system/ato-launch/{consent,boot}.html`.
+    AtoLaunch,
 }
 
 /// Vocabulary of system-capability tokens. Each per-capsule command
@@ -62,6 +66,7 @@ pub enum SystemCommand {
     AtoStore(ato_store::StoreCommand),
     AtoSettings(ato_settings::SettingsCommand),
     AtoWebViewer(ato_web_viewer::WebViewerCommand),
+    AtoLaunch(ato_launch::LaunchCommand),
 }
 
 impl SystemCommand {
@@ -73,6 +78,7 @@ impl SystemCommand {
             SystemCommand::AtoStore(c) => c.required_capability(),
             SystemCommand::AtoSettings(c) => c.required_capability(),
             SystemCommand::AtoWebViewer(c) => c.required_capability(),
+            SystemCommand::AtoLaunch(c) => c.required_capability(),
         }
     }
 }
@@ -135,6 +141,7 @@ impl CapabilityBroker {
             SystemCommand::AtoStore(c) => ato_store::dispatch(cx, host, c),
             SystemCommand::AtoSettings(c) => ato_settings::dispatch(cx, host, c),
             SystemCommand::AtoWebViewer(c) => ato_web_viewer::dispatch(cx, host, c),
+            SystemCommand::AtoLaunch(c) => ato_launch::dispatch(cx, host, c),
         }
     }
 }

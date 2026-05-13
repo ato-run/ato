@@ -1,0 +1,95 @@
+usecase: "Operator sees the consent + boot wizards for a capsule launch and reads them without confusion"
+actor: "first-time desktop user inspecting what is about to launch"
+goal: "Both wizards render with the structure shown in the design PNGs (capsule-consent-wizard.png, capsule-boot-wizard.png) — identity list + env vars + Approve/Cancel for consent; step list with running animation + abort for boot"
+
+result: "complete"
+
+context:
+  build: "cargo build --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop (debug, clean — only pre-existing unused-symbol warnings)"
+  binary: "crates/ato-desktop/target/debug/ato-desktop"
+  hermetic_env:
+    ATO_HOME: "/tmp/ato167"
+    HOME: "/tmp/ato167-home"
+    XDG_CONFIG_HOME: "/tmp/ato167/config"
+    XDG_CACHE_HOME: "/tmp/ato167/cache"
+  short_path_reason: "the worktree path .tmp/ato-test-shell/env.XXXXXX exceeds SUN_LEN for the desktop's unix socket; manually mapped ATO_HOME to /tmp/ato167 instead of using ato-test-shell.sh"
+  flags:
+    ATO_DESKTOP_MULTI_WINDOW: "1"
+    ATO_DESKTOP_ASSETS_DIR: ".../.worktrees/issue-167/crates/ato-desktop/assets"
+
+steps:
+  - action: "Boot ato-desktop with hermetic ATO_HOME=/tmp/ato167 and ATO_DESKTOP_MULTI_WINDOW=1"
+    observation: |
+      Log shows:
+        Focus View Control Bar opened at startup
+        Focus View Store window opened at startup
+        automation socket listening socket=/tmp/ato167/run/ato-desktop-97904.sock
+        Focus-mode automation dispatcher started
+
+  - action: "Pipe MCP JSON-RPC tools/call host_dispatch_action(OpenLaunchConsent) into ato-desktop-mcp"
+    observation: |
+      MCP responds {ok:true, queued_action:'OpenLaunchConsent', isError:false}.
+      Desktop log: focus dispatcher routes action action=OpenLaunchConsent
+
+  - action: "screencapture -x → 01-consent-wizard.png"
+    observation: |
+      The consent wizard renders matching capsule-consent-wizard.png:
+        - Indigo shield header with check-in-shield SVG
+        - Title "起動前にご確認ください" + subtitle
+        - Identity list:
+            アプリケーション       WasedaP2P
+            要求された権限         ato.app/shell://wasedap2p
+            信頼済みの発行元       Ato Labs (検証済み)
+            使用可能な権限         PostgreSQL / fs (RO) / Redis (Cache)
+        - Environment variable section with PG_PASSWORD (password input),
+          SECRET_KEY (password input), DATABASE_URL (postgresql://localhost/wasedap2p),
+          APP_ENV (production)
+        - Cancel button + indigo gradient "承認して起動" button (play icon)
+      The control bar at the top of the screenshot also shows the new
+      Identity avatar (round button, rightmost) added in the same session.
+
+  - action: "Pipe MCP JSON-RPC tools/call host_dispatch_action(OpenLaunchBoot) → screencapture after 3s, then 4s more"
+    observation: |
+      MCP responds {ok:true, queued_action:'OpenLaunchBoot'}.
+      Desktop log: focus dispatcher routes action action=OpenLaunchBoot
+      02-boot-wizard-early.png: spinning capsule badge, 4 done steps
+        (Capsule を取得中 / 依存関係を解決中 / 起動環境を準備中 / セキュリティ確認 = 完了)
+        active spinner on データ保護, pending state for プライバシー設定,
+        footer "ato-desktop · 安全な起動環境", 中断 button below the card.
+      03-boot-wizard-progressed.png: all 6 steps now marked done — the
+        Phase-1 1.2s decorative auto-advance reached the end of the list
+        (Phase 2 will replace this with real orchestrator events).
+
+agent_observation:
+  user_visible_problem: "None at Phase-1 scope. The two wizards are openable and render exactly as designed."
+  phase_1_honesty_notes:
+    - "Approve does NOT actually spawn the AppWindow — Phase 1 dispatch logs target_handle and closes the wizard. The consent.html JS sends {kind:'approve', handle:HANDLE} but the broker just records intent; no orchestrator call yet. This is the planned 'no lying UI' boundary — the wizards demonstrate the surface without claiming to be the real launch path."
+    - "Boot step progression is a decorative setInterval, not driven by ato-cli session state. The HTML comment in boot.html marks this as Phase-1 only."
+    - "Both wizards are accessible only via MCP for AODD; no user-reachable entry point yet. Phase 2 will gate every LocalCapsule route through open_consent_window."
+  suggested_next:
+    - "Phase 2A: have open_consent_window accept the GuestRoute that should launch on approve, and have the Approve handler call open_app_window(GuestRoute::CapsuleHandle{...})."
+    - "Phase 2B: pass real boot progress events from orchestrator over a new direction-reversed IPC channel; replace setInterval in boot.html with event-driven step transitions."
+    - "Phase 2C: wire the Control Bar's URL pill 'open capsule://...' Enter-key path through open_consent_window so the user sees the wizard before any new window appears."
+
+evidence:
+  - "claudedocs/aodd-receipts/ato-launch-wizards/01-consent-wizard.png"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/02-boot-wizard-early.png"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/03-boot-wizard-progressed.png"
+  - "log excerpt: /tmp/ato-desktop-launch-wizards.log — 'focus dispatcher routes action action=OpenLaunchConsent' and '...OpenLaunchBoot'"
+
+files_changed:
+  - "crates/ato-desktop/src/system_capsule/broker.rs                       (+ AtoLaunch enum variant + dispatch arm)"
+  - "crates/ato-desktop/src/system_capsule/manifest.rs                     (+ AtoLaunch manifest entry)"
+  - "crates/ato-desktop/src/system_capsule/ato_launch/mod.rs               (new — LaunchCommand{Approve,Cancel,AbortBoot})"
+  - "crates/ato-desktop/src/system_capsule/ipc.rs                          (+ ato-launch slug parse + command parse)"
+  - "crates/ato-desktop/src/system_capsule/mod.rs                          (+ pub mod ato_launch)"
+  - "crates/ato-desktop/assets/system/ato-launch/consent.html              (new)"
+  - "crates/ato-desktop/assets/system/ato-launch/boot.html                 (new)"
+  - "crates/ato-desktop/src/window/launch_window.rs                        (new — open_consent_window / open_boot_window)"
+  - "crates/ato-desktop/src/window/mod.rs                                  (+ pub mod launch_window)"
+  - "crates/ato-desktop/src/window/focus_dispatcher.rs                     (+ OpenLaunchConsent / OpenLaunchBoot branches)"
+  - "crates/ato-desktop/src/app.rs                                         (+ OpenIdentityMenu action — earlier in this session)"
+  - "crates/ato-desktop/src/window/control_bar.rs                          (+ identity_button() — earlier in this session)"
+  - "crates/ato-desktop/assets/icons/identity.svg                          (new — earlier in this session)"
+
+status: "open"

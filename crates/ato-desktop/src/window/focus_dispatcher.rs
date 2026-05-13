@@ -161,6 +161,29 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             // mutate. Asserted via the receipt by
                                             // grepping for `Forbidden` in the
                                             // log.
+                                            // AODD entrypoints for the
+                                            // `ato-launch` system-capsule
+                                            // wizards. Phase 1 — these are
+                                            // not yet wired into the real
+                                            // capsule launch pipeline; MCP
+                                            // is the only caller, used for
+                                            // receipt-generating screenshots.
+                                            "OpenLaunchConsent" => {
+                                                if let Err(err) =
+                                                    crate::window::launch_window::open_consent_window(cx)
+                                                {
+                                                    tracing::error!(?err, "open_consent_window failed");
+                                                }
+                                                Ok(())
+                                            }
+                                            "OpenLaunchBoot" => {
+                                                if let Err(err) =
+                                                    crate::window::launch_window::open_boot_window(cx)
+                                                {
+                                                    tracing::error!(?err, "open_boot_window failed");
+                                                }
+                                                Ok(())
+                                            }
                                             "BrokerNegativeTest" => {
                                                 use crate::system_capsule::ato_settings::SettingsCommand;
                                                 use crate::system_capsule::{

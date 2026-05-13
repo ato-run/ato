@@ -28,6 +28,7 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
+use super::ato_launch::LaunchCommand;
 use super::ato_settings::SettingsCommand;
 use super::ato_store::StoreCommand;
 use super::ato_web_viewer::WebViewerCommand;
@@ -72,6 +73,7 @@ pub fn make_ipc_handler(
             "ato-store" => SystemCapsuleId::AtoStore,
             "ato-settings" => SystemCapsuleId::AtoSettings,
             "ato-web-viewer" => SystemCapsuleId::AtoWebViewer,
+            "ato-launch" => SystemCapsuleId::AtoLaunch,
             other => {
                 tracing::warn!(slug = %other, "system_capsule::ipc: unknown capsule slug");
                 return;
@@ -90,6 +92,8 @@ pub fn make_ipc_handler(
                 serde_json::from_value::<WebViewerCommand>(envelope.command)
                     .map(SystemCommand::AtoWebViewer)
             }
+            SystemCapsuleId::AtoLaunch => serde_json::from_value::<LaunchCommand>(envelope.command)
+                .map(SystemCommand::AtoLaunch),
         };
         match command_result {
             Ok(cmd) => {

@@ -18,6 +18,7 @@ pub mod content_windows;
 pub mod control_bar;
 pub mod focus_dispatcher;
 pub mod gestures;
+pub mod launch_window;
 // `pub mod launcher;` was removed in Stage D — the legacy Launcher
 // window is retired. Settings lives in `settings_window` as the
 // `ato-settings` system capsule.
