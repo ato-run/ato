@@ -26,6 +26,7 @@ use gpui::{
     div, hsla, px, rgb, svg, AnyElement, Context, Entity, IntoElement, MouseButton, Pixels,
     Render, SharedString, Size,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 use url::Url;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -33,6 +34,12 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 /// Height of the tab strip at the top of the WebLinkView window.
 const TAB_STRIP_HEIGHT: f32 = 36.0;
+/// Left padding for the tab strip — must clear the macOS traffic-light
+/// buttons which are drawn by the OS on top of the client area.
+#[cfg(target_os = "macos")]
+const TAB_STRIP_LEFT_PAD: f32 = 80.0;
+#[cfg(not(target_os = "macos"))]
+const TAB_STRIP_LEFT_PAD: f32 = 8.0;
 /// Height of the chrome row (back/forward/reload/URL/menu).
 const CHROME_HEIGHT: f32 = 44.0;
 /// Combined offset — the WebView starts this many pixels below the
@@ -58,6 +65,8 @@ pub struct WebLinkViewShell {
     next_tab_id: usize,
     capsule_nav_queue: CapsuleNavQueue,
     window_size: Size<Pixels>,
+    url_input: Entity<InputState>,
+    url_input_focused: bool,
 }
 
 impl WebLinkViewShell {
@@ -69,6 +78,35 @@ impl WebLinkViewShell {
         let win_size = window.bounds().size;
         let nav_queue: CapsuleNavQueue = Arc::new(Mutex::new(Vec::new()));
         let first_tab = build_tab(0, initial_url, window, win_size, nav_queue.clone());
+
+        let initial_url_str: SharedString = first_tab.url.clone();
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://…")
+                .default_value(initial_url_str)
+        });
+        cx.subscribe_in(
+            &url_input,
+            window,
+            |this: &mut Self, input, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let url = input.read(cx).value().to_string();
+                    if !url.is_empty() {
+                        this.navigate_to(&url, window, cx);
+                    }
+                }
+                InputEvent::Change => cx.notify(),
+                InputEvent::Focus => {
+                    this.url_input_focused = true;
+                }
+                InputEvent::Blur => {
+                    this.url_input_focused = false;
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+
         spawn_capsule_nav_drain(cx, nav_queue.clone());
         Self {
             tabs: vec![first_tab],
@@ -76,6 +114,8 @@ impl WebLinkViewShell {
             next_tab_id: 1,
             capsule_nav_queue: nav_queue,
             window_size: win_size,
+            url_input,
+            url_input_focused: false,
         }
     }
 
@@ -132,6 +172,19 @@ impl WebLinkViewShell {
         if let Some(t) = self.active_tab() {
             let _ = t.webview.evaluate_script("location.reload();");
         }
+    }
+
+    fn navigate_to(&mut self, raw: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let normalized = normalize_url(raw);
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+            let _ = tab.webview.load_url(&normalized);
+            tab.url = SharedString::from(normalized.clone());
+        }
+        let ss: SharedString = normalized.into();
+        self.url_input.update(cx, |state, cx| {
+            state.set_value(ss, window, cx);
+        });
+        cx.notify();
     }
 
     fn sync_visibility(&self) {
@@ -244,7 +297,7 @@ fn handle_capsule_url(cx: &mut gpui::App, url: String) {
 impl Render for WebLinkViewShell {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
@@ -252,6 +305,18 @@ impl Render for WebLinkViewShell {
             .active_tab()
             .map(|t| t.url.clone())
             .unwrap_or_else(|| SharedString::from(""));
+
+        // Sync the URL bar to the active tab's URL when the user is not
+        // typing. Comparing first avoids a needless set_value every frame.
+        if !self.url_input_focused {
+            let current: SharedString = self.url_input.read(cx).value().to_string().into();
+            if current != active_url {
+                self.url_input.update(cx, |state, cx| {
+                    state.set_value(active_url, window, cx);
+                });
+            }
+        }
+
         let tab_snapshots: Vec<(usize, SharedString, bool)> = self
             .tabs
             .iter()
@@ -264,7 +329,7 @@ impl Render for WebLinkViewShell {
             .flex()
             .flex_col()
             .child(tab_strip(tab_snapshots, entity.clone()))
-            .child(chrome_strip(active_url, entity))
+            .child(chrome_strip(self.url_input.clone(), entity))
     }
 }
 
@@ -275,7 +340,7 @@ fn tab_strip(
     let mut row = div()
         .h(px(TAB_STRIP_HEIGHT))
         .w_full()
-        .pl(px(8.0))
+        .pl(px(TAB_STRIP_LEFT_PAD))
         .pt(px(6.0))
         .gap(px(4.0))
         .flex()
@@ -370,7 +435,7 @@ fn new_tab_btn(entity: Entity<WebLinkViewShell>) -> impl IntoElement {
 }
 
 fn chrome_strip(
-    url: SharedString,
+    url_input: Entity<InputState>,
     entity: Entity<WebLinkViewShell>,
 ) -> impl IntoElement {
     let e_back = entity.clone();
@@ -407,7 +472,7 @@ fn chrome_strip(
                 e_reload.update(cx, |this, _| this.reload());
             },
         ))
-        .child(url_pill(url))
+        .child(url_pill(url_input))
         .child(menu_dots())
 }
 
@@ -447,8 +512,9 @@ where
         .child(glyph_node)
 }
 
-fn url_pill(url: SharedString) -> impl IntoElement {
+fn url_pill(url_input: Entity<InputState>) -> impl IntoElement {
     div()
+        .id("url-pill")
         .flex_1()
         .h(px(30.0))
         .px(px(14.0))
@@ -468,7 +534,26 @@ fn url_pill(url: SharedString) -> impl IntoElement {
                 .size(px(14.0))
                 .text_color(rgb(0xa1a1aa)),
         )
-        .child(div().flex_1().overflow_hidden().child(url))
+        .child(
+            div().flex_1().h_full().flex().items_center().child(
+                Input::new(&url_input)
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    .text_size(px(13.0))
+                    .text_color(rgb(0x52525b)),
+            ),
+        )
+}
+
+fn normalize_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.contains("://") || trimmed.starts_with("about:") || trimmed.starts_with("data:") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    }
 }
 
 fn menu_dots() -> impl IntoElement {
