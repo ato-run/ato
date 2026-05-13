@@ -492,19 +492,21 @@ pub fn run() {
             }
         });
 
-        // Settings cog routing in Focus mode: the Control Bar's
-        // Settings click dispatches OpenLauncherWindow followed by
-        // ShowSettings. Flip the Launcher's view-state global so the
-        // freshly-opened (or focused) Launcher renders the Settings
-        // view instead of the Start view. The Launcher subscribes to
-        // this global via observe_global and re-renders automatically.
+        // Settings cog routing in Focus mode — Stage C:
+        // ShowSettings now opens a standalone Wry-hosted Settings
+        // window (the `ato-settings` system capsule) instead of
+        // flipping the Launcher's view-state. The Launcher's
+        // LauncherView::Settings GPUI tree is now dead code that
+        // Stage D will delete. The Control Bar's Settings cog still
+        // dispatches OpenLauncherWindow + ShowSettings; Stage D
+        // strips OpenLauncherWindow from that chain.
         cx.on_action(|_: &ShowSettings, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            cx.set_global(crate::window::launcher::LauncherViewState(
-                crate::window::launcher::LauncherView::Settings,
-            ));
+            if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
+                tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
+            }
         });
 
         // Focus-mode handler for the Control Bar URL pill's
