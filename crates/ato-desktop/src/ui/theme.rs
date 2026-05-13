@@ -93,6 +93,14 @@ pub struct Theme {
     // Preview cards (design_system.rs)
     pub preview_card_bg: Hsla,
     pub preview_chrome_bg: Hsla,
+
+    // Window controls (chrome traffic lights). Platform-fixed
+    // semantics — same colors in light and dark mode because they
+    // mirror the OS-native macOS traffic-light hues that users
+    // recognize as Close / Minimize / Maximize.
+    pub traffic_rose: Hsla,
+    pub traffic_amber: Hsla,
+    pub traffic_green: Hsla,
 }
 
 impl Theme {
@@ -167,6 +175,15 @@ impl Theme {
 
             preview_card_bg: hsla(60.0 / 360.0, 0.05, 0.950, 1.0),
             preview_chrome_bg: hsla(60.0 / 360.0, 0.06, 0.933, 1.0),
+
+            // #ff5f57 / #febc2e / #28c840 — fixed across modes; see
+            // field doc on Theme. Manifest in
+            // crates/ato-desktop/.tmp/gpui-html/theme.toml mirrors
+            // these literals so the gpui-html mockup lowers to a
+            // byte-identical packed-alpha value.
+            traffic_rose: hsla(3.0 / 360.0, 1.000, 0.671, 1.0),
+            traffic_amber: hsla(41.0 / 360.0, 0.990, 0.588, 1.0),
+            traffic_green: hsla(129.0 / 360.0, 0.667, 0.471, 1.0),
         }
     }
 
@@ -234,6 +251,11 @@ impl Theme {
 
             preview_card_bg: hsla(240.0 / 360.0, 0.10, 0.17, 1.0),
             preview_chrome_bg: hsla(0.0, 0.0, 1.0, 0.04),
+
+            // Same hues as light(); see field doc.
+            traffic_rose: hsla(3.0 / 360.0, 1.000, 0.671, 1.0),
+            traffic_amber: hsla(41.0 / 360.0, 0.990, 0.588, 1.0),
+            traffic_green: hsla(129.0 / 360.0, 0.667, 0.471, 1.0),
         }
     }
 }
