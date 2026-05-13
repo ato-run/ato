@@ -45,10 +45,19 @@
     flex-shrink: 0;
     box-shadow: 0 4px 10px rgba(99, 102, 241, 0.30);
   }
+  .avatar.muted {
+    background: var(--soft-bg);
+    color: var(--soft);
+    box-shadow: none;
+    border: 1px solid var(--border);
+  }
   .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .who .name  { font-size: 13.5px; font-weight: 700; }
-  .who .email { font-size: 11.5px; color: var(--muted);
+  .who .sub   { font-size: 11.5px; color: var(--muted);
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .who .sub.hint { color: var(--accent); }
+  .who .sub.code { font-family: "SF Mono", ui-monospace, monospace; }
+  .who .sub:empty { display: none; }
 
   /* MENU */
   .menu { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; }
@@ -109,12 +118,12 @@
 <body>
 
 <div class="panel">
-  <!-- HEADER -->
+  <!-- HEADER — populated entirely from `ato whoami` via __ATO_IDENTITY. -->
   <div class="header">
-    <div class="avatar" id="avatar">K</div>
+    <div class="avatar muted" id="avatar">?</div>
     <div class="who">
-      <span class="name"  id="name">ローカルユーザー</span>
-      <span class="email" id="email">kohsuke20010920@gmail.com</span>
+      <span class="name" id="name">確認中…</span>
+      <span class="sub"  id="sub"></span>
     </div>
   </div>
 
@@ -198,16 +207,64 @@
     : (m) => console.log('[no bridge]', m);
   const BRIDGE = (command) => POST({ capsule: 'ato-identity', command });
 
-  // Host may inject identity details (Phase 2 will replace this with
-  // a real provider). For now we read what was injected and otherwise
-  // fall back to the static demo values already in the HTML.
-  const ident = (window.__ATO_IDENTITY && typeof window.__ATO_IDENTITY === 'object')
+  // Identity rendering rule (locked):
+  //   The header reflects ONLY what `ato whoami` returns. The host
+  //   injects __ATO_IDENTITY = { authenticated, user_id?, name?,
+  //   email?, github?, publisher_handle?, reason? }. If a field is
+  //   missing in whoami's stdout, it is missing here too — no
+  //   fabricated defaults, no guessed initials, no email
+  //   placeholders.
+  const id = (window.__ATO_IDENTITY && typeof window.__ATO_IDENTITY === 'object')
     ? window.__ATO_IDENTITY : null;
-  if (ident) {
-    if (ident.name)   document.getElementById('name').textContent = ident.name;
-    if (ident.email)  document.getElementById('email').textContent = ident.email;
-    if (ident.initial) document.getElementById('avatar').textContent = ident.initial;
+  const avatarEl = document.getElementById('avatar');
+  const nameEl   = document.getElementById('name');
+  const subEl    = document.getElementById('sub');
+
+  function render() {
+    if (!id) {
+      // Pre-injection state; the host always injects so this branch
+      // is only reachable if the wizard is opened standalone (e.g.
+      // direct HTML preview without the desktop).
+      nameEl.textContent = 'ID 取得失敗';
+      subEl.textContent = '';
+      return;
+    }
+    if (id.authenticated === true) {
+      // Prefer Name > GitHub @handle > Publisher Handle > User ID.
+      // Whichever the CLI surfaced first, in that order.
+      const displayName = id.name || (id.github ? '@' + id.github : null)
+                       || id.publisher_handle || id.user_id || 'Authenticated';
+      nameEl.textContent = displayName;
+
+      // Sub line: prefer email, then github handle (if name was the
+      // chosen primary), then user_id. Skip if nothing concrete.
+      let sub = '';
+      if (id.email) {
+        sub = id.email;
+      } else if (id.name && id.github) {
+        sub = '@' + id.github;
+        subEl.classList.add('code');
+      } else if (id.user_id && displayName !== id.user_id) {
+        sub = id.user_id;
+        subEl.classList.add('code');
+      }
+      subEl.textContent = sub;
+
+      // Avatar initial from the chosen display name. Drop the
+      // muted style now that we know there's a real session.
+      avatarEl.classList.remove('muted');
+      const ch = (displayName.replace('@', '').trim()[0] || '·').toUpperCase();
+      avatarEl.textContent = ch;
+    } else {
+      // Unauthenticated — honest message, no fake profile.
+      nameEl.textContent = 'サインインしていません';
+      subEl.textContent = 'ato login で認証してください';
+      subEl.classList.add('hint', 'code');
+      avatarEl.classList.add('muted');
+      avatarEl.textContent = '?';
+    }
   }
+  render();
 
   document.querySelectorAll('.row[data-action]').forEach((row) => {
     row.addEventListener('click', () => {
