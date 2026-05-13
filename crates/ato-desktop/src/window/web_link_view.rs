@@ -156,6 +156,7 @@ impl WebLinkViewShell {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
             let _ = tab.webview.load_url(&normalized);
             tab.url = SharedString::from(normalized.clone());
+            tab.title = SharedString::from(short_title_for_url(&normalized));
         }
         if let Some(input) = url_input {
             let ss: SharedString = normalized.into();
