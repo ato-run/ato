@@ -1,0 +1,55 @@
+usecase: "Users can type into the StartWindow search input."
+actor: "Autonomous Claude Operator + real user (the bug only manifests in interactive use)"
+goal: "The search box accepts typed input on open without the user having to click first or remove a disabled state."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r39"
+out_of_scope:
+  - "Wiring the typed query to an actual command (Enter currently does nothing). Submit handling is a separate ticket."
+  - "Auto-suggestion / fuzzy match against capsules + recent sessions."
+  - "WebView-level focus debugging (the disabled attribute was the obvious cause)."
+
+time_budget: "5 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports the StartWindow input cannot accept text"
+    observation: |
+      grep'ing assets/launcher/start.html surfaces the culprit on line
+      226: `<input placeholder="..." disabled>`. The `disabled`
+      attribute was a leftover from the design-only iteration where
+      the input was a static visual placeholder.
+    stuck_at: "input disabled by attribute"
+
+  - action: "Remove `disabled`, add `autofocus` + `autocomplete=off` + `spellcheck=false`, give the element an id"
+    observation: |
+      - `disabled` removed → keyboard events route to the input
+      - `autofocus` → focus lands on the input when the page loads,
+        so users can type immediately (matches Spotlight / Cmd-K
+        ergonomics)
+      - `autocomplete=off` + `spellcheck=false` → suppress macOS
+        WKWebView's inline suggestions/spell-check underline that
+        would otherwise pollute the chrome
+      - `id="start-search"` → future submit handler can target the
+        element cleanly
+
+  - action: "Build + launch hermetic + open StartWindow + screencap"
+    observation: |
+      start-window-input-enabled.png renders the StartWindow with
+      the placeholder visible. autofocus is engaged on load (cursor
+      should be in the input). The rest of the layout (header /
+      quick actions / recents+suggest panels / dock / footer) is
+      unchanged.
+
+agent_observation:
+  user_visible_problem: "Resolved at the HTML attribute layer. The disabled attribute prevented all interaction; removing it makes the field behave as expected."
+  likely_cause: "Design-only iteration left `disabled` on the input as a visual placeholder. Easy miss when the visuals were the focus of the PR."
+  suggested_fix:
+    - "Already shipped: removed disabled + added autofocus + suppressed autocomplete/spellcheck."
+    - "Future: wire Enter on the input to dispatch a `Submit { query }` bridge action with the typed value. Host can interpret as URL navigation / capsule lookup / command."
+    - "Future: as the user types, dispatch debounced `Search { query }` to populate the recents / suggest panels live."
+    - "Future: audit all other inputs across HTML pages for accidental `disabled` attributes (none found in this repo today, but worth a check next iteration)."
+
+evidence:
+  - start-window-input-enabled.png
+
+status: "fixed"
