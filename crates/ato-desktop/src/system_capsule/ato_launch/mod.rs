@@ -21,6 +21,8 @@
 //! handle so a follow-up iteration can spawn the AppWindow once the
 //! consent flow is real.
 
+use std::collections::HashMap;
+
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
@@ -30,8 +32,14 @@ use crate::system_capsule::broker::{BrokerError, Capability};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LaunchCommand {
     /// User clicked "承認して起動" in the consent wizard. Carries
-    /// the capsule handle so Phase 2 can spawn the AppWindow.
-    Approve { handle: String },
+    /// the capsule handle and any env-var config values collected
+    /// from the form so the launch thread can pass them to
+    /// `resolve_and_start_guest` without surfacing a MissingConfig error.
+    Approve {
+        handle: String,
+        #[serde(default)]
+        config: HashMap<String, String>,
+    },
     /// User clicked "キャンセル" or dismissed the wizard.
     Cancel,
     /// Boot wizard's "Cancel during launch" affordance. Identical
@@ -55,7 +63,7 @@ pub fn dispatch(
     command: LaunchCommand,
 ) -> Result<(), BrokerError> {
     match command {
-        LaunchCommand::Approve { handle } => {
+        LaunchCommand::Approve { handle, config } => {
             tracing::info!(target_handle = %handle, "ato_launch: user approved");
             // Close the consent wizard so the boot wizard takes focus.
             let _ = host.update(cx, |_, window, _| window.remove_window());
@@ -65,11 +73,16 @@ pub fn dispatch(
                 .and_then(|g| g.0.clone());
             cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
 
+            // Store the config values so `open_app_window` → `AppCapsuleShell::new`
+            // can read them and pass to `resolve_and_start_guest`.
+            let plain_configs: Vec<(String, String)> = config.into_iter().collect();
+            cx.set_global(crate::window::launch_window::PendingLaunchConfigs(plain_configs));
+
             if let Some(route) = pending {
                 // Open boot wizard FIRST so there is visible progress
                 // feedback before the background thread even starts.
                 let boot_handle =
-                    match crate::window::launch_window::open_boot_window(cx) {
+                    match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
                         Ok(h) => Some(h),
                         Err(err) => {
                             tracing::error!(

@@ -616,6 +616,15 @@ fn terminal_panel() -> impl IntoElement {
 /// (e.g. `app::run`'s Focus-mode automation dispatcher) can route
 /// keyboard actions to it.
 pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandle> {
+    // Consume any pending launch configs stored by `ato_launch::dispatch(Approve)`.
+    // Other open paths (focus dispatcher, WebLinkView nav) get an empty vec,
+    // which is correct — they don't go through the consent form.
+    let launch_configs: Vec<(String, String)> = cx
+        .try_global::<crate::window::launch_window::PendingLaunchConfigs>()
+        .map(|g| g.0.clone())
+        .unwrap_or_default();
+    cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
+
     // Compute bounds explicitly rather than `Bounds::centered` so we
     // can reserve breathing room ABOVE the AppWindow for the floating
     // Control Bar — otherwise the bar sits flush against the macOS
@@ -672,9 +681,10 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             }
             crate::state::GuestRoute::CapsuleHandle { handle, .. } => {
+                let configs = launch_configs.clone();
                 let shell = cx.new(|cx| {
                     crate::window::app_capsule_shell::AppCapsuleShell::new(
-                        handle, window, cx,
+                        handle, configs, window, cx,
                     )
                 });
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
