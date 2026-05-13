@@ -98,16 +98,16 @@ pub fn dispatch(
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         WindowsCommand::OpenAppWindow => {
-            // Mirrors `app::on_action(OpenAppWindowExperiment, ...)`
-            // — fixed WasedaP2P route for Phase 1. Once the broker
-            // is the only path, this can accept a `route` parameter
-            // for the StartWindow's typed-URL quick action.
+            // Go through the consent wizard so the user sees the
+            // capsule identity before the session starts.
             let route = crate::state::GuestRoute::CapsuleHandle {
                 handle: "github.com/Koh0920/WasedaP2P".to_string(),
                 label: "WasedaP2P".to_string(),
             };
-            if let Err(err) = crate::window::open_app_window(cx, route) {
-                tracing::error!(error = %err, "ato_windows: open_app_window failed");
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            {
+                tracing::error!(error = %err, "ato_windows: open_consent_window_for_route failed");
             }
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
