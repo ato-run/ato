@@ -19,50 +19,57 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: linear-gradient(135deg, var(--bg-from) 0%, var(--bg-via) 50%, var(--bg-to) 100%);
+    background: radial-gradient(1200px 600px at 20% 10%, #efe9ff 0%, transparent 60%),
+                radial-gradient(1000px 500px at 80% 90%, #faf5ff 0%, transparent 60%),
+                linear-gradient(135deg, var(--bg-from) 0%, var(--bg-via) 50%, var(--bg-to) 100%);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
     color: var(--text);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 28px;
+    gap: 26px;
     padding: 28px 24px;
-    user-select: none;
     -webkit-user-select: none;
+    user-select: none;
   }
 
   /* HEADER */
   .header { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   .header-puck {
-    width: 48px; height: 48px; border-radius: 14px;
-    background: var(--accent-bg); color: var(--accent);
+    width: 44px; height: 44px; border-radius: 12px;
+    background: linear-gradient(135deg, #ddd6fe 0%, #c4b5fd 100%);
+    color: var(--accent);
     display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 16px rgba(79, 70, 229, 0.15);
   }
-  .header-puck svg { width: 24px; height: 24px; }
+  .header-puck svg { width: 22px; height: 22px; }
   .header h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
   .header p { margin: 0; font-size: 13px; color: var(--muted); }
 
   /* CARDS */
-  .cards { display: flex; gap: 16px; align-items: center; flex-wrap: nowrap; }
+  .cards { display: flex; gap: 16px; align-items: stretch; flex-wrap: nowrap; }
   .card {
     width: 220px; height: 300px;
     background: var(--card-bg);
-    border: 2px solid var(--border);
+    border: 1px solid var(--border);
     border-radius: 18px;
     display: flex; flex-direction: column;
     overflow: hidden;
     cursor: pointer;
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
   }
   .card:hover {
     transform: translateY(-3px);
-    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.10);
+    box-shadow: 0 14px 32px rgba(15, 23, 42, 0.10);
   }
-  .card.active { border-color: var(--accent); }
+  .card.active {
+    border: 2px solid var(--accent);
+    box-shadow: 0 12px 28px rgba(79, 70, 229, 0.18);
+  }
   .card-head {
-    padding: 10px 12px;
+    padding: 12px 12px 8px;
     display: flex; align-items: center; gap: 8px;
   }
   .card-icon {
@@ -70,6 +77,7 @@
     color: #fff; font-weight: 700; font-size: 12px;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
   }
   .card-title {
     font-size: 13.5px; font-weight: 600;
@@ -79,92 +87,175 @@
   .card-preview {
     flex: 1;
     margin: 0 12px;
-    border-radius: 12px;
+    border-radius: 10px;
     overflow: hidden;
     position: relative;
+    background: #fafafa;
   }
   .card-foot {
     padding: 10px 12px;
-    font-size: 11.5px; color: var(--muted);
+    font-size: 11px; color: var(--muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
   /* NEW WINDOW TILE */
   .card.new-window {
     background: #fafafa;
-    border-style: dashed;
+    border: 2px dashed #d4d4d8;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 12px;
+    gap: 10px;
+    box-shadow: none;
   }
-  .card.new-window:hover { border-color: var(--accent); border-style: solid; background: #f4f4f5; }
+  .card.new-window:hover { border-color: var(--accent); background: #f4f4f5; }
   .new-window-puck {
     width: 56px; height: 56px; border-radius: 50%;
     background: var(--accent-bg); color: var(--accent);
     display: flex; align-items: center; justify-content: center;
-    font-size: 30px; font-weight: 400; line-height: 1;
+    font-size: 30px; font-weight: 300; line-height: 1;
+    box-shadow: 0 6px 16px rgba(79, 70, 229, 0.12);
   }
   .new-window-label { font-size: 14px; font-weight: 600; }
-  .new-window-sub { font-size: 11.5px; color: var(--muted); margin-top: -8px; }
+  .new-window-sub { font-size: 11.5px; color: var(--muted); }
 
   /* FOOTER */
-  .footer { font-size: 11.5px; color: var(--muted); }
+  .footer { font-size: 11px; color: var(--muted); }
 
   /* DOCK */
   .dock {
-    display: flex; gap: 12px; align-items: center;
-    padding: 10px 16px;
-    background: var(--card-bg);
+    display: flex; gap: 10px; align-items: center;
+    padding: 8px 14px;
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     border: 1px solid var(--border);
     border-radius: 999px;
-    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
   }
   .dock-tile {
-    width: 40px; height: 40px; border-radius: 10px;
+    width: 42px; height: 42px; border-radius: 12px;
     color: #fff; font-weight: 700; font-size: 14px;
     display: flex; align-items: center; justify-content: center;
     cursor: pointer;
     transition: transform 0.12s ease;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.18);
   }
-  .dock-tile:hover { transform: translateY(-2px); }
+  .dock-tile:hover { transform: translateY(-3px) scale(1.05); }
   .dock-tile.plus {
     background: var(--accent-bg);
     color: var(--accent);
-    font-size: 22px; font-weight: 400;
+    font-size: 22px; font-weight: 300;
+    box-shadow: 0 2px 6px rgba(79, 70, 229, 0.15);
   }
 
-  /* PREVIEW VARIANTS — each is a self-contained mock that hints at the
-     window kind. AppWindow shows a dashboard/bars, Store shows a tile
-     grid, Start shows the start-window layout, Launcher shows nav+main. */
-  .pv { width: 100%; height: 100%; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+  /* === PER-KIND PREVIEWS === */
 
-  .pv-appwindow { justify-content: center; gap: 8px; }
-  .pv-appwindow .stat {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 9px; color: var(--text); opacity: 0.7;
+  /* AppWindow — dashboard with line chart + stat tiles */
+  .pv-app {
+    width: 100%; height: 100%; padding: 10px 10px 8px;
+    display: flex; flex-direction: column; gap: 8px;
   }
-  .pv-appwindow .bar { height: 8px; border-radius: 4px; opacity: 0.85; }
+  .pv-app-head { display: flex; align-items: center; justify-content: space-between; }
+  .pv-app-tag {
+    font-size: 9px; padding: 2px 6px; border-radius: 4px;
+    color: #fff; font-weight: 600;
+  }
+  .pv-app-pct { font-size: 11px; font-weight: 700; }
+  .pv-app-chart { flex: 1; }
+  .pv-app-chart svg { width: 100%; height: 100%; display: block; }
+  .pv-app-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; font-size: 8.5px; }
+  .pv-app-stat {
+    background: rgba(255,255,255,0.7);
+    border-radius: 4px;
+    padding: 3px 5px;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .pv-app-stat-label { color: var(--soft); font-size: 7.5px; }
+  .pv-app-stat-value { font-weight: 700; font-size: 9.5px; }
 
-  .pv-store { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-  .pv-store .tile { aspect-ratio: 1; border-radius: 7px; }
+  /* Store — list of "package" rows */
+  .pv-store {
+    width: 100%; height: 100%; padding: 10px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .pv-store-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 6px;
+    background: rgba(255,255,255,0.85);
+    border-radius: 6px;
+  }
+  .pv-store-icon { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+  .pv-store-text { flex: 1; display: flex; flex-direction: column; gap: 1px; }
+  .pv-store-name { height: 4px; border-radius: 2px; background: #d4d4d8; width: 70%; }
+  .pv-store-sub  { height: 3px; border-radius: 2px; background: #e4e4e7; width: 50%; }
+  .pv-store-arrow { width: 6px; height: 6px; border-right: 1px solid var(--soft); border-top: 1px solid var(--soft); transform: rotate(45deg); }
 
-  .pv-start { gap: 8px; }
-  .pv-start .search {
-    height: 12px; background: rgba(255,255,255,0.7); border-radius: 6px;
+  /* Start — mini start page mock */
+  .pv-start {
+    width: 100%; height: 100%; padding: 10px;
+    display: flex; flex-direction: column; gap: 6px;
   }
-  .pv-start .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .pv-start .qa { height: 26px; background: rgba(255,255,255,0.8); border-radius: 6px; }
+  .pv-start-search {
+    height: 14px;
+    background: rgba(255,255,255,0.9);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0 6px;
+    display: flex; align-items: center; gap: 3px;
+  }
+  .pv-start-search-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--soft); }
+  .pv-start-search-line { height: 2px; flex: 1; background: #e4e4e7; border-radius: 1px; }
+  .pv-start-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 4px; }
+  .pv-start-tile {
+    height: 28px;
+    background: rgba(255,255,255,0.9);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .pv-start-tile-puck { width: 9px; height: 9px; border-radius: 2px; }
+  .pv-start-tile-label { height: 2.5px; border-radius: 1px; background: #d4d4d8; width: 70%; }
+  .pv-start-list {
+    display: flex; flex-direction: column; gap: 3px; margin-top: 2px;
+  }
+  .pv-start-list-row {
+    height: 12px;
+    background: rgba(255,255,255,0.9);
+    border-radius: 4px;
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 5px;
+  }
+  .pv-start-list-icon { width: 6px; height: 6px; border-radius: 1.5px; }
+  .pv-start-list-text { flex: 1; height: 2px; background: #e4e4e7; border-radius: 1px; }
 
-  .pv-launcher { flex-direction: row; gap: 8px; padding: 12px; }
-  .pv-launcher .nav {
-    width: 38%; background: rgba(255,255,255,0.85); border-radius: 8px;
-    display: flex; flex-direction: column; gap: 4px; padding: 8px;
+  /* Launcher — settings: left nav + main rows */
+  .pv-launcher {
+    width: 100%; height: 100%; padding: 9px;
+    display: flex; gap: 7px;
   }
-  .pv-launcher .nav-row { height: 6px; border-radius: 3px; background: var(--border); }
-  .pv-launcher .nav-row.active { background: var(--accent); }
-  .pv-launcher .main {
-    flex: 1; display: flex; flex-direction: column; gap: 6px;
+  .pv-launcher-nav {
+    width: 32%;
+    background: rgba(255,255,255,0.85);
+    border-radius: 6px;
+    padding: 6px 4px;
+    display: flex; flex-direction: column; gap: 3px;
   }
-  .pv-launcher .main-row { height: 8px; background: rgba(255,255,255,0.85); border-radius: 4px; }
+  .pv-launcher-nav-row {
+    height: 5px; border-radius: 2px; background: var(--border);
+  }
+  .pv-launcher-nav-row.active { background: var(--accent); }
+  .pv-launcher-main {
+    flex: 1; display: flex; flex-direction: column; gap: 5px;
+  }
+  .pv-launcher-card {
+    background: rgba(255,255,255,0.9);
+    border-radius: 5px;
+    padding: 5px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .pv-launcher-card-icon { width: 12px; height: 12px; border-radius: 3px; }
+  .pv-launcher-card-bars { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .pv-launcher-card-bar { height: 2.5px; border-radius: 1.5px; }
 </style>
 </head>
 <body>
@@ -199,63 +290,142 @@
     let h = 0; for (let i = 0; i < title.length; i++) h = ((h * 31) + title.charCodeAt(i)) >>> 0;
     return PALETTE[h % PALETTE.length];
   }
-  function initial(title) {
-    return (title || '?').trim().charAt(0).toUpperCase();
-  }
+  function initial(title) { return (title || '?').trim().charAt(0).toUpperCase(); }
   function withAlpha(hex, alpha) {
     const v = parseInt(hex.slice(1), 16);
     const r = (v >> 16) & 0xff, g = (v >> 8) & 0xff, b = v & 0xff;
     return `rgba(${r},${g},${b},${alpha})`;
   }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
 
-  function previewFor(kind, accent) {
-    const wash = withAlpha(accent, 0.10);
-    const washStrong = withAlpha(accent, 0.18);
+  function previewAppWindow(accent, idx) {
+    // Soft accent wash + line chart + 4 stat tiles.
+    const gid = `g-${idx}`;
+    const points = [
+      [0,28],[14,22],[28,25],[42,16],[56,19],[70,9],[84,12],[100,4]
+    ];
+    const line = points.map(p => p.join(',')).join(' ');
+    const fill = `${line} 100,40 0,40`;
+    return `
+      <div class="pv-app" style="background:${withAlpha(accent, 0.10)}">
+        <div class="pv-app-head">
+          <div class="pv-app-tag" style="background:${accent}">アクティブ</div>
+          <div class="pv-app-pct" style="color:${accent}">93%</div>
+        </div>
+        <div class="pv-app-chart">
+          <svg viewBox="0 0 100 36" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="${accent}" stop-opacity="0.45"/>
+                <stop offset="100%" stop-color="${accent}" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <polygon points="${fill}" fill="url(#${gid})"/>
+            <polyline points="${line}" fill="none" stroke="${accent}" stroke-width="1.4" stroke-linejoin="round"/>
+            ${points.map(p => `<circle cx="${p[0]}" cy="${p[1]}" r="1.2" fill="${accent}"/>`).join('')}
+          </svg>
+        </div>
+        <div class="pv-app-stats">
+          <div class="pv-app-stat">
+            <span class="pv-app-stat-label">セッション</span>
+            <span class="pv-app-stat-value">1,240</span>
+          </div>
+          <div class="pv-app-stat">
+            <span class="pv-app-stat-label">同期</span>
+            <span class="pv-app-stat-value" style="color:${accent}">92%</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function previewStore(accent) {
+    const rows = [
+      { hue: '#0ea5e9' }, { hue: '#10b981' },
+      { hue: '#f59e0b' }, { hue: '#ec4899' }, { hue: '#a855f7' },
+    ];
+    return `
+      <div class="pv-store" style="background:${withAlpha(accent, 0.08)}">
+        ${rows.map(r => `
+          <div class="pv-store-row">
+            <div class="pv-store-icon" style="background:${r.hue}"></div>
+            <div class="pv-store-text">
+              <div class="pv-store-name"></div>
+              <div class="pv-store-sub"></div>
+            </div>
+            <div class="pv-store-arrow"></div>
+          </div>
+        `).join('')}
+      </div>`;
+  }
+
+  function previewStart(accent) {
+    return `
+      <div class="pv-start" style="background:${withAlpha(accent, 0.08)}">
+        <div class="pv-start-search">
+          <div class="pv-start-search-dot"></div>
+          <div class="pv-start-search-line"></div>
+        </div>
+        <div class="pv-start-grid">
+          <div class="pv-start-tile"><div class="pv-start-tile-puck" style="background:#0ea5e9"></div><div class="pv-start-tile-label"></div></div>
+          <div class="pv-start-tile"><div class="pv-start-tile-puck" style="background:#f59e0b"></div><div class="pv-start-tile-label"></div></div>
+          <div class="pv-start-tile"><div class="pv-start-tile-puck" style="background:#a855f7"></div><div class="pv-start-tile-label"></div></div>
+          <div class="pv-start-tile"><div class="pv-start-tile-puck" style="background:${accent}"></div><div class="pv-start-tile-label"></div></div>
+        </div>
+        <div class="pv-start-list">
+          ${[ '#4f46e5','#0ea5e9','#10b981' ].map(c => `
+            <div class="pv-start-list-row">
+              <div class="pv-start-list-icon" style="background:${c}"></div>
+              <div class="pv-start-list-text"></div>
+            </div>
+          `).join('')}
+        </div>
+      </div>`;
+  }
+
+  function previewLauncher(accent) {
+    return `
+      <div class="pv-launcher" style="background:${withAlpha(accent, 0.08)}">
+        <div class="pv-launcher-nav">
+          ${[0,1,2,3,4,5].map(i => `<div class="pv-launcher-nav-row ${i===1?'active':''}"></div>`).join('')}
+        </div>
+        <div class="pv-launcher-main">
+          <div class="pv-launcher-card">
+            <div class="pv-launcher-card-icon" style="background:${accent};border-radius:50%"></div>
+            <div class="pv-launcher-card-bars">
+              <div class="pv-launcher-card-bar" style="background:${accent};width:60%;opacity:.8"></div>
+              <div class="pv-launcher-card-bar" style="background:#d4d4d8;width:35%"></div>
+            </div>
+          </div>
+          <div class="pv-launcher-card">
+            <div class="pv-launcher-card-bars" style="gap:3px;">
+              <div class="pv-launcher-card-bar" style="background:#d4d4d8;width:80%"></div>
+              <div class="pv-launcher-card-bar" style="background:#e4e4e7;width:55%"></div>
+              <div class="pv-launcher-card-bar" style="background:#e4e4e7;width:70%"></div>
+            </div>
+          </div>
+          <div class="pv-launcher-card">
+            <div class="pv-launcher-card-icon" style="background:${withAlpha(accent,0.5)}"></div>
+            <div class="pv-launcher-card-bars">
+              <div class="pv-launcher-card-bar" style="background:#d4d4d8;width:50%"></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function previewFor(kind, accent, idx) {
     switch (kind) {
-      case 'AppWindow':
-        return `
-          <div class="pv pv-appwindow" style="background:${wash}">
-            ${[['総処理', '1,240', 90], ['信頼', '92/100', 80], ['同期', '同期中', 60], ['遅延', '12 ms', 45]].map(([k, v, w]) => `
-              <div class="stat"><span>${k}</span><span>${v}</span></div>
-              <div class="bar" style="background:${accent};width:${w}%"></div>
-            `).join('')}
-          </div>`;
-      case 'Store':
-        return `
-          <div class="pv pv-store" style="background:${wash}">
-            ${Array.from({ length: 9 }, (_, i) => `<div class="tile" style="background:${i % 2 === 0 ? accent : withAlpha(accent, 0.55)}"></div>`).join('')}
-          </div>`;
-      case 'Start':
-        return `
-          <div class="pv pv-start" style="background:${wash}">
-            <div class="search"></div>
-            <div class="row"><div class="qa"></div><div class="qa"></div></div>
-            <div class="row"><div class="qa"></div><div class="qa"></div></div>
-            <div class="row" style="grid-template-columns: 2fr 2fr;">
-              <div class="qa" style="height:34px;background:${withAlpha(accent,0.18)}"></div>
-              <div class="qa" style="height:34px;background:${withAlpha(accent,0.18)}"></div>
-            </div>
-          </div>`;
-      case 'Launcher':
-        return `
-          <div class="pv pv-launcher" style="background:${wash}">
-            <div class="nav">
-              ${Array.from({ length: 6 }, (_, i) => `<div class="nav-row ${i === 1 ? 'active' : ''}"></div>`).join('')}
-            </div>
-            <div class="main">
-              <div class="main-row" style="width:90%"></div>
-              <div class="main-row" style="width:70%"></div>
-              <div class="main-row" style="width:80%"></div>
-              <div class="main-row" style="width:50%"></div>
-              <div class="main-row" style="width:60%;background:${withAlpha(accent,0.45)}"></div>
-            </div>
-          </div>`;
-      default:
-        return `<div style="width:100%;height:100%;background:${wash};"></div>`;
+      case 'AppWindow': return previewAppWindow(accent, idx);
+      case 'Store':     return previewStore(accent);
+      case 'Start':     return previewStart(accent);
+      case 'Launcher':  return previewLauncher(accent);
+      default:          return `<div style="width:100%;height:100%;background:${withAlpha(accent,0.1)}"></div>`;
     }
   }
 
-  function makeCard(entry, isActive) {
+  function makeCard(entry, isActive, idx) {
     const accent = accentFor(entry.title);
     return `
       <div class="card ${isActive ? 'active' : ''}" data-window-id="${entry.windowId}">
@@ -263,7 +433,7 @@
           <div class="card-icon" style="background:${accent}">${escapeHtml(initial(entry.title))}</div>
           <div class="card-title">${escapeHtml(entry.title)}</div>
         </div>
-        <div class="card-preview">${previewFor(entry.kind, accent)}</div>
+        <div class="card-preview">${previewFor(entry.kind, accent, idx)}</div>
         <div class="card-foot">${escapeHtml(entry.subtitle)}</div>
       </div>`;
   }
@@ -279,17 +449,13 @@
 
   function makeDockTile(entry) {
     const accent = accentFor(entry.title);
-    return `<div class="dock-tile" style="background:${accent}" data-window-id="${entry.windowId}">${escapeHtml(initial(entry.title))}</div>`;
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+    return `<div class="dock-tile" style="background:linear-gradient(135deg, ${accent} 0%, ${withAlpha(accent, 0.8)} 100%)" data-window-id="${entry.windowId}">${escapeHtml(initial(entry.title))}</div>`;
   }
 
   // Render
   (function render() {
     const cardsEl = document.getElementById('cards');
-    WINDOWS.forEach((w, i) => cardsEl.insertAdjacentHTML('beforeend', makeCard(w, i === 0)));
+    WINDOWS.forEach((w, i) => cardsEl.insertAdjacentHTML('beforeend', makeCard(w, i === 0, i)));
     cardsEl.insertAdjacentHTML('beforeend', makeNewWindowCard());
 
     const dockEl = document.getElementById('dock');
@@ -304,31 +470,25 @@
 
   // Handlers
   document.addEventListener('click', (e) => {
-    // Card or dock tile with a window id → activate
     const tile = e.target.closest('[data-window-id]');
     if (tile) {
       e.stopPropagation();
       BRIDGE({ action: 'ActivateWindow', windowId: Number(tile.getAttribute('data-window-id')) });
       return;
     }
-    // New-window tile or dock plus
     if (e.target.closest('#new-window-card') || e.target.closest('#dock-plus')) {
       e.stopPropagation();
       BRIDGE({ action: 'OpenStartWindow' });
       return;
     }
-    // Click on a card-internal element bubbled up — ignore
     if (e.target.closest('.card') || e.target.closest('.dock') || e.target.closest('.header')) {
       return;
     }
-    // Backdrop click → close
     BRIDGE({ action: 'CloseSwitcher' });
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      BRIDGE({ action: 'CloseSwitcher' });
-    }
+    if (e.key === 'Escape') BRIDGE({ action: 'CloseSwitcher' });
   });
 </script>
 
