@@ -16,8 +16,8 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
-    OpenAppWindowExperiment, OpenCardSwitcher, OpenLauncherWindow, OpenStartWindow,
-    OpenStoreWindow, ShowSettings,
+    NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher, OpenLauncherWindow,
+    OpenStartWindow, OpenStoreWindow, ShowSettings,
 };
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
@@ -124,6 +124,36 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 // AppWindow.
                                                 let _ = cx;
                                                 window.remove_window();
+                                                Ok(())
+                                            }
+                                            // AODD test path for the Control
+                                            // Bar URL pill's NavigateToUrl
+                                            // dispatch. The MCP envelope has
+                                            // no payload, so this branch
+                                            // hard-codes the well-known
+                                            // capsule:// URL the user wants
+                                            // investigated. A real Enter
+                                            // press on the bar input
+                                            // dispatches the same action
+                                            // with the typed value.
+                                            "NavigateToTestCapsule" => {
+                                                window.dispatch_action(
+                                                    Box::new(NavigateToUrl {
+                                                        url:
+                                                            "capsule://github.com/Koh0920/WasedaP2P"
+                                                                .to_string(),
+                                                    }),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "NavigateToTestHttp" => {
+                                                window.dispatch_action(
+                                                    Box::new(NavigateToUrl {
+                                                        url: "https://ato.run/".to_string(),
+                                                    }),
+                                                    cx,
+                                                );
                                                 Ok(())
                                             }
                                             other => Err(format!(

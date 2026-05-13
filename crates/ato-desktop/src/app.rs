@@ -507,6 +507,70 @@ pub fn run() {
             ));
         });
 
+        // Focus-mode handler for the Control Bar URL pill's
+        // PressEnter. Parses the typed URL and spawns an AppWindow
+        // with the matching GuestRoute. The legacy DesktopShell has
+        // its own `on_navigate_to_url` for the single-window mode;
+        // it never runs here because DesktopShell isn't instantiated
+        // when the multi-window flag is on.
+        //
+        // Supported schemes:
+        //   - capsule://<handle...>  → CapsuleHandle route (spawns an
+        //     AppWindow whose registry entry tracks the capsule
+        //     identity). NOTE: full capsule SESSION orchestration
+        //     (running `ato app session start`, mounting the
+        //     WebView) is NOT wired into AppWindow yet — that path
+        //     waits on the per-window WebViewManager migration.
+        //   - http(s)://...          → ExternalUrl route.
+        //   - anything else          → log + ignore.
+        cx.on_action(|action: &NavigateToUrl, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            let raw = action.url.trim();
+            if raw.is_empty() {
+                return;
+            }
+            tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
+            if let Some(rest) = raw.strip_prefix("capsule://") {
+                let handle = rest.trim_end_matches('/').to_string();
+                if handle.is_empty() {
+                    tracing::warn!("capsule:// with empty handle — ignored");
+                    return;
+                }
+                // Label = last path segment of the handle. Falls
+                // back to the whole handle when there is no slash.
+                let label = handle
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&handle)
+                    .to_string();
+                let route = crate::state::GuestRoute::CapsuleHandle { handle, label };
+                if let Err(err) = crate::window::open_app_window(cx, route) {
+                    tracing::error!(error = %err, "NavigateToUrl(capsule) open_app_window failed");
+                }
+                return;
+            }
+            match url::Url::parse(raw) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                    let route = crate::state::GuestRoute::ExternalUrl(parsed);
+                    if let Err(err) = crate::window::open_app_window(cx, route) {
+                        tracing::error!(error = %err, "NavigateToUrl(http) open_app_window failed");
+                    }
+                }
+                Ok(parsed) => {
+                    tracing::warn!(
+                        scheme = parsed.scheme(),
+                        "NavigateToUrl: unsupported scheme — ignored"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, url = %raw, "NavigateToUrl: parse failed");
+                }
+            }
+        });
+
         // #173 — open Card Switcher overlay. No-op when multi-window
         // flag is off. The overlay snapshots open `AppWindow`s and
         // renders them as MRU-ordered cards; until the per-window

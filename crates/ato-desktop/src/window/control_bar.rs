@@ -13,13 +13,16 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, size, svg, AnyWindowHandle, App, Bounds, Context, FontWeight, IntoElement,
-    MouseButton, Pixels, Render, SharedString, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions,
+    div, hsla, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
+    FontWeight, IntoElement, MouseButton, Pixels, Render, SharedString,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
-use crate::app::{OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings};
+use crate::app::{
+    NavigateToUrl, OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings,
+};
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
 
@@ -33,33 +36,67 @@ const BAR_HEIGHT: f32 = 56.0;
 const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
 pub struct ControlBarShellPlaceholder {
-    url_display: SharedString,
+    /// Editable URL field in the centre of the bar. Wraps
+    /// `gpui_component::input::InputState` so we can subscribe to
+    /// PressEnter and read the value at render time for the icon
+    /// scheme decision.
+    omnibar: Entity<InputState>,
 }
 
 impl ControlBarShellPlaceholder {
-    pub fn new(route: &GuestRoute, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        route: &GuestRoute,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let initial = display_url_from_route(route);
+        let omnibar = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://… または capsule://… を入力")
+                .default_value(initial.clone())
+        });
+
+        // PressEnter → dispatch NavigateToUrl. The Focus-mode handler
+        // registered in `app::run` decides whether to spawn an
+        // ExternalUrl AppWindow (web) or a CapsuleHandle AppWindow
+        // (capsule://) based on the scheme.
+        // Change events bump notify so the leading icon (Globe vs
+        // capsule) re-evaluates as the user types.
+        cx.subscribe_in(
+            &omnibar,
+            window,
+            |_this: &mut Self, omnibar, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let url = omnibar.read(cx).value().to_string();
+                    if !url.is_empty() {
+                        window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
+                    }
+                }
+                InputEvent::Change => {
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+        .detach();
+
         // Re-render whenever the OpenContentWindows set changes so
-        // the Card Switcher badge reflects the live count. Every
-        // user-facing content window (AppWindow, Store, StartWindow,
-        // Launcher) inserts/removes from this set at spawn/close;
-        // `global_mut` pushes a NotifyGlobalObservers effect that
-        // wakes this subscription.
+        // the Card Switcher badge reflects the live count.
         cx.observe_global::<OpenContentWindows>(|_view, cx| {
             cx.notify();
         })
         .detach();
-        Self {
-            url_display: SharedString::from(display_url_from_route(route)),
-        }
+
+        Self { omnibar }
     }
 }
 
 fn display_url_from_route(route: &GuestRoute) -> String {
     match route {
         GuestRoute::ExternalUrl(url) => url.as_str().to_string(),
-        GuestRoute::CapsuleHandle { handle, .. } => format!("ato.app/shell://{handle}"),
+        GuestRoute::CapsuleHandle { handle, .. } => format!("capsule://{handle}"),
         GuestRoute::CapsuleUrl { handle, url, .. } => {
-            format!("ato.app/shell://{handle} → {url}")
+            format!("capsule://{handle} → {url}")
         }
         GuestRoute::Capsule { session, .. } => format!("capsule://{session}/"),
         GuestRoute::Terminal { session_id } => format!("terminal://{session_id}/"),
@@ -72,20 +109,25 @@ impl Render for ControlBarShellPlaceholder {
         _window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Count of currently open content windows (AppWindow, Store,
-        // StartWindow, Launcher) — surfaced as a badge on the Card
-        // Switcher pill button so users see at a glance how many
-        // windows are in play. Chrome windows (Control Bar itself,
-        // Card Switcher overlay) are excluded.
         let window_count = cx.global::<OpenContentWindows>().len();
-        // The host window is the pill — no padding ring, no centring
-        // wrapper. `bar_pill` is the entire content and uses
-        // `.size_full()` to inherit the window's dimensions.
-        bar_pill(self.url_display.clone(), window_count)
+        // Read the current input value so the leading icon swaps
+        // between Globe and the custom capsule glyph based on the
+        // typed scheme. Cheap read — no clone of InputState.
+        let is_capsule = self
+            .omnibar
+            .read(cx)
+            .value()
+            .trim_start()
+            .starts_with("capsule://");
+        bar_pill(self.omnibar.clone(), is_capsule, window_count)
     }
 }
 
-fn bar_pill(url: SharedString, window_count: usize) -> impl IntoElement {
+fn bar_pill(
+    omnibar: Entity<InputState>,
+    is_capsule: bool,
+    window_count: usize,
+) -> impl IntoElement {
     div()
         .size_full()
         .px(px(6.0))
@@ -110,7 +152,7 @@ fn bar_pill(url: SharedString, window_count: usize) -> impl IntoElement {
             ActionTarget::Settings,
             None,
         ))
-        .child(url_pill(url))
+        .child(url_pill(omnibar, is_capsule))
         .child(pill_button(
             "card-switcher",
             Some(PillIcon::Builtin(IconName::GalleryVerticalEnd)),
@@ -233,11 +275,27 @@ fn pill_button(
     body
 }
 
-fn url_pill(url: SharedString) -> impl IntoElement {
+fn url_pill(omnibar: Entity<InputState>, is_capsule: bool) -> impl IntoElement {
     // The URL chip is the only inner affordance with its own fill —
     // a barely-there zinc-50 tint plus a hairline border so the
-    // address sits on a recessed surface. URL text is zinc-600
-    // (muted) rather than near-black, matching the reference.
+    // address sits on a recessed surface. Now editable — wraps
+    // gpui_component::Input which routes keystrokes / clipboard / IME
+    // through the standard text-input machinery. Leading icon swaps
+    // between Globe (web) and a custom capsule glyph based on the
+    // current value's scheme; this is recomputed every render via
+    // the `is_capsule` flag the caller passes in.
+    let leading_icon: AnyElement = if is_capsule {
+        svg()
+            .path(SharedString::from("icons/capsule.svg"))
+            .size(px(15.0))
+            .text_color(rgb(0x4f46e5))
+            .into_any_element()
+    } else {
+        Icon::new(IconName::Globe)
+            .size(px(15.0))
+            .text_color(rgb(0x71717a))
+            .into_any_element()
+    };
     div()
         .id("url-pill")
         .flex_1()
@@ -252,12 +310,18 @@ fn url_pill(url: SharedString) -> impl IntoElement {
         .border_color(rgb(0xeeeeee))
         .text_color(rgb(0x52525b))
         .text_sm()
+        .child(leading_icon)
         .child(
-            Icon::new(IconName::Globe)
-                .size(px(15.0))
-                .text_color(rgb(0x71717a)),
+            div().flex_1().h_full().flex().items_center().child(
+                Input::new(&omnibar)
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
+                    .text_size(px(13.0))
+                    .text_color(rgb(0x52525b)),
+            ),
         )
-        .child(div().flex_1().overflow_hidden().child(url))
         .child(
             Icon::new(IconName::ChevronDown)
                 .size(px(13.0))
@@ -343,14 +407,18 @@ pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
         }
         None => Bounds::centered(None, size(win_w, win_h), cx),
     };
-    open_control_bar_inner(
-        cx,
-        bounds,
-        GuestRoute::CapsuleHandle {
+    // Default the URL input to https://ato.run so cold-launches read
+    // as "you're looking at the Store" — matches the Focus-mode boot
+    // path that opens the Store window as the initial content
+    // surface. Users can type a `capsule://...` to navigate
+    // elsewhere; the leading icon switches automatically.
+    let initial_route = url::Url::parse("https://ato.run/")
+        .map(GuestRoute::ExternalUrl)
+        .unwrap_or_else(|_| GuestRoute::CapsuleHandle {
             handle: "wasedap2p".to_string(),
             label: "WasedaP2P".to_string(),
-        },
-    )
+        });
+    open_control_bar_inner(cx, bounds, initial_route)
 }
 
 fn open_control_bar_inner(
@@ -375,7 +443,7 @@ fn open_control_bar_inner(
         ..Default::default()
     };
     let handle = cx.open_window(options, move |window, cx| {
-        let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, cx));
+        let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, window, cx));
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     // Round the NSWindow's contentView layer so the underlying
