@@ -8,7 +8,6 @@
 //!   directly on the pill background; only the URL chip carries its
 //!   own light tint
 //! - URL text in muted zinc-grey rather than near-black
-//! - Two small ⓘ info dots at the right edge
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -203,7 +202,6 @@ fn bar_pill(
             ActionTarget::Store,
             None,
         ))
-        .child(info_dots())
 }
 
 #[derive(Copy, Clone)]
