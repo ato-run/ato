@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{
     div, img, linear_color_stop, linear_gradient, point, px, BoxShadow, Div, FontWeight, Image,
-    InteractiveElement, IntoElement, MouseButton, Stateful,
+    InteractiveElement, IntoElement, MouseButton, Stateful, Window,
 };
 use gpui_component::{Icon, IconName};
 
 use super::theme::{task_hue, Theme};
-use crate::app::{CloseTask, MoveTask, NewTab, SelectTask, ShowSettings};
+use crate::app::{CloseTask, FocusCommandBar, MoveTask, NewTab, SelectTask, ShowSettings};
 use crate::state::{HostPanelRoute, PaneSurface};
 
 /// Drag-and-drop payload for reordering sidebar task tabs. The drop
@@ -256,28 +256,109 @@ pub(super) fn render_task_rail(
     let panel_bg = theme.panel_bg;
     let panel_border = theme.panel_border;
 
+    // Outer container = the rail surface. Header (h-12) and body
+    // (flex_1) are stacked vertically — the body keeps the previous
+    // py_3 / gap_1 / items_center rhythm so existing tabs render
+    // identically below the new header.
     div()
         .w(px(52.0))
         .min_w(px(52.0))
         .h_full()
         .flex()
         .flex_col()
-        .items_center()
-        .py_3()
-        .gap_1()
         .bg(panel_bg)
         .border_r_1()
         .border_color(panel_border)
-        .children(
-            tasks
-                .into_iter()
-                .enumerate()
-                .map(move |(i, task)| render_nav_item(task, i, favicon_cache, theme)),
+        .child(render_sidebar_header(theme))
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .w_full()
+                .py_3()
+                .gap_1()
+                .children(
+                    tasks
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(i, task)| render_nav_item(task, i, favicon_cache, theme)),
+                )
+                .child(render_nav_separator(theme))
+                .child(div().flex_1())
+                .child(render_settings_nav_item(settings_nav_active(state), theme)),
         )
-        .child(render_nav_separator(theme))
-        .child(render_new_tab_button(theme))
-        .child(div().flex_1())
-        .child(render_settings_nav_item(settings_nav_active(state), theme))
+}
+
+/// Sidebar header — Plus (NewTab) + Search (FocusCommandBar) icon
+/// buttons in a 48px tall row at the top of the rail.
+///
+/// ## gpui-html origin
+///
+/// Lowered from `.tmp/gpui-html/sidebar-header.html`. The generated
+/// chain is preserved in `.tmp/gpui-html/sidebar-header.generated.rs`.
+/// The mockup expresses two `p-1 rounded-md` boxes wrapping a
+/// `size-4` icon slot inside an `h-12 gap-1` flex row with a
+/// `border-b` separator; production replaces the placeholder
+/// `div().size_4()` with real `Icon::new(IconName::{Plus,Search})`
+/// and adds hover state + click handlers (out of gpui-html v0.1's
+/// static-lowering scope).
+///
+/// Replaces the previous `render_new_tab_button` that sat mid-rail
+/// between the task list and the spacer.
+fn render_sidebar_header(theme: &Theme) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h_12()
+        .gap_1()
+        .border_b_1()
+        .border_color(theme.border_subtle)
+        .child(render_sidebar_header_button(
+            "sidebar-header-new-tab",
+            IconName::Plus,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(NewTab), cx);
+            },
+        ))
+        .child(render_sidebar_header_button(
+            "sidebar-header-search",
+            IconName::Search,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(FocusCommandBar), cx);
+            },
+        ))
+}
+
+fn render_sidebar_header_button(
+    id: &'static str,
+    icon: IconName,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> Stateful<Div> {
+    // Same visual treatment as the chrome action / nav buttons —
+    // text-tertiary rest, text-secondary + surface-hover bg on
+    // hover. p-1 instead of p-1.5 because 72px rail can't fit two
+    // p-1.5 buttons + gap comfortably; p-1 (4px each side) lands
+    // each button at 24px, two of them + gap-1 = 52px, centered on
+    // the 72px rail with 10px breathing room.
+    div()
+        .id(id)
+        .p_1()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.text_tertiary)
+        .cursor_pointer()
+        .hover(move |s| s.bg(theme.surface_hover).text_color(theme.text_secondary))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(Icon::new(icon).size_4())
 }
 
 /// Ordered favicon candidate URLs to try for a given origin.
@@ -697,36 +778,6 @@ fn settings_nav_active(state: &crate::state::AppState) -> bool {
             })
         })
         .unwrap_or(false)
-}
-
-fn render_new_tab_button(theme: &Theme) -> Div {
-    let border_color = theme.border_strong;
-    let icon_color = theme.text_secondary;
-
-    div()
-        .w(px(NAV_ITEM_SIZE))
-        .h(px(NAV_ITEM_SIZE))
-        .rounded(px(6.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(NewTab), cx);
-        })
-        .child(
-            div()
-                .w(px(APP_ICON_SIZE))
-                .h(px(APP_ICON_SIZE))
-                .rounded(px(5.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .border_1()
-                .border_color(border_color)
-                .text_color(icon_color)
-                .child(Icon::new(IconName::Plus).size(px(16.0)).into_any_element()),
-        )
 }
 
 #[cfg(test)]
