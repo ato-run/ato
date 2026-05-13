@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>開いているウィンドウ</title>
+<style>
+  :root {
+    --bg-from: #f5f3ff;
+    --bg-via:  #ede9fe;
+    --bg-to:   #faf5ff;
+    --card-bg: #ffffff;
+    --border:  #e4e4e7;
+    --text:    #18181b;
+    --muted:   #71717a;
+    --soft:    #a1a1aa;
+    --accent:  #4f46e5;
+    --accent-bg: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: linear-gradient(135deg, var(--bg-from) 0%, var(--bg-via) 50%, var(--bg-to) 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 28px;
+    padding: 28px 24px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* HEADER */
+  .header { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .header-puck {
+    width: 48px; height: 48px; border-radius: 14px;
+    background: var(--accent-bg); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .header-puck svg { width: 24px; height: 24px; }
+  .header h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .header p { margin: 0; font-size: 13px; color: var(--muted); }
+
+  /* CARDS */
+  .cards { display: flex; gap: 16px; align-items: center; flex-wrap: nowrap; }
+  .card {
+    width: 220px; height: 300px;
+    background: var(--card-bg);
+    border: 2px solid var(--border);
+    border-radius: 18px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.10);
+  }
+  .card.active { border-color: var(--accent); }
+  .card-head {
+    padding: 10px 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card-icon {
+    width: 26px; height: 26px; border-radius: 7px;
+    color: #fff; font-weight: 700; font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .card-title {
+    font-size: 13.5px; font-weight: 600;
+    flex: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .card-preview {
+    flex: 1;
+    margin: 0 12px;
+    border-radius: 12px;
+    overflow: hidden;
+    position: relative;
+  }
+  .card-foot {
+    padding: 10px 12px;
+    font-size: 11.5px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* NEW WINDOW TILE */
+  .card.new-window {
+    background: #fafafa;
+    border-style: dashed;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px;
+  }
+  .card.new-window:hover { border-color: var(--accent); border-style: solid; background: #f4f4f5; }
+  .new-window-puck {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: var(--accent-bg); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; font-weight: 400; line-height: 1;
+  }
+  .new-window-label { font-size: 14px; font-weight: 600; }
+  .new-window-sub { font-size: 11.5px; color: var(--muted); margin-top: -8px; }
+
+  /* FOOTER */
+  .footer { font-size: 11.5px; color: var(--muted); }
+
+  /* DOCK */
+  .dock {
+    display: flex; gap: 12px; align-items: center;
+    padding: 10px 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+  }
+  .dock-tile {
+    width: 40px; height: 40px; border-radius: 10px;
+    color: #fff; font-weight: 700; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: transform 0.12s ease;
+  }
+  .dock-tile:hover { transform: translateY(-2px); }
+  .dock-tile.plus {
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-size: 22px; font-weight: 400;
+  }
+
+  /* PREVIEW VARIANTS — each is a self-contained mock that hints at the
+     window kind. AppWindow shows a dashboard/bars, Store shows a tile
+     grid, Start shows the start-window layout, Launcher shows nav+main. */
+  .pv { width: 100%; height: 100%; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+
+  .pv-appwindow { justify-content: center; gap: 8px; }
+  .pv-appwindow .stat {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 9px; color: var(--text); opacity: 0.7;
+  }
+  .pv-appwindow .bar { height: 8px; border-radius: 4px; opacity: 0.85; }
+
+  .pv-store { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .pv-store .tile { aspect-ratio: 1; border-radius: 7px; }
+
+  .pv-start { gap: 8px; }
+  .pv-start .search {
+    height: 12px; background: rgba(255,255,255,0.7); border-radius: 6px;
+  }
+  .pv-start .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .pv-start .qa { height: 26px; background: rgba(255,255,255,0.8); border-radius: 6px; }
+
+  .pv-launcher { flex-direction: row; gap: 8px; padding: 12px; }
+  .pv-launcher .nav {
+    width: 38%; background: rgba(255,255,255,0.85); border-radius: 8px;
+    display: flex; flex-direction: column; gap: 4px; padding: 8px;
+  }
+  .pv-launcher .nav-row { height: 6px; border-radius: 3px; background: var(--border); }
+  .pv-launcher .nav-row.active { background: var(--accent); }
+  .pv-launcher .main {
+    flex: 1; display: flex; flex-direction: column; gap: 6px;
+  }
+  .pv-launcher .main-row { height: 8px; background: rgba(255,255,255,0.85); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-puck">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="18" rx="2"/>
+      <rect x="14" y="3" width="7" height="11" rx="2"/>
+      <rect x="14" y="17" width="7" height="4" rx="2"/>
+    </svg>
+  </div>
+  <h1>開いているウィンドウ</h1>
+  <p id="subtitle">現在のセッションを切り替えます</p>
+</div>
+
+<div id="cards" class="cards"></div>
+
+<div class="footer">クリックで切り替え、Esc または背景クリックで閉じる</div>
+
+<div id="dock" class="dock"></div>
+
+<script>
+  const BRIDGE = (window.ipc && window.ipc.postMessage)
+    ? (m) => window.ipc.postMessage(JSON.stringify(m))
+    : (m) => console.log('[no bridge]', m);
+
+  const WINDOWS = window.__ATO_WINDOWS || [];
+
+  const PALETTE = ['#4f46e5','#0ea5e9','#10b981','#f59e0b','#ef4444','#a855f7','#ec4899','#14b8a6'];
+  function accentFor(title) {
+    let h = 0; for (let i = 0; i < title.length; i++) h = ((h * 31) + title.charCodeAt(i)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+  function initial(title) {
+    return (title || '?').trim().charAt(0).toUpperCase();
+  }
+  function withAlpha(hex, alpha) {
+    const v = parseInt(hex.slice(1), 16);
+    const r = (v >> 16) & 0xff, g = (v >> 8) & 0xff, b = v & 0xff;
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+
+  function previewFor(kind, accent) {
+    const wash = withAlpha(accent, 0.10);
+    const washStrong = withAlpha(accent, 0.18);
+    switch (kind) {
+      case 'AppWindow':
+        return `
+          <div class="pv pv-appwindow" style="background:${wash}">
+            ${[['総処理', '1,240', 90], ['信頼', '92/100', 80], ['同期', '同期中', 60], ['遅延', '12 ms', 45]].map(([k, v, w]) => `
+              <div class="stat"><span>${k}</span><span>${v}</span></div>
+              <div class="bar" style="background:${accent};width:${w}%"></div>
+            `).join('')}
+          </div>`;
+      case 'Store':
+        return `
+          <div class="pv pv-store" style="background:${wash}">
+            ${Array.from({ length: 9 }, (_, i) => `<div class="tile" style="background:${i % 2 === 0 ? accent : withAlpha(accent, 0.55)}"></div>`).join('')}
+          </div>`;
+      case 'Start':
+        return `
+          <div class="pv pv-start" style="background:${wash}">
+            <div class="search"></div>
+            <div class="row"><div class="qa"></div><div class="qa"></div></div>
+            <div class="row"><div class="qa"></div><div class="qa"></div></div>
+            <div class="row" style="grid-template-columns: 2fr 2fr;">
+              <div class="qa" style="height:34px;background:${withAlpha(accent,0.18)}"></div>
+              <div class="qa" style="height:34px;background:${withAlpha(accent,0.18)}"></div>
+            </div>
+          </div>`;
+      case 'Launcher':
+        return `
+          <div class="pv pv-launcher" style="background:${wash}">
+            <div class="nav">
+              ${Array.from({ length: 6 }, (_, i) => `<div class="nav-row ${i === 1 ? 'active' : ''}"></div>`).join('')}
+            </div>
+            <div class="main">
+              <div class="main-row" style="width:90%"></div>
+              <div class="main-row" style="width:70%"></div>
+              <div class="main-row" style="width:80%"></div>
+              <div class="main-row" style="width:50%"></div>
+              <div class="main-row" style="width:60%;background:${withAlpha(accent,0.45)}"></div>
+            </div>
+          </div>`;
+      default:
+        return `<div style="width:100%;height:100%;background:${wash};"></div>`;
+    }
+  }
+
+  function makeCard(entry, isActive) {
+    const accent = accentFor(entry.title);
+    return `
+      <div class="card ${isActive ? 'active' : ''}" data-window-id="${entry.windowId}">
+        <div class="card-head">
+          <div class="card-icon" style="background:${accent}">${escapeHtml(initial(entry.title))}</div>
+          <div class="card-title">${escapeHtml(entry.title)}</div>
+        </div>
+        <div class="card-preview">${previewFor(entry.kind, accent)}</div>
+        <div class="card-foot">${escapeHtml(entry.subtitle)}</div>
+      </div>`;
+  }
+
+  function makeNewWindowCard() {
+    return `
+      <div class="card new-window" id="new-window-card">
+        <div class="new-window-puck">+</div>
+        <div class="new-window-label">新しいウィンドウ</div>
+        <div class="new-window-sub">スタートページを開く</div>
+      </div>`;
+  }
+
+  function makeDockTile(entry) {
+    const accent = accentFor(entry.title);
+    return `<div class="dock-tile" style="background:${accent}" data-window-id="${entry.windowId}">${escapeHtml(initial(entry.title))}</div>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  // Render
+  (function render() {
+    const cardsEl = document.getElementById('cards');
+    WINDOWS.forEach((w, i) => cardsEl.insertAdjacentHTML('beforeend', makeCard(w, i === 0)));
+    cardsEl.insertAdjacentHTML('beforeend', makeNewWindowCard());
+
+    const dockEl = document.getElementById('dock');
+    WINDOWS.forEach((w) => dockEl.insertAdjacentHTML('beforeend', makeDockTile(w)));
+    dockEl.insertAdjacentHTML('beforeend', '<div class="dock-tile plus" id="dock-plus">+</div>');
+
+    const subEl = document.getElementById('subtitle');
+    subEl.textContent = WINDOWS.length === 0
+      ? 'まだウィンドウはありません — 新しいウィンドウから始めましょう。'
+      : `現在のセッションにある ${WINDOWS.length} つのアプリと、操作中のものを切り替えます。`;
+  })();
+
+  // Handlers
+  document.addEventListener('click', (e) => {
+    // Card or dock tile with a window id → activate
+    const tile = e.target.closest('[data-window-id]');
+    if (tile) {
+      e.stopPropagation();
+      BRIDGE({ action: 'ActivateWindow', windowId: Number(tile.getAttribute('data-window-id')) });
+      return;
+    }
+    // New-window tile or dock plus
+    if (e.target.closest('#new-window-card') || e.target.closest('#dock-plus')) {
+      e.stopPropagation();
+      BRIDGE({ action: 'OpenStartWindow' });
+      return;
+    }
+    // Click on a card-internal element bubbled up — ignore
+    if (e.target.closest('.card') || e.target.closest('.dock') || e.target.closest('.header')) {
+      return;
+    }
+    // Backdrop click → close
+    BRIDGE({ action: 'CloseSwitcher' });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      BRIDGE({ action: 'CloseSwitcher' });
+    }
+  });
+</script>
+
+</body>
+</html>

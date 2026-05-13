@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>新しいウィンドウ</title>
+<style>
+  :root {
+    --bg-from: #f5f3ff;
+    --bg-via:  #ede9fe;
+    --bg-to:   #faf5ff;
+    --card-bg: #ffffff;
+    --border:  #e4e4e7;
+    --border-soft: #f4f4f5;
+    --text:    #18181b;
+    --muted:   #71717a;
+    --soft:    #a1a1aa;
+    --accent:  #4f46e5;
+    --accent-bg: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: linear-gradient(160deg, var(--bg-from) 0%, var(--bg-via) 55%, var(--bg-to) 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .container {
+    width: min(960px, 100%);
+    padding: 32px 40px 28px;
+    display: flex; flex-direction: column; gap: 22px;
+  }
+
+  /* HEADER */
+  .header { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .header-puck {
+    width: 48px; height: 48px; border-radius: 14px;
+    background: var(--accent-bg); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .header-puck svg { width: 24px; height: 24px; }
+  .header h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .header p { margin: 0; font-size: 13px; color: var(--muted); }
+
+  /* SEARCH */
+  .search {
+    height: 48px; padding: 0 16px;
+    display: flex; align-items: center; gap: 10px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+  }
+  .search svg { width: 18px; height: 18px; color: var(--soft); flex-shrink: 0; }
+  .search input {
+    flex: 1; border: 0; outline: 0; background: transparent;
+    font: inherit; color: var(--text);
+  }
+  .search input::placeholder { color: var(--soft); }
+  .kbd {
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    padding: 3px 8px;
+    background: var(--border-soft);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+
+  /* QUICK ACTIONS */
+  .quick-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .qa-tile {
+    height: 96px; padding: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+  }
+  .qa-tile:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+  }
+  .qa-puck {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .qa-puck svg { width: 18px; height: 18px; }
+  .qa-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+  .qa-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+  /* COLUMNS */
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .section { display: flex; flex-direction: column; gap: 10px; }
+  .section-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 12.5px; font-weight: 700; color: var(--muted);
+  }
+  .section-head .more { color: var(--soft); font-weight: 500; font-size: 11.5px; cursor: pointer; }
+  .list { display: flex; flex-direction: column; gap: 6px; }
+  .row {
+    height: 56px; padding: 0 12px;
+    display: flex; align-items: center; gap: 12px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: border-color 0.12s ease, transform 0.12s ease;
+  }
+  .row:hover { transform: translateY(-1px); }
+  .row-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 13px;
+    flex-shrink: 0;
+  }
+  .row-icon-soft {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .row-icon-soft svg { width: 16px; height: 16px; }
+  .row-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .row-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .row-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-chev { color: var(--soft); }
+  .row-chev svg { width: 16px; height: 16px; }
+
+  /* DOCK */
+  .dock-wrap { display: flex; justify-content: center; }
+  .dock {
+    display: flex; gap: 12px; align-items: center;
+    padding: 10px 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+  }
+  .dock-tile {
+    width: 40px; height: 40px; border-radius: 10px;
+    color: #fff; font-weight: 700; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: transform 0.12s ease;
+  }
+  .dock-tile:hover { transform: translateY(-2px); }
+  .dock-tile.plus { background: var(--accent-bg); color: var(--accent); font-size: 22px; font-weight: 400; }
+
+  /* FOOTER */
+  .footer { text-align: center; font-size: 11.5px; color: var(--muted); }
+
+  /* Tile color variants */
+  .accent-indigo { color: #4f46e5; background: #eef2ff; }
+  .accent-sky    { color: #0ea5e9; background: #e0f2fe; }
+  .accent-emerald{ color: #10b981; background: #ecfdf5; }
+  .accent-amber  { color: #f59e0b; background: #fffbeb; }
+  .accent-pink   { color: #ec4899; background: #fdf2f8; }
+  .accent-violet { color: #a855f7; background: #faf5ff; }
+  .accent-teal   { color: #14b8a6; background: #f0fdfa; }
+  .accent-rose   { color: #ef4444; background: #fef2f2; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="header-puck">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="12" y1="5" x2="12" y2="19"/>
+        <line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+    </div>
+    <h1>新しいウィンドウ</h1>
+    <p>カプセルを開く、または URL やコマンドを入力します。</p>
+  </div>
+
+  <div class="search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="7"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+    <input placeholder="URLでひらく、またはコマンドを入力" disabled>
+    <span class="kbd">⌘ K</span>
+  </div>
+
+  <div class="quick-actions">
+    <div class="qa-tile" data-action="OpenAppWindow">
+      <div class="qa-puck accent-sky">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="qa-title">URLで開く</div>
+        <div class="qa-sub">Web URLを開く</div>
+      </div>
+    </div>
+    <div class="qa-tile" data-action="OpenAppWindow">
+      <div class="qa-puck accent-amber">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="qa-title">ローカルから開く</div>
+        <div class="qa-sub">ファイルやフォルダ</div>
+      </div>
+    </div>
+    <div class="qa-tile" data-action="OpenStore">
+      <div class="qa-puck accent-violet">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+      </div>
+      <div>
+        <div class="qa-title">ストアで探す</div>
+        <div class="qa-sub">公開カプセル</div>
+      </div>
+    </div>
+    <div class="qa-tile" data-action="OpenAppWindow">
+      <div class="qa-puck accent-indigo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </div>
+      <div>
+        <div class="qa-title">新しく始める</div>
+        <div class="qa-sub">空のセッション</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="columns">
+    <div class="section">
+      <div class="section-head">
+        <span>最近のセッション</span><span class="more">すべて見る →</span>
+      </div>
+      <div class="list" id="recent-list"></div>
+    </div>
+    <div class="section">
+      <div class="section-head">
+        <span>ストア</span><span class="more">すべて見る →</span>
+      </div>
+      <div class="list" id="store-list"></div>
+    </div>
+  </div>
+
+  <div class="dock-wrap">
+    <div class="dock" id="dock"></div>
+  </div>
+
+  <div class="footer">Tabキーでカプセルを切り替え、新しいウィンドウは ⌘N で開けます</div>
+</div>
+
+<script>
+  const BRIDGE = (window.ipc && window.ipc.postMessage)
+    ? (m) => window.ipc.postMessage(JSON.stringify(m))
+    : (m) => console.log('[no bridge]', m);
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  // Placeholder data — real wiring to AppState retention + capsule
+  // discovery lands as a follow-up. Each row is a hint at the eventual
+  // content; click triggers OpenAppWindow for now so the affordance is
+  // not dead.
+  const RECENT = [
+    { name: 'WasedaP2P',    handle: 'github.com/Koh0920/WasedaP2P', accent: '#4f46e5' },
+    { name: 'CodeLab',      handle: 'github.com/ato-run/codelab',   accent: '#0ea5e9' },
+    { name: 'QueryX',       handle: 'github.com/ato-run/queryx',    accent: '#10b981' },
+    { name: 'Local AI Chat', handle: 'local://ai-chat',             accent: '#a855f7' },
+  ];
+  const STORE = [
+    { name: 'データ可視化', sub: 'BI / ダッシュボード',  iconCls: 'accent-teal' },
+    { name: 'メモリストア', sub: 'ベクトル & グラフ',    iconCls: 'accent-pink' },
+    { name: '音声メモ',    sub: 'ローカル文字起こし',     iconCls: 'accent-rose' },
+    { name: 'ストアを開く', sub: '公開カプセル一覧',     iconCls: 'accent-indigo' },
+  ];
+
+  const recentEl = document.getElementById('recent-list');
+  RECENT.forEach((r) => {
+    recentEl.insertAdjacentHTML('beforeend', `
+      <div class="row" data-action="OpenAppWindow">
+        <div class="row-icon" style="background:${r.accent}">${escapeHtml(r.name.charAt(0).toUpperCase())}</div>
+        <div class="row-text">
+          <div class="row-title">${escapeHtml(r.name)}</div>
+          <div class="row-sub">${escapeHtml(r.handle)}</div>
+        </div>
+        <div class="row-chev">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+      </div>`);
+  });
+
+  const storeEl = document.getElementById('store-list');
+  STORE.forEach((s) => {
+    storeEl.insertAdjacentHTML('beforeend', `
+      <div class="row" data-action="OpenStore">
+        <div class="row-icon-soft ${s.iconCls}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"/>
+            <rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/>
+            <rect x="14" y="14" width="7" height="7" rx="1"/>
+          </svg>
+        </div>
+        <div class="row-text">
+          <div class="row-title">${escapeHtml(s.name)}</div>
+          <div class="row-sub">${escapeHtml(s.sub)}</div>
+        </div>
+        <div class="row-chev">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>
+      </div>`);
+  });
+
+  const dockEl = document.getElementById('dock');
+  RECENT.forEach((r) => {
+    dockEl.insertAdjacentHTML('beforeend',
+      `<div class="dock-tile" data-action="OpenAppWindow" style="background:${r.accent}">${escapeHtml(r.name.charAt(0).toUpperCase())}</div>`);
+  });
+  dockEl.insertAdjacentHTML('beforeend',
+    `<div class="dock-tile plus" data-action="OpenAppWindow">+</div>`);
+
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-action]');
+    if (!t) return;
+    const action = t.getAttribute('data-action');
+    BRIDGE({ action });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      BRIDGE({ action: 'CloseStartWindow' });
+    }
+  });
+</script>
+
+</body>
+</html>

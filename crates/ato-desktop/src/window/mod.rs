@@ -24,6 +24,7 @@ pub mod macos;
 pub mod orchestrator;
 pub mod start_window;
 pub mod store;
+pub mod web_bridge;
 
 // Make the pure-data `AppWindowRegistry` from `state` accessible
 // across windows via `cx.global::<AppWindowRegistry>()`. The impl
@@ -32,7 +33,7 @@ pub mod store;
 impl gpui::Global for crate::state::AppWindowRegistry {}
 impl gpui::Global for content_windows::OpenContentWindows {}
 
-pub use card_switcher::{open_card_switcher_window, CardSwitcherShellPlaceholder};
+pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{
     open_control_bar_window, open_focus_control_bar, ControlBarShellPlaceholder,
 };

@@ -1,30 +1,28 @@
-//! Layer 5 — borderless full-bleed light-wash NSWindow that surfaces
-//! the task list of open `AppWindow`s. Reads the cross-window
-//! `AppWindowRegistry` global at spawn time. Layout follows the
-//! `.tmp/window-list.png` reference:
-//!   - Header strip with icon + title + subtitle
-//!   - Row of portrait preview cards (one per open AppWindow)
-//!   - Trailing "+ 新しいウィンドウ" tile
-//!   - Footer instruction line
-//!   - Bottom dock with the same apps as small circular tiles
-//! Real WKWebView snapshots inside the cards await the per-window
-//! WebViewManager migration; for now the preview area carries a
-//! handle-coloured gradient placeholder.
+//! Card Switcher — Wry-hosted HTML overlay. The visual layer lives in
+//! `assets/launcher/switcher.html` (single-file: inline CSS + JS) and
+//! receives the open-windows snapshot via a `window.__ATO_WINDOWS`
+//! initialization script. User interaction (card click, dock click,
+//! Escape, backdrop click, new-window tile) is signalled back over
+//! `window.ipc.postMessage(...)` and routed through `web_bridge` to
+//! the `&mut App` dispatcher below.
 //!
-//! Lifecycle is unchanged from the previous iteration: backdrop click
-//! and Escape close the switcher; cards stop_propagation so card
-//! clicks do not bubble.
+//! Switched from GPUI rendering because the design reference
+//! (.tmp/window-list.png) calls for richer card content (per-kind
+//! mock previews, gradients, shadows) than GPUI's element library
+//! can express ergonomically.
 
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, size, AnyWindowHandle, App, Bounds, Context, FocusHandle, Focusable,
-    FontWeight, IntoElement, MouseButton, Render, SharedString, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions,
 };
-use gpui_component::{Icon, IconName};
+use serde::Serialize;
+use wry::dpi::{LogicalPosition, LogicalSize};
+use wry::{Rect, WebView, WebViewBuilder};
 
-use crate::window::content_windows::OpenContentWindows;
+use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+use crate::window::web_bridge::{self, BridgeAction};
 
 /// Process-wide slot for the currently-open Card Switcher window so
 /// the Control Bar's switcher button can behave as a toggle: a
@@ -34,497 +32,58 @@ use crate::window::content_windows::OpenContentWindows;
 pub struct CardSwitcherWindowSlot(pub Option<AnyWindowHandle>);
 impl gpui::Global for CardSwitcherWindowSlot {}
 
-/// Snapshot of one registry entry for rendering in the switcher.
-/// Detached from `OpenContentWindows` so the switcher's data is
-/// immutable for the lifetime of the overlay window. `handle` is
-/// carried so the card click can route to `activate_window()` on the
-/// target window.
-#[derive(Clone)]
-struct CardEntry {
-    title: SharedString,
-    subtitle: SharedString,
-    /// First grapheme cluster of the title, uppercased — used as the
-    /// fallback "logo" letter when no branded asset is available.
-    initial: SharedString,
-    /// Deterministic accent colour derived from the handle/title so
-    /// each card reads as visually distinct without needing real
-    /// branded assets. RGB integer.
-    accent: u32,
-    /// Window handle for click-to-focus.
-    handle: AnyWindowHandle,
+/// Lightweight GPUI entity whose only job is to keep the Wry WebView
+/// alive for the lifetime of the switcher window. Wry mounts the
+/// WKWebView as a child NSView of the window's content view, so the
+/// GPUI `Render` body just provides a white backdrop in case the page
+/// is still loading (browsers typically show transparent before the
+/// document layouts).
+pub struct CardSwitcherShell {
+    _webview: WebView,
 }
 
-pub struct CardSwitcherShellPlaceholder {
-    cards: Vec<CardEntry>,
-    focus_handle: FocusHandle,
-}
-
-impl CardSwitcherShellPlaceholder {
-    fn new(cards: Vec<CardEntry>, cx: &mut Context<Self>) -> Self {
-        Self {
-            cards,
-            focus_handle: cx.focus_handle(),
-        }
-    }
-}
-
-impl Focusable for CardSwitcherShellPlaceholder {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl Render for CardSwitcherShellPlaceholder {
+impl Render for CardSwitcherShell {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Backdrop catches:
-        //   - left mouse down → close the switcher
-        //   - Escape key      → close the switcher
-        // Foreground children stop_propagation on mouse down so clicks
-        // on cards / dock / new-window tile do not bubble.
-        let backdrop = div()
-            .id("card-switcher-backdrop")
-            .track_focus(&self.focus_handle)
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                cx.set_global(CardSwitcherWindowSlot(None));
-                window.remove_window();
-            })
-            .on_key_down(|event, window, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.set_global(CardSwitcherWindowSlot(None));
-                    window.remove_window();
-                }
-            })
-            .size_full()
-            // Light wash backdrop with a very subtle violet tint to
-            // match the reference's pale-violet cast. The two layered
-            // semi-transparent fills emulate the reference's soft
-            // top-to-bottom gradient without needing a true gradient
-            // primitive.
-            .bg(rgb(0xf5f3ff))
-            .text_color(rgb(0x18181b))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(28.0));
-
-        let header = header_block(self.cards.len());
-        let card_row = card_row(&self.cards);
-        let footer = footer_text();
-        let dock = bottom_dock(&self.cards);
-
-        backdrop
-            .child(header)
-            .child(card_row)
-            .child(footer)
-            .child(dock)
+        div().size_full().bg(rgb(0xf5f3ff))
     }
 }
 
-fn header_block(window_count: usize) -> impl IntoElement {
-    let subtitle = if window_count == 0 {
-        SharedString::from("まだウィンドウはありません。新しいウィンドウから始めましょう。")
-    } else {
-        SharedString::from(format!(
-            "現在のセッションにある {window_count} つのアプリと、操作中のものを切り替えます。"
-        ))
-    };
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(10.0))
-        .child(
-            div()
-                .w(px(48.0))
-                .h(px(48.0))
-                .rounded_xl()
-                .bg(rgb(0xe0e7ff))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    Icon::new(IconName::GalleryVerticalEnd)
-                        .size(px(24.0))
-                        .text_color(rgb(0x4f46e5)),
-                ),
-        )
-        .child(
-            div()
-                .text_size(px(22.0))
-                .font_weight(FontWeight(700.0))
-                .text_color(rgb(0x18181b))
-                .child("開いているウィンドウ"),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(0x71717a))
-                .child(subtitle),
-        )
+const SWITCHER_HTML: &str = include_str!("../../assets/launcher/switcher.html");
+
+/// Per-card payload injected into the WebView at open time. Matches
+/// what `switcher.html` reads off `window.__ATO_WINDOWS`.
+#[derive(Serialize)]
+struct CardDto {
+    #[serde(rename = "windowId")]
+    window_id: u64,
+    title: String,
+    subtitle: String,
+    /// One of `AppWindow | Store | Start | Launcher`. The HTML keys
+    /// off this to pick a preview variant per card.
+    kind: &'static str,
 }
 
-fn card_row(cards: &[CardEntry]) -> impl IntoElement {
-    let mut row = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(16.0))
-        // Cards swallow clicks so the row's content does not
-        // bubble to the backdrop. The row container itself does not
-        // intercept clicks — empty gaps still close the switcher.
-        ;
-    for (idx, card) in cards.iter().enumerate() {
-        row = row.child(preview_card(card.clone(), idx, idx == 0));
+fn kind_tag(kind: &ContentWindowKind) -> &'static str {
+    match kind {
+        ContentWindowKind::AppWindow { .. } => "AppWindow",
+        ContentWindowKind::Store => "Store",
+        ContentWindowKind::Start => "Start",
+        ContentWindowKind::Launcher => "Launcher",
     }
-    row.child(new_window_card())
-}
-
-fn preview_card(card: CardEntry, idx: usize, is_active: bool) -> impl IntoElement {
-    // Portrait card matching the reference's window-list layout:
-    //   - header strip: app icon (accent circle with initial) + name
-    //   - middle: preview placeholder (very-light accent wash)
-    //   - bottom: pill chip with handle/subtitle
-    let card_border = if is_active {
-        rgb(0x6366f1)
-    } else {
-        rgb(0xe4e4e7)
-    };
-    let accent = rgb(card.accent);
-    let accent_wash = hsla_from_rgb_with_alpha(card.accent, 0.10);
-    let target_handle = card.handle;
-
-    div()
-        .id(("card", idx))
-        .w(px(220.0))
-        .h(px(300.0))
-        .bg(rgb(0xffffff))
-        .border_2()
-        .border_color(card_border)
-        .rounded_2xl()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .cursor_pointer()
-        // Click → raise the target window to the foreground via
-        // `activate_window`, then dismiss the switcher. The handle
-        // is captured by Copy (AnyWindowHandle is Copy).
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            let _ = target_handle.update(cx, |_, w, _| w.activate_window());
-            cx.set_global(CardSwitcherWindowSlot(None));
-            window.remove_window();
-        })
-        // Header row
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(12.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .w(px(26.0))
-                        .h(px(26.0))
-                        .rounded_md()
-                        .bg(accent)
-                        .text_color(rgb(0xffffff))
-                        .text_xs()
-                        .font_weight(FontWeight(700.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(card.initial.clone()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_sm()
-                        .font_weight(FontWeight(600.0))
-                        .text_color(rgb(0x18181b))
-                        .overflow_hidden()
-                        .child(card.title.clone()),
-                ),
-        )
-        // Preview placeholder area — fills remaining height, accent
-        // wash, faint dotted-style gradient feel via a soft inner box
-        .child(
-            div()
-                .flex_1()
-                .mx(px(12.0))
-                .my(px(4.0))
-                .rounded_lg()
-                .bg(accent_wash)
-                .border_1()
-                .border_color(hsla_from_rgb_with_alpha(card.accent, 0.18))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    Icon::new(IconName::SquareTerminal)
-                        .size(px(28.0))
-                        .text_color(hsla_from_rgb_with_alpha(card.accent, 0.55)),
-                ),
-        )
-        // Bottom subtitle pill
-        .child(
-            div()
-                .px(px(12.0))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x71717a))
-                        .overflow_hidden()
-                        .child(card.subtitle.clone()),
-                ),
-        )
-}
-
-/// Trailing tile inside the Card Switcher row that opens a fresh
-/// AppWindow. Click dispatches `OpenAppWindowExperiment` (the same
-/// action the Control Bar / MCP route through) and dismisses the
-/// switcher so the new window is immediately interactable. Sized to
-/// match `preview_card` so the row reads as a uniform tile strip.
-fn new_window_card() -> impl IntoElement {
-    div()
-        .id("new-window-card")
-        .w(px(220.0))
-        .h(px(300.0))
-        .bg(rgb(0xfafafa))
-        .border_2()
-        .border_color(rgb(0xe4e4e7))
-        .rounded_2xl()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(12.0))
-        .cursor_pointer()
-        .hover(|s| {
-            s.bg(rgb(0xf4f4f5))
-                .border_color(rgb(0x6366f1))
-        })
-        // Swallow the click so it does not bubble to the backdrop's
-        // close-on-click handler. Open a fresh StartWindow by calling
-        // the function directly — not through dispatch_action — so
-        // the new window does NOT depend on the dispatch queue
-        // surviving the Card Switcher's remove_window call that
-        // follows immediately. R29 used dispatch_action and the
-        // dispatch never fired in practice; the direct call is the
-        // reliable path. Open BEFORE removing the switcher so a
-        // spawn failure does not leave the user staring at a closed
-        // switcher with nowhere to go.
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            cx.stop_propagation();
-            if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                tracing::error!(error = %err, "failed to open start window");
-            }
-            cx.set_global(CardSwitcherWindowSlot(None));
-            window.remove_window();
-        })
-        .child(
-            div()
-                .w(px(56.0))
-                .h(px(56.0))
-                .rounded_full()
-                .bg(rgb(0xeef2ff))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    Icon::new(IconName::Plus)
-                        .size(px(28.0))
-                        .text_color(rgb(0x4f46e5)),
-                ),
-        )
-        .child(
-            div()
-                .text_sm()
-                .font_weight(FontWeight(600.0))
-                .text_color(rgb(0x18181b))
-                .child("新しいウィンドウ"),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(0x71717a))
-                .child("スタートページを開く"),
-        )
-}
-
-fn footer_text() -> impl IntoElement {
-    div()
-        .text_xs()
-        .text_color(rgb(0x71717a))
-        .child("クリックで切り替え、Esc で閉じる")
-}
-
-fn bottom_dock(cards: &[CardEntry]) -> impl IntoElement {
-    // Bottom strip of small circular tiles — one per open AppWindow
-    // plus a trailing "+" tile that mirrors the new-window-card
-    // affordance for users who prefer to grab the dock rather than
-    // the large card. Sits in a pill-shaped container with a soft
-    // white background, matching the reference.
-    let mut dock = div()
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .px(px(16.0))
-        .py(px(10.0))
-        .rounded_full()
-        .bg(rgb(0xffffff))
-        .border_1()
-        .border_color(rgb(0xe4e4e7));
-    for (idx, card) in cards.iter().enumerate() {
-        dock = dock.child(dock_tile(card.clone(), idx));
-    }
-    dock.child(dock_new_window_tile())
-}
-
-fn dock_tile(card: CardEntry, idx: usize) -> impl IntoElement {
-    let accent = rgb(card.accent);
-    let target_handle = card.handle;
-    div()
-        .id(("dock", idx))
-        .w(px(40.0))
-        .h(px(40.0))
-        .rounded_lg()
-        .bg(accent)
-        .text_color(rgb(0xffffff))
-        .text_sm()
-        .font_weight(FontWeight(700.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        // Same click route as the large card.
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            let _ = target_handle.update(cx, |_, w, _| w.activate_window());
-            cx.set_global(CardSwitcherWindowSlot(None));
-            window.remove_window();
-        })
-        .child(card.initial.clone())
-}
-
-fn dock_new_window_tile() -> impl IntoElement {
-    div()
-        .id("dock-new-window")
-        .w(px(40.0))
-        .h(px(40.0))
-        .rounded_lg()
-        .bg(rgb(0xeef2ff))
-        .text_color(rgb(0x4f46e5))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0xe0e7ff)))
-        // Mirrors `new_window_card`'s click route: spawn a fresh
-        // StartWindow via a direct call rather than dispatch_action.
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            cx.stop_propagation();
-            if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                tracing::error!(error = %err, "failed to open start window");
-            }
-            cx.set_global(CardSwitcherWindowSlot(None));
-            window.remove_window();
-        })
-        .child(Icon::new(IconName::Plus).size(px(18.0)))
-}
-
-/// Convert a `ContentWindowEntry` from the cross-window registry into
-/// a `CardEntry` for rendering. Adds the initial letter + deterministic
-/// accent that the card visuals need, on top of the title/subtitle/
-/// handle the registry already carries.
-fn card_entry_from(entry: &crate::window::content_windows::ContentWindowEntry) -> CardEntry {
-    let initial = entry
-        .title
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".to_string());
-    let accent = accent_for(entry.title.as_ref());
-    CardEntry {
-        title: entry.title.clone(),
-        subtitle: entry.subtitle.clone(),
-        initial: SharedString::from(initial),
-        accent,
-        handle: entry.handle,
-    }
-}
-
-/// Deterministic accent colour for a given title — picks from a
-/// curated set of brand-safe pastel-leaning hues so each app card
-/// reads as visually distinct without ever looking garish.
-fn accent_for(title: &str) -> u32 {
-    const PALETTE: &[u32] = &[
-        0x4f46e5, // indigo
-        0x0ea5e9, // sky
-        0x10b981, // emerald
-        0xf59e0b, // amber
-        0xef4444, // red
-        0xa855f7, // violet
-        0xec4899, // pink
-        0x14b8a6, // teal
-    ];
-    let hash = title
-        .bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    PALETTE[(hash as usize) % PALETTE.len()]
-}
-
-/// Build an hsla colour derived from an RGB integer, with the given
-/// alpha. Used to compose translucent fills tied to a card's accent
-/// without hand-tuning each combination.
-fn hsla_from_rgb_with_alpha(rgb_int: u32, alpha: f32) -> gpui::Hsla {
-    let r = ((rgb_int >> 16) & 0xff) as f32 / 255.0;
-    let g = ((rgb_int >> 8) & 0xff) as f32 / 255.0;
-    let b = (rgb_int & 0xff) as f32 / 255.0;
-    // Convert RGB → HSL via standard formula; gpui's `hsla` consumes
-    // hue in 0..1.
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let (h, s) = if max == min {
-        (0.0, 0.0)
-    } else {
-        let d = max - min;
-        let s = if l > 0.5 {
-            d / (2.0 - max - min)
-        } else {
-            d / (max + min)
-        };
-        let h = if max == r {
-            ((g - b) / d) + if g < b { 6.0 } else { 0.0 }
-        } else if max == g {
-            ((b - r) / d) + 2.0
-        } else {
-            ((r - g) / d) + 4.0
-        } / 6.0;
-        (h, s)
-    };
-    hsla(h, s, l, alpha)
 }
 
 /// Toggle the Card Switcher overlay. If one is already open
 /// (tracked via the `CardSwitcherWindowSlot` global), this closes
-/// it. Otherwise it reads the MRU snapshot from `AppWindowRegistry`
-/// and opens a fresh overlay. The Control Bar's switcher button
-/// dispatches through here so a second click dismisses the overlay
-/// instead of stacking another one on top.
+/// it. Otherwise it snapshots `OpenContentWindows::mru_order()` into
+/// a card payload, opens a fresh Wry-backed overlay, and starts the
+/// IPC drain loop. The Control Bar's switcher button dispatches
+/// through here so a second click dismisses the overlay instead of
+/// stacking another on top.
 pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
-    // If a switcher is already tracked, try to close it. Whether
-    // close succeeds or the handle is stale (window was already
-    // dismissed via backdrop / Escape), we clear the slot so the
-    // next click reopens cleanly. When we successfully closed an
-    // existing window, this is a toggle-off — return early.
     let existing = cx.global::<CardSwitcherWindowSlot>().0;
     if let Some(handle) = existing {
         let close_result = handle.update(cx, |_, window, _| window.remove_window());
@@ -532,18 +91,27 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         if close_result.is_ok() {
             return Ok(());
         }
-        // Handle was stale (window already gone) — fall through to
-        // open a fresh switcher.
     }
 
-    // Snapshot the cross-window content registry into card entries.
-    // MRU order is preserved by the registry's `mru_order()`.
-    let cards: Vec<CardEntry> = cx
+    let cards: Vec<CardDto> = cx
         .global::<OpenContentWindows>()
         .mru_order()
         .iter()
-        .map(card_entry_from)
+        .map(|e| {
+            // Use the gpui WindowId from the registry keys — we
+            // re-derive it from the handle so the snapshot stays
+            // consistent with whatever the registry indexes off.
+            let window_id = e.handle.window_id().as_u64();
+            CardDto {
+                window_id,
+                title: e.title.to_string(),
+                subtitle: e.subtitle.to_string(),
+                kind: kind_tag(&e.kind),
+            }
+        })
         .collect();
+    let cards_json = serde_json::to_string(&cards).unwrap_or_else(|_| "[]".to_string());
+    let init_script = format!("window.__ATO_WINDOWS = {};", cards_json);
 
     let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), cx);
     let options = WindowOptions {
@@ -555,14 +123,76 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
+
+    let queue = web_bridge::new_queue();
+
     let handle = cx.open_window(options, |window, cx| {
-        let shell = cx.new(|cx| CardSwitcherShellPlaceholder::new(cards, cx));
-        // Focus the backdrop so the `on_key_down` Escape handler
-        // fires without the user having to click first.
-        let focus = shell.read(cx).focus_handle.clone();
-        window.focus(&focus, cx);
+        let win_size = window.bounds().size;
+        let webview_rect = Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(win_size.width) as u32,
+                f32::from(win_size.height) as u32,
+            )
+            .into(),
+        };
+        let queue_for_ipc = queue.clone();
+        let webview = WebViewBuilder::new()
+            .with_html(SWITCHER_HTML)
+            .with_initialization_script(init_script.as_str())
+            .with_ipc_handler(web_bridge::make_ipc_handler(queue_for_ipc))
+            .with_bounds(webview_rect)
+            .build_as_child(window)
+            .expect("build_as_child must succeed for the Card Switcher WebView");
+        let shell = cx.new(|_cx| CardSwitcherShell { _webview: webview });
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
+
+    web_bridge::spawn_drain_loop(cx, queue, *handle, dispatch);
+
     Ok(())
+}
+
+/// Translate one bridge action into the corresponding `&mut App`
+/// operation. Runs on the GPUI main thread (the drain loop
+/// trampolines onto it via `AsyncApp::update`), so it has full
+/// access to globals and window APIs.
+fn dispatch(cx: &mut App, host: AnyWindowHandle, action: BridgeAction) {
+    match action {
+        BridgeAction::CloseSwitcher => {
+            cx.set_global(CardSwitcherWindowSlot(None));
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        BridgeAction::ActivateWindow { window_id } => {
+            // Look up the target handle in the cross-window registry.
+            // Missing IDs (e.g. a window that closed between the
+            // snapshot being injected and the click firing) are a
+            // no-op — just close the switcher.
+            let target = cx
+                .global::<OpenContentWindows>()
+                .get(window_id)
+                .map(|e| e.handle);
+            if let Some(target) = target {
+                let _ = target.update(cx, |_, window, _| window.activate_window());
+            }
+            cx.set_global(CardSwitcherWindowSlot(None));
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        BridgeAction::OpenStartWindow => {
+            if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                tracing::error!(error = %err, "failed to open start window from switcher");
+            }
+            cx.set_global(CardSwitcherWindowSlot(None));
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        // Switcher does not expose these actions; treat as no-ops if
+        // they somehow arrive (extra safety, unparseable variants
+        // are already dropped at the bridge boundary).
+        BridgeAction::CloseStartWindow
+        | BridgeAction::OpenAppWindow
+        | BridgeAction::OpenStore => {
+            tracing::debug!(?action, "ignored — not a switcher action");
+        }
+    }
 }

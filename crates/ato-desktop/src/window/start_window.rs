@@ -1,19 +1,10 @@
-//! StartWindow — a standalone "compose a new window" surface,
-//! conceptually separate from the Launcher. Every invocation spawns
-//! a fresh window: there is no slot-based focus-reuse, so the Card
-//! Switcher's "新しいウィンドウ" tile creates a NEW StartWindow each
-//! time. The body is the start-view content shared with the Launcher
-//! (see `launcher::render_start_view`).
+//! StartWindow — Wry-hosted HTML "compose a new window" surface.
+//! The visual layer lives in `assets/launcher/start.html`. Quick
+//! actions and dock tiles inside the page post messages back over
+//! `window.ipc` which `web_bridge` routes to host actions.
 //!
-//! Distinct from Launcher:
-//!   - Launcher = settings host (Cmd-,) — slot-tracked, focus on
-//!     second invocation, single-instance.
-//!   - StartWindow = composition surface for a new window — every
-//!     click in the Card Switcher creates a fresh instance.
-//!
-//! Lifecycle: the standard macOS title bar (traffic lights) closes
-//! the window; quitting the process auto-cleans. No on_window_closed
-//! bookkeeping is needed because no slot tracks the window.
+//! Distinct from Launcher: each invocation spawns a fresh window
+//! (no slot, no focus-reuse).
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -22,8 +13,15 @@ use gpui::{
     WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use wry::dpi::{LogicalPosition, LogicalSize};
+use wry::{Rect, WebView, WebViewBuilder};
 
-pub struct StartWindowShell;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
+use crate::window::web_bridge::{self, BridgeAction};
+
+pub struct StartWindowShell {
+    _webview: WebView,
+}
 
 impl Render for StartWindowShell {
     fn render(
@@ -31,27 +29,18 @@ impl Render for StartWindowShell {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Body is the same Start view the Launcher renders when
-        // `LauncherViewState::Start` is active. Delegating to a
-        // shared helper keeps the visual surface aligned between the
-        // two windows without coupling their lifecycles.
-        div()
-            .size_full()
-            .bg(rgb(0xf5f3ff))
-            .text_color(rgb(0x18181b))
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(crate::window::launcher::render_start_view())
+        // Pale-violet backdrop in case the HTML is still painting.
+        div().size_full().bg(rgb(0xf5f3ff))
     }
 }
 
-/// Spawn a fresh StartWindow. Always creates a new window — there is
-/// no slot or focus-reuse pathway here. Callers (Card Switcher new-
-/// window tile, OpenStartWindow action handler) invoke this directly
-/// instead of going through `dispatch_action` so that opening the
-/// window does not depend on the dispatch queue surviving any close-
-/// soon-after on the caller side.
+const START_HTML: &str = include_str!("../../assets/launcher/start.html");
+
+/// Spawn a fresh StartWindow. Always opens a new window — there is no
+/// slot or focus-reuse pathway here. Callers invoke this directly
+/// (e.g. the switcher's new-window tile) so opening the window does
+/// not depend on a dispatch queue surviving any close-soon-after on
+/// the caller side.
 pub fn open_start_window(cx: &mut App) -> Result<()> {
     let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
     let options = WindowOptions {
@@ -62,15 +51,31 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
+
+    let queue = web_bridge::new_queue();
     let handle = cx.open_window(options, |window, cx| {
-        let shell = cx.new(|_cx| StartWindowShell);
+        let win_size = window.bounds().size;
+        let webview_rect = Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(win_size.width) as u32,
+                f32::from(win_size.height) as u32,
+            )
+            .into(),
+        };
+        let queue_for_ipc = queue.clone();
+        let webview = WebViewBuilder::new()
+            .with_html(START_HTML)
+            .with_ipc_handler(web_bridge::make_ipc_handler(queue_for_ipc))
+            .with_bounds(webview_rect)
+            .build_as_child(window)
+            .expect("build_as_child must succeed for the Start WebView");
+        let shell = cx.new(|_cx| StartWindowShell { _webview: webview });
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+
     // Register in the cross-window content registry so the Control
     // Bar badge increments AND the Card Switcher renders a card.
-    use crate::window::content_windows::{
-        ContentWindowEntry, ContentWindowKind, OpenContentWindows,
-    };
     cx.global_mut::<OpenContentWindows>().insert(
         handle.window_id().as_u64(),
         ContentWindowEntry {
@@ -81,5 +86,42 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             last_focused_at: std::time::Instant::now(),
         },
     );
+
+    web_bridge::spawn_drain_loop(cx, queue, *handle, dispatch);
+
     Ok(())
+}
+
+fn dispatch(cx: &mut App, host: gpui::AnyWindowHandle, action: BridgeAction) {
+    match action {
+        BridgeAction::CloseStartWindow => {
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        BridgeAction::OpenAppWindow => {
+            // Mirror the OpenAppWindowExperiment handler in app.rs:
+            // spawn an AppWindow with the demo route. Closing the
+            // StartWindow after dispatching avoids leaving a stale
+            // composition surface behind.
+            let route = crate::state::GuestRoute::CapsuleHandle {
+                handle: "github.com/Koh0920/WasedaP2P".to_string(),
+                label: "WasedaP2P".to_string(),
+            };
+            if let Err(err) = crate::window::open_app_window(cx, route) {
+                tracing::error!(error = %err, "OpenAppWindow from StartWindow failed");
+            }
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        BridgeAction::OpenStore => {
+            if let Err(err) = crate::window::store::open_store_window(cx) {
+                tracing::error!(error = %err, "OpenStore from StartWindow failed");
+            }
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        // Switcher-only actions arriving here are a no-op.
+        BridgeAction::CloseSwitcher
+        | BridgeAction::ActivateWindow { .. }
+        | BridgeAction::OpenStartWindow => {
+            tracing::debug!(?action, "ignored — not a StartWindow action");
+        }
+    }
 }

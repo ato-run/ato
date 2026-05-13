@@ -59,6 +59,9 @@ impl OpenContentWindows {
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
     }
+    pub fn get(&self, gpui_window_id: u64) -> Option<&ContentWindowEntry> {
+        self.windows.get(&gpui_window_id)
+    }
     /// Bump the MRU timestamp for the given window. Returns true if
     /// the window was tracked. No-op for unknown IDs (e.g. chrome
     /// windows that never registered).
