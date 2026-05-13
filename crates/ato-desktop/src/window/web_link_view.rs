@@ -57,6 +57,7 @@ struct Tab {
     webview: WebView,
     url: SharedString,
     title: SharedString,
+    url_input: Entity<InputState>,
 }
 
 pub struct WebLinkViewShell {
@@ -65,8 +66,6 @@ pub struct WebLinkViewShell {
     next_tab_id: usize,
     capsule_nav_queue: CapsuleNavQueue,
     window_size: Size<Pixels>,
-    url_input: Entity<InputState>,
-    url_input_focused: bool,
 }
 
 impl WebLinkViewShell {
@@ -77,42 +76,7 @@ impl WebLinkViewShell {
     ) -> Self {
         let win_size = window.bounds().size;
         let nav_queue: CapsuleNavQueue = Arc::new(Mutex::new(Vec::new()));
-        let first_tab = build_tab(0, initial_url, window, win_size, nav_queue.clone());
-
-        let initial_url_str: SharedString = first_tab.url.clone();
-        let url_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://…")
-                .default_value(initial_url_str)
-        });
-        cx.subscribe_in(
-            &url_input,
-            window,
-            |this: &mut Self, input, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => {
-                    let url = input.read(cx).value().to_string();
-                    if !url.is_empty() {
-                        this.navigate_to(&url, window, cx);
-                    }
-                }
-                InputEvent::Change => cx.notify(),
-                InputEvent::Focus => {
-                    this.url_input_focused = true;
-                    // WKWebView may hold macOS first-responder status after the
-                    // user previously clicked web content. Reclaim it so that
-                    // GPUI's NSView receives keyDown: events again.
-                    if let Some(tab) = this.active_tab() {
-                        let _ = tab.webview.focus_parent();
-                    }
-                }
-                InputEvent::Blur => {
-                    this.url_input_focused = false;
-                    cx.notify();
-                }
-            },
-        )
-        .detach();
-
+        let first_tab = build_tab(0, initial_url, window, win_size, nav_queue.clone(), cx);
         spawn_capsule_nav_drain(cx, nav_queue.clone());
         Self {
             tabs: vec![first_tab],
@@ -120,8 +84,6 @@ impl WebLinkViewShell {
             next_tab_id: 1,
             capsule_nav_queue: nav_queue,
             window_size: win_size,
-            url_input,
-            url_input_focused: false,
         }
     }
 
@@ -157,7 +119,7 @@ impl WebLinkViewShell {
     fn add(&mut self, url: Url, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = build_tab(id, url, window, self.window_size, self.capsule_nav_queue.clone());
+        let tab = build_tab(id, url, window, self.window_size, self.capsule_nav_queue.clone(), cx);
         self.tabs.push(tab);
         self.active_tab_id = id;
         self.sync_visibility();
@@ -182,14 +144,25 @@ impl WebLinkViewShell {
 
     fn navigate_to(&mut self, raw: &str, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let normalized = normalize_url(raw);
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active_tab_id) {
+        let active_id = self.active_tab_id;
+
+        // Clone the url_input handle before any mutable borrow of tabs.
+        let url_input = self
+            .tabs
+            .iter()
+            .find(|t| t.id == active_id)
+            .map(|t| t.url_input.clone());
+
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == active_id) {
             let _ = tab.webview.load_url(&normalized);
             tab.url = SharedString::from(normalized.clone());
         }
-        let ss: SharedString = normalized.into();
-        self.url_input.update(cx, |state, cx| {
-            state.set_value(ss, window, cx);
-        });
+        if let Some(input) = url_input {
+            let ss: SharedString = normalized.into();
+            input.update(cx, |state, cx| {
+                state.set_value(ss, window, cx);
+            });
+        }
         cx.notify();
     }
 
@@ -206,6 +179,7 @@ fn build_tab(
     window: &mut gpui::Window,
     win_size: Size<Pixels>,
     queue: CapsuleNavQueue,
+    cx: &mut Context<WebLinkViewShell>,
 ) -> Tab {
     let top = TOTAL_TOP as i32;
     let w = f32::from(win_size.width) as u32;
@@ -235,11 +209,43 @@ fn build_tab(
         })
         .build_as_child(window)
         .expect("WebLinkView tab WebView build_as_child must succeed");
+
+    let url_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("https://…")
+            .default_value(SharedString::from(url_str.clone()))
+    });
+    cx.subscribe_in(
+        &url_input,
+        window,
+        |this: &mut WebLinkViewShell, input, event: &InputEvent, window, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                let url = input.read(cx).value().to_string();
+                if !url.is_empty() {
+                    this.navigate_to(&url, window, cx);
+                }
+            }
+            // On focus, reclaim macOS first-responder from WKWebView so
+            // GPUI's NSView receives keyDown: events. This fires via the
+            // deferred callback path; the on_mouse_down on url_pill provides
+            // an earlier synchronous reclaim for better responsiveness.
+            InputEvent::Focus => {
+                if let Some(tab) = this.active_tab() {
+                    let _ = tab.webview.focus_parent();
+                }
+                cx.notify();
+            }
+            InputEvent::Change | InputEvent::Blur => cx.notify(),
+        },
+    )
+    .detach();
+
     Tab {
         id,
         webview,
         url: SharedString::from(url_str.clone()),
         title: SharedString::from(short_title_for_url(&url_str)),
+        url_input,
     }
 }
 
@@ -303,25 +309,10 @@ fn handle_capsule_url(cx: &mut gpui::App, url: String) {
 impl Render for WebLinkViewShell {
     fn render(
         &mut self,
-        window: &mut gpui::Window,
+        _window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let entity = cx.entity();
-        let active_url = self
-            .active_tab()
-            .map(|t| t.url.clone())
-            .unwrap_or_else(|| SharedString::from(""));
-
-        // Sync the URL bar to the active tab's URL when the user is not
-        // typing. Comparing first avoids a needless set_value every frame.
-        if !self.url_input_focused {
-            let current: SharedString = self.url_input.read(cx).value().to_string().into();
-            if current != active_url {
-                self.url_input.update(cx, |state, cx| {
-                    state.set_value(active_url, window, cx);
-                });
-            }
-        }
 
         let tab_snapshots: Vec<(usize, SharedString, bool)> = self
             .tabs
@@ -329,13 +320,20 @@ impl Render for WebLinkViewShell {
             .map(|t| (t.id, t.title.clone(), t.id == self.active_tab_id))
             .collect();
 
+        // Each tab owns its url_input; pass the active tab's handle to the
+        // chrome strip. Switching tabs automatically shows the correct URL.
+        let url_input = self
+            .active_tab()
+            .map(|t| t.url_input.clone())
+            .unwrap_or_else(|| unreachable!("WebLinkViewShell has no active tab"));
+
         div()
             .size_full()
             .bg(rgb(0xffffff))
             .flex()
             .flex_col()
             .child(tab_strip(tab_snapshots, entity.clone()))
-            .child(chrome_strip(self.url_input.clone(), entity))
+            .child(chrome_strip(url_input, entity))
     }
 }
 
@@ -446,7 +444,8 @@ fn chrome_strip(
 ) -> impl IntoElement {
     let e_back = entity.clone();
     let e_fwd = entity.clone();
-    let e_reload = entity;
+    let e_reload = entity.clone();
+    let e_pill = entity;
     div()
         .h(px(CHROME_HEIGHT))
         .w_full()
@@ -478,7 +477,7 @@ fn chrome_strip(
                 e_reload.update(cx, |this, _| this.reload());
             },
         ))
-        .child(url_pill(url_input))
+        .child(url_pill(url_input, e_pill))
         .child(menu_dots())
 }
 
@@ -518,7 +517,7 @@ where
         .child(glyph_node)
 }
 
-fn url_pill(url_input: Entity<InputState>) -> impl IntoElement {
+fn url_pill(url_input: Entity<InputState>, entity: Entity<WebLinkViewShell>) -> impl IntoElement {
     div()
         .id("url-pill")
         .flex_1()
@@ -535,6 +534,17 @@ fn url_pill(url_input: Entity<InputState>) -> impl IntoElement {
         .border_color(rgb(0xe4e4e7))
         .text_sm()
         .text_color(rgb(0x52525b))
+        // Reclaim macOS first-responder from WKWebView synchronously on
+        // mouse-down, before any key events can be dispatched. This ensures
+        // GPUI's NSView receives keyDown: even if WKWebView previously had
+        // first-responder status from the user clicking web content.
+        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+            entity.update(cx, |this, _cx| {
+                if let Some(tab) = this.active_tab() {
+                    let _ = tab.webview.focus_parent();
+                }
+            });
+        })
         .child(
             Icon::new(IconName::Globe)
                 .size(px(14.0))
