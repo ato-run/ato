@@ -63,8 +63,66 @@ struct CardDto {
     title: String,
     subtitle: String,
     /// One of `AppWindow | Store | Start | Launcher`. The HTML keys
-    /// off this to pick a preview variant per card.
+    /// off this to pick a preview variant per card when no real
+    /// snapshot is available.
     kind: &'static str,
+    /// Optional `data:image/png;base64,...` URL containing a fresh
+    /// screenshot of the target window. When present the switcher
+    /// renders it as an `<img>` inside the card preview area — the
+    /// Safari Tab Overview pattern. When `None` we fall back to the
+    /// CSS-only kind-specific mock.
+    #[serde(rename = "previewDataUrl", skip_serializing_if = "Option::is_none")]
+    preview_data_url: Option<String>,
+}
+
+/// Capture a PNG screenshot of the OS window that backs `handle` and
+/// return a data URL ready to embed in an `<img>`. macOS-only — uses
+/// the OS-provided `screencapture -l <windowID>` tool which goes via
+/// `CGWindowListCreateImage` and works on any window by ID without
+/// raising it to the foreground (important: the switcher overlay
+/// would obscure them otherwise). Requires the user to have granted
+/// Screen Recording permission to the terminal running ato-desktop.
+#[cfg(target_os = "macos")]
+fn snapshot_window(cx: &mut App, handle: AnyWindowHandle) -> Option<String> {
+    use base64::Engine;
+    let nswindow = crate::window::macos::ns_window_for(cx, handle)?;
+    let win_num = nswindow.windowNumber();
+    if win_num <= 0 {
+        return None;
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "ato-snap-{}-{}.png",
+        win_num,
+        std::process::id()
+    ));
+    let out = std::process::Command::new("screencapture")
+        .args([
+            "-l",
+            &win_num.to_string(),
+            "-t",
+            "png",
+            "-x",
+            tmp.to_str()?,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        tracing::debug!(
+            window_number = win_num,
+            stderr = ?String::from_utf8_lossy(&out.stderr),
+            "screencapture failed; falling back to CSS preview"
+        );
+        return None;
+    }
+    let bytes = std::fs::read(&tmp).ok()?;
+    let _ = std::fs::remove_file(&tmp);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:image/png;base64,{}", encoded))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn snapshot_window(_cx: &mut App, _handle: AnyWindowHandle) -> Option<String> {
+    None
 }
 
 fn kind_tag(kind: &ContentWindowKind) -> &'static str {
@@ -93,20 +151,26 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         }
     }
 
-    let cards: Vec<CardDto> = cx
+    // Snapshot each window BEFORE opening the switcher overlay so the
+    // overlay does not obscure them. screencapture -l works on any
+    // window by ID regardless of stacking, but doing it before keeps
+    // the visual lineage obvious in the log.
+    let entries: Vec<_> = cx
         .global::<OpenContentWindows>()
         .mru_order()
-        .iter()
+        .into_iter()
+        .collect();
+    let cards: Vec<CardDto> = entries
+        .into_iter()
         .map(|e| {
-            // Use the gpui WindowId from the registry keys — we
-            // re-derive it from the handle so the snapshot stays
-            // consistent with whatever the registry indexes off.
             let window_id = e.handle.window_id().as_u64();
+            let preview_data_url = snapshot_window(cx, e.handle);
             CardDto {
                 window_id,
                 title: e.title.to_string(),
                 subtitle: e.subtitle.to_string(),
                 kind: kind_tag(&e.kind),
+                preview_data_url,
             }
         })
         .collect();

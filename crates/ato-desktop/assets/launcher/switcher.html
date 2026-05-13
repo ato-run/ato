@@ -133,6 +133,38 @@
   /* FOOTER */
   .footer { font-size: 11px; color: var(--muted-on-dark); }
 
+  /* SEARCH — Safari Tab Overview-style filter input */
+  .switcher-search {
+    width: 320px; height: 36px; padding: 0 14px;
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 10px;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .switcher-search:focus-within {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: rgba(129, 140, 248, 0.55);
+  }
+  .switcher-search svg { width: 14px; height: 14px; color: var(--muted-on-dark); flex-shrink: 0; }
+  .switcher-search input {
+    flex: 1; border: 0; outline: 0; background: transparent;
+    color: var(--text-on-dark); font: inherit; font-size: 13px;
+  }
+  .switcher-search input::placeholder { color: var(--muted-on-dark); }
+
+  /* Real-screenshot variant — fills the preview area edge-to-edge,
+     no padding, no background. */
+  .pv-real { width: 100%; height: 100%; }
+  .pv-real img {
+    width: 100%; height: 100%;
+    object-fit: cover; object-position: top left;
+    display: block;
+  }
+
+  /* Cards hidden by search filter */
+  .card.hidden { display: none; }
+
   /* DOCK — frosted dark glass pill */
   .dock {
     display: flex; gap: 10px; align-items: center;
@@ -283,6 +315,15 @@
   </div>
   <h1>開いているウィンドウ</h1>
   <p id="subtitle">現在のセッションを切り替えます</p>
+</div>
+
+<!-- Safari Tab Overview-style search/filter -->
+<div class="switcher-search">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="7"/>
+    <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </svg>
+  <input id="filter" placeholder="ウィンドウを絞り込む" autofocus>
 </div>
 
 <div id="cards" class="cards"></div>
@@ -438,15 +479,28 @@
     }
   }
 
+  function previewReal(dataUrl) {
+    // Real window screenshot. object-fit:cover crops to the card's
+    // aspect ratio so we see the top-left of the page (Safari Tab
+    // Overview convention — page header stays visible).
+    return `<div class="pv-real"><img src="${dataUrl}" alt=""></div>`;
+  }
+
   function makeCard(entry, isActive, idx) {
     const accent = accentFor(entry.title);
+    // Prefer the real screenshot when the host was able to capture
+    // one. Fall back to the CSS-only kind-specific mock otherwise
+    // (e.g. screencapture refused for permission reasons).
+    const preview = entry.previewDataUrl
+      ? previewReal(entry.previewDataUrl)
+      : previewFor(entry.kind, accent, idx);
     return `
-      <div class="card ${isActive ? 'active' : ''}" data-window-id="${entry.windowId}">
+      <div class="card ${isActive ? 'active' : ''}" data-window-id="${entry.windowId}" data-title="${escapeHtml(entry.title.toLowerCase())}" data-subtitle="${escapeHtml(entry.subtitle.toLowerCase())}">
         <div class="card-head">
           <div class="card-icon" style="background:${accent}">${escapeHtml(initial(entry.title))}</div>
           <div class="card-title">${escapeHtml(entry.title)}</div>
         </div>
-        <div class="card-preview">${previewFor(entry.kind, accent, idx)}</div>
+        <div class="card-preview">${preview}</div>
         <div class="card-foot">${escapeHtml(entry.subtitle)}</div>
       </div>`;
   }
@@ -503,6 +557,32 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') BRIDGE({ action: 'CloseSwitcher' });
   });
+
+  // Safari-style live filter: typing in the search box hides cards
+  // whose title/subtitle doesn't contain the query (case-insensitive).
+  // The new-window CTA tile is always visible.
+  const filterEl = document.getElementById('filter');
+  if (filterEl) {
+    filterEl.addEventListener('input', () => {
+      const q = filterEl.value.trim().toLowerCase();
+      document.querySelectorAll('.card[data-window-id]').forEach((c) => {
+        const t = c.getAttribute('data-title') || '';
+        const s = c.getAttribute('data-subtitle') || '';
+        const match = q === '' || t.includes(q) || s.includes(q);
+        c.classList.toggle('hidden', !match);
+      });
+    });
+    // Pressing Enter on the search box activates the first visible
+    // card — same UX as Safari Tab Overview's keyboard nav.
+    filterEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const first = document.querySelector('.card[data-window-id]:not(.hidden)');
+        if (first) {
+          BRIDGE({ action: 'ActivateWindow', windowId: Number(first.getAttribute('data-window-id')) });
+        }
+      }
+    });
+  }
 </script>
 
 </body>
