@@ -311,7 +311,15 @@ pub fn resolve_and_start_guest(
     handle: &str,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
 ) -> Result<GuestLaunchSession, LaunchError> {
+    // Step 0: validating (emitted before preflight so the boot wizard shows
+    // "検証中" immediately, even if the page fires the callback before the
+    // WebView has fully loaded — the JS buffers it via DOMContentLoaded).
+    if let Some(ref f) = on_step {
+        f(0);
+    }
+
     // #117 — eager preflight collection. Walks the orchestration
     // target graph via `ato internal preflight --json` *before* any
     // provisioning side effects. If any requirements are pending,
@@ -364,7 +372,7 @@ pub fn resolve_and_start_guest(
         }
     }
 
-    resolve_and_start_capsule(handle, secrets, plain_configs)
+    resolve_and_start_capsule(handle, secrets, plain_configs, on_step)
 }
 
 /// Drop preflight envelopes whose secret requirements are already
@@ -628,6 +636,7 @@ pub fn resolve_and_start_capsule(
     handle: &str,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
 ) -> Result<CapsuleLaunchSession, LaunchError> {
     info!(handle, "resolving capsule");
 
@@ -700,18 +709,27 @@ pub fn resolve_and_start_capsule(
     // resolve / session-start halves of the hot path are measured
     // independently (RFC §3.1 — Phase 1's two fast paths key on this
     // separation).
+    if let Some(ref f) = on_step {
+        f(1); // Step 1: resolving — before the slow resolve subprocess
+    }
     let resolved = {
         let timer = SurfaceStageTimer::start("resolve_subprocess");
         let result = resolve_capsule(handle);
         timer.finish_ok();
         result?
     };
+    if let Some(ref f) = on_step {
+        f(2); // Step 2: starting — before the slow session-start subprocess
+    }
     let started = {
         let timer = SurfaceStageTimer::start("session_start_subprocess");
         let result = start_capsule(handle, secrets, plain_configs);
         timer.finish_ok();
         result?
     };
+    if let Some(ref f) = on_step {
+        f(3); // Step 3: connecting — before building the launch session struct
+    }
     let mut session = {
         let timer = SurfaceStageTimer::start("build_launch_session");
         let result = build_launch_session(handle, resolved, started);
@@ -2637,7 +2655,7 @@ mod tests {
         }
 
         // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[])
+        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None)
             .expect("resolve_and_start_capsule should succeed for the share URL");
 
         eprintln!("[e2e] session_id  = {}", session.session_id);

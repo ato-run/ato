@@ -25,13 +25,13 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     div, hsla, px, App, Context, FontWeight, IntoElement, Pixels, Render,
-    SharedString, Size,
+    SharedString, Size, WeakEntity,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::orchestrator::{GuestLaunchSession, LaunchError};
-use crate::window::launch_window::BootWindowSlot;
+use crate::window::launch_window::{BootWindowSlot, LaunchWindowShell, PendingBootShell};
 
 // ── state ──────────────────────────────────────────────────────────────────
 
@@ -77,11 +77,29 @@ impl AppCapsuleShell {
 
         // Spawn background thread for the blocking orchestration call.
         let (tx, rx) = std::sync::mpsc::channel();
+        // Separate channel for fine-grained step progress from the orchestrator.
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
+
+        // Read (and immediately clear) the boot shell weak entity set by
+        // `open_boot_window`. Clearing prevents stale references leaking
+        // to a subsequent launch that opens before this one's entity drops.
+        let boot_shell_weak: Option<WeakEntity<LaunchWindowShell>> = cx
+            .try_global::<PendingBootShell>()
+            .and_then(|g| g.0.clone());
+        cx.set_global(PendingBootShell(None));
+
         let handle_clone = handle.clone();
         let abort_clone = Arc::clone(&abort_flag);
         std::thread::spawn(move || {
-            let result =
-                crate::orchestrator::resolve_and_start_guest(&handle_clone, &secrets, &configs);
+            let prog = progress_tx;
+            let result = crate::orchestrator::resolve_and_start_guest(
+                &handle_clone,
+                &secrets,
+                &configs,
+                Some(Box::new(move |step| {
+                    let _ = prog.send(step);
+                })),
+            );
             // If already aborted and the session started, stop it immediately.
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
@@ -105,6 +123,28 @@ impl AppCapsuleShell {
                 async move {
                     loop {
                         be.timer(Duration::from_millis(100)).await;
+
+                        // Drain progress steps before checking the result so
+                        // the boot wizard advances as the orchestrator works.
+                        let steps: Vec<u8> = {
+                            let mut v = Vec::new();
+                            while let Ok(s) = progress_rx.try_recv() {
+                                v.push(s);
+                            }
+                            v
+                        };
+                        if !steps.is_empty() {
+                            aa.update(|cx: &mut App| {
+                                if let Some(weak) = &boot_shell_weak {
+                                    if let Some(shell) = weak.upgrade() {
+                                        for step in steps {
+                                            let _ = shell.update(cx, |s, _cx| s.push_step(step));
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
                         match rx.try_recv() {
                             Ok(result) => {
                                 aa.update(|cx: &mut App| {

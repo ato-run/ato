@@ -1752,7 +1752,7 @@ impl WebViewManager {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
                 handle: handle.clone(),
-                session: resolve_and_start_guest(&handle, &secrets, &plain_configs).inspect_err(
+                session: resolve_and_start_guest(&handle, &secrets, &plain_configs, None).inspect_err(
                     |err| {
                         // #117 — interactive-resolution errors
                         // (preflight aggregate, missing config,
