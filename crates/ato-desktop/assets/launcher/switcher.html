@@ -5,25 +5,30 @@
 <title>開いているウィンドウ</title>
 <style>
   :root {
-    --bg-from: #f5f3ff;
-    --bg-via:  #ede9fe;
-    --bg-to:   #faf5ff;
+    /* Dark Mission-Control-like backdrop — system-mode feel that
+       distinguishes the switcher from regular content windows. */
+    --bg-base: #1f1f23;
+    --bg-blob: #2a2a31;
     --card-bg: #ffffff;
     --border:  #e4e4e7;
-    --text:    #18181b;
+    --text:    #18181b;       /* used on white cards */
+    --text-on-dark: #f4f4f5;
     --muted:   #71717a;
+    --muted-on-dark: #a1a1aa;
     --soft:    #a1a1aa;
-    --accent:  #4f46e5;
+    --soft-on-dark: #71717a;
+    --accent:  #818cf8;       /* indigo-400 — readable on dark */
     --accent-bg: #eef2ff;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: radial-gradient(1200px 600px at 20% 10%, #efe9ff 0%, transparent 60%),
-                radial-gradient(1000px 500px at 80% 90%, #faf5ff 0%, transparent 60%),
-                linear-gradient(135deg, var(--bg-from) 0%, var(--bg-via) 50%, var(--bg-to) 100%);
+    background:
+      radial-gradient(1200px 600px at 18% 8%,  var(--bg-blob) 0%, transparent 60%),
+      radial-gradient(900px 500px at 82% 92%,  #25252b 0%, transparent 65%),
+      var(--bg-base);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
-    color: var(--text);
+    color: var(--text-on-dark);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -38,35 +43,38 @@
   .header { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   .header-puck {
     width: 44px; height: 44px; border-radius: 12px;
-    background: linear-gradient(135deg, #ddd6fe 0%, #c4b5fd 100%);
-    color: var(--accent);
+    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+    color: #fff;
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 6px 16px rgba(79, 70, 229, 0.15);
+    box-shadow: 0 6px 18px rgba(99, 102, 241, 0.35);
   }
   .header-puck svg { width: 22px; height: 22px; }
-  .header h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
-  .header p { margin: 0; font-size: 13px; color: var(--muted); }
+  .header h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.01em; color: var(--text-on-dark); }
+  .header p { margin: 0; font-size: 13px; color: var(--muted-on-dark); }
 
   /* CARDS */
   .cards { display: flex; gap: 16px; align-items: stretch; flex-wrap: nowrap; }
   .card {
     width: 220px; height: 300px;
     background: var(--card-bg);
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     border-radius: 18px;
     display: flex; flex-direction: column;
     overflow: hidden;
     cursor: pointer;
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+    /* On a dark backdrop the cards need a deeper shadow to read as
+       "lifted" rather than embedded. */
+    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.35);
+    color: var(--text);
   }
   .card:hover {
     transform: translateY(-3px);
-    box-shadow: 0 14px 32px rgba(15, 23, 42, 0.10);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
   }
   .card.active {
     border: 2px solid var(--accent);
-    box-shadow: 0 12px 28px rgba(79, 70, 229, 0.18);
+    box-shadow: 0 14px 32px rgba(99, 102, 241, 0.45);
   }
   .card-head {
     padding: 12px 12px 8px;
@@ -98,38 +106,43 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
-  /* NEW WINDOW TILE */
+  /* NEW WINDOW TILE — translucent against the dark backdrop */
   .card.new-window {
-    background: #fafafa;
-    border: 2px dashed #d4d4d8;
+    background: rgba(255, 255, 255, 0.05);
+    border: 2px dashed rgba(255, 255, 255, 0.18);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 10px;
     box-shadow: none;
+    color: var(--text-on-dark);
   }
-  .card.new-window:hover { border-color: var(--accent); background: #f4f4f5; }
+  .card.new-window:hover {
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.08);
+  }
   .new-window-puck {
     width: 56px; height: 56px; border-radius: 50%;
-    background: var(--accent-bg); color: var(--accent);
+    background: rgba(129, 140, 248, 0.18);
+    color: var(--accent);
     display: flex; align-items: center; justify-content: center;
     font-size: 30px; font-weight: 300; line-height: 1;
-    box-shadow: 0 6px 16px rgba(79, 70, 229, 0.12);
+    box-shadow: 0 6px 16px rgba(99, 102, 241, 0.30);
   }
   .new-window-label { font-size: 14px; font-weight: 600; }
-  .new-window-sub { font-size: 11.5px; color: var(--muted); }
+  .new-window-sub { font-size: 11.5px; color: var(--muted-on-dark); }
 
   /* FOOTER */
-  .footer { font-size: 11px; color: var(--muted); }
+  .footer { font-size: 11px; color: var(--muted-on-dark); }
 
-  /* DOCK */
+  /* DOCK — frosted dark glass pill */
   .dock {
     display: flex; gap: 10px; align-items: center;
     padding: 8px 14px;
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 999px;
-    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
   }
   .dock-tile {
     width: 42px; height: 42px; border-radius: 12px;
@@ -137,14 +150,14 @@
     display: flex; align-items: center; justify-content: center;
     cursor: pointer;
     transition: transform 0.12s ease;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.45);
   }
   .dock-tile:hover { transform: translateY(-3px) scale(1.05); }
   .dock-tile.plus {
-    background: var(--accent-bg);
+    background: rgba(129, 140, 248, 0.20);
     color: var(--accent);
     font-size: 22px; font-weight: 300;
-    box-shadow: 0 2px 6px rgba(79, 70, 229, 0.15);
+    box-shadow: 0 4px 10px rgba(99, 102, 241, 0.30);
   }
 
   /* === PER-KIND PREVIEWS === */

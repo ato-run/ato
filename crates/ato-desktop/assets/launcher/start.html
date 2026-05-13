@@ -5,13 +5,15 @@
 <title>新しいウィンドウ</title>
 <style>
   :root {
-    --bg-base:    #f7f5fb;      /* near-white lavender */
-    --bg-blob-1:  #e8e1ff;
-    --bg-blob-2:  #f3edff;
+    /* White-based palette — matches the Store / AppWindow tone. The
+       only colour outside black/white is a tiny indigo accent for
+       the header puck and the keyboard hints. */
+    --bg-base:    #ffffff;
+    --bg-tint:    #fafafa;      /* used for very subtle surface accents */
     --card:       #ffffff;
     --border:     #ececf1;
-    --border-soft:#f2f2f5;
-    --text:       #1a1a1f;
+    --border-soft:#f4f4f7;
+    --text:       #18181b;
     --muted:      #6b6b78;
     --soft:       #a3a3b0;
     --accent:     #6366f1;
@@ -20,10 +22,9 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background:
-      radial-gradient(720px 380px at 88% 6%,  var(--bg-blob-1) 0%, transparent 60%),
-      radial-gradient(640px 360px at 10% 95%, var(--bg-blob-2) 0%, transparent 65%),
-      var(--bg-base);
+    /* Single near-white surface — no wash blobs. The accent comes
+       only from the indigo header puck and the per-tile glyph pucks. */
+    background: var(--bg-base);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
     color: var(--text);
     display: flex;
