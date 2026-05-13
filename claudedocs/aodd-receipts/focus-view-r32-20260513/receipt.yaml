@@ -1,0 +1,80 @@
+usecase: "Card Switcher cards reflect every open content window (AppWindow, Store, StartWindow, Launcher), not just AppWindows; card click activates the target window."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Switcher overlay renders one card per content window in MRU order, with a meaningful title/subtitle/accent per kind. The badge count and card count match."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r32"
+out_of_scope:
+  - "Real WKWebView snapshots inside the preview area (still the placeholder terminal glyph)."
+  - "Verifying click-to-focus via MCP — host element clicks are not exposed; activate_window wiring is code-reviewed only."
+  - "MRU bookkeeping on window focus events (entries are only re-sorted on switcher open; live focus tracking can come later)."
+time_budget: "45 minutes"
+
+result: "complete"
+
+steps:
+  - action: "R31's receipt flagged: badge count ≠ card count because cards source from AppWindowRegistry while the badge sources from OpenContentWindows"
+    observation: "After R31 the badge correctly counted every content window, but the switcher cards still only enumerated AppWindowRegistry — confusing because the badge said '3' while only one card showed up."
+
+  - action: "Promote OpenContentWindows from a HashSet<u64> in state to a richer HashMap<u64, ContentWindowEntry> in window/content_windows.rs"
+    observation: |
+      New module owns:
+        - ContentWindowKind enum (AppWindow{route} / Store / Start / Launcher)
+        - ContentWindowEntry struct (handle / kind / title / subtitle / last_focused_at)
+        - OpenContentWindows struct with insert / remove / len / focus / mru_order
+      Moved out of state/ because AnyWindowHandle is a gpui type and
+      state/ is intentionally gpui-free.
+
+  - action: "Update every content-window spawn site to insert a full entry"
+    observation: |
+      - orchestrator.rs: derives title/subtitle from GuestRoute via a
+        new title_subtitle_for_route helper. Carries the route inside
+        ContentWindowKind::AppWindow so future consumers can recover it.
+      - store.rs: registers as Store / 'ストア' / 'ato.run'.
+      - start_window.rs: registers as Start / '新しいウィンドウ' /
+        'カプセル / URL / コマンドから始める'.
+      - launcher.rs: registers as Launcher / 'Launcher' /
+        '設定 · 検索 · ストア'.
+
+  - action: "Rewrite Card Switcher data path to source from OpenContentWindows"
+    observation: |
+      - CardEntry gained a `handle: AnyWindowHandle` field.
+      - card_entry_from(&ContentWindowEntry) replaces the old
+        entry_from_route — derives initial + deterministic accent from
+        the title and pulls everything else from the registry.
+      - open_card_switcher_window snapshots via mru_order() instead of
+        AppWindowRegistry iteration.
+
+  - action: "Wire card click → activate_window"
+    observation: |
+      preview_card and dock_tile click handlers now do:
+        cx.stop_propagation();
+        let _ = target_handle.update(cx, |_, w, _| w.activate_window());
+        cx.set_global(CardSwitcherWindowSlot(None));
+        window.remove_window();
+      AnyWindowHandle is Copy, so the handle is captured by value into
+      the `move |...| { ... }` closure without lifetime gymnastics.
+
+  - action: "Build → launch hermetic Focus mode → MCP dispatch OpenStartWindow + OpenAppWindowExperiment + OpenLauncherWindow + OpenCardSwitcher → screencap"
+    observation: |
+      switcher-4-window-types.png shows the switcher with four cards:
+        - Launcher (indigo 'L', active border, '設定 · 検索 · ストア')
+        - WasedaP2P (violet 'W', 'github.com/Koh0920/WasedaP2P')
+        - 新しいウィンドウ (mint '新', 'カプセル / URL / コマンドから始める')
+        - ストア (violet 'ス', 'ato.run')
+        - Trailing '+ 新しいウィンドウ' CTA tile
+      The header subtitle reads '現在のセッションにある 4 つのアプリ' —
+      matches the live card count, which now also matches the badge.
+      Bottom dock has the four accent tiles + the indigo '+' tile.
+      MRU order places Launcher first (most-recently-opened action).
+
+agent_observation:
+  user_visible_problem: "Resolved. The Card Switcher is now a faithful task list — every content window the user has open shows up as a card with a meaningful label, and clicking a card brings that window forward. Badge count matches card count."
+  likely_cause: "Card Switcher's data path predated the cross-window content registry. After R31 introduced the registry for the badge, the cards still ran on the older AppWindowRegistry data; promoting the registry from set to richly-typed map unblocks the switcher pulling from a single source."
+  suggested_fix:
+    - "Already shipped: ContentWindowKind/Entry + registry in window/content_windows.rs + card sourcing + click-to-focus."
+    - "Future: bump last_focused_at on actual window focus events (via cx.observe_focus or a key-window AppKit hook), so MRU reflects user interaction, not just spawn order."
+    - "Future: when a card represents the currently focused window, skip emitting the activate_window call to avoid a no-op flicker."
+
+evidence:
+  - switcher-4-window-types.png
+
+status: "fixed"

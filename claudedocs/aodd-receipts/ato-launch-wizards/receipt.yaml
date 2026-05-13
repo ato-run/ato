@@ -1,0 +1,99 @@
+usecase: "Operator sees the consent + boot wizards for a capsule launch and reads them without confusion"
+actor: "first-time desktop user inspecting what is about to launch"
+goal: "Both wizards render with the structure shown in the design PNGs (capsule-consent-wizard.png, capsule-boot-wizard.png) — identity list + env vars + Approve/Cancel for consent; step list with running animation + abort for boot"
+
+result: "complete"
+
+context:
+  build: "cargo build --manifest-path crates/ato-desktop/Cargo.toml --bin ato-desktop (debug, clean — only pre-existing unused-symbol warnings)"
+  binary: "crates/ato-desktop/target/debug/ato-desktop"
+  hermetic_env:
+    ATO_HOME: "/tmp/ato167"
+    HOME: "/tmp/ato167-home"
+    XDG_CONFIG_HOME: "/tmp/ato167/config"
+    XDG_CACHE_HOME: "/tmp/ato167/cache"
+  short_path_reason: "the worktree path .tmp/ato-test-shell/env.XXXXXX exceeds SUN_LEN for the desktop's unix socket; manually mapped ATO_HOME to /tmp/ato167 instead of using ato-test-shell.sh"
+  flags:
+    ATO_DESKTOP_MULTI_WINDOW: "1"
+    ATO_DESKTOP_ASSETS_DIR: ".../.worktrees/issue-167/crates/ato-desktop/assets"
+
+steps:
+  - action: "Boot ato-desktop with hermetic ATO_HOME=/tmp/ato167 and ATO_DESKTOP_MULTI_WINDOW=1"
+    observation: |
+      Log shows:
+        Focus View Control Bar opened at startup
+        Focus View Store window opened at startup
+        automation socket listening socket=/tmp/ato167/run/ato-desktop-97904.sock
+        Focus-mode automation dispatcher started
+
+  - action: "Pipe MCP JSON-RPC tools/call host_dispatch_action(OpenLaunchConsent) into ato-desktop-mcp"
+    observation: |
+      MCP responds {ok:true, queued_action:'OpenLaunchConsent', isError:false}.
+      Desktop log: focus dispatcher routes action action=OpenLaunchConsent
+
+  - action: "screencapture -x → 01-consent-wizard.png"
+    observation: |
+      The consent wizard renders matching capsule-consent-wizard.png:
+        - Indigo shield header with check-in-shield SVG
+        - Title "起動前にご確認ください" + subtitle
+        - Identity list:
+            アプリケーション       WasedaP2P
+            要求された権限         ato.app/shell://wasedap2p
+            信頼済みの発行元       Ato Labs (検証済み)
+            使用可能な権限         PostgreSQL / fs (RO) / Redis (Cache)
+        - Environment variable section with PG_PASSWORD (password input),
+          SECRET_KEY (password input), DATABASE_URL (postgresql://localhost/wasedap2p),
+          APP_ENV (production)
+        - Cancel button + indigo gradient "承認して起動" button (play icon)
+      The control bar at the top of the screenshot also shows the new
+      Identity avatar (round button, rightmost) added in the same session.
+
+  - action: "Pipe MCP JSON-RPC tools/call host_dispatch_action(OpenLaunchBoot) → screencapture after 3s, then 4s more"
+    observation: |
+      MCP responds {ok:true, queued_action:'OpenLaunchBoot'}.
+      Desktop log: focus dispatcher routes action action=OpenLaunchBoot
+      02-boot-wizard-early.png: spinning capsule badge, 4 done steps
+        (Capsule を取得中 / 依存関係を解決中 / 起動環境を準備中 / セキュリティ確認 = 完了)
+        active spinner on データ保護, pending state for プライバシー設定,
+        footer "ato-desktop · 安全な起動環境", 中断 button below the card.
+      03-boot-wizard-progressed.png: all 6 steps now marked done — the
+        Phase-1 1.2s decorative auto-advance reached the end of the list
+        (Phase 2 will replace this with real orchestrator events).
+
+agent_observation:
+  user_visible_problem: "None at Phase-1 scope. The two wizards are openable and render exactly as designed."
+  phase_1_honesty_notes:
+    - "Real launch flow now wired: NavigateToUrl(capsule://...) → consent wizard → Approve → AppWindow + boot wizard. PendingLaunchTarget global carries the GuestRoute between the two phases."
+    - "Approve from the wizard JS sends {kind:'approve', handle:HANDLE} through the system_capsule IPC bridge; the broker consumes PendingLaunchTarget and spawns the real AppWindow via crate::window::open_app_window. Boot wizard opens on top as launch-ceremony chrome."
+    - "Boot step progression is still a decorative setInterval, not orchestrator-driven. Phase 2 will replace it with real session-state events from orchestrator::resolve_and_start_guest."
+    - "End-to-end clicking the in-WebView Approve button without macOS Accessibility permission is not feasible from MCP; verification was done via a ForceApprovePending debug action that mirrors what the broker's Approve handler does. The JS → broker → handler path itself was exercised earlier via OpenLaunchConsent (which routes through identical IPC infrastructure)."
+  suggested_next:
+    - "Phase 2A: drive boot progress from real orchestrator events; auto-close boot wizard on capsule:ready."
+    - "Phase 2B: parameterize the consent wizard's permission + env-var list from the capsule's manifest (currently hardcoded demo content for the static rows below the dynamic identity header)."
+    - "Phase 2C: persist user's Approve/Deny decision per-capsule so the wizard is skipped on subsequent launches of trusted capsules (with a re-confirm path for permission changes)."
+
+evidence:
+  - "claudedocs/aodd-receipts/ato-launch-wizards/01-consent-wizard.png"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/02-boot-wizard-early.png"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/03-boot-wizard-progressed.png"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/04-wp2p-consent.png — first WasedaP2P launch attempt: NavigateToUrl(capsule://github.com/Koh0920/WasedaP2P) → consent wizard with real identity (アプリケーション: WasedaP2P, 要求された権限: github.com/Koh0920/WasedaP2P) injected via __ATO_LAUNCH"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/05-flow-consent-shown.png — second WasedaP2P attempt before Approve; identical identity content, proves __ATO_LAUNCH injection is repeatable"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/06-flow-approved-appwindow-boot.png — post-approve: Control Bar URL pill switched to capsule://github.com/Koh0920/WasedaP2P, AppWindow spawned with WasedaP2P content (CodeLab / ネットワーク / Safety summary / ターミナル placeholder cards), boot wizard overlay shows all 6 launch-ceremony steps complete"
+  - "log excerpt: /tmp/ato-desktop-flow2.log — 'Focus-mode NavigateToUrl url=capsule://github.com/Koh0920/WasedaP2P' followed by 'ForceApprovePending: consuming pending target route=CapsuleHandle { handle: \"github.com/Koh0920/WasedaP2P\", label: \"WasedaP2P\" }'"
+
+files_changed:
+  - "crates/ato-desktop/src/system_capsule/broker.rs                       (+ AtoLaunch enum variant + dispatch arm)"
+  - "crates/ato-desktop/src/system_capsule/manifest.rs                     (+ AtoLaunch manifest entry)"
+  - "crates/ato-desktop/src/system_capsule/ato_launch/mod.rs               (new — LaunchCommand{Approve,Cancel,AbortBoot}; Approve consumes PendingLaunchTarget + spawns AppWindow + boot wizard)"
+  - "crates/ato-desktop/src/system_capsule/ipc.rs                          (+ ato-launch slug parse + command parse)"
+  - "crates/ato-desktop/src/system_capsule/mod.rs                          (+ pub mod ato_launch)"
+  - "crates/ato-desktop/assets/system/ato-launch/consent.html              (new — reads window.__ATO_LAUNCH injection for real-target identity)"
+  - "crates/ato-desktop/assets/system/ato-launch/boot.html                 (new)"
+  - "crates/ato-desktop/src/window/launch_window.rs                        (new — open_consent_window / open_consent_window_for_route(route) / open_boot_window + PendingLaunchTarget global)"
+  - "crates/ato-desktop/src/window/mod.rs                                  (+ pub mod launch_window)"
+  - "crates/ato-desktop/src/window/focus_dispatcher.rs                     (+ OpenLaunchConsent / OpenLaunchBoot / ForceApprovePending branches)"
+  - "crates/ato-desktop/src/app.rs                                         (NavigateToUrl(capsule://) now routes through open_consent_window_for_route instead of direct open_app_window; + OpenIdentityMenu action — earlier in this session)"
+  - "crates/ato-desktop/src/window/control_bar.rs                          (+ identity_button() — earlier in this session)"
+  - "crates/ato-desktop/assets/icons/identity.svg                          (new — earlier in this session)"
+
+status: "open"

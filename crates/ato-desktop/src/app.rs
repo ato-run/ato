@@ -82,7 +82,30 @@ actions!(
         // platform / keymap conflict surfaces we re-bind without
         // changing the action name.
         StopActiveSession,
-        StopAllRetainedSessions
+        StopAllRetainedSessions,
+        // #169 — gated on `ATO_DESKTOP_MULTI_WINDOW=1`. Opens an
+        // additional top-level GPUI window rendering the placeholder
+        // `AppWindowShell` so the multi-window orchestrator can be
+        // exercised end-to-end before later layers (#171–#174) plug in
+        // real content. The action is wired regardless of the flag,
+        // but the handler is a no-op when the flag is off.
+        OpenAppWindowExperiment,
+        // #173 — opens the Card Switcher overlay window.
+        OpenCardSwitcher,
+        // Opens the Store window — a Wry WebView pointed at
+        // https://ato.run/. Re-clicks focus the existing window
+        // rather than stacking duplicates. Gated on the multi-window
+        // flag.
+        OpenStoreWindow,
+        // Opens a fresh StartWindow — the standalone "compose a new
+        // window" surface that the Card Switcher's new-window tile
+        // routes to. Always spawns a new window (no slot reuse).
+        OpenStartWindow,
+        // Identity / Account menu trigger — fired from the Control
+        // Bar's right-end Identity button. Phase 1 logs the click;
+        // Phase 2 will open a real popover (Profile / Account /
+        // Workspace / Trust / Preferences / Help / About).
+        OpenIdentityMenu
     ]
 );
 
@@ -262,6 +285,22 @@ pub fn run() {
     application.run(move |cx: &mut App| {
         gpui_component::init(cx);
         open_url_bridge.install_async_app(cx.to_async());
+        // Cross-window MRU registry — populated as AppWindows spawn,
+        // read by Card Switcher (#173) to render real entries instead
+        // of hardcoded placeholders.
+        cx.set_global(crate::state::AppWindowRegistry::default());
+        cx.set_global(crate::window::content_windows::OpenContentWindows::default());
+        // Slot tracking the currently-open Card Switcher window so
+        // the Control Bar's switcher button can toggle (open → close)
+        // rather than stack overlays.
+        cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
+        // Slot tracking the currently-open Launcher window so the
+        // Stage D retired the Launcher window — the focused
+        // settings cog now opens an `ato-settings` system capsule
+        // window directly. No slot/state global needed for it.
+        // Slot tracking the currently-open Store window (Wry WebView
+        // on ato.run).
+        cx.set_global(crate::window::store::StoreWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
@@ -293,6 +332,29 @@ pub fn run() {
             // session); Cmd+Shift+W is the explicit "stop session"
             // action that actively kills the process.
             KeyBinding::new("cmd-shift-w", StopActiveSession, Some("AtoDesktopShell")),
+            // #169 / #170 / #173 — Focus View companion windows.
+            // Keystroke bindings are intentionally limited to
+            // in-Focus navigation (Launcher, Card Switcher). The
+            // legacy ↔ Focus mode itself is chosen at startup via
+            // `ATO_DESKTOP_MULTI_WINDOW`; there is no in-session
+            // toggle. `OpenAppWindowExperiment` survives as an
+            // action handler (reachable via the automation socket
+            // `host_dispatch_action` for AODD scripts that need to
+            // spawn an additional Focus AppWindow), but has no key
+            // binding.
+            // Stage D: cmd-shift-k previously opened the Launcher.
+            // The Launcher window has been retired. ShowSettings
+            // (cmd-,) now reaches the ato-settings system capsule
+            // directly; the StartWindow is reached via the Card
+            // Switcher's "+ 新しいウィンドウ" tile.
+            // #173 — open the Card Switcher overlay window.
+            // Provisional binding; will be augmented by gesture
+            // invocation from the Control Bar (#174).
+            KeyBinding::new(
+                "cmd-shift-p",
+                OpenCardSwitcher,
+                Some("AtoDesktopShell"),
+            ),
         ]);
 
         #[cfg(target_os = "macos")]
@@ -314,34 +376,327 @@ pub fn run() {
             }
             cx.quit();
         });
-        cx.on_window_closed(|cx, _window_id| {
+        cx.on_window_closed(|cx, window_id| {
+            // Evict the closed window from the AppWindow registry so
+            // Card Switcher / MRU stay accurate. The registry uses
+            // the GPUI WindowId u64 it stamped at open time.
+            let closed_id = window_id.as_u64();
+            let removed_id = cx
+                .global_mut::<crate::state::AppWindowRegistry>()
+                .find_by_gpui_window_id(closed_id);
+            if let Some(id) = removed_id {
+                cx.global_mut::<crate::state::AppWindowRegistry>()
+                    .close(id);
+                tracing::info!(
+                    app_window_id = id,
+                    gpui_window_id = closed_id,
+                    "AppWindow evicted from registry on close"
+                );
+            }
+
+            // Evict from the cross-window content registry so the
+            // Card Switcher badge decrements and the corresponding
+            // card disappears. No-op for chrome windows (Control Bar,
+            // Card Switcher overlay) since they never registered.
+            if cx
+                .global_mut::<crate::window::content_windows::OpenContentWindows>()
+                .remove(closed_id)
+            {
+                tracing::info!(
+                    gpui_window_id = closed_id,
+                    "content window evicted from registry on close"
+                );
+            }
+
+            // Clear singleton slots when their tracked window closes
+            // so the next Settings / Store / switcher click opens a
+            // fresh one cleanly. (The Launcher window was retired
+            // in Stage D of the system-capsule refactor; ato-settings
+            // is slot-free.)
+            let switcher_slot = cx
+                .global::<crate::window::card_switcher::CardSwitcherWindowSlot>()
+                .0;
+            if switcher_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(
+                    crate::window::card_switcher::CardSwitcherWindowSlot(None),
+                );
+                tracing::info!("Card Switcher window closed; slot cleared");
+            }
+            let store_slot = cx
+                .global::<crate::window::store::StoreWindowSlot>()
+                .0;
+            if store_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(crate::window::store::StoreWindowSlot(None));
+                tracing::info!("Store window closed; slot cleared");
+            }
+
+            // In Focus mode the Control Bar is a process-lifetime
+            // singleton with its own lifecycle, decoupled from any
+            // AppWindow. Closing the last AppWindow therefore should
+            // NOT auto-open a Launcher — the bar is already there as
+            // the user's landing surface. We quit only when every
+            // remaining window (including the Control Bar) is gone.
             if cx.windows().is_empty() {
                 cx.quit();
             }
         })
         .detach();
 
-        let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
+        // #169 — multi-window experiment action. Opens a placeholder
+        // `AppWindowShell` window when `ATO_DESKTOP_MULTI_WINDOW=1`.
+        // When the flag is off this is a no-op so the binding never
+        // surprises users who haven't opted in.
+        cx.on_action(|_: &OpenAppWindowExperiment, cx: &mut App| {
+            tracing::info!("OpenAppWindowExperiment handler entered");
+            if !crate::window::is_multi_window_enabled() {
+                tracing::warn!(
+                    "OpenAppWindowExperiment dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            // Spawn with a CapsuleHandle route so the AppWindow's title
+            // block renders the capsule label ("WasedaP2P") rather than
+            // a host URL. Mirrors the reference mockup where the focus
+            // is a capsule, not a generic web page.
+            let route = crate::state::GuestRoute::CapsuleHandle {
+                handle: "github.com/Koh0920/WasedaP2P".to_string(),
+                label: "WasedaP2P".to_string(),
+            };
+            tracing::info!("calling open_app_window");
+            match crate::window::open_app_window(cx, route) {
+                Ok(_) => tracing::info!("open_app_window returned Ok"),
+                Err(err) => tracing::error!(error = %err, "open_app_window failed"),
+            }
+        });
 
-        // Let GPUI draw the shell chrome so the window feels like an in-app surface.
-        cx.open_window(
-            WindowOptions {
-                titlebar: Some(TitleBar::title_bar_options()),
-                focus: true,
-                show: true,
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_decorations: Some(WindowDecorations::Client),
-                ..Default::default()
-            },
-            {
-                let open_url_bridge = open_url_bridge.clone();
-                move |window, cx| {
-                    let shell = cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
-                    cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        // OpenLauncherWindow / open_launcher_window were retired in
+        // Stage D. The Settings cog now dispatches `ShowSettings`
+        // directly, which opens the `ato-settings` system capsule
+        // in its own window.
+
+        // Identity / Account menu trigger from the Control Bar's
+        // right-end avatar button. Opens the `ato-identity` system
+        // capsule. The popover renders an honest Phase-1 surface:
+        // Store / Settings rows are live (hand off to the existing
+        // system capsules), while Profile / Account / Workspace /
+        // Trust rows are visibly disabled with "近日公開" pills.
+        cx.on_action(|_: &OpenIdentityMenu, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) = crate::window::identity_window::open_identity_window(cx) {
+                tracing::error!(error = %err, "OpenIdentityMenu: open_identity_window failed");
+            }
+        });
+
+        // Settings cog routing in Focus mode — Stages C+D:
+        // ShowSettings opens a standalone Wry-hosted Settings
+        // window (the `ato-settings` system capsule). The legacy
+        // Launcher window was retired in Stage D so the Control
+        // Bar dispatches ShowSettings as the sole action for the
+        // settings cog click.
+        cx.on_action(|_: &ShowSettings, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
+                tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
+            }
+        });
+
+        // Focus-mode handler for the Control Bar URL pill's
+        // PressEnter. Parses the typed URL and spawns an AppWindow
+        // with the matching GuestRoute. The legacy DesktopShell has
+        // its own `on_navigate_to_url` for the single-window mode;
+        // it never runs here because DesktopShell isn't instantiated
+        // when the multi-window flag is on.
+        //
+        // Supported schemes:
+        //   - capsule://<handle...>  → CapsuleHandle route (spawns an
+        //     AppWindow whose registry entry tracks the capsule
+        //     identity). NOTE: full capsule SESSION orchestration
+        //     (running `ato app session start`, mounting the
+        //     WebView) is NOT wired into AppWindow yet — that path
+        //     waits on the per-window WebViewManager migration.
+        //   - http(s)://...          → ExternalUrl route.
+        //   - anything else          → log + ignore.
+        cx.on_action(|action: &NavigateToUrl, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            let raw = action.url.trim();
+            if raw.is_empty() {
+                return;
+            }
+            tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
+            if let Some(rest) = raw.strip_prefix("capsule://") {
+                let handle = rest.trim_end_matches('/').to_string();
+                if handle.is_empty() {
+                    tracing::warn!("capsule:// with empty handle — ignored");
+                    return;
                 }
-            },
-        )
-        .expect("failed to open ato-desktop window");
+                // Label = last path segment of the handle. Falls
+                // back to the whole handle when there is no slash.
+                let label = handle
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&handle)
+                    .to_string();
+                let route = crate::state::GuestRoute::CapsuleHandle { handle, label };
+                // Gate every capsule launch on a pre-flight consent
+                // wizard. On Approve the broker spawns the real
+                // AppWindow + boot wizard; on Cancel nothing happens.
+                if let Err(err) =
+                    crate::window::launch_window::open_consent_window_for_route(cx, route)
+                {
+                    tracing::error!(
+                        error = %err,
+                        "NavigateToUrl(capsule) open_consent_window_for_route failed"
+                    );
+                }
+                return;
+            }
+            match url::Url::parse(raw) {
+                Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                    let route = crate::state::GuestRoute::ExternalUrl(parsed);
+                    if let Err(err) = crate::window::open_app_window(cx, route) {
+                        tracing::error!(error = %err, "NavigateToUrl(http) open_app_window failed");
+                    }
+                }
+                Ok(parsed) => {
+                    tracing::warn!(
+                        scheme = parsed.scheme(),
+                        "NavigateToUrl: unsupported scheme — ignored"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, url = %raw, "NavigateToUrl: parse failed");
+                }
+            }
+        });
+
+        // #173 — open Card Switcher overlay. No-op when multi-window
+        // flag is off. The overlay snapshots open `AppWindow`s and
+        // renders them as MRU-ordered cards; until the per-window
+        // WebViewManager migration lands the snapshot/dismissal logic
+        // is placeholder.
+        cx.on_action(|_: &OpenCardSwitcher, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenCardSwitcher dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::open_card_switcher_window(cx) {
+                tracing::error!(error = %err, "failed to open card switcher window");
+            }
+        });
+
+        // Open / focus the Store window (Wry WebView → ato.run).
+        cx.on_action(|_: &OpenStoreWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenStoreWindow dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::store::open_store_window(cx) {
+                tracing::error!(error = %err, "failed to open store window");
+            }
+        });
+
+        // Spawn a fresh StartWindow. Unlike the Launcher / Store
+        // handlers, there is no slot — every dispatch produces a new
+        // window. The Card Switcher's new-window tile invokes the
+        // underlying function directly (not through this action) to
+        // avoid the dispatch-queue-vs-window-removal race, but the
+        // action is still registered so MCP / keybind paths reach
+        // the same target.
+        cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenStartWindow dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::start_window::open_start_window(cx) {
+                tracing::error!(error = %err, "failed to open start window");
+            }
+        });
+
+        // ATO_DESKTOP_MULTI_WINDOW selects the entire startup surface.
+        // The two modes are mutually exclusive — there is no in-session
+        // toggle, only a process-lifetime choice. Multi-window mode
+        // opens the redesigned Focus View (AppWindow + Control Bar)
+        // directly; single-window mode opens the legacy `DesktopShell`
+        // and never touches the new code paths.
+        if crate::window::is_multi_window_enabled() {
+            tracing::info!("ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode");
+            // Spawn the Control Bar FIRST as a Focus-mode singleton.
+            // Its lifecycle is independent of any AppWindow: closing
+            // the active AppWindow does not close the bar; opening a
+            // new AppWindow re-uses the existing bar. The bar stays
+            // until the user explicitly closes it or the process
+            // exits.
+            if let Err(err) = crate::window::open_focus_control_bar(cx) {
+                tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
+                cx.quit();
+                return;
+            }
+            tracing::info!("Focus View Control Bar opened at startup");
+
+            // Open the Store (Wry WebView on ato.run) as the
+            // initial content window. The WasedaP2P mock dashboard
+            // is reachable via host_dispatch_action
+            // OpenAppWindowExperiment when an AODD script or
+            // developer needs it; the boot landing surface is the
+            // real Store so first-run feels like landing in the
+            // catalogue.
+            let initial_handle = match crate::window::store::open_store_window(cx) {
+                Ok(handle) => {
+                    tracing::info!("Focus View Store window opened at startup");
+                    handle
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "Focus View startup failed; quitting");
+                    cx.quit();
+                    return;
+                }
+            };
+            // Focus mode has no DesktopShell / WebViewManager, so the
+            // automation socket would never start and host_dispatch_action
+            // would have nowhere to land. Start a thin dispatcher that
+            // owns its own `AutomationHost`, drains socket-delivered
+            // requests, and routes `HostDispatchAction { action }` to
+            // the initial window as a real GPUI action dispatch.
+            // Actions are App-level so dispatching via any window
+            // handle reaches the registered handler — the Store
+            // handle is fine here.
+            crate::window::focus_dispatcher::start(cx, initial_handle);
+        } else {
+            tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
+            let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    titlebar: Some(TitleBar::title_bar_options()),
+                    focus: true,
+                    show: true,
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_decorations: Some(WindowDecorations::Client),
+                    ..Default::default()
+                },
+                {
+                    let open_url_bridge = open_url_bridge.clone();
+                    move |window, cx| {
+                        let shell =
+                            cx.new(|cx| DesktopShell::new(window, cx, open_url_bridge.clone()));
+                        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+                    }
+                },
+            )
+            .expect("failed to open ato-desktop window");
+        }
 
         cx.activate(true);
     });

@@ -1,0 +1,109 @@
+usecase: "WebLinkView gains tabs + functional chrome; clicking a capsule:// link inside it pops a separate AppWindow; Control Bar URL shows ato://web-viewer (the feature identity) while the WebLinkView is MRU front."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket (NavigateToTestHttp dispatch)"
+goal: "Each AppWindow whose route is ExternalUrl renders the new multi-tab WebLinkView; the Control Bar URL field reads ato://web-viewer regardless of which page is loaded inside the tabs."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r42"
+out_of_scope:
+  - "MCP-driven keyboard/mouse interaction inside the WebLinkView's tab/chrome (host-element clicks are not exposed by host_dispatch_action). Tab add / close / switch and capsule:// click verification rely on real user input."
+  - "Page-load callback wiring (each tab's title stays at the URL's host string; would update via Wry's on_page_load callback)."
+  - "Address bar editing inside WebLinkView's chrome — URL pill there is read-only display only."
+  - "Resize handling for tab WebViews when the AppWindow is resized — set_bounds is currently set once at tab build time."
+time_budget: "75 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User asks for three changes: (1) Bar URL = ato://web-viewer for the browser, (2) Tabs + functional chrome in WebLinkView, (3) capsule:// link click → separate AppWindow"
+    observation: |
+      Architecturally clean: bar carries the feature ID (immutable
+      while inside the browser), the in-page chrome carries the
+      page URL, and capsule:// links are intercepted to spawn a
+      capsule AppWindow rather than navigate within the browser.
+
+  - action: "Change `orchestrator::url_for_route` for ExternalUrl to return `ato://web-viewer`"
+    observation: |
+      Other routes unchanged. The bar's MRU sync (R41) pulls the
+      `url` field verbatim, so changing the source string is enough
+      to propagate the new identity into the input.
+
+  - action: "Rewrite `window/web_link_view.rs` for multi-tab + capsule interception"
+    observation: |
+      Data:
+        Tab { id, webview: wry::WebView, url, title }
+        WebLinkViewShell { tabs: Vec<Tab>, active_tab_id, next_tab_id,
+                           capsule_nav_queue, window_size }
+      Layout: top 36px tab strip + 44px chrome row, WebViews mounted
+      via `build_as_child(window)` with bounds y=80 (= TOTAL_TOP) so
+      they fill below the chrome.
+      Visibility: `WebView::set_visible(bool)` toggled per tab so
+      only the active tab's WebView is on-screen; inactive tabs
+      keep their state but render hidden.
+      Click handlers route through `cx.entity().update(cx, |this, ctx| ...)`
+      so the closures can mutate the shell from inside the click
+      event without lifetime gymnastics.
+
+  - action: "Add capsule:// navigation interception"
+    observation: |
+      Each tab's WebView is built with
+      `WebViewBuilder::with_navigation_handler(|target: String| -> bool { ... })`.
+      The closure inspects the target URL: when it starts with
+      `capsule://`, pushes the URL onto the shared capsule_nav_queue
+      (Arc<Mutex<Vec<String>>>) and returns false (cancel in-tab
+      navigation). All other schemes return true (allow).
+      A foreground polling task (`spawn_capsule_nav_drain`) drains
+      the queue every 50ms and calls `handle_capsule_url(cx, url)`
+      which parses the handle/label and dispatches
+      `crate::window::open_app_window` — spawning a separate
+      AppWindow exactly as the bar's NavigateToUrl path would.
+      Pattern mirrors `web_bridge::spawn_drain_loop` (R33) and
+      `automation/transport.rs` (R29). Already proven elsewhere.
+
+  - action: "Wire chrome button handlers + tab add/close/switch"
+    observation: |
+      back / forward / reload → `webview.evaluate_script("history.back();")`
+        etc. on the active tab.
+      Tab click → `this.switch_to(id, ctx)` flips active_tab_id +
+        re-syncs WebView visibility.
+      Tab close ('×') → `this.close(id, ctx)` removes the Tab from
+        the Vec (Drop tears down the WebView), shifts active to a
+        neighbour if the closed tab was active.
+      `+` button → `this.add(NEW_TAB_URL, window, ctx)` builds a new
+        Tab pointing at https://ato.run/ and activates it.
+
+  - action: "Build + launch hermetic + NavigateToTestHttp → screencap"
+    observation: |
+      bar-ato-web-viewer.png shows the Control Bar with
+      `ato://web-viewer` and the Globe icon.
+      web-link-view-loaded.png shows the WebLinkView AppWindow with:
+        - Tab strip ("ato.run" active, "+" button on right)
+        - Chrome row (back / forward / reload + URL pill containing
+          `https://ato.run/` + menu dots)
+        - ato.run page rendered correctly below (logo, "Find AI agents"
+          search, ollama/jupyter/claude tags, footer copy)
+      Card Switcher badge reads 2 (Store + WebLinkView).
+
+  - action: "Note untestable-via-MCP paths"
+    observation: |
+      capsule:// link interception, tab add via '+', tab close via
+      '×', tab switching via click — all require host-element
+      clicks which MCP's host_dispatch_action cannot produce. The
+      code path is identical to AODD-verified patterns (web_bridge
+      drain + open_app_window) so we trust the wiring; the user
+      can verify end-to-end interactively.
+
+agent_observation:
+  user_visible_problem: "Resolved at the architecture level. WebLinkView is now a real browser-like surface (tabs + chrome + nav). The bar IDs the feature (ato://web-viewer) instead of leaking the page URL — clean separation between Desktop chrome and per-window in-page chrome."
+  likely_cause: "Previous single-tab WebLinkView was a minimum viable shell; the user-supplied design + architectural framing required proper multi-tab + scheme-aware navigation handling. Bar URL was leaking page URL because url_for_route used the raw https URL."
+  suggested_fix:
+    - "Already shipped: ato://web-viewer bar identity + multi-tab WebLinkView + Wry navigation_handler + capsule:// drain loop → open_app_window."
+    - "Future: Wry on_page_load callback → update each Tab.title with the real `<title>` element so the tab chip shows the page title rather than just the host."
+    - "Future: address bar editing inside WebLinkView's chrome — convert the read-only div into a gpui_component::input::InputState so users can navigate by typing inside the tab's own chrome (today they have to use the Control Bar)."
+    - "Future: resize handling — WebViews currently keep the bounds set at build time. When the AppWindow is resized, the active tab's bounds should follow. Wry's `WebView::set_bounds(rect)` is already callable; need to plumb a gpui observe_window_bounds subscription that recomputes per-tab Rect."
+    - "Future: keyboard shortcuts (Cmd+T new tab, Cmd+W close tab, Cmd+1..9 switch) inside the WebLinkView — register key bindings on the AppWindow."
+    - "Future: when the user closes the LAST tab, close the AppWindow itself (today it keeps an empty container)."
+
+evidence:
+  - bar-ato-web-viewer.png
+  - web-link-view-loaded.png
+  - web-link-view-tabs.png
+
+status: "fixed"

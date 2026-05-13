@@ -1,0 +1,72 @@
+usecase: "Card Switcher matches the .tmp/window-list.png reference — light wash backdrop, header, portrait cards, bottom dock."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Visual structure (backdrop, header, cards, footer, dock) matches the reference; accent colours derived from handle hash so cards stay distinct without bundled brand assets."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r26"
+out_of_scope:
+  - "Real WKWebView preview snapshots (await per-window WebViewManager migration)."
+  - "Wiring card click to 'switch to this AppWindow' — still stop_propagation-only."
+  - "Making the switcher full-bleed inside the AppWindow's frame (current popup is 1200×700, centred on display)."
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Rebuild card_switcher.rs from the dark-theme stub to the light reference layout"
+    observation: |
+      Backdrop bg changed from hsla(0,0,0,0.7) to rgb(0xf5f3ff) — opaque
+      pale violet matching the reference. Layout switched from a single
+      flex row to a flex column with header / cards / footer / dock.
+
+  - action: "Replace mru_card with portrait preview_card (220×300)"
+    observation: |
+      Light theme: white fill, indigo border for active (was zinc), zinc
+      border for others. Header strip carries an accent square with the
+      app's first letter; preview area is a faint accent wash with a
+      terminal glyph placeholder; bottom row shows the handle in zinc-500.
+
+  - action: "Restyle new_window_card to match light theme"
+    observation: |
+      Soft-gray fill (zinc-50), zinc-200 border, indigo on hover. Center
+      puck switched from translucent-white to indigo-50 with indigo plus
+      glyph. Added a zinc-500 'カプセルまたは URL を入力' sub-label.
+
+  - action: "Add header_block / footer_text / bottom_dock helpers"
+    observation: |
+      Header shows the GalleryVerticalEnd icon in an indigo-100 puck,
+      the title '開いているウィンドウ' (22px/700) and a count-aware
+      subtitle. Footer is a small zinc-500 instruction line. Dock is a
+      pill of accent-coloured 40×40 tiles + a trailing indigo plus tile;
+      tile click dispatches OpenAppWindowExperiment (parity with the
+      new-window card).
+
+  - action: "Add accent_for(title: &str) -> u32 and hsla_from_rgb_with_alpha helpers"
+    observation: |
+      accent_for picks from an 8-colour brand-safe palette via a
+      deterministic byte hash, so different handles produce stable
+      distinct colours without bundled brand assets. hsla_from_rgb_with_alpha
+      converts an RGB integer to gpui::Hsla so accent washes inside the
+      cards can be tied to the picked accent without re-tuning each pair.
+
+  - action: "Build → launch hermetic Focus mode → MCP opens 3 AppWindows + switcher → screencap"
+    observation: |
+      switcher-3-windows.png matches the reference structure: pale-violet
+      backdrop, header centred, three portrait cards with violet accent
+      (all 3 are 'WasedaP2P' so they hash to the same palette index —
+      verified the deterministic-hash code path runs; visual variety
+      would require diverse routes), '+ 新しいウィンドウ' tile to the
+      right, footer line, dock pill at the bottom. The active card
+      carries the indigo border; the others carry zinc-200.
+
+agent_observation:
+  user_visible_problem: "Resolved at the visual layer. The Card Switcher reads as a curated task list with clear hierarchy (header → cards → footer → dock) on a light backdrop, matching .tmp/window-list.png in shape and density."
+  likely_cause: "Previous Card Switcher was a single-row dark overlay with placeholder cards — minimum viable for the toggle/MRU plumbing in earlier iterations. The reference is a more curated UI surface; this rebuild ports the layout while keeping the lifecycle (toggle, Esc, backdrop close, stop_propagation on cards) unchanged."
+  suggested_fix:
+    - "Already shipped: full light-theme rebuild with header / portrait cards / footer / dock."
+    - "Future: real WKWebView snapshots in the preview area (per-window WebViewManager migration)."
+    - "Future: card click → 'switch to this AppWindow' (raise the AppWindow's NSWindow + dismiss switcher)."
+    - "Future: full-bleed switcher inside the AppWindow frame (or attached, so the Control Bar can stay floating above it)."
+
+evidence:
+  - switcher-3-windows.png
+
+status: "fixed"

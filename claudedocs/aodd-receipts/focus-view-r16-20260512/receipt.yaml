@@ -1,0 +1,61 @@
+usecase: "Clicking the Control Bar's Store button should open ato.run in a WebView, not the Launcher placeholder"
+actor: "Autonomous Claude Operator dispatching `OpenStoreWindow` via the Focus-mode MCP socket"
+goal: "A new GPUI window opens with a Wry WebView mounted as its child NSView, pointing at https://ato.run/. 2nd+ Store clicks focus the existing window."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Custom-protocol partitioning, capability gating, preload scripts (the Store is a plain external page)"
+  - "Per-window WebViewManager migration (the Store is a one-off, not the per-AppWindow pattern)"
+time_budget: "15 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: Store should open ato.run as a real WebView, not the same Launcher placeholder as Settings"
+    observation: "Both buttons in `control_bar.rs::pill_button` dispatched `OpenLauncherWindow`. Store needs its own action + a window that actually mounts a Wry WebView."
+
+  - action: "Add `window/store.rs` with `StoreWebView` entity + `open_store_window(cx)`"
+    observation: |
+      `StoreWebView` is a tiny GPUI view that holds the Wry `WebView`
+      alive (`_webview: WebView` field) for the window's lifetime —
+      Wry mounts the WKWebView as a child NSView of the gpui::Window
+      and stays attached as long as the `WebView` value is not
+      dropped. The Render body is a white backdrop in case the
+      page is still loading.
+      `open_store_window` follows the same focus-on-existing pattern
+      as `open_launcher_window` (R15): consult `StoreWindowSlot`
+      global, activate if alive, fall through if stale, otherwise
+      open + stash the new handle.
+
+  - action: "New `OpenStoreWindow` action in `app::run` + dispatcher handler"
+    observation: "Mirrors the OpenLauncherWindow / OpenCardSwitcher handlers — gated on `ATO_DESKTOP_MULTI_WINDOW=1` and calls `crate::window::store::open_store_window(cx)`."
+
+  - action: "Re-route the Store pill button + extend focus_dispatcher"
+    observation: |
+      `ControlBarShellPlaceholder::ActionTarget::Store` now dispatches
+      `OpenStoreWindow` instead of `OpenLauncherWindow`.
+      `focus_dispatcher` learned to translate the
+      `host_dispatch_action`'s `"OpenStoreWindow"` name to the new
+      GPUI action so AODD MCP scripts can reach it.
+
+  - action: "Wire close cleanup"
+    observation: "`app::on_window_closed` matches the closed `WindowId` against `StoreWindowSlot` alongside the existing Launcher / Card-Switcher slot checks."
+
+  - action: "AODD: dispatch `OpenStoreWindow` via MCP, screenshot"
+    observation: |
+      store-window-loaded.png shows a new top-level window with the
+      ato.run search bar (`Search packages`) + the ato logo + the
+      ollama / jupyter / claude pill buttons rendered by Wry. The
+      Control Bar pill remains visible at the top. Desktop log
+      records `focus dispatcher routes action action=OpenStoreWindow`.
+
+agent_observation:
+  user_visible_problem: "Resolved. Store now opens the actual ato.run page in a Wry WebView; clicking the button again focuses the existing window per R15's slot pattern."
+  likely_cause: "Initial scaffolding routed both Settings and Store through the same Launcher placeholder. Store needs a real WebView."
+  suggested_fix:
+    - "Already shipped: dedicated Store window with Wry WebView, OpenStoreWindow action + dispatcher routing, focus-on-existing + on_window_closed slot cleanup."
+    - "Future: when the per-window WebViewManager migration lands, decide whether the Store should adopt that path (gets capability + partition isolation) or stay simple. Today it bypasses WebViewManager so it has no preload scripts, no JSON-RPC bridge, no capsule:// protocol — fine for plain external pages."
+
+evidence:
+  - store-window-loaded.png
+
+status: "fixed"

@@ -12,10 +12,12 @@ mod retention;
 mod settings;
 mod state;
 mod surface_timing;
+mod system_capsule;
 mod terminal;
 mod ui;
 mod userland;
 mod webview;
+mod window;
 
 fn main() {
     if std::env::args().any(|a| a == "--version" || a == "-V") {

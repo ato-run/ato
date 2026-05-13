@@ -1,0 +1,52 @@
+usecase: "The pill renders rounded but the underlying NSWindow is still rectangular — when the backdrop happens to share the pill's white fill (e.g. Store sitting beneath the bar) the rectangle leaks through the corners and the bar reads as square."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "NSWindow contentView clipped to the same radius as the pill so the window itself reads as rounded — no rectangular leak in the corners."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Macro changes to gpui's window backend; this is a layer-mask add-on"
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports the rectangular NSWindow leaks through the rounded pill corners"
+    observation: "Pill uses `rounded_full` and `bg(0xffffff)`, but the NSWindow underneath is still a rectangle. When the bar sits over the (white) Store window, the four corner cut-outs of the pill reveal Store white — visually indistinguishable from opaque white, so the bar reads as a square."
+    stuck_at: "Square NSWindow rectangle leaks through pill corners"
+
+  - action: "Add `round_window_corners` helper to `window/macos.rs`"
+    observation: |
+      Walks from the gpui `AnyWindowHandle` → `Window::window_handle()`
+      (HasWindowHandle trait method via match-pattern disambiguation)
+      → AppKit raw handle → NSView → NSWindow → contentView. Applies:
+        - `setWantsLayer(true)` so the view has a backing layer
+        - `layer.setCornerRadius(radius)` to round the layer
+        - `layer.setMasksToBounds(true)` to clip children inside the
+          rounded path
+      Radius = `BAR_HEIGHT / 2.0` (28px for the 56-tall pill), so the
+      NSWindow ends are circular per the pill.
+
+  - action: "Call the helper from `open_control_bar_inner` right after `cx.open_window`"
+    observation: "macOS-gated (`#[cfg(target_os = \"macos\")]`). The radius matches the pill's `rounded_full` shape so the two clips coincide."
+
+  - action: "Build, launch hermetic Focus mode, host_take_screenshot"
+    observation: |
+      nswindow-rounded.png shows the bar over the Store window.
+      No `round_window_corners` warn lines in the desktop log,
+      confirming the layer + setCornerRadius + setMasksToBounds chain
+      ran without falling into any of the early-return paths.
+
+agent_observation:
+  user_visible_problem: |
+    Resolved at the AppKit layer: the NSWindow contentView is now
+    clipped to the same rounded shape as the pill, so the rectangular
+    bounds no longer leak through when the backdrop happens to be the
+    same colour as the pill.
+  likely_cause: "GPUI renders the pill div with rounded corners, but the underlying NSWindow stays rectangular. A second rounding layer at the AppKit level is needed."
+  suggested_fix:
+    - "Already shipped: `round_window_corners` helper applying CALayer cornerRadius + masksToBounds + wantsLayer on the NSWindow's contentView."
+    - "Future: if the rounding ever needs to coexist with a visible shadow, render the shadow via a separate CALayer with a matching shadow path (CALayer's shadow respects cornerRadius when masksToBounds is false; combining is non-trivial)."
+
+evidence:
+  - nswindow-rounded.png
+
+status: "fixed"

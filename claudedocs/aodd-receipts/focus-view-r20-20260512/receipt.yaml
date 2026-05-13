@@ -1,0 +1,91 @@
+usecase: "Reproduce the Control Bar reference (.tmp/control-bar.png) exactly — rounded pill, soft shadow, bare icon buttons, muted URL text, info dots on the right"
+actor: "Autonomous Claude Operator + Fixer via the Focus-mode MCP socket"
+goal: "Visual diff against the reference shrinks to noise"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Wiring the right-edge info dots to a real popover / handler"
+  - "Removing the URL pill chevron behavior (still presentation-only)"
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Read .tmp/control-bar.png and enumerate diffs against the running bar"
+    observation: |
+      Five concrete deltas:
+        1. Pill bg was transparent (R12 Blurred backdrop); reference is
+           opaque white with a multi-layer soft shadow.
+        2. Inner icon buttons (Settings / Card Switcher / Store) had
+           their own light-gray fill + border; reference has them
+           BARE (no fill, no border) sitting directly on the white
+           pill — only the URL chip carries its own surface.
+        3. URL text was near-black (#18181b); reference is zinc-600
+           muted (#52525b).
+        4. Window had zero outer padding (R11 minimisation pass), so
+           the shadow had no room to render; reference clearly shows
+           a soft halo around the pill.
+        5. Right edge missing the two small ⓘ info indicators visible
+           in the reference.
+
+  - action: "Restore window padding + pill fill + multi-layer shadow"
+    observation: |
+      `WINDOW_PAD = 32.0` reinstated; window now ships at
+      `(BAR_WIDTH + 64) x (BAR_HEIGHT + 64)` so the shadow has room.
+      Outer pill bg = pure white (`#ffffff`). Border replaced with a
+      4%-alpha black hairline — perceptually invisible but adds a
+      single-pixel definition under raster scaling. Shadow stack:
+        - 0/1 blur 2 @ 4%  : tight near-shadow
+        - 0/8 blur 16 @ 6% : mid shadow
+        - 0/24 blur 40 @ 8% with -8 spread : wide soft halo
+      Reads as one natural shadow rather than a hard offset.
+
+  - action: "Switch `window_background` from `Blurred` back to `Transparent`"
+    observation: |
+      Pill is opaque now, no need for the system vibrancy fallback
+      from R12. Transparent backdrop just lets the shadow blur
+      cleanly over whatever is behind the window.
+
+  - action: "Strip the bg/border from `pill_button`; keep hover tint"
+    observation: |
+      Removed `.bg(rgb(0xfafafa))` + `.border_1()` +
+      `.border_color(rgb(0xe4e4e7))`. Buttons now sit directly on the
+      white pill. Hover keeps a zinc-100 `bg(rgb(0xf4f4f5))` so the
+      click target is discoverable. Icon color zinc-700 (`#3f3f46`)
+      instead of near-black so the glyphs match the reference's
+      mid-grey weight.
+
+  - action: "Tune URL pill colors"
+    observation: |
+      Text color → zinc-600 (`#52525b`); Globe + ChevronDown icons →
+      zinc-500 (`#71717a`). Border tightened to `#eeeeee` so the chip
+      reads as a quiet recess rather than a competing element.
+
+  - action: "Add two info dots on the right edge"
+    observation: |
+      New `info_dots()` helper renders two 20×20 boxes each holding an
+      `IconName::Info` glyph at 13px in zinc-400 (`#a1a1aa`). Tucked
+      into 4px right padding inside the pill, matching the reference's
+      footprint.
+
+  - action: "Build, launch hermetic Focus mode, host_take_screenshot"
+    observation: |
+      bar-redesigned.png shows:
+        - Opaque white pill with the soft floating shadow
+        - 設定 / ストア with bare icons + labels
+        - Card switcher icon bare in the middle
+        - URL chip reading 'ato.app/shell://wasedap2p' in muted grey
+        - Two ⓘ info dots on the right edge
+      Side-by-side with .tmp/control-bar.png the remaining differences
+      are sub-pixel (font kerning, shadow blur radius perception).
+
+agent_observation:
+  user_visible_problem: "Resolved at the visual level. The bar now reads as a single white floating chrome element with quiet affordances and a recessed URL chip — same hierarchy as the reference."
+  likely_cause: "Earlier iterations stacked partial fixes (R11 padding removal, R12 Blurred backdrop) that pushed the bar further from the reference. The reference is achievable with the simpler classic recipe: opaque pill + multi-layer shadow + bare icons."
+  suggested_fix:
+    - "Already shipped: padding restored, pill repainted white, multi-layer shadow, button bg/border stripped, URL muted, info dots added."
+    - "Future: wire the info dots to real popovers (e.g. 'what is running' / 'help'); honour the muted-text contract by extending it to the future card switcher tooltip / hover labels."
+
+evidence:
+  - bar-redesigned.png
+
+status: "fixed"

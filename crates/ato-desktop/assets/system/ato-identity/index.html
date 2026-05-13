@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>アカウント</title>
+<style>
+  :root {
+    --bg:        #ffffff;
+    --border:    #ececf1;
+    --soft-bg:   #f6f6fa;
+    --text:      #1a1a1f;
+    --muted:     #6b6b78;
+    --soft:      #a3a3b0;
+    --accent:    #6366f1;
+    --accent-bg: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .panel {
+    width: 100%; height: 100%;
+    padding: 32px 18px 14px;
+    display: flex; flex-direction: column;
+  }
+
+  /* HEADER */
+  .header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 4px 12px;
+  }
+  .avatar {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: linear-gradient(135deg, #c4b5fd 0%, #6366f1 100%);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 700;
+    flex-shrink: 0;
+    box-shadow: 0 4px 10px rgba(99, 102, 241, 0.30);
+  }
+  .avatar.muted {
+    background: var(--soft-bg);
+    color: var(--soft);
+    box-shadow: none;
+    border: 1px solid var(--border);
+  }
+  .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .who .name  { font-size: 13.5px; font-weight: 700; }
+  .who .sub   { font-size: 11.5px; color: var(--muted);
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .who .sub.hint { color: var(--accent); }
+  .who .sub.code { font-family: "SF Mono", ui-monospace, monospace; }
+  .who .sub:empty { display: none; }
+
+  /* MENU */
+  .menu { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; }
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .row .icon {
+    width: 16px; height: 16px; flex-shrink: 0; color: var(--muted);
+  }
+  .row:hover { background: var(--accent-bg); color: var(--accent); }
+  .row:hover .icon { color: var(--accent); }
+  .row .label { flex: 1; }
+
+  .row.disabled {
+    cursor: default; color: var(--soft);
+  }
+  .row.disabled:hover { background: transparent; color: var(--soft); }
+  .row.disabled:hover .icon { color: var(--soft); }
+  .row.disabled .icon { color: var(--soft); }
+  .row .pill {
+    font-size: 10px; font-weight: 600;
+    background: var(--soft-bg);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 2px 8px;
+  }
+
+  .divider {
+    height: 1px; background: var(--border);
+    margin: 6px 4px;
+  }
+
+  /* FOOTER */
+  .footer {
+    margin-top: auto;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 8px 0;
+    font-size: 10.5px; color: var(--soft);
+  }
+  .footer .version { font-family: "SF Mono", ui-monospace, monospace; }
+  .footer button.close {
+    background: var(--soft-bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 11.5px; font-weight: 600;
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  .footer button.close:hover { background: #ececf1; }
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <!-- HEADER — populated entirely from `ato whoami` via __ATO_IDENTITY. -->
+  <div class="header">
+    <div class="avatar muted" id="avatar">?</div>
+    <div class="who">
+      <span class="name" id="name">確認中…</span>
+      <span class="sub"  id="sub"></span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ACTIVE ITEMS — hand off to existing system capsules. -->
+  <div class="menu">
+    <div class="row" data-action="open_store">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9l1.5-5h15L21 9"/>
+        <path d="M3 9v11a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V9"/>
+        <path d="M3 9h18"/>
+      </svg>
+      <span class="label">ストア</span>
+    </div>
+    <div class="row" data-action="open_settings">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>
+      </svg>
+      <span class="label">設定</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- PHASE 2 PLACEHOLDERS — clearly labelled as not yet shipped. -->
+  <div class="menu">
+    <div class="row disabled" title="Phase 2 で実装予定">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="8" r="4"/>
+        <path d="M4 22a8 8 0 0 1 16 0"/>
+      </svg>
+      <span class="label">プロフィール</span>
+      <span class="pill">近日公開</span>
+    </div>
+    <div class="row disabled" title="Phase 2 で実装予定">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="6" width="20" height="13" rx="2"/>
+        <line x1="2"  y1="11" x2="22" y2="11"/>
+      </svg>
+      <span class="label">アカウント</span>
+      <span class="pill">近日公開</span>
+    </div>
+    <div class="row disabled" title="Phase 2 で実装予定">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1"/>
+        <rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="3" y="14" width="7" height="7" rx="1"/>
+        <rect x="14" y="14" width="7" height="7" rx="1"/>
+      </svg>
+      <span class="label">ワークスペース</span>
+      <span class="pill">近日公開</span>
+    </div>
+    <div class="row disabled" title="Phase 2 で実装予定">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>
+      </svg>
+      <span class="label">信頼設定</span>
+      <span class="pill">近日公開</span>
+    </div>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <span class="version">ato-desktop · v0.5.1</span>
+    <button class="close" id="close">閉じる</button>
+  </div>
+</div>
+
+<script>
+  // System-capsule IPC envelope.
+  const POST = (window.ipc && window.ipc.postMessage)
+    ? (m) => window.ipc.postMessage(JSON.stringify(m))
+    : (m) => console.log('[no bridge]', m);
+  const BRIDGE = (command) => POST({ capsule: 'ato-identity', command });
+
+  // Identity rendering rule (locked):
+  //   The header reflects ONLY what `ato whoami` returns. The host
+  //   injects __ATO_IDENTITY = { authenticated, user_id?, name?,
+  //   email?, github?, publisher_handle?, reason? }. If a field is
+  //   missing in whoami's stdout, it is missing here too — no
+  //   fabricated defaults, no guessed initials, no email
+  //   placeholders.
+  const id = (window.__ATO_IDENTITY && typeof window.__ATO_IDENTITY === 'object')
+    ? window.__ATO_IDENTITY : null;
+  const avatarEl = document.getElementById('avatar');
+  const nameEl   = document.getElementById('name');
+  const subEl    = document.getElementById('sub');
+
+  function render() {
+    if (!id) {
+      // Pre-injection state; the host always injects so this branch
+      // is only reachable if the wizard is opened standalone (e.g.
+      // direct HTML preview without the desktop).
+      nameEl.textContent = 'ID 取得失敗';
+      subEl.textContent = '';
+      return;
+    }
+    if (id.authenticated === true) {
+      // Prefer Name > GitHub @handle > Publisher Handle > User ID.
+      // Whichever the CLI surfaced first, in that order.
+      const displayName = id.name || (id.github ? '@' + id.github : null)
+                       || id.publisher_handle || id.user_id || 'Authenticated';
+      nameEl.textContent = displayName;
+
+      // Sub line: prefer email, then github handle (if name was the
+      // chosen primary), then user_id. Skip if nothing concrete.
+      let sub = '';
+      if (id.email) {
+        sub = id.email;
+      } else if (id.name && id.github) {
+        sub = '@' + id.github;
+        subEl.classList.add('code');
+      } else if (id.user_id && displayName !== id.user_id) {
+        sub = id.user_id;
+        subEl.classList.add('code');
+      }
+      subEl.textContent = sub;
+
+      // Avatar initial from the chosen display name. Drop the
+      // muted style now that we know there's a real session.
+      avatarEl.classList.remove('muted');
+      const ch = (displayName.replace('@', '').trim()[0] || '·').toUpperCase();
+      avatarEl.textContent = ch;
+    } else {
+      // Unauthenticated — honest message, no fake profile.
+      nameEl.textContent = 'サインインしていません';
+      subEl.textContent = 'ato login で認証してください';
+      subEl.classList.add('hint', 'code');
+      avatarEl.classList.add('muted');
+      avatarEl.textContent = '?';
+    }
+  }
+  render();
+
+  document.querySelectorAll('.row[data-action]').forEach((row) => {
+    row.addEventListener('click', () => {
+      BRIDGE({ kind: row.dataset.action });
+    });
+  });
+
+  document.getElementById('close').addEventListener('click', () => {
+    BRIDGE({ kind: 'close' });
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') BRIDGE({ kind: 'close' });
+  });
+</script>
+
+</body>
+</html>

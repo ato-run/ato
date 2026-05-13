@@ -1,0 +1,100 @@
+usecase: "Card Switcher cards show real window screenshots (Safari Tab Overview parity) + a top filter input for keyboard-friendly switching."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Each card's preview area renders an actual base64-encoded PNG of the target window, captured fresh when the switcher opens. A top search box filters visible cards by title/subtitle live; Enter activates the first match."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r37"
+out_of_scope:
+  - "Live-updating snapshots while the switcher is open (snapshots are taken once, on open)."
+  - "Snapshot fallback for non-macOS hosts (screencapture is the OS-provided tool used here)."
+  - "Background pre-capture / cache. Capture is on-demand at switcher open."
+  - "Animations / perspective tilts on cards — kept the existing hover lift."
+
+time_budget: "45 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User asks for actual screenshots inside the switcher cards + Safari-like UI patterns"
+    observation: |
+      Previous switcher rendered CSS-only kind-specific mocks
+      (bar chart for AppWindow, store rows for Store, etc.). User
+      explicitly wants the real content from each window — the
+      Safari Tab Overview convention where each tab card shows a
+      live thumbnail.
+
+  - action: "Add `snapshot_window(cx, handle)` helper to card_switcher.rs"
+    observation: |
+      macOS-only path:
+        1. Resolve the gpui handle → NSWindow via the existing
+           `crate::window::macos::ns_window_for` walk
+        2. `nswindow.windowNumber()` → CGWindowID
+        3. Shell out to `screencapture -l <id> -t png -x <tmp>` —
+           uses CGWindowListCreateImage internally, captures any
+           window by ID regardless of stacking (so the switcher
+           opening over them is not a problem)
+        4. Read PNG bytes, base64-encode (base64 crate 0.22), wrap
+           in a data: URL
+        5. Return Option<String>
+      Non-macOS path returns None and the JS falls back to the CSS
+      mock. Errors during capture (permission denied, etc.) also
+      surface as None so the switcher still renders gracefully.
+
+  - action: "Add `preview_data_url` to CardDto"
+    observation: |
+      `Option<String>`, serde-skipped when None. Populated by calling
+      `snapshot_window(cx, e.handle)` for each MRU entry BEFORE
+      `cx.open_window` for the switcher itself — that way the
+      switcher overlay never appears in its own snapshot.
+
+  - action: "Update switcher.html JS"
+    observation: |
+      Added `previewReal(dataUrl)` helper that emits a `pv-real`
+      container wrapping an `<img>` with `object-fit: cover` and
+      `object-position: top left` — Safari shows the top of each
+      page, keeping the title bar / chrome visible. `makeCard`
+      now prefers `previewReal(entry.previewDataUrl)` and falls
+      back to the kind-specific CSS mock when the host did not
+      provide a snapshot.
+
+  - action: "Add a Safari-Tab-Overview-style filter input"
+    observation: |
+      Compact 320×36 input pill between the header and the cards
+      row. Translucent white-on-dark styling; indigo focus ring.
+      JS attaches an `input` listener that toggles a `.hidden`
+      class on `.card[data-window-id]` elements whose title or
+      subtitle doesn't contain the query (case-insensitive). The
+      new-window CTA is always visible (no `data-window-id`).
+      An `Enter` keydown on the input activates the FIRST visible
+      card via the existing ActivateWindow bridge action — same
+      keyboard pattern as Safari Tab Overview.
+
+  - action: "Build + launch hermetic + open all windows + open switcher"
+    observation: |
+      `switcher-real-snapshots.png` shows the rebuilt switcher:
+      dark Mission-Control backdrop, indigo header puck, title +
+      subtitle, the new filter input ('ウィンドウを絞り込む'),
+      and four cards. Card previews:
+        - Launcher: actual Launcher Start view captured (search +
+          quick actions + recent panels visible)
+        - WasedaP2P: actual AppWindow hero banner with gradient
+          and 'WasedaP2P' title
+        - 新しいウィンドウ: actual StartWindow content (quick
+          actions, recent rows)
+        - ストア: empty white card list (ato.run hadn't fully
+          rendered when snapshotted)
+      Cards' rounded corners crop the screenshots cleanly.
+
+agent_observation:
+  user_visible_problem: "Resolved. Switcher previews are now actual window screenshots — the user can identify which window is which by looking at its content, not by reading the title. Filter input gives keyboard-driven switching."
+  likely_cause: "The CSS mocks were structurally correct but visually generic. Real screenshots remove all ambiguity at a glance."
+  suggested_fix:
+    - "Already shipped: snapshot_window helper + previewDataUrl plumbing + previewReal renderer + filter input."
+    - "Future: refresh snapshots in-place when the switcher is open and the user keeps it open for a while (e.g. timer-based re-capture every 1s, or IPC-driven refresh)."
+    - "Future: cache snapshots between opens so the first frame after switcher-open is instant — invalidate when the window's render state changes (page navigation, GPUI render)."
+    - "Future: snapshot the Store window with a small post-load delay so ato.run is fully rendered before capture."
+    - "Future: keyboard arrow navigation through cards while the filter input is focused, mirroring Safari Tab Overview more completely."
+
+evidence:
+  - switcher-real-snapshots.png
+  - switcher-crop.png
+
+status: "fixed"

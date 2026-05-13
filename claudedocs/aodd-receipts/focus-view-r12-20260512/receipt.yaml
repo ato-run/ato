@@ -1,0 +1,51 @@
+usecase: "Make the Control Bar background transparent OR visually unify the bar with whatever surface is behind it"
+actor: "Autonomous Claude Operator + Fixer via Focus-mode MCP socket"
+goal: "Bar reads as a single visual unit with its backdrop — no solid white plate floating in space"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Replacing the inner affordance button backgrounds (they stay opaque to remain readable)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Drop the white fill on the outer pill in `bar_pill`"
+    observation: |
+      Removed `.bg(rgb(0xffffff))`. The pill now has no background
+      colour — the only thing defining its shape is the border at
+      `hsla(0.0, 0.0, 1.0, 0.35)` (35%-alpha white outline). The
+      drop shadow declaration was also removed in this same pass
+      since it had been clipped flush against the window edge in
+      R11 and was no longer doing anything visually.
+
+  - action: "Switch the Control Bar window's `window_background` from `Transparent` to `Blurred`"
+    observation: |
+      `WindowBackgroundAppearance::Blurred` activates macOS vibrancy
+      on the window's NSWindow backdrop — whatever is behind the
+      window gets the system's frosted-glass treatment. Combined
+      with a transparent outer pill, the bar reads as glass that
+      blurs the desktop / app behind it.
+
+  - action: "Build, launch hermetic Focus mode, host_take_screenshot"
+    observation: |
+      blurred-pill.png shows the Control Bar pill at the top of the
+      screen. Underlying Chrome / desktop / AppWindow gradient is
+      visibly blurred through the pill. The four affordance buttons
+      (settings cog, URL pill, store icon, card switcher icon) stay
+      opaque so their icons and text remain readable regardless of
+      backdrop contrast. The pill's outline reads as a soft
+      hairline of light against the frosted backdrop.
+
+agent_observation:
+  user_visible_problem: "None. The bar now visually integrates with whatever is behind it — backdrop content blurs through the pill rather than being hidden behind an opaque plate."
+
+  likely_cause: "n/a — direct response to the user's stated requirement."
+
+  suggested_fix:
+    - "Already shipped: removed pill fill, switched to Blurred backdrop, retained translucent border + opaque inner buttons."
+    - "Defer: if a future iteration wants visible-everywhere readability, give the inner button-row a very-translucent tint (e.g. hsla(0.0, 0.0, 1.0, 0.15)) so the affordances sit on a faint glass tray rather than directly on the system blur. Today they read OK because each affordance button still carries its own opaque background."
+
+evidence:
+  - blurred-pill.png
+
+status: "fixed"
