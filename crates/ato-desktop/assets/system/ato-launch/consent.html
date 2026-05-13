@@ -232,10 +232,11 @@
   const HANDLE = document.getElementById('app-handle').textContent.trim();
 
   document.getElementById('approve').addEventListener('click', () => {
-    // Phase 1 does NOT actually start the capsule; the broker logs
-    // the approve and closes the window. Phase 2 spawns the
-    // AppWindow + drives the boot wizard with real progress.
-    BRIDGE({ kind: 'approve', handle: HANDLE });
+    const config = {};
+    document.querySelectorAll('[data-key]').forEach(el => {
+      if (el.value.trim()) config[el.dataset.key] = el.value.trim();
+    });
+    BRIDGE({ kind: 'approve', handle: HANDLE, config });
   });
   document.getElementById('cancel').addEventListener('click', () => {
     BRIDGE({ kind: 'cancel' });

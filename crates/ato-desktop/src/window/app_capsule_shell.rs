@@ -58,7 +58,12 @@ pub struct AppCapsuleShell {
 }
 
 impl AppCapsuleShell {
-    pub fn new(handle: String, window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        handle: String,
+        configs: Vec<(String, String)>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let win_size = window.bounds().size;
         let abort_flag = Arc::new(AtomicBool::new(false));
 
@@ -76,7 +81,7 @@ impl AppCapsuleShell {
         let abort_clone = Arc::clone(&abort_flag);
         std::thread::spawn(move || {
             let result =
-                crate::orchestrator::resolve_and_start_guest(&handle_clone, &secrets, &[]);
+                crate::orchestrator::resolve_and_start_guest(&handle_clone, &secrets, &configs);
             // If already aborted and the session started, stop it immediately.
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {

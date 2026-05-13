@@ -56,6 +56,16 @@ pub struct PendingLaunchTarget(pub Option<GuestRoute>);
 
 impl gpui::Global for PendingLaunchTarget {}
 
+/// Config key/value pairs collected from the consent form and passed
+/// to `open_app_window` → `AppCapsuleShell::new` → `resolve_and_start_guest`.
+/// Set by `ato_launch::dispatch(Approve)` before `open_app_window`.
+/// Read and cleared inside `open_app_window` so other code paths
+/// (focus_dispatcher direct opens, WebLinkView nav) get empty configs.
+#[derive(Default, Debug, Clone)]
+pub struct PendingLaunchConfigs(pub Vec<(String, String)>);
+
+impl gpui::Global for PendingLaunchConfigs {}
+
 /// Tracks the two transient wizard windows opened during a capsule boot flow:
 ///
 /// - `boot_window`: the in-flight boot progress wizard
@@ -204,6 +214,33 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
 
 /// Spawn the boot progress wizard. Returns the `AnyWindowHandle` so the
 /// caller can store it in `BootWindowSlot` for later programmatic close.
-pub fn open_boot_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    open_wizard(cx, BOOT_HTML, BOOT_W, BOOT_H, None)
+///
+/// `route` is optional — when `Some`, injects `window.__ATO_BOOT = { name, handle }`
+/// so the boot HTML can show the real capsule identity instead of the
+/// generic placeholder. Pass `None` for standalone AODD/MCP test opens.
+pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyWindowHandle> {
+    let init_script = route.map(|r| {
+        let (name, handle) = match r {
+            GuestRoute::CapsuleHandle { handle, label } => {
+                let pretty = label
+                    .split(['/', '@', '-', '_'])
+                    .filter(|s| !s.is_empty())
+                    .next_back()
+                    .unwrap_or(label.as_str())
+                    .to_string();
+                (pretty, handle.clone())
+            }
+            GuestRoute::ExternalUrl(url) => (
+                url.host_str().unwrap_or("external").to_string(),
+                url.as_str().to_string(),
+            ),
+            other => (format!("{:?}", other), "unknown".to_string()),
+        };
+        let payload = serde_json::json!({ "name": name, "handle": handle });
+        format!(
+            "window.__ATO_BOOT = {};",
+            serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string())
+        )
+    });
+    open_wizard(cx, BOOT_HTML, BOOT_W, BOOT_H, init_script)
 }
