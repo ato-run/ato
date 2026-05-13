@@ -475,19 +475,18 @@ pub fn run() {
         // in its own window.
 
         // Identity / Account menu trigger from the Control Bar's
-        // right-end button. Phase 1 logs the click — the real
-        // popover (Profile / Account / Workspace / Trust /
-        // Preferences / Help / About) is Phase 2 work. Honest UI:
-        // no menu opens yet, but the log proves the click reached
-        // the handler.
-        cx.on_action(|_: &OpenIdentityMenu, _cx: &mut App| {
+        // right-end avatar button. Opens the `ato-identity` system
+        // capsule. The popover renders an honest Phase-1 surface:
+        // Store / Settings rows are live (hand off to the existing
+        // system capsules), while Profile / Account / Workspace /
+        // Trust rows are visibly disabled with "近日公開" pills.
+        cx.on_action(|_: &OpenIdentityMenu, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            tracing::info!(
-                "OpenIdentityMenu (Phase 1 stub — popover with Profile / \
-                 Account / Workspace / Trust lands in Phase 2)"
-            );
+            if let Err(err) = crate::window::identity_window::open_identity_window(cx) {
+                tracing::error!(error = %err, "OpenIdentityMenu: open_identity_window failed");
+            }
         });
 
         // Settings cog routing in Focus mode — Stages C+D:

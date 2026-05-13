@@ -83,6 +83,19 @@ const TABLE: &[SystemCapsuleManifest] = &[
             Capability::LaunchSystemCapsule,
         ],
     },
+    SystemCapsuleManifest {
+        id: SystemCapsuleId::AtoIdentity,
+        slug: "ato-identity",
+        display_name: "Identity",
+        // Account / Identity popover invoked from the Control Bar
+        // avatar button. Phase 1 menu items either close their own
+        // window (WindowsClose) or hand off to ato-store /
+        // ato-settings (LaunchSystemCapsule).
+        allowed_capabilities: &[
+            Capability::WindowsClose,
+            Capability::LaunchSystemCapsule,
+        ],
+    },
 ];
 
 pub fn lookup(id: SystemCapsuleId) -> &'static SystemCapsuleManifest {

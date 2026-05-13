@@ -16,7 +16,7 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
-    NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher,
+    NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher, OpenIdentityMenu,
     OpenStartWindow, OpenStoreWindow, ShowSettings,
 };
 use crate::automation::command::AutomationCommand;
@@ -106,6 +106,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             "ShowSettings" => {
                                                 window.dispatch_action(
                                                     Box::new(ShowSettings),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "OpenIdentityMenu" => {
+                                                window.dispatch_action(
+                                                    Box::new(OpenIdentityMenu),
                                                     cx,
                                                 );
                                                 Ok(())
