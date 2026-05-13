@@ -100,7 +100,12 @@ actions!(
         // Opens a fresh StartWindow — the standalone "compose a new
         // window" surface that the Card Switcher's new-window tile
         // routes to. Always spawns a new window (no slot reuse).
-        OpenStartWindow
+        OpenStartWindow,
+        // Identity / Account menu trigger — fired from the Control
+        // Bar's right-end Identity button. Phase 1 logs the click;
+        // Phase 2 will open a real popover (Profile / Account /
+        // Workspace / Trust / Preferences / Help / About).
+        OpenIdentityMenu
     ]
 );
 
@@ -468,6 +473,22 @@ pub fn run() {
         // Stage D. The Settings cog now dispatches `ShowSettings`
         // directly, which opens the `ato-settings` system capsule
         // in its own window.
+
+        // Identity / Account menu trigger from the Control Bar's
+        // right-end button. Phase 1 logs the click — the real
+        // popover (Profile / Account / Workspace / Trust /
+        // Preferences / Help / About) is Phase 2 work. Honest UI:
+        // no menu opens yet, but the log proves the click reached
+        // the handler.
+        cx.on_action(|_: &OpenIdentityMenu, _cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            tracing::info!(
+                "OpenIdentityMenu (Phase 1 stub — popover with Profile / \
+                 Account / Workspace / Trust lands in Phase 2)"
+            );
+        });
 
         // Settings cog routing in Focus mode — Stages C+D:
         // ShowSettings opens a standalone Wry-hosted Settings

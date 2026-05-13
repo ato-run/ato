@@ -21,7 +21,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    NavigateToUrl, OpenCardSwitcher, OpenStoreWindow, ShowSettings,
+    NavigateToUrl, OpenCardSwitcher, OpenIdentityMenu, OpenStoreWindow, ShowSettings,
 };
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
@@ -203,6 +203,40 @@ fn bar_pill(
             ActionTarget::Store,
             None,
         ))
+        // Right-end Identity / Account button. Phase 1 is a
+        // placeholder click target — the popover with
+        // Profile / Account / Workspace / Trust / Preferences /
+        // Help / About lands in Phase 2. Visually: a round chip
+        // with the user-silhouette glyph, indigo-tinted to
+        // distinguish it from the action-icon affordances on the
+        // left without competing with the URL pill's accent.
+        .child(identity_button())
+}
+
+fn identity_button() -> impl IntoElement {
+    div()
+        .id("identity")
+        .w(px(36.0))
+        .h(px(36.0))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(0xeef2ff))
+        .border_1()
+        .border_color(rgb(0xe0e7ff))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(0xe0e7ff)).border_color(rgb(0xc7d2fe)))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.dispatch_action(Box::new(OpenIdentityMenu), cx);
+        })
+        .child(
+            svg()
+                .path(SharedString::from("icons/identity.svg"))
+                .size(px(18.0))
+                .text_color(rgb(0x4f46e5)),
+        )
 }
 
 #[derive(Copy, Clone)]
