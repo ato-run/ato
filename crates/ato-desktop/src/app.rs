@@ -454,18 +454,18 @@ pub fn run() {
                 );
                 return;
             }
-            // Spawn with a CapsuleHandle route so the AppWindow's title
-            // block renders the capsule label ("WasedaP2P") rather than
-            // a host URL. Mirrors the reference mockup where the focus
-            // is a capsule, not a generic web page.
+            // Go through the consent wizard so the full boot flow is
+            // exercised end-to-end from the keyboard shortcut.
             let route = crate::state::GuestRoute::CapsuleHandle {
                 handle: "github.com/Koh0920/WasedaP2P".to_string(),
                 label: "WasedaP2P".to_string(),
             };
-            tracing::info!("calling open_app_window");
-            match crate::window::open_app_window(cx, route) {
-                Ok(_) => tracing::info!("open_app_window returned Ok"),
-                Err(err) => tracing::error!(error = %err, "open_app_window failed"),
+            tracing::info!("calling open_consent_window_for_route");
+            match crate::window::launch_window::open_consent_window_for_route(cx, route) {
+                Ok(()) => tracing::info!("open_consent_window_for_route returned Ok"),
+                Err(err) => {
+                    tracing::error!(error = %err, "open_consent_window_for_route failed")
+                }
             }
         });
 

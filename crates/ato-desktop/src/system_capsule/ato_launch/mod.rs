@@ -57,31 +57,58 @@ pub fn dispatch(
     match command {
         LaunchCommand::Approve { handle } => {
             tracing::info!(target_handle = %handle, "ato_launch: user approved");
-            // Close the consent wizard first so the AppWindow and boot
-            // wizard take focus on top of a clean stack.
+            // Close the consent wizard so the boot wizard takes focus.
             let _ = host.update(cx, |_, window, _| window.remove_window());
 
-            // Consume the pending launch target. If the wizard was
-            // opened via the real NavigateToUrl path, this holds the
-            // GuestRoute to spawn. If the wizard was opened standalone
-            // via MCP for AODD, there is no pending target — we log
-            // and skip the AppWindow spawn (honest no-op).
             let pending = cx
                 .try_global::<crate::window::launch_window::PendingLaunchTarget>()
                 .and_then(|g| g.0.clone());
             cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
 
             if let Some(route) = pending {
-                if let Err(err) = crate::window::open_app_window(cx, route.clone()) {
-                    tracing::error!(error = %err, ?route, "ato_launch: open_app_window failed after approve");
-                }
-                // Launch-ceremony overlay. The boot wizard's step
-                // animation is decorative (Phase 1). Phase 2 will drive
-                // it from real orchestrator events and auto-close on
-                // "ready".
-                if let Err(err) = crate::window::launch_window::open_boot_window(cx) {
-                    tracing::error!(error = %err, "ato_launch: open_boot_window failed after approve");
-                }
+                // Open boot wizard FIRST so there is visible progress
+                // feedback before the background thread even starts.
+                let boot_handle =
+                    match crate::window::launch_window::open_boot_window(cx) {
+                        Ok(h) => Some(h),
+                        Err(err) => {
+                            tracing::error!(
+                                error = %err,
+                                "ato_launch: open_boot_window failed after approve"
+                            );
+                            None
+                        }
+                    };
+
+                // Open the destination AppWindow SECOND. AppCapsuleShell
+                // is created inside and immediately starts the background
+                // launch thread.
+                let app_handle = match crate::window::open_app_window(cx, route.clone()) {
+                    Ok(h) => Some(h),
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            ?route,
+                            "ato_launch: open_app_window failed after approve"
+                        );
+                        // Boot wizard is already open with no app to back it;
+                        // close it immediately to avoid an orphaned overlay.
+                        if let Some(bh) = boot_handle {
+                            let _ = bh.update(cx, |_, window, _| window.remove_window());
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // Register both handles in the global slot so AbortBoot and
+                // AppCapsuleShell's polling task can close them.
+                //
+                // GPUI is single-threaded here, so this set is guaranteed
+                // to happen before the polling task's first tick.
+                cx.set_global(crate::window::launch_window::BootWindowSlot {
+                    boot_window: boot_handle,
+                    app_window: app_handle,
+                });
             } else {
                 tracing::info!(
                     "ato_launch: approve from MCP/standalone (no pending target) — wizard closed, no AppWindow spawned"
@@ -94,10 +121,24 @@ pub fn dispatch(
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         LaunchCommand::AbortBoot => {
-            tracing::info!(
-                "ato_launch: user aborted boot — Phase 2 will signal the orchestrator to stop the in-flight session"
-            );
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+            tracing::info!("ato_launch: user aborted boot — closing both windows");
+
+            // Read and clear the slot atomically within this GPUI turn.
+            let slot = cx
+                .try_global::<crate::window::launch_window::BootWindowSlot>()
+                .cloned()
+                .unwrap_or_default();
+            cx.set_global(crate::window::launch_window::BootWindowSlot::default());
+
+            // Close the boot wizard (may be `host` itself or a sibling).
+            if let Some(boot) = slot.boot_window {
+                let _ = boot.update(cx, |_, window, _| window.remove_window());
+            }
+            // Close the AppWindow. GPUI drops AppCapsuleShell → its Drop
+            // sets abort_flag and stops any running session.
+            if let Some(app) = slot.app_window {
+                let _ = app.update(cx, |_, window, _| window.remove_window());
+            }
         }
     }
     Ok(())
