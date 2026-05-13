@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Web Viewer</title>
+<!--
+  ato-web-viewer system capsule — Phase-1 stub.
+
+  In R42 the WebLinkView's tab strip + chrome row (back / forward /
+  reload / URL pill / menu) are rendered as GPUI native elements
+  above the Wry tab WebViews. Stage D defines the system-capsule
+  identity (slug, manifest allowlist, command vocabulary, IPC
+  envelope shape) so future migration work can replace the GPUI
+  chrome with HTML served from this file. The migration is
+  non-trivial because each chrome control must drive the specific
+  active-tab WebView's `evaluate_script(...)`, so the broker needs
+  per-window access to `WebLinkViewShell` — that plumbing is a
+  separate iteration.
+
+  Today the GPUI chrome strip in `web_link_view.rs` remains the
+  visible surface. Once the broker → WebLinkView path is wired,
+  this file will host the real tab strip + nav buttons + URL bar,
+  and the IPC envelope will look like:
+
+    { capsule: "ato-web-viewer",
+      command: { kind: "back" } }
+    { capsule: "ato-web-viewer",
+      command: { kind: "navigate", url: "https://..." } }
+
+  The matching command vocabulary already exists in
+  `crate::system_capsule::ato_web_viewer::WebViewerCommand`.
+-->
+</head>
+<body>
+<p style="font-family: system-ui; color: #71717a; padding: 24px;">
+  ato-web-viewer placeholder. Chrome rendering migrates from
+  <code>web_link_view.rs</code> in a follow-up iteration.
+</p>
+</body>
+</html>

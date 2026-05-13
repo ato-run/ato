@@ -1,0 +1,76 @@
+usecase: "Card Switcher shows live cards bound to AppWindowRegistry MRU rather than three hardcoded placeholders"
+actor: "Autonomous Claude Operator using host_dispatch_action over the Focus-mode automation socket (newly added in this round)"
+goal: "Open N AppWindows via the socket, invoke Card Switcher, see N cards reflecting registry contents in MRU order"
+entry_point: "Hermetic Focus mode startup (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Removing entries on AppWindow close (deferred — registry grows monotonically for now)"
+  - "WKWebView snapshots inside cards (deferred to per-window WebViewManager migration)"
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Register `state::AppWindowRegistry` as `gpui::Global` from `window/mod.rs`. impl outside state/ keeps the state crate free of GPUI deps."
+    observation: "Compiles. `cx.global::<AppWindowRegistry>()` becomes usable from any GPUI context."
+
+  - action: "Set the global on App boot (`app.rs::run`) with `cx.set_global(AppWindowRegistry::default())`"
+    observation: "Both Focus and Legacy modes initialise the registry; only Focus mode populates it."
+
+  - action: "Have `window::open_app_window` push onto the registry before opening the GPUI window"
+    observation: "Each spawned AppWindow gets a fresh AppWindowId. Registry grows in spawn order."
+
+  - action: "Rewrite `card_switcher::open_card_switcher_window` to read `mru_order()` at spawn time and pass a `Vec<CardEntry>` snapshot to the renderer"
+    observation: "Each entry carries (title, subtitle) derived from the AppWindow's GuestRoute. First card gets an active accent (indigo border); rest get neutral border. Empty-state card when registry is empty."
+
+  - action: "FIRST AODD ATTEMPT: launch Focus mode, dispatch host_dispatch_action OpenAppWindowExperiment over MCP"
+    observation: "MCP returned `no ato-desktop instance is running (no socket at /tmp/ato-aodd/ato-home/run/ato-desktop.sock)`. Investigation: Focus mode skips DesktopShell, which is what owns WebViewManager — which is what calls `AutomationHost::start()`. The socket never starts in Focus mode."
+    stuck_at: "Focus mode lacks the automation socket entry point"
+
+  - action: "FIXER pivot: build `window/focus_dispatcher.rs` — owns its own AutomationHost, spawns a foreground polling task that drains pending requests and routes `HostDispatchAction` items to the AppWindow via `app_handle.update(cx, |.., window, cx| window.dispatch_action(...))`. Non-host commands return an explicit `not supported in Focus mode` error so callers never silently hang."
+    observation: "Compiles after threading the right type through AsyncApp::update (which returns R directly, not Result<R>). Log line `Focus-mode automation dispatcher started` appears alongside `automation socket listening` on boot."
+
+  - action: "RETRY: dispatch second OpenAppWindowExperiment, then OpenCardSwitcher, screenshot"
+    observation: |
+      Log shows the dispatcher routing both actions:
+        focus dispatcher routes action action=OpenAppWindowExperiment
+        ...
+        focus dispatcher routes action action=OpenCardSwitcher
+      Screenshot evidence/mru-2-cards.png: Card Switcher overlay shows
+      TWO cards (not three hardcoded), both labelled WasedaP2P (same
+      route used twice for the demo). The most-recent card (left) is
+      bordered indigo to mark it as active; the older card (right) is
+      bordered grey. Empty regions of the overlay show the underlying
+      Focus surface and editor backdrop through the 70% black
+      translucency.
+
+agent_observation:
+  user_visible_problem: |
+    None. Card Switcher is now a live view onto AppWindowRegistry. The
+    UX assumption "the agent (or human) sees what is actually open"
+    holds. The R3-remaining-friction item "Card switcher cards are
+    hardcoded" is closed.
+
+  likely_cause: "n/a — the implementation matches the redesign plan."
+
+  suggested_fix:
+    - "Already shipped: AppWindowRegistry as gpui::Global, populate-on-spawn in open_app_window, CardSwitcher reads mru_order, focus_dispatcher routes host_dispatch_action over the Focus-mode automation socket."
+    - "Next data step (deferred): remove AppWindow entries on close. Today the registry only grows — closing an AppWindow leaves a stale entry. Hook `cx.on_window_closed` to call `AppWindowRegistry::close(id)`."
+    - "Next UX step (deferred): real WKWebView snapshots in each card via `WKWebView.takeSnapshotWithConfiguration:` once per-window WebViewManager migration lands."
+    - "Architectural cleanup (deferred): the Focus dispatcher creates its OWN AutomationHost; the Legacy dispatcher in WebViewManager creates ANOTHER. They share the same socket discovery file. Eventually these should be one host per process owned by `App`, with consumers (Legacy WebViewManager / Focus dispatcher) attaching to it. Today only one of the two paths is ever active so the duplication is invisible."
+
+evidence:
+  - mru-2-cards.png
+  - desktop-log-excerpt: |
+      ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+      addChildWindow attached Control Bar to AppWindow
+      Focus View AppWindow opened at startup
+      automation socket listening socket=/tmp/ato-aodd/ato-home/run/ato-desktop-65005.sock
+      Focus-mode automation dispatcher started
+      focus dispatcher routes action action=OpenAppWindowExperiment
+      OpenAppWindowExperiment handler entered
+      calling open_app_window
+      addChildWindow attached Control Bar to AppWindow
+      open_app_window returned Ok
+      focus dispatcher routes action action=OpenCardSwitcher
+
+status: "fixed"

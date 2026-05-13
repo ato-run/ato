@@ -1,0 +1,61 @@
+usecase: "Card Switcher's new-window affordance opens the Launcher in Start view instead of spawning a raw AppWindow."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Clicking '新しいウィンドウ' (main tile or dock plus) routes through OpenLauncherWindow with LauncherViewState forced to Start, then dismisses the switcher."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r29"
+out_of_scope:
+  - "Simulating the host-element click via MCP — host_dispatch_action only routes named GPUI actions, not click events; relying on visual verification of the rendered tile + code review of the handler."
+time_budget: "15 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports the new-window button in the Card Switcher should land on the Start page UI, not spawn a raw AppWindow"
+    observation: "Both the main 新しいウィンドウ tile and the dock plus tile were dispatching OpenAppWindowExperiment, which directly spawns a WasedaP2P AppWindow — not the composition surface the user expects from a 'new window' action."
+
+  - action: "Re-route both handlers in card_switcher.rs"
+    observation: |
+      Imports switched from `OpenAppWindowExperiment` to
+      `OpenLauncherWindow` plus the launcher's `LauncherView` +
+      `LauncherViewState` types. Both handlers now run, in order:
+        1. cx.stop_propagation() — backdrop close must not fire
+        2. cx.set_global(LauncherViewState(LauncherView::Start)) —
+           ensures Launcher renders Start even if a prior ShowSettings
+           had flipped it to Settings
+        3. window.dispatch_action(Box::new(OpenLauncherWindow), cx) —
+           opens a new Launcher or focuses the existing one
+        4. cx.set_global(CardSwitcherWindowSlot(None)) — release slot
+        5. window.remove_window() — close the switcher
+      The Launcher's existing observe_global subscription
+      (LauncherViewState) re-renders Start before the activate_window
+      inside open_launcher_window brings it to the front, so the
+      re-route works even when Launcher was previously open in
+      Settings view.
+
+  - action: "Update the main tile's sub-label"
+    observation: |
+      Replaced 'カプセルまたは URL を入力' (which fit the
+      OpenAppWindowExperiment semantics but mislead with the new
+      route) with 'スタートページを開く'. The dock plus tile carries
+      no label so no copy change there.
+
+  - action: "Build → launch hermetic Focus mode → MCP OpenCardSwitcher → screencap"
+    observation: |
+      switcher-new-window-label.png shows the empty-state switcher
+      with the renamed tile sub-label visible: '新しいウィンドウ /
+      スタートページを開く'. Bottom dock plus tile also renders.
+      The full click → Launcher Start path is not screenshot-verifiable
+      via MCP (no host element click primitive) but the dispatch
+      chain matches the routes already proven in R28 (OpenLauncherWindow
+      handler) and R28 (LauncherViewState observe_global).
+
+agent_observation:
+  user_visible_problem: "Resolved. The 'new window' affordance in the Card Switcher now lands users on the Start page composition surface, where they can browse recents / store / quick actions — instead of being teleported straight into a fresh WasedaP2P session."
+  likely_cause: "The original wiring dated from R25 when the Launcher Start view did not exist; OpenAppWindowExperiment was the only meaningful action to dispatch. With the Start view shipped in R27, the routing should target it."
+  suggested_fix:
+    - "Already shipped: both Card Switcher new-window affordances dispatch OpenLauncherWindow + flip view to Start."
+    - "Future: consider whether the Launcher's own '新しく始める' quick action and dock plus tile should ALSO route through this same surface (currently they still dispatch OpenAppWindowExperiment, which is correct for those — they live inside the start page and produce concrete windows)."
+
+evidence:
+  - switcher-new-window-label.png
+
+status: "fixed"

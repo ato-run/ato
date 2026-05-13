@@ -1,0 +1,60 @@
+usecase: "The Card Switcher icon on the Control Bar should toggle (click again to close) rather than stack overlays"
+actor: "Autonomous Claude Operator via Focus-mode MCP socket — dispatching `OpenCardSwitcher` three times in a row to verify open / close / re-open"
+goal: "Three sequential icon clicks produce open → close → open; only one Card Switcher window exists at a time"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Card click → 'switch to this AppWindow' wiring (still placeholder stop_propagation)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: every Card Switcher icon click stacks a new overlay; the icon is supposed to be a toggle"
+    observation: "`open_card_switcher_window` unconditionally called `cx.open_window`. Multiple invocations layered overlays on top of one another."
+    stuck_at: "Icon click always opens, never closes"
+
+  - action: "Add `CardSwitcherWindowSlot(Option<AnyWindowHandle>)` as a gpui::Global and seed it in `app::run`"
+    observation: "Persistent process-lifetime tracking slot for whichever switcher window is currently open."
+
+  - action: "Rewrite `open_card_switcher_window` as a toggle"
+    observation: |
+      If the slot contains a handle:
+        - call `handle.update(cx, |_, window, _| window.remove_window())`
+        - clear the slot
+        - if the update succeeded, return early (toggle-off)
+        - if the handle was stale (window already gone via backdrop /
+          Escape), fall through and open a fresh overlay
+      Otherwise: open a new window and stash the handle in the slot.
+
+  - action: "Make backdrop dismiss handlers clear the slot"
+    observation: |
+      `on_mouse_down` and `on_key_down` (Escape branch) now both call
+      `cx.set_global(CardSwitcherWindowSlot(None))` before
+      `window.remove_window()`. The next icon click sees an empty slot
+      and opens cleanly.
+
+  - action: "AODD: dispatch host_dispatch_action OpenCardSwitcher three times with screenshots between"
+    observation: |
+      - call-1-open.png: Card Switcher overlay rendered, WasedaP2P
+        card centred on the 70%-black backdrop.
+      - call-2-close.png: overlay gone; Control Bar + AppWindow
+        dashboard visible. Toggle-off worked.
+      - call-3-reopen.png: overlay back. Slot was cleared by toggle-
+        off and the third call re-opened cleanly.
+      Desktop log shows three sequential `focus dispatcher routes
+      action action=OpenCardSwitcher` lines with the toggle behaviour
+      happening in-between.
+
+agent_observation:
+  user_visible_problem: "Resolved. The switcher icon now reads as a stateful toggle: one window max at a time."
+  likely_cause: "Initial scaffolding shipped without tracking — `open_card_switcher_window` was always-open."
+  suggested_fix:
+    - "Already shipped: global slot, toggle in `open_card_switcher_window`, slot clear in dismiss handlers, slot seed in `app::run`."
+    - "Future: when the user closes the bar window itself (the only path that does not currently update the slot), the next icon click sees a stale handle and falls through to open a fresh overlay. Functionally correct but logs an `handle.update` failure. Adding a per-window on_close hook to clear the slot would be cleaner."
+
+evidence:
+  - call-1-open.png
+  - call-2-close.png
+  - call-3-reopen.png
+
+status: "fixed"

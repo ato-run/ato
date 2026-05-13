@@ -1,0 +1,93 @@
+usecase: "Control Bar Card Switcher badge counts every user-facing content window — Store, StartWindow, AppWindow, Launcher — not just AppWindows."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Badge value tracks the live count of all content windows. Excludes chrome (Control Bar, Card Switcher overlay)."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r31"
+out_of_scope:
+  - "Card Switcher MRU cards still surface only AppWindows (AppWindowRegistry is unchanged) — extending cards to Store/StartWindow/Launcher is a separate iteration."
+  - "Persisting OpenContentWindows across restarts."
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: Store windows and new windows (StartWindow) are not counted in the window-list badge"
+    observation: |
+      Root cause: badge code in `control_bar.rs` reads
+      `cx.global::<AppWindowRegistry>().len()`. AppWindowRegistry is
+      AppWindow-only — Store / StartWindow / Launcher have their own
+      single-slot globals (StoreWindowSlot, etc.) and never feed into
+      any cross-window counter.
+    stuck_at: "Badge sourced from AppWindow-only registry"
+
+  - action: "Introduce `OpenContentWindows: HashSet<u64>` global in `state/app_window.rs`"
+    observation: |
+      Single-purpose set keyed by GPUI WindowId. Re-exported from
+      `state::mod` and given a `gpui::Global` impl in `window::mod`.
+      Initialised at app startup alongside AppWindowRegistry.
+
+  - action: "Register at every content window spawn site"
+    observation: |
+      - orchestrator.rs: after AppWindow's `cx.open_window`, calls
+        `cx.global_mut::<OpenContentWindows>().insert(...)` using the
+        same `gpui_window_id` already stamped into the AppWindow
+        registry entry.
+      - store.rs / start_window.rs / launcher.rs: insert
+        `handle.window_id().as_u64()` after `cx.open_window` returns.
+      Control Bar and Card Switcher overlay deliberately do NOT
+      register so they are excluded from the badge count.
+
+  - action: "Add eviction in `app::on_window_closed`"
+    observation: |
+      Single call `cx.global_mut::<OpenContentWindows>().remove(closed_id)`
+      handles every close path uniformly — user red-traffic-light,
+      programmatic CloseAppWindow, and process shutdown. No-op for
+      windows that never registered (chrome), so we don't need to
+      pre-filter by window type.
+
+  - action: "Switch Control Bar's badge source"
+    observation: |
+      `observe_global::<AppWindowRegistry>` swapped for
+      `observe_global::<OpenContentWindows>`. Render reads
+      `cx.global::<OpenContentWindows>().len()` for the badge value.
+      The AppWindowRegistry observer was the only AppWindowRegistry
+      consumer in control_bar.rs, so dropping it does not affect
+      anything else.
+
+  - action: "Build → launch hermetic Focus mode → screencap badge at boot"
+    observation: |
+      badge-initial-store-only.png shows badge='1' — Store opened
+      automatically at boot. Previously this would have been hidden
+      (count 0) because AppWindowRegistry was empty.
+
+  - action: "MCP dispatch OpenStartWindow → screencap"
+    observation: "badge-after-startwindow.png shows badge='2'. StartWindow successfully registered."
+
+  - action: "MCP dispatch OpenAppWindowExperiment → screencap"
+    observation: "badge-after-appwindow.png shows badge='3'. AppWindow registered (orchestrator path)."
+
+  - action: "MCP dispatch OpenLauncherWindow → screencap"
+    observation: "badge-after-launcher.png shows badge='4'. Launcher registered."
+
+  - action: "MCP dispatch CloseAppWindow → screencap"
+    observation: |
+      Desktop log: `content window evicted from open set on close
+      gpui_window_id=4294967298` (Store, per `Store window closed; slot
+      cleared` line that follows). badge-after-close.png shows
+      badge='3' — decrement verified via on_window_closed.
+
+agent_observation:
+  user_visible_problem: "Resolved. The badge now reflects every window the user has open as a content window — Store, StartWindow, AppWindow, Launcher — and decrements when any of them close. The previous behaviour (badge only counting AppWindows) was misleading because Store opens automatically at boot, so users always saw a count of '0' even when the Store window was right there."
+  likely_cause: "Badge was sourced from AppWindowRegistry, which is intentionally AppWindow-only (it drives Card Switcher MRU cards which today only show AppWindows). For the badge — a user-facing 'how many windows do I have open' counter — a broader set is needed."
+  suggested_fix:
+    - "Already shipped: OpenContentWindows global registered at every content-window spawn site + evicted in on_window_closed."
+    - "Future: extend Card Switcher MRU cards to include Store / StartWindow / Launcher so the badge count == card count."
+    - "Future: when Card Switcher cards land for these window types, route the card click to focus the corresponding window (raise via NSWindow makeKeyAndOrderFront)."
+
+evidence:
+  - badge-initial-store-only.png
+  - badge-after-startwindow.png
+  - badge-after-appwindow.png
+  - badge-after-launcher.png
+  - badge-after-close.png
+
+status: "fixed"

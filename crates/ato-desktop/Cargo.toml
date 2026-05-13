@@ -103,6 +103,11 @@ objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-quartz-core = "0.3.2"
 objc2-web-kit = "0.3.2"
+# `raw-window-handle` is already pulled in transitively (gpui, wry).
+# Declared as a direct dep here so `window/macos.rs` can call
+# `gpui::Window::window_handle()` to descend to NSWindow and wire
+# `addChildWindow:ordered:` for the Focus View Control Bar (#171).
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

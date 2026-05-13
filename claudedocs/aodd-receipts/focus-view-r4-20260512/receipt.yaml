@@ -1,0 +1,61 @@
+usecase: "Legacy DesktopShell and the redesigned Focus View are mutually exclusive surfaces selected at startup by ATO_DESKTOP_MULTI_WINDOW; no in-session command toggle"
+actor: "Autonomous Claude Operator running two hermetic ato-desktop instances (one per mode) and confirming each renders only its own surface"
+goal: "Launch with ATO_DESKTOP_MULTI_WINDOW=1 → Focus View AppWindow + Control Bar at startup, no legacy DesktopShell visible. Launch unset → legacy DesktopShell, no Focus surfaces."
+entry_point: "Two separate hermetic launches under /tmp/ato-aodd"
+out_of_scope:
+  - "Adding new keystroke bindings for the Focus mode (Cmd+Shift+N is removed; no in-session view toggle)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Edit app.rs::run to branch on `crate::window::is_multi_window_enabled()` at startup; Focus path calls `open_app_window` directly with the WasedaP2P CapsuleHandle; Legacy path opens the existing DesktopShell"
+    observation: "Single branch, two arms. Log lines `ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode` and `ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell` differentiate the runs."
+
+  - action: "Edit app.rs key bindings to drop `cmd-shift-n → OpenAppWindowExperiment`; comment explains the mode is now process-lifetime, not per-session"
+    observation: "Cmd-Shift-K (Launcher) and Cmd-Shift-P (Card Switcher) remain as in-Focus shortcuts because they are intra-mode navigation, not mode toggles. The OpenAppWindowExperiment action handler is retained but reachable only via host_dispatch_action — useful for AODD scripts that need to spawn additional Focus AppWindows."
+
+  - action: "Build, launch hermetic with ATO_DESKTOP_MULTI_WINDOW=1, screenshot"
+    observation: |
+      See mode-focus.png. AppWindow + Control Bar appear at startup with
+      no dispatch needed. The legacy DesktopShell is absent — the
+      backdrop shows the editor / desktop wallpaper directly behind the
+      Focus surfaces. Control Bar position, WasedaP2P title block and
+      mock dashboard are unchanged from R3. Desktop log shows:
+        ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+        Focus View AppWindow opened at startup
+
+  - action: "Kill, clean /tmp/ato-aodd, relaunch WITHOUT the env var, screenshot"
+    observation: |
+      See mode-legacy.png. Only the legacy DesktopShell appears: ato.run
+      Launcher v2 splash with `Search for capsules`, ollama/jupyter/claude
+      pill buttons, the 52px left rail, the top chrome with omnibar
+      `https://ato.run/`. No Control Bar, no AppWindow placeholder. Log:
+        ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell
+
+agent_observation:
+  user_visible_problem: |
+    None. The mode boundary that R3 left ambiguous (Focus View opens via
+    keystroke ON TOP of the legacy DesktopShell) is now clean. Each mode
+    is its own process lifetime, the env var picks which surface boots,
+    and there is no way to "leak" the other mode into the running
+    surface.
+
+  likely_cause: "n/a — this is the requested architecture, not a regression."
+
+  suggested_fix:
+    - "Already shipped: env-var-gated startup branch + cmd-shift-n binding removal."
+    - "Document the env var in ato-desktop/CLAUDE.md so contributors can find the switch (follow-up)."
+    - "When the Launcher migration (#170) lands, Focus mode startup should consult persisted window state — if none, open the Launcher window only; if present, restore the saved AppWindows. Today's hardcoded WasedaP2P seed is the dev/test default."
+
+evidence:
+  - mode-focus.png
+  - mode-legacy.png
+  - log-excerpts:
+      focus_mode: |
+        ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+        Focus View AppWindow opened at startup
+      legacy_mode: |
+        ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell
+
+status: "fixed"
