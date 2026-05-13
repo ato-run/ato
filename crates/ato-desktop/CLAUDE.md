@@ -96,3 +96,13 @@ For `GuestRoute::LocalCapsule`, `webview.rs` calls `orchestrator::resolve_and_st
 - GPUI の `Canvas` / 独自レンダー層でセルを描画。
 - ato-mcp に `terminal_write`, `terminal_read`, `terminal_resize`, `terminal_wait` ツールを追加。
 - 既存の `GuestRoute::Terminal` / bridge / orchestrator の PTY 経路との統合を再設計。
+
+---
+
+## Agent workflows
+
+- [`SKILL.md`](./SKILL.md) — Mockup HTML → GPUI component workflow. When the
+  user hands you HTML for a UI element, lower it with the external
+  [`gpui-html`](https://github.com/ato-run/gpui-html) CLI and port the
+  generated Rust skeleton into `src/ui/`. Do **not** add an HTML parser to
+  this crate or take a `gpui-html-core` dependency.
