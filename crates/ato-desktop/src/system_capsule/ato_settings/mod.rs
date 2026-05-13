@@ -1,30 +1,45 @@
 //! `ato-settings` system capsule — Settings UI.
 //!
-//! Stage A: stubs only. Stage C will port the GPUI
-//! `launcher::settings_content` tree into HTML served at
-//! `capsule://system/ato-settings/index.html`, and this dispatch
-//! module will gain real handlers.
-//!
-//! Phase 1 deliberately gates `SetToggle` as `Forbidden` — Phase 2
-//! adds a consent prompt before granting `SettingsWrite`.
+//! Provides real IPC handlers for the settings window. Commands:
+//! - `LoadSnapshot` — serialise the current config and push it to JS
+//! - `PatchGlobalSettings` — typed config mutation via `patch_config_for_capsule`
+//! - `RunGlobalAction` — reserved for future side-effect actions
+//! - `NavigateTab` — client-side navigation hint (no server state)
+//! - `Close` — close the host window
 
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
+use serde_json::Value;
 
+use crate::config::{load_config, save_config};
+use crate::settings::{patch_config_for_capsule, settings_snapshot_from_config};
 use crate::system_capsule::broker::{BrokerError, Capability};
+use crate::window::settings_window::ActiveSettingsShell;
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SettingsCommand {
-    Close,
-    /// Reserved for Stage C. Read-only navigation between settings
-    /// tabs (一般 / セキュリティ / ターミナル / …). Carries the
-    /// tab id as a string in Phase 1.
+    /// Reload the current config from disk and push the full snapshot to JS.
+    LoadSnapshot {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    /// Apply a typed patch to the config file.
+    PatchGlobalSettings {
+        #[serde(default)]
+        request_id: Option<String>,
+        patch: Value,
+    },
+    /// Reserved for future side-effect actions (e.g. clear_cache, sign_out).
+    RunGlobalAction {
+        #[serde(default)]
+        request_id: Option<String>,
+        action: String,
+    },
+    /// Navigate to a named tab — handled entirely in JS; Rust just logs.
     NavigateTab { tab: String },
-    /// Reserved for Stage C + Phase 2. Mutating a settings toggle
-    /// requires `SettingsWrite`, which is not in `ato-settings`'s
-    /// allowlist yet — every call returns `Forbidden` today.
-    SetToggle { key: String, value: bool },
+    /// Close the settings window.
+    Close,
 }
 
 impl SettingsCommand {
@@ -32,7 +47,9 @@ impl SettingsCommand {
         match self {
             SettingsCommand::Close => Capability::WindowsClose,
             SettingsCommand::NavigateTab { .. } => Capability::SettingsRead,
-            SettingsCommand::SetToggle { .. } => Capability::SettingsWrite,
+            SettingsCommand::LoadSnapshot { .. } => Capability::SettingsRead,
+            SettingsCommand::PatchGlobalSettings { .. } => Capability::SettingsWrite,
+            SettingsCommand::RunGlobalAction { .. } => Capability::SettingsWrite,
         }
     }
 }
@@ -47,24 +64,55 @@ pub fn dispatch(
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         SettingsCommand::NavigateTab { tab } => {
-            // Phase 1 stub. Stage C lands real tab routing via the
-            // ato-settings HTML + LauncherViewState integration.
-            tracing::info!(?tab, "ato_settings: NavigateTab (stub)");
-            let _ = cx;
+            tracing::debug!(?tab, "ato_settings: NavigateTab");
         }
-        SettingsCommand::SetToggle { key, value } => {
-            // This arm is unreachable in Phase 1 because the broker
-            // already rejected the call with `Forbidden` (no
-            // `SettingsWrite` in the manifest's allowlist). Kept
-            // for exhaustiveness so the surface compiles cleanly
-            // when Phase 2 adds the capability.
-            tracing::error!(
-                ?key,
-                ?value,
-                "ato_settings::SetToggle dispatched despite Forbidden — broker bug?"
-            );
-            let _ = (cx, host);
+        SettingsCommand::LoadSnapshot { request_id } => {
+            let config = load_config();
+            let snap = settings_snapshot_from_config(&config);
+            let response = serde_json::json!({
+                "ok": true,
+                "requestId": request_id,
+                "snapshot": snap,
+            });
+            push_to_settings_webview(cx, &response.to_string());
+        }
+        SettingsCommand::PatchGlobalSettings { request_id, patch } => {
+            let mut config = load_config();
+            let patch_resp = patch_config_for_capsule(&mut config, &patch, request_id.as_deref());
+            save_config(&config);
+            let snap = settings_snapshot_from_config(&config);
+            let mut response = patch_resp;
+            response["snapshot"] = snap;
+            push_to_settings_webview(cx, &response.to_string());
+        }
+        SettingsCommand::RunGlobalAction { request_id, action } => {
+            tracing::info!(?action, "ato_settings: RunGlobalAction (stub)");
+            let response = serde_json::json!({
+                "ok": false,
+                "requestId": request_id,
+                "error": format!("action '{}' is not implemented", action),
+            });
+            push_to_settings_webview(cx, &response.to_string());
         }
     }
     Ok(())
 }
+
+/// Deliver `payload_json` to the currently open settings window via
+/// `window.__ATO_SETTINGS_HYDRATE__`.
+fn push_to_settings_webview(cx: &mut App, payload_json: &str) {
+    let weak = cx
+        .try_global::<ActiveSettingsShell>()
+        .and_then(|g| g.0.clone());
+    let Some(weak) = weak else {
+        return;
+    };
+    let Some(entity) = weak.upgrade() else {
+        return;
+    };
+    let payload = payload_json.to_string();
+    entity.update(cx, |shell, _cx| {
+        shell.hydrate(&payload);
+    });
+}
+
