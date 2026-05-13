@@ -98,6 +98,12 @@ impl WebLinkViewShell {
                 InputEvent::Change => cx.notify(),
                 InputEvent::Focus => {
                     this.url_input_focused = true;
+                    // WKWebView may hold macOS first-responder status after the
+                    // user previously clicked web content. Reclaim it so that
+                    // GPUI's NSView receives keyDown: events again.
+                    if let Some(tab) = this.active_tab() {
+                        let _ = tab.webview.focus_parent();
+                    }
                 }
                 InputEvent::Blur => {
                     this.url_input_focused = false;
