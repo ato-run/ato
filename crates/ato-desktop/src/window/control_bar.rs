@@ -8,6 +8,7 @@
 //!   directly on the pill background; only the URL chip carries its
 //!   own light tint
 //! - URL text in muted zinc-grey rather than near-black
+//! TODO: add the avatar icon on the right end
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -20,7 +21,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    NavigateToUrl, OpenCardSwitcher, OpenLauncherWindow, OpenStoreWindow, ShowSettings,
+    NavigateToUrl, OpenCardSwitcher, OpenStoreWindow, ShowSettings,
 };
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
@@ -251,7 +252,9 @@ fn pill_button(
         .hover(|s| s.bg(rgb(0xf4f4f5)))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| match target {
             ActionTarget::Settings => {
-                window.dispatch_action(Box::new(OpenLauncherWindow), cx);
+                // Stage D: Launcher window retired. ShowSettings
+                // opens the ato-settings system capsule window
+                // directly — no Launcher round-trip needed.
                 window.dispatch_action(Box::new(ShowSettings), cx);
             }
             ActionTarget::Store => {
@@ -363,32 +366,32 @@ fn url_pill(omnibar: Entity<InputState>, is_capsule: bool) -> impl IntoElement {
         )
 }
 
-fn info_dots() -> impl IntoElement {
-    // Two small ⓘ info dots tucked into the right edge of the pill,
-    // matching the reference. Decorative for now — future iteration
-    // can wire one to "what's running here?" and the other to a
-    // help overlay.
-    let dot = || {
-        div()
-            .w(px(20.0))
-            .h(px(20.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                Icon::new(IconName::Info)
-                    .size(px(13.0))
-                    .text_color(rgb(0xa1a1aa)),
-            )
-    };
-    div()
-        .px(px(4.0))
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .child(dot())
-        .child(dot())
-}
+// fn info_dots() -> impl IntoElement {
+//     // Two small ⓘ info dots tucked into the right edge of the pill,
+//     // matching the reference. Decorative for now — future iteration
+//     // can wire one to "what's running here?" and the other to a
+//     // help overlay.
+//     let dot = || {
+//         div()
+//             .w(px(20.0))
+//             .h(px(20.0))
+//             .flex()
+//             .items_center()
+//             .justify_center()
+//             .child(
+//                 Icon::new(IconName::Info)
+//                     .size(px(13.0))
+//                     .text_color(rgb(0xa1a1aa)),
+//             )
+//     };
+//     div()
+//         .px(px(4.0))
+//         .flex()
+//         .items_center()
+//         .gap(px(2.0))
+//         .child(dot())
+//         .child(dot())
+// }
 
 /// Open the bar anchored above a parent app window's bounds.
 pub fn open_control_bar_window_at(

@@ -95,7 +95,7 @@ fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
     match kind {
         ContentWindowKind::Store => "store",
         ContentWindowKind::Start => "sparkle",
-        ContentWindowKind::Launcher => "panel",
+        ContentWindowKind::Settings => "panel",
         ContentWindowKind::AppWindow { .. } => {
             let lower = title.to_lowercase();
             if lower.contains("code") || lower.contains("term") || lower.contains("shell") {
@@ -170,7 +170,7 @@ fn kind_tag(kind: &ContentWindowKind) -> &'static str {
         ContentWindowKind::AppWindow { .. } => "AppWindow",
         ContentWindowKind::Store => "Store",
         ContentWindowKind::Start => "Start",
-        ContentWindowKind::Launcher => "Launcher",
+        ContentWindowKind::Settings => "Settings",
     }
 }
 

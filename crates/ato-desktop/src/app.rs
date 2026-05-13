@@ -90,11 +90,6 @@ actions!(
         // real content. The action is wired regardless of the flag,
         // but the handler is a no-op when the flag is off.
         OpenAppWindowExperiment,
-        // #170 — focuses or opens the Launcher window. Gated on the
-        // same multi-window flag; no-op when off. Will replace the
-        // legacy in-shell settings/store invocations once the rename
-        // portion of #170 lands.
-        OpenLauncherWindow,
         // #173 — opens the Card Switcher overlay window.
         OpenCardSwitcher,
         // Opens the Store window — a Wry WebView pointed at
@@ -295,13 +290,11 @@ pub fn run() {
         // rather than stack overlays.
         cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
         // Slot tracking the currently-open Launcher window so the
-        // Control Bar's Settings button focuses the existing window
-        // on a 2nd+ click instead of spawning a new one.
-        cx.set_global(crate::window::launcher::LauncherWindowSlot::default());
-        cx.set_global(crate::window::launcher::LauncherViewState::default());
+        // Stage D retired the Launcher window — the focused
+        // settings cog now opens an `ato-settings` system capsule
+        // window directly. No slot/state global needed for it.
         // Slot tracking the currently-open Store window (Wry WebView
-        // on ato.run). Same focus-on-existing behaviour as the
-        // Launcher slot.
+        // on ato.run).
         cx.set_global(crate::window::store::StoreWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
@@ -344,11 +337,11 @@ pub fn run() {
             // `host_dispatch_action` for AODD scripts that need to
             // spawn an additional Focus AppWindow), but has no key
             // binding.
-            KeyBinding::new(
-                "cmd-shift-k",
-                OpenLauncherWindow,
-                Some("AtoDesktopShell"),
-            ),
+            // Stage D: cmd-shift-k previously opened the Launcher.
+            // The Launcher window has been retired. ShowSettings
+            // (cmd-,) now reaches the ato-settings system capsule
+            // directly; the StartWindow is reached via the Card
+            // Switcher's "+ 新しいウィンドウ" tile.
             // #173 — open the Card Switcher overlay window.
             // Provisional binding; will be augmented by gesture
             // invocation from the Control Bar (#174).
@@ -412,15 +405,9 @@ pub fn run() {
 
             // Clear singleton slots when their tracked window closes
             // so the next Settings / Store / switcher click opens a
-            // fresh one cleanly. Match by `WindowId` since the slots
-            // store the typed handle which derefs to AnyWindowHandle.
-            let launcher_slot = cx
-                .global::<crate::window::launcher::LauncherWindowSlot>()
-                .0;
-            if launcher_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
-                cx.set_global(crate::window::launcher::LauncherWindowSlot(None));
-                tracing::info!("Launcher window closed; slot cleared");
-            }
+            // fresh one cleanly. (The Launcher window was retired
+            // in Stage D of the system-capsule refactor; ato-settings
+            // is slot-free.)
             let switcher_slot = cx
                 .global::<crate::window::card_switcher::CardSwitcherWindowSlot>()
                 .0;
@@ -477,29 +464,17 @@ pub fn run() {
             }
         });
 
-        // #170 — open / focus the Launcher window. No-op when the
-        // multi-window flag is off; in that mode settings / store are
-        // still reached through the legacy `DesktopShell` chrome.
-        cx.on_action(|_: &OpenLauncherWindow, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
-                    "OpenLauncherWindow dispatched but multi-window flag is off"
-                );
-                return;
-            }
-            if let Err(err) = crate::window::open_launcher_window(cx) {
-                tracing::error!(error = %err, "failed to open launcher window");
-            }
-        });
+        // OpenLauncherWindow / open_launcher_window were retired in
+        // Stage D. The Settings cog now dispatches `ShowSettings`
+        // directly, which opens the `ato-settings` system capsule
+        // in its own window.
 
-        // Settings cog routing in Focus mode — Stage C:
-        // ShowSettings now opens a standalone Wry-hosted Settings
-        // window (the `ato-settings` system capsule) instead of
-        // flipping the Launcher's view-state. The Launcher's
-        // LauncherView::Settings GPUI tree is now dead code that
-        // Stage D will delete. The Control Bar's Settings cog still
-        // dispatches OpenLauncherWindow + ShowSettings; Stage D
-        // strips OpenLauncherWindow from that chain.
+        // Settings cog routing in Focus mode — Stages C+D:
+        // ShowSettings opens a standalone Wry-hosted Settings
+        // window (the `ato-settings` system capsule). The legacy
+        // Launcher window was retired in Stage D so the Control
+        // Bar dispatches ShowSettings as the sole action for the
+        // settings cog click.
         cx.on_action(|_: &ShowSettings, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 return;

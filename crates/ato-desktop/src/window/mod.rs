@@ -18,7 +18,9 @@ pub mod content_windows;
 pub mod control_bar;
 pub mod focus_dispatcher;
 pub mod gestures;
-pub mod launcher;
+// `pub mod launcher;` was removed in Stage D — the legacy Launcher
+// window is retired. Settings lives in `settings_window` as the
+// `ato-settings` system capsule.
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod orchestrator;
@@ -39,7 +41,6 @@ pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{
     open_control_bar_window, open_focus_control_bar, ControlBarShellPlaceholder,
 };
-pub use launcher::{open_launcher_window, LauncherShellPlaceholder};
 pub use orchestrator::{open_app_window, AppWindowShell};
 
 /// `ATO_DESKTOP_MULTI_WINDOW=1` opt-in flag. Defaults to **off** until

@@ -85,7 +85,7 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
         handle.window_id().as_u64(),
         ContentWindowEntry {
             handle: *handle,
-            kind: ContentWindowKind::Launcher, // Phase 1 reuses the Launcher kind for the badge / card visual; Stage D will introduce a dedicated Settings variant if needed.
+            kind: ContentWindowKind::Settings,
             title: gpui::SharedString::from("設定"),
             subtitle: gpui::SharedString::from("セキュリティ · ランタイム · ストア"),
             url: gpui::SharedString::from("ato://settings"),

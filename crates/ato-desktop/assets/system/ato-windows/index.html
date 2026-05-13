@@ -275,7 +275,7 @@
   .pv-start-list-icon { width: 6px; height: 6px; border-radius: 1.5px; }
   .pv-start-list-text { flex: 1; height: 2px; background: #e4e4e7; border-radius: 1px; }
 
-  /* Launcher — settings: left nav + main rows */
+  /* Settings (ato-settings) — left nav + main rows */
   .pv-launcher {
     width: 100%; height: 100%; padding: 9px;
     display: flex; gap: 7px;
@@ -465,7 +465,7 @@
       </div>`;
   }
 
-  function previewLauncher(accent) {
+  function previewSettings(accent) {
     return `
       <div class="pv-launcher" style="background:${withAlpha(accent, 0.08)}">
         <div class="pv-launcher-nav">
@@ -501,7 +501,7 @@
       case 'AppWindow': return previewAppWindow(accent, idx);
       case 'Store':     return previewStore(accent);
       case 'Start':     return previewStart(accent);
-      case 'Launcher':  return previewLauncher(accent);
+      case 'Settings':  return previewSettings(accent);
       default:          return `<div style="width:100%;height:100%;background:${withAlpha(accent,0.1)}"></div>`;
     }
   }

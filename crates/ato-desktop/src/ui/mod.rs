@@ -1857,9 +1857,9 @@ impl DesktopShell {
                         cx,
                     );
                 }
-                "OpenLauncherWindow" => {
-                    window.dispatch_action(Box::new(crate::app::OpenLauncherWindow), cx);
-                }
+                // "OpenLauncherWindow" was retired in Stage D of the
+                // system-capsule refactor — ShowSettings now reaches
+                // the ato-settings system capsule directly.
                 "OpenCardSwitcher" => {
                     window.dispatch_action(Box::new(crate::app::OpenCardSwitcher), cx);
                 }

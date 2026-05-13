@@ -16,7 +16,7 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
-    NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher, OpenLauncherWindow,
+    NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher,
     OpenStartWindow, OpenStoreWindow, ShowSettings,
 };
 use crate::automation::command::AutomationCommand;
@@ -86,13 +86,9 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 );
                                                 Ok(())
                                             }
-                                            "OpenLauncherWindow" => {
-                                                window.dispatch_action(
-                                                    Box::new(OpenLauncherWindow),
-                                                    cx,
-                                                );
-                                                Ok(())
-                                            }
+                                            // "OpenLauncherWindow" was retired in Stage D
+                                            // along with the Launcher window. Use
+                                            // `ShowSettings` to reach ato-settings instead.
                                             "OpenStoreWindow" => {
                                                 window.dispatch_action(
                                                     Box::new(OpenStoreWindow),

@@ -29,7 +29,10 @@ pub enum ContentWindowKind {
     AppWindow { route: GuestRoute },
     Store,
     Start,
-    Launcher,
+    /// `ato-settings` system capsule. Replaces the Phase-1 `Launcher`
+    /// variant — the legacy Launcher window was retired in Stage D
+    /// of the system-capsule refactor.
+    Settings,
 }
 
 #[derive(Clone, Debug)]
