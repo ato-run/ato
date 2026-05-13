@@ -280,6 +280,11 @@ fn dispatch(cx: &mut App, host: AnyWindowHandle, action: BridgeAction) {
                 .get(window_id)
                 .map(|e| e.handle);
             if let Some(target) = target {
+                // Bump MRU so the Control Bar's omnibar reflects this
+                // window's URL after the activate. `focus()` only
+                // updates `last_focused_at`; the activate_window call
+                // below does the actual `makeKeyAndOrderFront:`.
+                cx.global_mut::<OpenContentWindows>().focus(window_id);
                 let _ = target.update(cx, |_, window, _| window.activate_window());
             }
             cx.set_global(CardSwitcherWindowSlot(None));

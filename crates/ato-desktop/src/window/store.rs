@@ -108,6 +108,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             kind: ContentWindowKind::Store,
             title: gpui::SharedString::from("ストア"),
             subtitle: gpui::SharedString::from("ato.run"),
+            url: gpui::SharedString::from(STORE_URL),
             last_focused_at: std::time::Instant::now(),
         },
     );

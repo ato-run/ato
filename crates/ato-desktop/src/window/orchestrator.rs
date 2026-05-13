@@ -51,6 +51,23 @@ fn short_title_from_route(route: &GuestRoute) -> String {
     }
 }
 
+/// Canonical URL string for the Control Bar URL field when this
+/// AppWindow is the MRU front entry. ExternalUrl uses the underlying
+/// https/http URL verbatim; CapsuleHandle uses `capsule://<handle>`;
+/// CapsuleUrl uses `capsule://<handle>/<url>`. Future routes get a
+/// sensible scheme prefix.
+fn url_for_route(route: &GuestRoute) -> SharedString {
+    use crate::state::GuestRoute as R;
+    let s = match route {
+        R::ExternalUrl(url) => url.as_str().to_string(),
+        R::CapsuleHandle { handle, .. } => format!("capsule://{handle}"),
+        R::CapsuleUrl { handle, url, .. } => format!("capsule://{handle}/{url}"),
+        R::Capsule { session, .. } => format!("capsule://{session}/"),
+        R::Terminal { session_id } => format!("terminal://{session_id}/"),
+    };
+    SharedString::from(s)
+}
+
 /// (title, subtitle) pair used by the cross-window content registry
 /// to render Card Switcher entries for AppWindows. Subtitle is the
 /// handle / URL / session ID so users can disambiguate two cards with
@@ -636,8 +653,25 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
 
     let route_for_view = route.clone();
     let app_handle = cx.open_window(options, move |window, cx| {
-        let shell = cx.new(|_cx| AppWindowShell::new(&route_for_view));
-        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+        // Branch on route kind:
+        //   - ExternalUrl → WebLinkView (Wry WebView + browser
+        //     chrome). This is the Desktop's built-in browser view
+        //     for https links — NOT a capsule.
+        //   - Everything else → AppWindowShell hero placeholder for
+        //     now. Real capsule runtime will replace this once the
+        //     per-window WebViewManager migration lands.
+        match route_for_view.clone() {
+            crate::state::GuestRoute::ExternalUrl(url) => {
+                let shell = cx.new(|cx| {
+                    crate::window::web_link_view::WebLinkViewShell::new(url, window, cx)
+                });
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+            }
+            _ => {
+                let shell = cx.new(|_cx| AppWindowShell::new(&route_for_view));
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+            }
+        }
     })?;
 
     // Stamp the GPUI WindowId on the registry entry so
@@ -658,6 +692,7 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         ContentWindowEntry, ContentWindowKind, OpenContentWindows,
     };
     let (entry_title, entry_subtitle) = title_subtitle_for_route(&route);
+    let entry_url = url_for_route(&route);
     cx.global_mut::<OpenContentWindows>().insert(
         gpui_window_id,
         ContentWindowEntry {
@@ -665,6 +700,7 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
             kind: ContentWindowKind::AppWindow { route: route.clone() },
             title: entry_title,
             subtitle: entry_subtitle,
+            url: entry_url,
             last_focused_at: std::time::Instant::now(),
         },
     );

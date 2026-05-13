@@ -83,6 +83,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             kind: ContentWindowKind::Start,
             title: gpui::SharedString::from("新しいウィンドウ"),
             subtitle: gpui::SharedString::from("カプセル / URL / コマンドから始める"),
+            url: gpui::SharedString::from("ato://start"),
             last_focused_at: std::time::Instant::now(),
         },
     );

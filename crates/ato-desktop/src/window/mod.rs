@@ -25,6 +25,7 @@ pub mod orchestrator;
 pub mod start_window;
 pub mod store;
 pub mod web_bridge;
+pub mod web_link_view;
 
 // Make the pure-data `AppWindowRegistry` from `state` accessible
 // across windows via `cx.global::<AppWindowRegistry>()`. The impl

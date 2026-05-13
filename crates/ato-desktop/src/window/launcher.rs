@@ -1105,6 +1105,7 @@ pub fn open_launcher_window(cx: &mut App) -> Result<()> {
             kind: ContentWindowKind::Launcher,
             title: gpui::SharedString::from("Launcher"),
             subtitle: gpui::SharedString::from("設定 · 検索 · ストア"),
+            url: gpui::SharedString::from("ato://launcher"),
             last_focused_at: std::time::Instant::now(),
         },
     );

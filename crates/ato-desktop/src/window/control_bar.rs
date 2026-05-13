@@ -41,6 +41,10 @@ pub struct ControlBarShellPlaceholder {
     /// PressEnter and read the value at render time for the icon
     /// scheme decision.
     omnibar: Entity<InputState>,
+    /// Track focus so the MRU → omnibar sync does NOT clobber the
+    /// user's in-progress typing. Flipped by the InputEvent::Focus
+    /// / InputEvent::Blur subscription.
+    omnibar_focused: bool,
 }
 
 impl ControlBarShellPlaceholder {
@@ -65,7 +69,7 @@ impl ControlBarShellPlaceholder {
         cx.subscribe_in(
             &omnibar,
             window,
-            |_this: &mut Self, omnibar, event: &InputEvent, window, cx| match event {
+            |this: &mut Self, omnibar, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { .. } => {
                     let url = omnibar.read(cx).value().to_string();
                     if !url.is_empty() {
@@ -75,7 +79,13 @@ impl ControlBarShellPlaceholder {
                 InputEvent::Change => {
                     cx.notify();
                 }
-                _ => {}
+                InputEvent::Focus => {
+                    this.omnibar_focused = true;
+                }
+                InputEvent::Blur => {
+                    this.omnibar_focused = false;
+                    cx.notify();
+                }
             },
         )
         .detach();
@@ -87,7 +97,10 @@ impl ControlBarShellPlaceholder {
         })
         .detach();
 
-        Self { omnibar }
+        Self {
+            omnibar,
+            omnibar_focused: false,
+        }
     }
 }
 
@@ -106,10 +119,33 @@ fn display_url_from_route(route: &GuestRoute) -> String {
 impl Render for ControlBarShellPlaceholder {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
+        window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let window_count = cx.global::<OpenContentWindows>().len();
+
+        // Mirror the MRU-front window's URL into the omnibar while
+        // the user is NOT focused on the field. Typing wins until
+        // Blur. Comparing against the current value avoids triggering
+        // a needless set_value on every render.
+        if !self.omnibar_focused {
+            let target = cx
+                .global::<OpenContentWindows>()
+                .mru_order()
+                .into_iter()
+                .next()
+                .map(|e| e.url.clone());
+            if let Some(target) = target {
+                let current: SharedString =
+                    self.omnibar.read(cx).value().to_string().into();
+                if current != target {
+                    self.omnibar.update(cx, |state, cx| {
+                        state.set_value(target.clone(), window, cx);
+                    });
+                }
+            }
+        }
+
         // Read the current input value so the leading icon swaps
         // between Globe and the custom capsule glyph based on the
         // typed scheme. Cheap read — no clone of InputState.
