@@ -6,10 +6,12 @@
 //! but the command surface here stays stable.
 
 use gpui::{AnyWindowHandle, App};
+use serde::Deserialize;
 
 use crate::system_capsule::broker::{BrokerError, Capability};
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoreCommand {
     /// Open / focus the Store window. Mirrors what the
     /// StartWindow's `OpenStore` IPC action did pre-refactor.

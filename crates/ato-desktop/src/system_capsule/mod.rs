@@ -31,6 +31,7 @@ pub mod ato_store;
 pub mod ato_web_viewer;
 pub mod ato_windows;
 pub mod broker;
+pub mod ipc;
 pub mod manifest;
 
 pub use broker::{

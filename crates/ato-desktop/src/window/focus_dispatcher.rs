@@ -156,6 +156,43 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 );
                                                 Ok(())
                                             }
+                                            // Stage B AODD negative test:
+                                            // ato-windows requests SettingsWrite.
+                                            // Per the inline manifest, ato-windows
+                                            // does NOT have SettingsWrite — the
+                                            // broker MUST reject with Forbidden
+                                            // and the desktop state MUST NOT
+                                            // mutate. Asserted via the receipt by
+                                            // grepping for `Forbidden` in the
+                                            // log.
+                                            "BrokerNegativeTest" => {
+                                                use crate::system_capsule::ato_settings::SettingsCommand;
+                                                use crate::system_capsule::{
+                                                    CapabilityBroker, SystemCapsuleId,
+                                                    SystemCommand,
+                                                };
+                                                let result = CapabilityBroker::dispatch(
+                                                    cx,
+                                                    app_handle,
+                                                    SystemCapsuleId::AtoWindows,
+                                                    SystemCommand::AtoSettings(
+                                                        SettingsCommand::SetToggle {
+                                                            key: "test".to_string(),
+                                                            value: true,
+                                                        },
+                                                    ),
+                                                );
+                                                match result {
+                                                    Ok(()) => tracing::error!(
+                                                        "BrokerNegativeTest: expected Forbidden, got Ok — broker bound BROKEN"
+                                                    ),
+                                                    Err(err) => tracing::info!(
+                                                        ?err,
+                                                        "BrokerNegativeTest: broker rejected as expected"
+                                                    ),
+                                                }
+                                                Ok(())
+                                            }
                                             other => Err(format!(
                                                 "unknown action '{other}' — add it to focus_dispatcher::start"
                                             )),

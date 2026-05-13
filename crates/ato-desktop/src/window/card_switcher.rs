@@ -21,8 +21,8 @@ use serde::Serialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
-use crate::window::web_bridge::{self, BridgeAction};
 
 /// Process-wide slot for the currently-open Card Switcher window so
 /// the Control Bar's switcher button can behave as a toggle: a
@@ -52,7 +52,7 @@ impl Render for CardSwitcherShell {
     }
 }
 
-const SWITCHER_HTML: &str = include_str!("../../assets/launcher/switcher.html");
+const SWITCHER_HTML: &str = include_str!("../../assets/system/ato-windows/index.html");
 
 /// Per-card payload injected into the WebView at open time. Matches
 /// what `switcher.html` reads off `window.__ATO_WINDOWS`.
@@ -230,7 +230,12 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
 
-    let queue = web_bridge::new_queue();
+    // Stage B: route through the system-capsule IPC pipeline. The
+    // WebView posts `{capsule, command}` envelopes; the handler
+    // parses them into typed (SystemCapsuleId, SystemCommand) pairs
+    // and the drain loop hands each to `CapabilityBroker::dispatch`.
+    // No per-window dispatcher closure — the broker is the only path.
+    let queue = system_ipc::new_queue();
 
     let handle = cx.open_window(options, |window, cx| {
         let win_size = window.bounds().size;
@@ -246,7 +251,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         let webview = WebViewBuilder::new()
             .with_html(SWITCHER_HTML)
             .with_initialization_script(init_script.as_str())
-            .with_ipc_handler(web_bridge::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Card Switcher WebView");
@@ -255,48 +260,14 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     })?;
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
 
-    web_bridge::spawn_drain_loop(cx, queue, *handle, dispatch);
+    system_ipc::spawn_drain_loop(cx, queue, *handle);
 
     Ok(())
 }
 
-/// Translate one bridge action into the corresponding `&mut App`
-/// operation. Runs on the GPUI main thread (the drain loop
-/// trampolines onto it via `AsyncApp::update`).
-///
-/// Stage A: this no longer holds the dispatch logic itself.
-/// Instead it translates the legacy `BridgeAction` into a typed
-/// `SystemCommand` and routes through `CapabilityBroker`, which
-/// in turn calls into `ato_windows::dispatch`. The actual side
-/// effects (window remove, MRU focus, etc.) live in the broker's
-/// per-capsule module. Stage B will swap the HTML envelope to
-/// `{capsule, command}` directly and remove this translation step.
-fn dispatch(cx: &mut App, host: AnyWindowHandle, action: BridgeAction) {
-    use crate::system_capsule::ato_windows::WindowsCommand;
-    use crate::system_capsule::{CapabilityBroker, SystemCapsuleId, SystemCommand};
-
-    let translated = match action {
-        BridgeAction::CloseSwitcher => Some(WindowsCommand::CloseSwitcher),
-        BridgeAction::ActivateWindow { window_id } => {
-            Some(WindowsCommand::ActivateWindow { window_id })
-        }
-        BridgeAction::OpenStartWindow => Some(WindowsCommand::OpenStart),
-        // The switcher's HTML does not emit these; if it ever does,
-        // log + drop (parity with the previous behaviour).
-        BridgeAction::CloseStartWindow
-        | BridgeAction::OpenAppWindow
-        | BridgeAction::OpenStore => {
-            tracing::debug!(?action, "card_switcher: ignored — not a switcher action");
-            None
-        }
-    };
-    let Some(command) = translated else { return };
-    if let Err(err) = CapabilityBroker::dispatch(
-        cx,
-        host,
-        SystemCapsuleId::AtoWindows,
-        SystemCommand::AtoWindows(command),
-    ) {
-        tracing::warn!(?err, "card_switcher: broker rejected dispatch");
-    }
-}
+// Stage B note: the per-window `dispatch` translator from Stage A is
+// gone. The HTML now posts `{capsule: "ato-windows", command: {...}}`
+// envelopes directly, the system_capsule::ipc handler parses them
+// into typed pairs, and the drain loop invokes
+// `CapabilityBroker::dispatch` → `ato_windows::dispatch`. No
+// per-window glue needed.

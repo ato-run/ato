@@ -15,12 +15,14 @@
 //! translation step.
 
 use gpui::{AnyWindowHandle, App};
+use serde::Deserialize;
 
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::card_switcher::CardSwitcherWindowSlot;
 use crate::window::content_windows::OpenContentWindows;
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WindowsCommand {
     /// Close the Card Switcher overlay (called from the switcher's
     /// own page; clears the slot global so the next bar click opens
@@ -32,7 +34,10 @@ pub enum WindowsCommand {
     CloseStartWindow,
     /// Raise the target content window. The `host` is the switcher
     /// that issued the request — it dismisses itself after.
-    ActivateWindow { window_id: u64 },
+    ActivateWindow {
+        #[serde(rename = "windowId")]
+        window_id: u64,
+    },
     /// Open a fresh StartWindow + dismiss the calling switcher.
     OpenStart,
     /// Open the demo AppWindow with the WasedaP2P route — invoked

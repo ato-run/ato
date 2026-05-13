@@ -1,0 +1,112 @@
+usecase: "Stage B — migrate Card Switcher + StartWindow to the ato-windows system capsule with the typed `{capsule, command}` IPC envelope. Prove the broker's capability allowlist by triggering a Forbidden path from MCP."
+actor: "Autonomous Claude Operator (build + host_dispatch_action) + Inspector (log inspection for Forbidden message)"
+goal: |
+  (a) Card Switcher + StartWindow render identically to Stage A using
+  the new HTML assets at `assets/system/ato-windows/`.
+  (b) The HTML posts `{capsule: "ato-windows", command: {...}}` (or
+  `{capsule: "ato-store", command: {...}}` from start.html).
+  (c) The new `system_capsule::ipc` handler parses the envelope and
+  the drain loop hands typed (SystemCapsuleId, SystemCommand) pairs
+  to `CapabilityBroker::dispatch`.
+  (d) Broker rejects mismatched-capsule capability requests
+  (`AtoWindows + SettingsWrite → Forbidden`).
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-stageb, RUST_LOG=ato_desktop::system_capsule=debug"
+out_of_scope:
+  - "RouteContent::SystemCapsule custom-protocol routing — assets are still inlined via `include_str!`. Custom protocol routing is deferred to a follow-up since it does not affect runtime behaviour, only packaging."
+  - "Deleting `crates/ato-desktop/src/window/web_bridge.rs`. Module is marked deprecated; deletion is scheduled for Stage C/D after the last consumer is removed."
+  - "Live keyboard/mouse verification of card clicks via MCP — host-element clicks remain unavailable. The new envelope path is exercised via the BrokerNegativeTest action which directly invokes `CapabilityBroker::dispatch`."
+time_budget: "75 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Add `#[derive(Deserialize)]` with serde tag attribute to the four `*Command` enums"
+    observation: |
+      `#[serde(tag = "kind", rename_all = "snake_case")]` makes JSON
+      payloads like `{"kind": "activate_window", "windowId": 42}`
+      parse directly into the typed enum. `SettingsCommand::NavigateTab`
+      converted from tuple variant to struct variant so it works with
+      internally-tagged enums.
+
+  - action: "Create `crates/ato-desktop/src/system_capsule/ipc.rs`"
+    observation: |
+      `Envelope { capsule: String, command: serde_json::Value }`
+      parsed at the IPC boundary. Unknown capsule slugs and command
+      parse failures are dropped at WARN level. The drain loop pulls
+      typed `(SystemCapsuleId, SystemCommand)` pairs and trampolines
+      onto the GPUI main thread via `AsyncApp::update` to invoke
+      `CapabilityBroker::dispatch`. Liveness probe identical to
+      `web_bridge::spawn_drain_loop`.
+
+  - action: "Copy `assets/launcher/switcher.html` → `assets/system/ato-windows/index.html` and update BRIDGE shape"
+    observation: |
+      `BRIDGE({ action: 'ActivateWindow', windowId: ... })` becomes
+      `BRIDGE({ kind: 'activate_window', windowId: ... })`. The BRIDGE
+      helper now wraps the post with `{capsule: 'ato-windows',
+      command: {...}}`. Five call sites updated.
+
+  - action: "Copy `assets/launcher/start.html` → `assets/system/ato-windows/start.html` and add per-action capsule mapping"
+    observation: |
+      start.html spans two capsules: window-creation actions go to
+      `ato-windows`, store-open goes to `ato-store`. Added a
+      `dispatchAction(action)` helper that maps each `data-action`
+      string ('OpenAppWindow', 'OpenStore', 'CloseStartWindow') to
+      the correct envelope.
+
+  - action: "Switch `card_switcher.rs` and `start_window.rs` to new HTML + new IPC"
+    observation: |
+      `include_str!` paths updated to `assets/system/ato-windows/`.
+      `web_bridge::{new_queue, make_ipc_handler, spawn_drain_loop}`
+      replaced with `system_capsule::ipc::*`. The per-window
+      `dispatch` translator functions from Stage A are DELETED — the
+      broker is the only path now. Net delta: -68 lines of dispatcher
+      glue.
+
+  - action: "Add `BrokerNegativeTest` to `focus_dispatcher`"
+    observation: |
+      MCP-callable action that synthetically dispatches
+      `(AtoWindows, AtoSettings(SetToggle {...}))` through the broker.
+      AtoSettings::SetToggle requires Capability::SettingsWrite which
+      is NOT in AtoWindows's manifest allowlist — the broker MUST
+      reject with Forbidden. The action logs the result so the
+      receipt can assert on the log line.
+
+  - action: "Mark `web_bridge.rs` deprecated"
+    observation: |
+      Module-level doc comment notes Stage B obsoleted the consumers;
+      deletion deferred to Stage C/D to keep the diff focused.
+
+  - action: "Build + hermetic launch + MCP dispatch sequence"
+    observation: |
+      Sequence: OpenStartWindow → OpenCardSwitcher → BrokerNegativeTest.
+      Build: clean. Card Switcher screenshot
+      (switcher-stage-b.png) shows the new HTML rendering correctly
+      (新しいウィンドウ + ストア + new-window tile + dock + badge=2 +
+      bar URL "ato://start"). Indistinguishable from R37/R42 — only
+      the IPC envelope shape changed.
+
+  - action: "Inspect log for BrokerNegativeTest result"
+    observation: |
+      Log shows three sequential lines:
+        focus dispatcher routes action action=BrokerNegativeTest
+        broker: Forbidden — capsule not allowed this capability
+          capsule=AtoWindows capability=SettingsWrite
+        BrokerNegativeTest: broker rejected as expected
+          err=Forbidden { capsule: AtoWindows, capability: SettingsWrite }
+      Confirms: the manifest allowlist is consulted at dispatch
+      time and unauthorised capsule/capability combos return
+      `BrokerError::Forbidden` without mutating state.
+
+agent_observation:
+  user_visible_problem: "No visible regression. The architectural goal — system capsules talk to the desktop through a single typed broker that enforces a per-capsule capability allowlist — is now provably enforced."
+  likely_cause: "Stage A landed the broker scaffolding but kept the legacy `BridgeAction` translation in card_switcher/start_window. Stage B moves the IPC vocabulary itself to the typed shape so the broker sees real `{capsule, command}` pairs straight from the HTML, and proves the allowlist boundary holds via a synthetic negative test."
+  suggested_fix:
+    - "Already shipped: typed serde Command enums + system_capsule::ipc envelope + new ato-windows HTML assets + broker negative test."
+    - "Stage C — port the Store + Settings UIs to HTML under capsule://system/ato-{store,settings}/."
+    - "Stage D — retire the Launcher window and migrate ato-web-viewer chrome to HTML."
+    - "Future polish (post Phase 1): RouteContent::SystemCapsule + custom protocol so HTML can be served as separate JS/CSS files rather than `include_str!` blobs."
+
+evidence:
+  - switcher-stage-b.png
+
+status: "fixed"

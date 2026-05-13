@@ -9,18 +9,28 @@
 //! exhaustively covers all four system capsules from Stage A.
 
 use gpui::{AnyWindowHandle, App};
+use serde::Deserialize;
 
 use crate::system_capsule::broker::{BrokerError, Capability};
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WebViewerCommand {
     Back,
     Forward,
     Reload,
     NewTab,
-    CloseTab { tab_id: usize },
-    SelectTab { tab_id: usize },
-    Navigate { url: String },
+    CloseTab {
+        #[serde(rename = "tabId")]
+        tab_id: usize,
+    },
+    SelectTab {
+        #[serde(rename = "tabId")]
+        tab_id: usize,
+    },
+    Navigate {
+        url: String,
+    },
 }
 
 impl WebViewerCommand {

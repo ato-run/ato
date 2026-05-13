@@ -1,3 +1,12 @@
+//! **Deprecated (Stage B):** legacy `BridgeAction`-based IPC bridge.
+//! The Card Switcher and StartWindow now route through
+//! `crate::system_capsule::ipc`, which uses a typed
+//! `{capsule, command}` envelope and the `CapabilityBroker`. This
+//! module is retained for one stage so any out-of-tree experiments
+//! using the old shape don't break; Stage C/D will delete it.
+//!
+//! Original design notes:
+//!
 //! IPC bridge between the Wry-hosted launcher HTML pages (Card
 //! Switcher, StartWindow) and the rust-side GPUI actions. Pattern is
 //! borrowed from `automation/transport.rs` + `focus_dispatcher.rs`:

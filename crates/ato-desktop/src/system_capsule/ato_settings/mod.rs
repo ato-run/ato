@@ -9,16 +9,18 @@
 //! adds a consent prompt before granting `SettingsWrite`.
 
 use gpui::{AnyWindowHandle, App};
+use serde::Deserialize;
 
 use crate::system_capsule::broker::{BrokerError, Capability};
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SettingsCommand {
     Close,
     /// Reserved for Stage C. Read-only navigation between settings
     /// tabs (一般 / セキュリティ / ターミナル / …). Carries the
     /// tab id as a string in Phase 1.
-    NavigateTab(String),
+    NavigateTab { tab: String },
     /// Reserved for Stage C + Phase 2. Mutating a settings toggle
     /// requires `SettingsWrite`, which is not in `ato-settings`'s
     /// allowlist yet — every call returns `Forbidden` today.
@@ -29,7 +31,7 @@ impl SettingsCommand {
     pub fn required_capability(&self) -> Capability {
         match self {
             SettingsCommand::Close => Capability::WindowsClose,
-            SettingsCommand::NavigateTab(_) => Capability::SettingsRead,
+            SettingsCommand::NavigateTab { .. } => Capability::SettingsRead,
             SettingsCommand::SetToggle { .. } => Capability::SettingsWrite,
         }
     }
@@ -44,7 +46,7 @@ pub fn dispatch(
         SettingsCommand::Close => {
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
-        SettingsCommand::NavigateTab(tab) => {
+        SettingsCommand::NavigateTab { tab } => {
             // Phase 1 stub. Stage C lands real tab routing via the
             // ato-settings HTML + LauncherViewState integration.
             tracing::info!(?tab, "ato_settings: NavigateTab (stub)");

@@ -1,7 +1,10 @@
 //! StartWindow — Wry-hosted HTML "compose a new window" surface.
-//! The visual layer lives in `assets/launcher/start.html`. Quick
-//! actions and dock tiles inside the page post messages back over
-//! `window.ipc` which `web_bridge` routes to host actions.
+//! Stage B: visual layer moved to `assets/system/ato-windows/start.html`
+//! and the IPC envelope is now the typed system-capsule shape
+//! (`{capsule, command}`). The page is part of the `ato-windows`
+//! system capsule even though it owns its own NSWindow — the
+//! distinction is "switcher view vs picker view" inside the same
+//! capsule.
 //!
 //! Distinct from Launcher: each invocation spawns a fresh window
 //! (no slot, no focus-reuse).
@@ -16,8 +19,8 @@ use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
-use crate::window::web_bridge::{self, BridgeAction};
 
 pub struct StartWindowShell {
     _webview: WebView,
@@ -34,7 +37,7 @@ impl Render for StartWindowShell {
     }
 }
 
-const START_HTML: &str = include_str!("../../assets/launcher/start.html");
+const START_HTML: &str = include_str!("../../assets/system/ato-windows/start.html");
 
 /// Spawn a fresh StartWindow. Always opens a new window — there is no
 /// slot or focus-reuse pathway here. Callers invoke this directly
@@ -52,7 +55,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
 
-    let queue = web_bridge::new_queue();
+    let queue = system_ipc::new_queue();
     let handle = cx.open_window(options, |window, cx| {
         let win_size = window.bounds().size;
         let webview_rect = Rect {
@@ -66,7 +69,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         let queue_for_ipc = queue.clone();
         let webview = WebViewBuilder::new()
             .with_html(START_HTML)
-            .with_ipc_handler(web_bridge::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Start WebView");
@@ -88,44 +91,13 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         },
     );
 
-    web_bridge::spawn_drain_loop(cx, queue, *handle, dispatch);
+    system_ipc::spawn_drain_loop(cx, queue, *handle);
 
     Ok(())
 }
 
-/// Stage A: translate the legacy `BridgeAction` into the typed
-/// system-capsule vocabulary and route through `CapabilityBroker`.
-/// The actual side effects (window remove, open_app_window,
-/// open_store_window) live behind per-capsule modules in
-/// `crate::system_capsule::{ato_windows, ato_store}`. Stage B will
-/// switch the HTML envelope so this translation step disappears.
-fn dispatch(cx: &mut App, host: gpui::AnyWindowHandle, action: BridgeAction) {
-    use crate::system_capsule::ato_store::StoreCommand;
-    use crate::system_capsule::ato_windows::WindowsCommand;
-    use crate::system_capsule::{CapabilityBroker, SystemCapsuleId, SystemCommand};
-
-    let (capsule, command) = match action {
-        BridgeAction::CloseStartWindow => (
-            SystemCapsuleId::AtoWindows,
-            SystemCommand::AtoWindows(WindowsCommand::CloseStartWindow),
-        ),
-        BridgeAction::OpenAppWindow => (
-            SystemCapsuleId::AtoWindows,
-            SystemCommand::AtoWindows(WindowsCommand::OpenAppWindow),
-        ),
-        BridgeAction::OpenStore => (
-            SystemCapsuleId::AtoStore,
-            SystemCommand::AtoStore(StoreCommand::Open),
-        ),
-        // Switcher-only IPC arriving here is a no-op.
-        BridgeAction::CloseSwitcher
-        | BridgeAction::ActivateWindow { .. }
-        | BridgeAction::OpenStartWindow => {
-            tracing::debug!(?action, "start_window: ignored — not a StartWindow action");
-            return;
-        }
-    };
-    if let Err(err) = CapabilityBroker::dispatch(cx, host, capsule, command) {
-        tracing::warn!(?err, "start_window: broker rejected dispatch");
-    }
-}
+// Stage B note: the per-window `dispatch` translator from Stage A is
+// gone. start.html now posts `{capsule: "ato-windows", command: ...}`
+// or `{capsule: "ato-store", command: ...}` envelopes directly. The
+// system_capsule::ipc handler resolves the capsule, parses the typed
+// command, and the drain loop invokes `CapabilityBroker::dispatch`.
