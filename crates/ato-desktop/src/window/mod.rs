@@ -13,6 +13,7 @@
 //! Both are deferred to follow-up commits on the same redesign branch
 //! and tracked in the consolidated PR description.
 
+pub mod app_capsule_shell;
 pub mod card_switcher;
 pub mod content_windows;
 pub mod control_bar;

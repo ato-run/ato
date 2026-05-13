@@ -30,7 +30,7 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, WindowBounds,
     WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
@@ -56,6 +56,24 @@ pub struct PendingLaunchTarget(pub Option<GuestRoute>);
 
 impl gpui::Global for PendingLaunchTarget {}
 
+/// Tracks the two transient wizard windows opened during a capsule boot flow:
+///
+/// - `boot_window`: the in-flight boot progress wizard
+///   (`open_boot_window`).
+/// - `app_window`: the destination AppWindow that owns `AppCapsuleShell`.
+///
+/// Set by `ato_launch::dispatch(Approve)` after both windows are open.
+/// Consumed by `ato_launch::dispatch(AbortBoot)` to close both windows, and
+/// by `AppCapsuleShell`'s polling task to close the boot wizard on launch
+/// completion or failure.
+#[derive(Default, Debug, Clone)]
+pub struct BootWindowSlot {
+    pub boot_window: Option<AnyWindowHandle>,
+    pub app_window: Option<AnyWindowHandle>,
+}
+
+impl gpui::Global for BootWindowSlot {}
+
 pub struct LaunchWindowShell {
     _webview: WebView,
 }
@@ -77,7 +95,7 @@ fn open_wizard(
     w: f32,
     h: f32,
     init_script: Option<String>,
-) -> Result<()> {
+) -> Result<AnyWindowHandle> {
     let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
@@ -115,7 +133,7 @@ fn open_wizard(
     })?;
 
     system_ipc::spawn_drain_loop(cx, queue, *handle);
-    Ok(())
+    Ok(*handle)
 }
 
 // Window dimensions are tuned to the card content so the window IS
@@ -130,7 +148,7 @@ const BOOT_H: f32 = 520.0;
 /// screenshot generation. The wizard JS falls back to its hardcoded
 /// demo identity (`WasedaP2P` / `ato.app/shell://wasedap2p`).
 pub fn open_consent_window(cx: &mut App) -> Result<()> {
-    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, None)
+    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, None).map(|_| ())
 }
 
 /// Real launch entrypoint: open the consent wizard for a concrete
@@ -181,11 +199,11 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
         serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string())
     );
 
-    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, Some(init_script))
+    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, Some(init_script)).map(|_| ())
 }
 
-/// Spawn the boot progress wizard. Narrower than consent — just the
-/// capsule badge + steps list + abort button.
-pub fn open_boot_window(cx: &mut App) -> Result<()> {
+/// Spawn the boot progress wizard. Returns the `AnyWindowHandle` so the
+/// caller can store it in `BootWindowSlot` for later programmatic close.
+pub fn open_boot_window(cx: &mut App) -> Result<AnyWindowHandle> {
     open_wizard(cx, BOOT_HTML, BOOT_W, BOOT_H, None)
 }
