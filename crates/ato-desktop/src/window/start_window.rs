@@ -42,7 +42,7 @@ const START_HTML: &str = include_str!("../../assets/launcher/start.html");
 /// not depend on a dispatch queue surviving any close-soon-after on
 /// the caller side.
 pub fn open_start_window(cx: &mut App) -> Result<()> {
-    let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
+    let bounds = Bounds::centered(None, size(px(1200.0), px(880.0)), cx);
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
         focus: true,
