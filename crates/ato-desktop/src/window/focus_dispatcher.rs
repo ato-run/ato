@@ -184,6 +184,48 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 }
                                                 Ok(())
                                             }
+                                            // AODD verification of the
+                                            // consent → AppWindow + boot
+                                            // chain. Mirrors what the broker
+                                            // does on AtoLaunch::Approve,
+                                            // but driven from MCP because
+                                            // clicking the in-WebView
+                                            // Approve button requires
+                                            // macOS Accessibility. Reads
+                                            // the PendingLaunchTarget set
+                                            // by NavigateToUrl(capsule://),
+                                            // spawns the AppWindow, opens
+                                            // the boot wizard.
+                                            "ForceApprovePending" => {
+                                                let pending = cx
+                                                    .try_global::<crate::window::launch_window::PendingLaunchTarget>()
+                                                    .and_then(|g| g.0.clone());
+                                                cx.set_global(
+                                                    crate::window::launch_window::PendingLaunchTarget(None),
+                                                );
+                                                match pending {
+                                                    Some(route) => {
+                                                        tracing::info!(
+                                                            ?route,
+                                                            "ForceApprovePending: consuming pending target"
+                                                        );
+                                                        if let Err(err) =
+                                                            crate::window::open_app_window(cx, route)
+                                                        {
+                                                            tracing::error!(?err, "open_app_window failed");
+                                                        }
+                                                        if let Err(err) =
+                                                            crate::window::launch_window::open_boot_window(cx)
+                                                        {
+                                                            tracing::error!(?err, "open_boot_window failed");
+                                                        }
+                                                    }
+                                                    None => tracing::warn!(
+                                                        "ForceApprovePending: no pending target — did NavigateToUrl run first?"
+                                                    ),
+                                                }
+                                                Ok(())
+                                            }
                                             "BrokerNegativeTest" => {
                                                 use crate::system_capsule::ato_settings::SettingsCommand;
                                                 use crate::system_capsule::{

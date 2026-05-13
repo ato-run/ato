@@ -63,32 +63,36 @@ steps:
 agent_observation:
   user_visible_problem: "None at Phase-1 scope. The two wizards are openable and render exactly as designed."
   phase_1_honesty_notes:
-    - "Approve does NOT actually spawn the AppWindow — Phase 1 dispatch logs target_handle and closes the wizard. The consent.html JS sends {kind:'approve', handle:HANDLE} but the broker just records intent; no orchestrator call yet. This is the planned 'no lying UI' boundary — the wizards demonstrate the surface without claiming to be the real launch path."
-    - "Boot step progression is a decorative setInterval, not driven by ato-cli session state. The HTML comment in boot.html marks this as Phase-1 only."
-    - "Both wizards are accessible only via MCP for AODD; no user-reachable entry point yet. Phase 2 will gate every LocalCapsule route through open_consent_window."
+    - "Real launch flow now wired: NavigateToUrl(capsule://...) → consent wizard → Approve → AppWindow + boot wizard. PendingLaunchTarget global carries the GuestRoute between the two phases."
+    - "Approve from the wizard JS sends {kind:'approve', handle:HANDLE} through the system_capsule IPC bridge; the broker consumes PendingLaunchTarget and spawns the real AppWindow via crate::window::open_app_window. Boot wizard opens on top as launch-ceremony chrome."
+    - "Boot step progression is still a decorative setInterval, not orchestrator-driven. Phase 2 will replace it with real session-state events from orchestrator::resolve_and_start_guest."
+    - "End-to-end clicking the in-WebView Approve button without macOS Accessibility permission is not feasible from MCP; verification was done via a ForceApprovePending debug action that mirrors what the broker's Approve handler does. The JS → broker → handler path itself was exercised earlier via OpenLaunchConsent (which routes through identical IPC infrastructure)."
   suggested_next:
-    - "Phase 2A: have open_consent_window accept the GuestRoute that should launch on approve, and have the Approve handler call open_app_window(GuestRoute::CapsuleHandle{...})."
-    - "Phase 2B: pass real boot progress events from orchestrator over a new direction-reversed IPC channel; replace setInterval in boot.html with event-driven step transitions."
-    - "Phase 2C: wire the Control Bar's URL pill 'open capsule://...' Enter-key path through open_consent_window so the user sees the wizard before any new window appears."
+    - "Phase 2A: drive boot progress from real orchestrator events; auto-close boot wizard on capsule:ready."
+    - "Phase 2B: parameterize the consent wizard's permission + env-var list from the capsule's manifest (currently hardcoded demo content for the static rows below the dynamic identity header)."
+    - "Phase 2C: persist user's Approve/Deny decision per-capsule so the wizard is skipped on subsequent launches of trusted capsules (with a re-confirm path for permission changes)."
 
 evidence:
   - "claudedocs/aodd-receipts/ato-launch-wizards/01-consent-wizard.png"
   - "claudedocs/aodd-receipts/ato-launch-wizards/02-boot-wizard-early.png"
   - "claudedocs/aodd-receipts/ato-launch-wizards/03-boot-wizard-progressed.png"
-  - "log excerpt: /tmp/ato-desktop-launch-wizards.log — 'focus dispatcher routes action action=OpenLaunchConsent' and '...OpenLaunchBoot'"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/04-wp2p-consent.png — first WasedaP2P launch attempt: NavigateToUrl(capsule://github.com/Koh0920/WasedaP2P) → consent wizard with real identity (アプリケーション: WasedaP2P, 要求された権限: github.com/Koh0920/WasedaP2P) injected via __ATO_LAUNCH"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/05-flow-consent-shown.png — second WasedaP2P attempt before Approve; identical identity content, proves __ATO_LAUNCH injection is repeatable"
+  - "claudedocs/aodd-receipts/ato-launch-wizards/06-flow-approved-appwindow-boot.png — post-approve: Control Bar URL pill switched to capsule://github.com/Koh0920/WasedaP2P, AppWindow spawned with WasedaP2P content (CodeLab / ネットワーク / Safety summary / ターミナル placeholder cards), boot wizard overlay shows all 6 launch-ceremony steps complete"
+  - "log excerpt: /tmp/ato-desktop-flow2.log — 'Focus-mode NavigateToUrl url=capsule://github.com/Koh0920/WasedaP2P' followed by 'ForceApprovePending: consuming pending target route=CapsuleHandle { handle: \"github.com/Koh0920/WasedaP2P\", label: \"WasedaP2P\" }'"
 
 files_changed:
   - "crates/ato-desktop/src/system_capsule/broker.rs                       (+ AtoLaunch enum variant + dispatch arm)"
   - "crates/ato-desktop/src/system_capsule/manifest.rs                     (+ AtoLaunch manifest entry)"
-  - "crates/ato-desktop/src/system_capsule/ato_launch/mod.rs               (new — LaunchCommand{Approve,Cancel,AbortBoot})"
+  - "crates/ato-desktop/src/system_capsule/ato_launch/mod.rs               (new — LaunchCommand{Approve,Cancel,AbortBoot}; Approve consumes PendingLaunchTarget + spawns AppWindow + boot wizard)"
   - "crates/ato-desktop/src/system_capsule/ipc.rs                          (+ ato-launch slug parse + command parse)"
   - "crates/ato-desktop/src/system_capsule/mod.rs                          (+ pub mod ato_launch)"
-  - "crates/ato-desktop/assets/system/ato-launch/consent.html              (new)"
+  - "crates/ato-desktop/assets/system/ato-launch/consent.html              (new — reads window.__ATO_LAUNCH injection for real-target identity)"
   - "crates/ato-desktop/assets/system/ato-launch/boot.html                 (new)"
-  - "crates/ato-desktop/src/window/launch_window.rs                        (new — open_consent_window / open_boot_window)"
+  - "crates/ato-desktop/src/window/launch_window.rs                        (new — open_consent_window / open_consent_window_for_route(route) / open_boot_window + PendingLaunchTarget global)"
   - "crates/ato-desktop/src/window/mod.rs                                  (+ pub mod launch_window)"
-  - "crates/ato-desktop/src/window/focus_dispatcher.rs                     (+ OpenLaunchConsent / OpenLaunchBoot branches)"
-  - "crates/ato-desktop/src/app.rs                                         (+ OpenIdentityMenu action — earlier in this session)"
+  - "crates/ato-desktop/src/window/focus_dispatcher.rs                     (+ OpenLaunchConsent / OpenLaunchBoot / ForceApprovePending branches)"
+  - "crates/ato-desktop/src/app.rs                                         (NavigateToUrl(capsule://) now routes through open_consent_window_for_route instead of direct open_app_window; + OpenIdentityMenu action — earlier in this session)"
   - "crates/ato-desktop/src/window/control_bar.rs                          (+ identity_button() — earlier in this session)"
   - "crates/ato-desktop/assets/icons/identity.svg                          (new — earlier in this session)"
 

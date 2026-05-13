@@ -56,16 +56,41 @@ pub fn dispatch(
 ) -> Result<(), BrokerError> {
     match command {
         LaunchCommand::Approve { handle } => {
-            tracing::info!(
-                target_handle = %handle,
-                "ato_launch: user approved — Phase 2 will spawn the AppWindow here"
-            );
-            // Phase 1: just close the wizard window. Phase 2 spawns
-            // `open_app_window(GuestRoute::CapsuleHandle { handle, label })`.
+            tracing::info!(target_handle = %handle, "ato_launch: user approved");
+            // Close the consent wizard first so the AppWindow and boot
+            // wizard take focus on top of a clean stack.
             let _ = host.update(cx, |_, window, _| window.remove_window());
+
+            // Consume the pending launch target. If the wizard was
+            // opened via the real NavigateToUrl path, this holds the
+            // GuestRoute to spawn. If the wizard was opened standalone
+            // via MCP for AODD, there is no pending target — we log
+            // and skip the AppWindow spawn (honest no-op).
+            let pending = cx
+                .try_global::<crate::window::launch_window::PendingLaunchTarget>()
+                .and_then(|g| g.0.clone());
+            cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
+
+            if let Some(route) = pending {
+                if let Err(err) = crate::window::open_app_window(cx, route.clone()) {
+                    tracing::error!(error = %err, ?route, "ato_launch: open_app_window failed after approve");
+                }
+                // Launch-ceremony overlay. The boot wizard's step
+                // animation is decorative (Phase 1). Phase 2 will drive
+                // it from real orchestrator events and auto-close on
+                // "ready".
+                if let Err(err) = crate::window::launch_window::open_boot_window(cx) {
+                    tracing::error!(error = %err, "ato_launch: open_boot_window failed after approve");
+                }
+            } else {
+                tracing::info!(
+                    "ato_launch: approve from MCP/standalone (no pending target) — wizard closed, no AppWindow spawned"
+                );
+            }
         }
         LaunchCommand::Cancel => {
             tracing::info!("ato_launch: user cancelled");
+            cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         LaunchCommand::AbortBoot => {

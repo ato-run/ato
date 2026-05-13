@@ -220,9 +220,17 @@
     : (m) => console.log('[no bridge]', m);
   const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
 
-  // Phase 1: the target capsule handle is hard-coded into the page.
-  // Phase 2 will receive it via an initialization-script injection,
-  // mirroring how the Card Switcher receives `__ATO_WINDOWS`.
+  // The host injects __ATO_LAUNCH = { name, handle, url } via
+  // with_initialization_script before document load. When the wizard
+  // is opened via NavigateToUrl(capsule://...), this carries the real
+  // target. When opened standalone via MCP (AODD), __ATO_LAUNCH is
+  // undefined and we keep the demo identity already in the HTML.
+  const launch = (window.__ATO_LAUNCH && typeof window.__ATO_LAUNCH === 'object')
+    ? window.__ATO_LAUNCH : null;
+  if (launch) {
+    if (launch.name)   document.getElementById('app-name').textContent = launch.name;
+    if (launch.handle) document.getElementById('app-handle').textContent = launch.handle;
+  }
   const HANDLE = document.getElementById('app-handle').textContent.trim();
 
   document.getElementById('approve').addEventListener('click', () => {

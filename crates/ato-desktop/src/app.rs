@@ -545,8 +545,16 @@ pub fn run() {
                     .unwrap_or(&handle)
                     .to_string();
                 let route = crate::state::GuestRoute::CapsuleHandle { handle, label };
-                if let Err(err) = crate::window::open_app_window(cx, route) {
-                    tracing::error!(error = %err, "NavigateToUrl(capsule) open_app_window failed");
+                // Gate every capsule launch on a pre-flight consent
+                // wizard. On Approve the broker spawns the real
+                // AppWindow + boot wizard; on Cancel nothing happens.
+                if let Err(err) =
+                    crate::window::launch_window::open_consent_window_for_route(cx, route)
+                {
+                    tracing::error!(
+                        error = %err,
+                        "NavigateToUrl(capsule) open_consent_window_for_route failed"
+                    );
                 }
                 return;
             }
