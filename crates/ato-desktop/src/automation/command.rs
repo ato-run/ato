@@ -139,6 +139,14 @@ pub enum AutomationCommand {
     /// at dispatch time, mirroring the keybind. `pane_id` on the
     /// JSON-RPC params is ignored.
     StopActiveSession,
+    /// Dispatch a host-level GPUI action by name (e.g.
+    /// "OpenAppWindowExperiment"). The dispatcher just enqueues the
+    /// name onto `AppState::pending_host_actions`; `DesktopShell::render`
+    /// drains the queue and invokes the corresponding handler the next
+    /// time the shell renders. This is the AODD bypass for macOS
+    /// Accessibility permission, which would otherwise be required to
+    /// synthesise keystrokes via osascript.
+    HostDispatchAction { action: String },
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────

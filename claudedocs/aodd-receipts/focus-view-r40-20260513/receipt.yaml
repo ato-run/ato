@@ -1,0 +1,141 @@
+usecase: "Make the Control Bar's URL field editable, swap the leading icon based on scheme (web vs capsule://), and investigate whether typing capsule://github.com/Koh0920/WasedaP2P actually launches the capsule end-to-end."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket (typing simulation via dispatched NavigateToUrl actions)"
+goal: "Bar shows https://ato.run with Globe icon at cold launch; entering a capsule:// URL produces a CapsuleHandle AppWindow; entering a http(s):// URL produces an ExternalUrl AppWindow."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r40b"
+out_of_scope:
+  - "Full capsule SESSION orchestration in the new AppWindow (running `ato app session start`, mounting a WebView). This requires the per-window WebViewManager migration."
+  - "Updating the bar's URL field to reflect the newly-active window (URL stays at the cold-launch default after dispatch)."
+  - "Keyboard-input verification on the actual GPUI Input via MCP — host_dispatch_action does not produce keystrokes inside host widgets. The dispatch chain is exercised via two AODD-only routes (NavigateToTestCapsule / NavigateToTestHttp) that feed pre-baked URLs into the same NavigateToUrl action the real Enter press dispatches."
+time_budget: "60 minutes"
+
+result: "degraded"
+
+steps:
+  - action: "User asks for an editable Control Bar URL with scheme-aware icon, defaulting to https://ato.run; wants to know if capsule:// works end-to-end"
+    observation: |
+      Control Bar is GPUI-rendered (window/control_bar.rs) — URL was a
+      static SharedString shown in a div. To make it editable, need to
+      pull in gpui_component::input::{Input, InputState} (already used
+      in legacy launcher_v2.rs) and route PressEnter to a
+      NavigateToUrl action that has a Focus-mode handler.
+
+  - action: "Add capsule.svg asset"
+    observation: |
+      `crates/ato-desktop/assets/icons/capsule.svg` — a stylised
+      medicine-capsule glyph (rounded rect with a vertical divider).
+      Stroked via currentColor so the rendered tint matches the
+      div's text-color (set to indigo in url_pill).
+
+  - action: "Rewrite ControlBarShellPlaceholder"
+    observation: |
+      - `omnibar: Entity<InputState>` field
+      - new() takes `window` so InputState can register first-responder
+        chain through the gpui Window
+      - default_value comes from display_url_from_route(route)
+      - cx.subscribe_in handles InputEvent::PressEnter (dispatch
+        NavigateToUrl) and InputEvent::Change (cx.notify so the icon
+        re-evaluates as the user types)
+      - render() reads omnibar.value() to compute is_capsule, passes
+        through bar_pill → url_pill which renders either Globe (web)
+        or icons/capsule.svg.
+
+  - action: "Wrap the url_pill body in Input"
+    observation: |
+      `Input::new(&omnibar).appearance(false).bordered(false).
+       focus_bordered(false).bg(transparent).text_size(13).text_color(zinc-600)` —
+      embeds the editable field inside the existing pill background
+      so visuals are unchanged from R23's url_pill. ChevronDown
+      retained on the right.
+
+  - action: "Change Focus-mode boot route to https://ato.run/ via ExternalUrl"
+    observation: |
+      open_focus_control_bar previously seeded with a placeholder
+      CapsuleHandle route, which made the cold-launch bar read
+      'capsule://wasedap2p'. Switched to `url::Url::parse("https://ato.run/")
+      .map(GuestRoute::ExternalUrl)` so the bar comes up with the
+      requested default.
+
+  - action: "Add Focus-mode NavigateToUrl handler in app.rs"
+    observation: |
+      Registered via `cx.on_action(|action: &NavigateToUrl, cx| ...)`,
+      gated on `is_multi_window_enabled()`. Parsing rules:
+        - `capsule://<handle...>` → trim trailing `/`, derive label
+          from the last path segment, spawn open_app_window with
+          GuestRoute::CapsuleHandle { handle, label }
+        - http(s) URLs → url::Url::parse + ExternalUrl route → spawn
+        - other schemes / parse errors → log + ignore
+      All branches emit `tracing::info!(url, "Focus-mode NavigateToUrl")`
+      so AODD can assert dispatch via the log.
+
+  - action: "Build + cold launch hermetic Focus mode → screencap bar"
+    observation: |
+      01-cold-globe.png shows the bar with `https://ato.run/` text
+      inside the URL pill and the Globe icon on the left. Card
+      Switcher badge already at 1 (Store auto-opened at boot is in
+      OpenContentWindows).
+
+  - action: "MCP host_dispatch_action NavigateToTestCapsule"
+    observation: |
+      Log:
+        focus dispatcher routes action action=NavigateToTestCapsule
+        Focus-mode NavigateToUrl url=capsule://github.com/Koh0920/WasedaP2P
+      02-after-capsule-nav.png shows a freshly spawned AppWindow
+      with the 'WasedaP2P' hero banner (Safety summary panel, network/
+      storage stats, terminal panel). Confirms the chain:
+        NavigateToUrl(capsule://) → open_app_window(CapsuleHandle) → AppWindow.
+
+  - action: "MCP host_dispatch_action NavigateToTestHttp"
+    observation: |
+      Log:
+        focus dispatcher routes action action=NavigateToTestHttp
+        Focus-mode NavigateToUrl url=https://ato.run/
+      03-after-http-nav.png shows a second AppWindow with the
+      'ato.run' hero banner. Confirms the http(s) → ExternalUrl path.
+      Card Switcher badge now reads 3 (Store + 2 AppWindows).
+
+agent_observation:
+  user_visible_problem: |
+    The bar URL is now editable, the icon swaps correctly between
+    Globe and the capsule glyph based on the typed scheme, and
+    pressing Enter spawns an AppWindow with the matching route.
+
+    HOWEVER — the investigation reveals a layer that does NOT yet
+    work: the spawned AppWindow renders `AppWindowShell` (a static
+    placeholder hero with the title/banner). It does NOT actually
+    launch the capsule session. So `capsule://github.com/Koh0920/
+    WasedaP2P` opens a window labelled 'WasedaP2P' with hero content
+    that looks like a real capsule, but it is not running the
+    WasedaP2P capsule code. The result is marked DEGRADED rather
+    than COMPLETE — the typed input does reach the right place, the
+    spawned window has the right identity in the registry / Card
+    Switcher / badge, but a real user looking at the spawned
+    AppWindow would see decorative placeholder content rather than
+    their actual capsule UI.
+
+  likely_cause: |
+    Two distinct architectural pieces:
+      1. URL routing — landed cleanly in this iteration. Editable
+         field → action dispatch → handler → window spawn works
+         end-to-end.
+      2. Session orchestration — the missing piece. The legacy
+         single-window code paths invoke `ato app session start`
+         via `crate::orchestrator` (CLI subprocess) and mount the
+         resulting WebView through `webview::WebViewManager`. The
+         multi-window AppWindow does not yet have a per-window
+         WebViewManager nor a session-spawn helper. Until that
+         lands, every AppWindow renders the same hero placeholder
+         regardless of the GuestRoute it carries.
+
+  suggested_fix:
+    - "Already shipped: editable URL pill + scheme-aware icon + cold-launch default + Focus-mode NavigateToUrl handler covering capsule:// + http(s) + AODD test dispatches."
+    - "Future (the real completeness gap): give AppWindowShell a per-window WebViewManager so a CapsuleHandle route spawns its session via orchestrator::open_app_window and mounts the running capsule's WebView inside the window. ExternalUrl gets a plain Wry WebView pointed at the URL (similar to today's Store window)."
+    - "Future: bidirectional sync between the bar's omnibar value and the active AppWindow's current URL — clicking a Card Switcher entry or alt-tabbing should update the bar to match. Use the existing OpenContentWindows registry's MRU + observe_global to track key-window changes."
+    - "Future: remove the AODD test dispatches (NavigateToTestCapsule / NavigateToTestHttp from focus_dispatcher.rs) once the WebView migration lets us drive the bar directly via a real keystroke route."
+
+evidence:
+  - 01-cold-globe.png
+  - 02-after-capsule-nav.png
+  - 03-after-http-nav.png
+  - bar-cold-globe.png  # earlier pre-handler verification
+
+status: "open"

@@ -1,0 +1,58 @@
+usecase: "Launcher 'start' view matches the .tmp/start-window.png reference."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket (OpenLauncherWindow)"
+goal: "Header / search bar / 4 quick actions / two-column (recent + store) / bottom dock / footer."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r27"
+out_of_scope:
+  - "Wiring recent sessions to live AppState retention (placeholder rows)."
+  - "Wiring store cards to capsule discovery (placeholder rows)."
+  - "Search-bar functional input (UI shell only)."
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Rewrite LauncherShellPlaceholder render to match the start-window layout"
+    observation: |
+      Top-level `launcher_content` is a 960px-wide column with the
+      following children (gap 24px between):
+        - header_block: indigo-100 puck + Plus icon + 新しいウィンドウ + subtitle
+        - search_bar: pill with Search icon + placeholder + ⌘K hint chip
+        - quick_actions_row: 4 equal-width tiles (URL/ローカル/ストア/新しく始める)
+          each with its own accent-tinted icon puck + title + sub-label
+        - two_column_block: flex row with [最近のセッション / ストア] sections;
+          each section has a header (title + すべて見る) + four placeholder
+          rows
+        - bottom_dock: pill with 4 accent tiles (W/C/Q/L) + indigo plus tile
+        - footer_text: small zinc instruction line
+
+  - action: "Fix two build errors"
+    observation: |
+      ElementId does not implement From<(&str, &str)>, so the original
+      `.id(("quick", title))` shape failed; switched to
+      `SharedString::from(format!("quick-{title}"))`. IconName::History
+      does not exist in gpui_component (auto-generated from icon SVGs
+      bundled in gpui-component), so section_header dropped its icon
+      parameter — section headers are now pure text + 'すべて見る' link.
+
+  - action: "Build → launch hermetic Focus mode → MCP OpenLauncherWindow → screencap"
+    observation: |
+      launcher-start.png shows the full layout: header with indigo +
+      puck, search bar, four colored quick action tiles, two-column
+      block with WasedaP2P/CodeLab/QueryX/Local AI Chat on the left
+      and store discovery cards on the right, bottom dock with the
+      same four W/C/Q/L tiles + indigo plus, footer line. Visual
+      hierarchy and density match the reference.
+
+agent_observation:
+  user_visible_problem: "Resolved at the visual layer. The Launcher's 'start' surface now reads as a real onboarding/window-creation entry point rather than a placeholder."
+  likely_cause: "Launcher was a one-line 'placeholder for #170' stub. The full visual rebuild lands here ahead of the DesktopShell rename so the UI is reviewable before the data migration."
+  suggested_fix:
+    - "Already shipped: full layout rebuild."
+    - "Future: wire recent_sessions_list to AppState retention so the rows reflect actual kept-warm sessions."
+    - "Future: wire store_cards_list to capsule discovery results."
+    - "Future: make the search bar a real input with command-palette routing."
+
+evidence:
+  - launcher-start.png
+
+status: "fixed"

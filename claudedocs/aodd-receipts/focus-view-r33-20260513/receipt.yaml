@@ -1,0 +1,122 @@
+usecase: "StartWindow and Card Switcher visually match .tmp/start-window.png and .tmp/window-list.png closely enough that the user accepts the surface."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Replace the GPUI-rendered StartWindow and Card Switcher with Wry-hosted HTML pages backed by an IPC bridge for user actions."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r33"
+out_of_scope:
+  - "Wiring the StartWindow's recent / store rows to real AppState (still placeholder data)."
+  - "Bumping last_focused_at on real focus events (only set at spawn time)."
+  - "End-to-end click verification via MCP — host_dispatch_action cannot drive clicks inside the new HTML pages; the IPC chain is exercised by real user clicks."
+time_budget: "60 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: StartWindow + Card Switcher GPUI implementations are too far from the reference designs; suggests HTML + RPC as an acceptable alternative"
+    observation: |
+      Diff analysis (Inspector role):
+        - GPUI version of switcher cards had a flat coloured square +
+          terminal glyph as the 'preview'. Reference shows distinctive
+          per-app mock content (bar chart for WasedaP2P, code for
+          CodeLab, etc.).
+        - GPUI version of StartWindow was structurally close but
+          missing soft shadows, gradient depth, modern typography
+          hierarchy.
+      The GPUI element library does not ergonomically express the
+      reference's CSS-style gradients/shadows on this scale, and
+      bundling per-app preview SVGs into the binary would be a much
+      bigger commitment than embedding two HTML files.
+    stuck_at: "GPUI element vocabulary too coarse for the reference design density"
+
+  - action: "Author `assets/launcher/switcher.html` and `assets/launcher/start.html` as self-contained HTML+CSS+JS pages"
+    observation: |
+      Single-file HTML pages with inline `<style>` and `<script>` blocks.
+      No external network deps, no relative imports — both pages are
+      embedded into the binary via `include_str!`. Layout uses CSS
+      grid + flexbox; per-kind preview variants in switcher.html are
+      synthesised in JS from the injected `window.__ATO_WINDOWS`
+      snapshot (AppWindow → dashboard bars, Store → tile grid,
+      Start → start-page mock, Launcher → nav+main mock).
+
+  - action: "Add `window/web_bridge.rs` IPC bridge module"
+    observation: |
+      Defines `BridgeAction` (tagged enum) deserialised from the
+      JSON messages JS sends over `window.ipc.postMessage`. Pattern
+      mirrors `automation/transport.rs`:
+        - `make_ipc_handler(queue)` returns a closure compatible with
+          `WebViewBuilder::with_ipc_handler` — runs on whatever
+          thread Wry chooses, only touches the shared queue.
+        - `spawn_drain_loop(cx, queue, host, dispatcher)` schedules a
+          foreground polling task that drains the queue every 50ms,
+          trampolines onto the GPUI main thread via
+          `AsyncApp::update`, and invokes `dispatcher(cx, host,
+          action)` for each. Loop exits when `host.update` returns
+          Err (window closed by red traffic light).
+
+  - action: "Rewrite `window/card_switcher.rs` to use Wry + switcher.html"
+    observation: |
+      `CardSwitcherShell` is now a thin GPUI entity holding the Wry
+      WebView alive. `open_card_switcher_window`:
+        - snapshots `OpenContentWindows::mru_order()` into a Vec of
+          `CardDto { window_id, title, subtitle, kind }`,
+        - injects it as `window.__ATO_WINDOWS = [...]` via
+          `with_initialization_script`,
+        - registers the IPC handler with a per-window queue,
+        - spawns the drain loop with a `dispatch` function that maps
+          BridgeAction → app operations (CloseSwitcher / ActivateWindow
+          / OpenStartWindow).
+      Removed the GPUI render helpers (preview_card, dock_tile, etc.)
+      since the HTML now owns all visuals.
+
+  - action: "Rewrite `window/start_window.rs` to use Wry + start.html"
+    observation: |
+      Same pattern: `StartWindowShell` holds the WebView; `open_start_
+      window` builds the page, registers the IPC handler + drain loop.
+      Dispatcher routes `OpenAppWindow` → spawn AppWindow,
+      `OpenStore` → open store, `CloseStartWindow` → remove window.
+      Page still has placeholder recent/store rows — wiring to real
+      data is a follow-up.
+
+  - action: "Build → launch hermetic Focus mode → MCP `OpenStartWindow` → screencap"
+    observation: |
+      start-window-html.png shows the rendered HTML page: indigo
+      header puck with '+' icon, '新しいウィンドウ' heading + subtitle,
+      pill-shaped search bar with magnifier + ⌘K kbd chip, four
+      quick-action tiles (Globe / Folder / Search / Plus) with per-tile
+      accent-tinted icon pucks, two-column block (最近のセッション
+      with WasedaP2P/CodeLab/QueryX/Local AI Chat + chevrons, ストア
+      with four placeholder rows), bottom dock pill (4 accent tiles
+      + indigo plus), footer. Soft shadows + violet gradient
+      backdrop visible.
+
+  - action: "MCP `OpenAppWindowExperiment` + `OpenLauncherWindow` + `OpenCardSwitcher` → screencap"
+    observation: |
+      switcher-html-4-cards.png shows the rebuilt switcher: pale-violet
+      gradient backdrop, header (Layout-Dashboard glyph + '開いている
+      ウィンドウ' + count subtitle), four cards with per-kind preview
+      content + trailing '+ 新しいウィンドウ' tile, footer line,
+      bottom dock pill.
+      Notably the previews now actually differ per window kind:
+        - Launcher card shows a nav rail + content rows mock
+        - WasedaP2P (AppWindow) shows a stats dashboard with bars
+        - 新しいウィンドウ (Start) shows a search bar + quick-action grid
+        - ストア (Store) shows a 3x3 tile grid
+
+agent_observation:
+  user_visible_problem: |
+    Resolved at the architectural layer. The Card Switcher and
+    StartWindow now render through CSS-driven HTML with rich per-kind
+    visuals. Design fidelity vs the reference is dramatically closer
+    than the previous GPUI versions, while window lifecycle / focus /
+    badge integration stay unchanged.
+  likely_cause: "GPUI's element library is great for app shells but coarse for design-system-heavy 'card with mock app preview' UI. Once a single design surface needs gradients, shadows, mock visuals, accent washes, hover lift, etc., HTML+CSS is the more ergonomic medium."
+  suggested_fix:
+    - "Already shipped: web_bridge module + two HTML pages + Wry-based card_switcher.rs + start_window.rs."
+    - "Future: wire StartWindow recents/store rows to real AppState retention + capsule discovery (currently placeholder)."
+    - "Future: have the host inject the window list snapshot for the StartWindow too (right now only switcher gets injected data)."
+    - "Future: use real WKWebView snapshots inside switcher card previews — would need an IPC route to ask the host for a snapshot URL per windowId, plus a host-side handler that calls `WKWebView.takeSnapshot`."
+
+evidence:
+  - start-window-html.png
+  - switcher-html-4-cards.png
+
+status: "fixed"

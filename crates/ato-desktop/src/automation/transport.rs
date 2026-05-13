@@ -617,6 +617,9 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         // entry points, so MCP and UI exit through the exact same
         // code path (refs #92 AC-step 6).
         "stop_active_session" => Ok(AutomationCommand::StopActiveSession),
+        "host_dispatch_action" => Ok(AutomationCommand::HostDispatchAction {
+            action: s("action")?,
+        }),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")

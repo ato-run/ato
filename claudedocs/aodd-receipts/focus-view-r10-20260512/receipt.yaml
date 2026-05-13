@@ -1,0 +1,89 @@
+usecase: "Closing the active AppWindow should NOT take the Control Bar with it — the Control Bar is the Focus View's persistent shell chrome and has its own lifecycle"
+actor: "Autonomous Claude Operator + Fixer using host_dispatch_action / host_take_screenshot via Focus-mode MCP socket"
+goal: "After closing the AppWindow, the Control Bar pill remains floating at the top of the screen; the process stays alive. Closing the Control Bar itself (manually) is what eventually quits the app."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "OS-managed co-movement between AppWindow drag and Control Bar position (sacrificed in this round — see suggested_fix)"
+  - "URL pill / Card Switcher data refresh when AppWindow changes (still uses spawn-time snapshot)"
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: 'closing AppWindow only leaves the Placeholder; the original Control Bar disappears'"
+    observation: |
+      R9 had wired `addChildWindow:ordered:` to glue the Control Bar
+      to its AppWindow, so macOS auto-closed the bar when the
+      AppWindow closed. The R9 fallback opened a Launcher placeholder
+      in its place, but the user wants the *original Control Bar*
+      itself to persist — a different lifecycle.
+    stuck_at: "AppWindow close cascades through addChildWindow and tears down the Control Bar"
+
+  - action: "Remove the Control Bar spawn (and the addChildWindow attach) from `open_app_window`"
+    observation: |
+      `window/orchestrator.rs::open_app_window` no longer opens a paired
+      Control Bar. The macOS attach call is gone. AppWindows are now
+      standalone NSWindows.
+
+  - action: "Add `open_focus_control_bar(cx)` — process-lifetime singleton"
+    observation: |
+      New helper in `window/control_bar.rs` positions the bar near the
+      top-centre of the primary display (display.origin.y + 36px), no
+      parent relationship. Called once from `app.rs::run` Focus
+      branch BEFORE the initial AppWindow opens.
+
+  - action: "Simplify `cx.on_window_closed` — remove the Launcher-on-close branch"
+    observation: |
+      AppWindow close now just evicts from the registry. The
+      Launcher fallback is unnecessary because the Control Bar is
+      already present as the user's persistent landing surface.
+      Quit fires only when `cx.windows().is_empty()` — i.e. the
+      Control Bar itself is closed too.
+
+  - action: "AODD: launch Focus mode, screenshot (initial)"
+    observation: |
+      initial-bar-plus-app.png: Control Bar pill at top, full
+      WasedaP2P AppWindow (hero banner, preview cards, bottom panels).
+      Process PID 85190.
+
+  - action: "host_dispatch_action CloseAppWindow"
+    observation: |
+      Desktop log:
+        focus dispatcher routes action action=CloseAppWindow
+        AppWindow evicted from registry on close app_window_id=0 gpui_window_id=4294967298
+      No `last AppWindow closed; opened Launcher` line — the Launcher
+      fallback is gone.
+
+  - action: "host_take_screenshot"
+    observation: |
+      after-close-bar-stays.png: Control Bar pill is STILL VISIBLE at
+      the top of the screen. AppWindow is gone (backdrop reveals the
+      user's editor). Process PID still 85190 — no quit.
+
+agent_observation:
+  user_visible_problem: |
+    None. The Control Bar now reads as "global Focus chrome": it
+    appears at startup, stays through every AppWindow open/close,
+    and only goes away when the user explicitly closes it (at which
+    point the process exits).
+
+  likely_cause: "R9's addChildWindow attachment was the wrong relationship for the redesign — it conflated 'OS-managed co-movement' with 'lifecycle parent'. The user wanted only the first, but addChildWindow ties both."
+
+  suggested_fix:
+    - "Already shipped: Control Bar as Focus-mode singleton + removed addChildWindow + simplified close handler."
+    - "Defer: re-add co-movement another way — observe the active AppWindow's NSWindow position via NSWorkspace notifications and `setFrame:` the Control Bar to track. This buys back drag-follow without re-introducing the lifecycle coupling."
+    - "Defer: when the active AppWindow changes (e.g. via Card Switcher select), update the Control Bar's URL pill to reflect the new active route. Today it stays at the startup-time route."
+
+evidence:
+  - initial-bar-plus-app.png
+  - after-close-bar-stays.png
+  - desktop-log-excerpt: |
+      ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+      Focus View Control Bar opened at startup
+      Focus View AppWindow opened at startup
+      Focus-mode automation dispatcher started
+      focus dispatcher routes action action=CloseAppWindow
+      AppWindow evicted from registry on close app_window_id=0 gpui_window_id=4294967298
+      (no Launcher / no quit — Control Bar still in cx.windows())
+
+status: "fixed"
