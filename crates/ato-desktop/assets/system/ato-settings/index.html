@@ -9,6 +9,515 @@
     --card:       #ffffff;
     --card-soft:  #fafafa;
     --border:     #e4e4e7;
+    --text:       #18181b;
+    --muted:      #71717a;
+    --soft:       #a1a1aa;
+    --accent:     #4f46e5;
+    --accent-bg:  #eef2ff;
+    --badge-bg:   #fef9c3;
+    --badge-text: #92400e;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg-base);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    display: flex;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .frame {
+    width: min(960px, 100%);
+    height: 100%;
+    margin: 0 auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+  }
+  .card {
+    flex: 1;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* LEFT NAV */
+  .nav {
+    width: 180px;
+    background: var(--card-soft);
+    border-right: 1px solid var(--border);
+    padding: 16px 12px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .nav-back {
+    height: 32px; padding: 0 10px;
+    display: flex; align-items: center; gap: 8px;
+    border-radius: 6px;
+    color: var(--muted); font-size: 12px;
+    cursor: pointer;
+    margin-bottom: 8px;
+  }
+  .nav-back:hover { background: #f4f4f5; }
+  .nav-back svg { width: 14px; height: 14px; }
+  .nav-item {
+    height: 36px; padding: 0 12px;
+    display: flex; align-items: center;
+    border-radius: 6px;
+    color: #52525b; font-size: 14px; font-weight: 500;
+    cursor: pointer;
+  }
+  .nav-item:hover { background: #f4f4f5; }
+  .nav-item.active {
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* MAIN PANEL */
+  .panel {
+    flex: 1;
+    padding: 24px 28px;
+    overflow-y: auto;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+  .panel h1 {
+    margin: 0;
+    font-size: 20px; font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .tab-content { display: none; flex-direction: column; gap: 16px; }
+  .tab-content.visible { display: flex; }
+
+  /* BLOCK */
+  .block {
+    padding: 16px;
+    background: var(--card-soft);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .block-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  /* ROWS */
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    min-height: 36px;
+  }
+  .row-label { font-size: 14px; flex: 1; }
+  .row-sublabel { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .row-label-group { display: flex; flex-direction: column; }
+
+  /* NEXT-LAUNCH BADGE */
+  .badge-next {
+    font-size: 10px; font-weight: 600;
+    background: var(--badge-bg); color: var(--badge-text);
+    border-radius: 4px; padding: 1px 5px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  /* TOGGLE */
+  .toggle-track {
+    width: 36px; height: 20px;
+    background: #d4d4d8;
+    border-radius: 999px;
+    padding: 2px;
+    display: flex; align-items: center; justify-content: flex-start;
+    cursor: pointer;
+    transition: background 0.12s ease;
+    flex-shrink: 0;
+  }
+  .toggle-track.on {
+    background: var(--accent);
+    justify-content: flex-end;
+  }
+  .toggle-knob {
+    width: 16px; height: 16px;
+    background: #fff; border-radius: 50%;
+  }
+
+  /* SELECT */
+  .setting-select {
+    font-size: 13px; color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    outline: none;
+  }
+  .setting-select:focus { border-color: var(--accent); }
+
+  /* LOADING / ERROR */
+  .state-msg {
+    padding: 32px 0; text-align: center;
+    color: var(--muted); font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<div class="frame">
+  <div class="card">
+    <!-- LEFT NAV -->
+    <div class="nav">
+      <div class="nav-back" id="btn-close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+        <span>閉じる</span>
+      </div>
+      <div class="nav-item active" data-tab="general">一般</div>
+      <div class="nav-item" data-tab="desktop">デスクトップ</div>
+      <div class="nav-item" data-tab="updates">更新</div>
+      <div class="nav-item" data-tab="developer">Developer</div>
+    </div>
+
+    <!-- MAIN PANEL -->
+    <div class="panel">
+      <h1 id="panel-title">一般</h1>
+      <div id="loading" class="state-msg">読み込み中…</div>
+
+      <!-- ── 一般 ── -->
+      <div class="tab-content" id="tab-general">
+        <div class="block">
+          <div class="block-title">外観</div>
+          <div class="row">
+            <span class="row-label">テーマ</span>
+            <select class="setting-select" id="sel-theme">
+              <option value="dark">ダーク</option>
+              <option value="light">ライト</option>
+            </select>
+          </div>
+          <div class="row">
+            <span class="row-label">言語</span>
+            <select class="setting-select" id="sel-language">
+              <option value="system">システムに合わせる</option>
+              <option value="japanese">日本語</option>
+              <option value="english">English</option>
+            </select>
+          </div>
+        </div>
+        <div class="block">
+          <div class="block-title">起動</div>
+          <div class="row">
+            <span class="row-label">ログイン時に自動起動</span>
+            <div class="toggle-track" id="tog-launchAtLogin"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">メニューバーに表示</span>
+            <div class="toggle-track" id="tog-showInTray"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">新着情報を表示</span>
+            <div class="toggle-track" id="tog-showWhatsNew"><div class="toggle-knob"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── デスクトップ ── -->
+      <div class="tab-content" id="tab-desktop">
+        <div class="block">
+          <div class="block-title">Focus View</div>
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label">Focus View を有効にする<span class="badge-next">次回起動時</span></span>
+              <span class="row-sublabel">マルチウィンドウモードを使用します</span>
+            </div>
+            <div class="toggle-track" id="tog-focusViewEnabled"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">起動時の画面<span class="badge-next">次回起動時</span></span>
+            <select class="setting-select" id="sel-startupSurface">
+              <option value="store">ストア</option>
+              <option value="start">スタート</option>
+              <option value="blank">空白</option>
+              <option value="restore-last">前回の画面を復元</option>
+            </select>
+          </div>
+          <div class="row">
+            <span class="row-label">コンテンツウィンドウの初期表示<span class="badge-next">次回起動時</span></span>
+            <select class="setting-select" id="sel-contentWindowDefaultPresentation">
+              <option value="windowed">ウィンドウ</option>
+              <option value="maximized">最大化</option>
+              <option value="fullscreen">フルスクリーン</option>
+            </select>
+          </div>
+          <div class="row">
+            <span class="row-label">ウィンドウ位置を復元<span class="badge-next">次回起動時</span></span>
+            <div class="toggle-track" id="tog-restoreWindowFrames"><div class="toggle-knob"></div></div>
+          </div>
+        </div>
+        <div class="block">
+          <div class="block-title">コントロールバー</div>
+          <div class="row">
+            <span class="row-label">常に最前面に表示</span>
+            <div class="toggle-track" id="tog-controlBarAlwaysOnTop"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">起動時に表示<span class="badge-next">次回起動時</span></span>
+            <div class="toggle-track" id="tog-controlBarVisibleOnStartup"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">位置</span>
+            <select class="setting-select" id="sel-controlBarPosition">
+              <option value="top">上</option>
+              <option value="bottom">下</option>
+            </select>
+          </div>
+          <div class="row">
+            <span class="row-label">非使用時に自動で隠す</span>
+            <div class="toggle-track" id="tog-controlBarAutoHide"><div class="toggle-knob"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 更新 ── -->
+      <div class="tab-content" id="tab-updates">
+        <div class="block">
+          <div class="block-title">アップデートチャンネル</div>
+          <div class="row">
+            <span class="row-label">チャンネル</span>
+            <select class="setting-select" id="sel-updateChannel">
+              <option value="stable">安定版 (Stable)</option>
+              <option value="beta">ベータ</option>
+              <option value="nightly">ナイトリー</option>
+            </select>
+          </div>
+          <div class="row">
+            <span class="row-label">自動でアップデート</span>
+            <div class="toggle-track" id="tog-automaticUpdates"><div class="toggle-knob"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Developer ── -->
+      <div class="tab-content" id="tab-developer">
+        <div class="block">
+          <div class="block-title">デバッグ</div>
+          <div class="row">
+            <span class="row-label">ログレベル</span>
+            <select class="setting-select" id="sel-logLevel">
+              <option value="error">Error</option>
+              <option value="warn">Warn</option>
+              <option value="info">Info</option>
+              <option value="debug">Debug</option>
+            </select>
+          </div>
+          <div class="row">
+            <span class="row-label">テレメトリーを送信</span>
+            <div class="toggle-track" id="tog-telemetry"><div class="toggle-knob"></div></div>
+          </div>
+          <div class="row">
+            <span class="row-label">DevTools を自動で開く</span>
+            <div class="toggle-track" id="tog-autoOpenDevtools"><div class="toggle-knob"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ── Bridge ────────────────────────────────────────────────────────────────────
+const POST = (window.ipc && window.ipc.postMessage)
+  ? (m) => window.ipc.postMessage(JSON.stringify(m))
+  : (m) => console.log('[no bridge]', m);
+const BRIDGE = (command) => POST({ capsule: 'ato-settings', command });
+
+let _reqId = 0;
+function nextReqId() { return String(++_reqId); }
+
+function sendPatch(patch) {
+  BRIDGE({ kind: 'patchGlobalSettings', requestId: nextReqId(), patch });
+}
+
+// ── Tab navigation ────────────────────────────────────────────────────────────
+const TAB_TITLES = {
+  general:   '一般',
+  desktop:   'デスクトップ',
+  updates:   '更新',
+  developer: 'Developer',
+};
+
+function showTab(tabId) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('visible'));
+  document.querySelectorAll('.nav-item[data-tab]').forEach(el => el.classList.remove('active'));
+  const content = document.getElementById('tab-' + tabId);
+  const navItem = document.querySelector('.nav-item[data-tab="' + tabId + '"]');
+  if (content) content.classList.add('visible');
+  if (navItem) navItem.classList.add('active');
+  document.getElementById('panel-title').textContent = TAB_TITLES[tabId] || tabId;
+  BRIDGE({ kind: 'navigateTab', tab: tabId });
+}
+
+document.querySelectorAll('.nav-item[data-tab]').forEach(el => {
+  el.addEventListener('click', () => showTab(el.getAttribute('data-tab')));
+});
+
+document.getElementById('btn-close').addEventListener('click', () => {
+  BRIDGE({ kind: 'close' });
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') BRIDGE({ kind: 'close' });
+});
+
+// ── Toggle helper ─────────────────────────────────────────────────────────────
+function setToggleState(el, on) {
+  if (on) {
+    el.classList.add('on');
+  } else {
+    el.classList.remove('on');
+  }
+  el.dataset.state = on ? '1' : '0';
+}
+
+function bindToggle(id, patchKey) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('click', () => {
+    const nowOn = el.dataset.state === '1';
+    setToggleState(el, !nowOn);
+    sendPatch({ [patchKey]: !nowOn });
+  });
+}
+
+// ── Select helper ─────────────────────────────────────────────────────────────
+function bindSelect(id, patchKey) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', () => {
+    sendPatch({ [patchKey]: el.value });
+  });
+}
+
+// ── Wire up controls ──────────────────────────────────────────────────────────
+bindToggle('tog-launchAtLogin',             'launchAtLogin');
+bindToggle('tog-showInTray',                'showInTray');
+bindToggle('tog-showWhatsNew',              'showWhatsNew');
+bindSelect('sel-theme',                     'theme');
+bindSelect('sel-language',                  'language');
+
+bindToggle('tog-focusViewEnabled',          'focusViewEnabled');
+bindSelect('sel-startupSurface',            'startupSurface');
+bindSelect('sel-contentWindowDefaultPresentation', 'contentWindowDefaultPresentation');
+bindToggle('tog-restoreWindowFrames',       'restoreWindowFrames');
+bindToggle('tog-controlBarAlwaysOnTop',     'controlBarAlwaysOnTop');
+bindToggle('tog-controlBarVisibleOnStartup','controlBarVisibleOnStartup');
+bindSelect('sel-controlBarPosition',        'controlBarPosition');
+bindToggle('tog-controlBarAutoHide',        'controlBarAutoHide');
+
+bindSelect('sel-updateChannel',             'updateChannel');
+bindToggle('tog-automaticUpdates',          'automaticUpdates');
+
+bindSelect('sel-logLevel',                  'logLevel');
+bindToggle('tog-telemetry',                 'telemetry');
+bindToggle('tog-autoOpenDevtools',          'autoOpenDevtools');
+
+// ── Hydrate from snapshot ─────────────────────────────────────────────────────
+function hydrateFromSnapshot(snap) {
+  const r = snap && snap.resolved;
+  if (!r) return;
+
+  function val(obj, ...keys) {
+    let cur = obj;
+    for (const k of keys) { if (cur == null) return undefined; cur = cur[k]; }
+    return (cur && 'value' in cur) ? cur.value : cur;
+  }
+
+  // General
+  setOptionalSelect('sel-theme',    val(r, 'general', 'theme'));
+  setOptionalSelect('sel-language', val(r, 'general', 'language'));
+  setToggleEl('tog-launchAtLogin',  val(r, 'general', 'launchAtLogin'));
+  setToggleEl('tog-showInTray',     val(r, 'general', 'showInTray'));
+  setToggleEl('tog-showWhatsNew',   val(r, 'general', 'showWhatsNew'));
+
+  // Desktop
+  setToggleEl('tog-focusViewEnabled',           val(r, 'desktop', 'focusViewEnabled'));
+  setOptionalSelect('sel-startupSurface',       val(r, 'desktop', 'startupSurface'));
+  setOptionalSelect('sel-contentWindowDefaultPresentation', val(r, 'desktop', 'contentWindowDefaultPresentation'));
+  setToggleEl('tog-restoreWindowFrames',        val(r, 'desktop', 'restoreWindowFrames'));
+  setToggleEl('tog-controlBarAlwaysOnTop',      val(r, 'desktop', 'controlBar', 'alwaysOnTop'));
+  setToggleEl('tog-controlBarVisibleOnStartup', val(r, 'desktop', 'controlBar', 'visibleOnStartup'));
+  setOptionalSelect('sel-controlBarPosition',   val(r, 'desktop', 'controlBar', 'position'));
+  setToggleEl('tog-controlBarAutoHide',         val(r, 'desktop', 'controlBar', 'autoHide'));
+
+  // Updates
+  setOptionalSelect('sel-updateChannel',  val(r, 'updates', 'channel'));
+  setToggleEl('tog-automaticUpdates',     val(r, 'updates', 'automaticUpdates'));
+
+  // Developer
+  setOptionalSelect('sel-logLevel',       val(r, 'developer', 'logLevel'));
+  setToggleEl('tog-telemetry',            val(r, 'developer', 'telemetry'));
+  setToggleEl('tog-autoOpenDevtools',     val(r, 'developer', 'autoOpenDevtools'));
+}
+
+function setToggleEl(id, value) {
+  const el = document.getElementById(id);
+  if (el && value !== undefined) setToggleState(el, !!value);
+}
+
+function setOptionalSelect(id, value) {
+  const el = document.getElementById(id);
+  if (!el || value === undefined || value === null) return;
+  // Serde serialises kebab-case enums as strings like "dark", "store", "top"
+  const strVal = String(value).toLowerCase().replace(/_/g, '-');
+  for (const opt of el.options) {
+    if (opt.value === strVal) { el.value = strVal; break; }
+  }
+}
+
+// ── Hydrate callback (used by both init and Rust-push) ────────────────────────
+window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
+  const loading = document.getElementById('loading');
+  if (payload && payload.snapshot) {
+    if (loading) loading.style.display = 'none';
+    document.querySelectorAll('.tab-content').forEach(el => {
+      if (el.classList.contains('visible')) el.style.visibility = 'visible';
+    });
+    hydrateFromSnapshot(payload.snapshot);
+  }
+};
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+(function init() {
+  // Show the first tab by default.
+  showTab('general');
+
+  // Hide all tab content until data arrives (prevents flash of un-hydrated UI).
+  document.querySelectorAll('.tab-content').forEach(el => {
+    el.style.visibility = 'hidden';
+    el.classList.add('visible'); // keep layout; visibility hides content
+  });
+  showTab('general'); // re-apply active class
+
+  // Seed from the initialization script if available (injected by Rust
+  // before the page parsed), otherwise request a fresh snapshot.
+  if (window.__ATO_SETTINGS_INIT__ && window.__ATO_SETTINGS_INIT__.resolved) {
+    const loading = document.getElementById('loading');
+    if (loading) loading.style.display = 'none';
+    document.querySelectorAll('.tab-content').forEach(el => el.style.visibility = 'visible');
+    hydrateFromSnapshot(window.__ATO_SETTINGS_INIT__);
+  } else {
+    BRIDGE({ kind: 'loadSnapshot', requestId: nextReqId() });
+  }
+})();
+</script>
+
+</body>
+</html>
+  :root {
+    --bg-base:    #f5f3ff;
+    --card:       #ffffff;
+    --card-soft:  #fafafa;
+    --border:     #e4e4e7;
     --border-soft:#ececf1;
     --text:       #18181b;
     --muted:      #71717a;
