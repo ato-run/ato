@@ -16,25 +16,26 @@
     --accent-bg: #eef2ff;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html, body { height: 100%; margin: 0; padding: 0; }
   body {
-    background: #ffffff;
+    background: var(--card);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
                  "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
     color: var(--text);
-    display: flex; align-items: center; justify-content: center;
     -webkit-user-select: none;
     user-select: none;
   }
 
   .frame {
-    width: min(560px, 100%);
-    padding: 24px 28px 20px;
+    /* Fills the whole window — outer chrome lives in the host window
+       frame, the card has no body padding around it. */
+    width: 100%; height: 100%;
+    padding: 32px 28px 20px;
     background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    box-shadow: 0 22px 50px rgba(28, 25, 65, 0.16);
-    display: flex; flex-direction: column; gap: 18px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    display: flex; flex-direction: column; gap: 16px;
   }
 
   /* HEADER */

@@ -118,11 +118,19 @@ fn open_wizard(
     Ok(())
 }
 
+// Window dimensions are tuned to the card content so the window IS
+// the card — no surrounding chrome padding. Update these together
+// when the HTML content grows or shrinks.
+const CONSENT_W: f32 = 560.0;
+const CONSENT_H: f32 = 560.0;
+const BOOT_W: f32 = 440.0;
+const BOOT_H: f32 = 520.0;
+
 /// Spawn the consent wizard with no specific target — used for AODD
 /// screenshot generation. The wizard JS falls back to its hardcoded
 /// demo identity (`WasedaP2P` / `ato.app/shell://wasedap2p`).
 pub fn open_consent_window(cx: &mut App) -> Result<()> {
-    open_wizard(cx, CONSENT_HTML, 620.0, 640.0, None)
+    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, None)
 }
 
 /// Real launch entrypoint: open the consent wizard for a concrete
@@ -173,11 +181,11 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
         serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string())
     );
 
-    open_wizard(cx, CONSENT_HTML, 620.0, 640.0, Some(init_script))
+    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, Some(init_script))
 }
 
 /// Spawn the boot progress wizard. Narrower than consent — just the
 /// capsule badge + steps list + abort button.
 pub fn open_boot_window(cx: &mut App) -> Result<()> {
-    open_wizard(cx, BOOT_HTML, 500.0, 540.0, None)
+    open_wizard(cx, BOOT_HTML, BOOT_W, BOOT_H, None)
 }
