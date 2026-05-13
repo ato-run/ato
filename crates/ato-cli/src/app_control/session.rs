@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result};
 // Session record schema and atomic writer now live in `ato-session-core`
 // so `ato-desktop` can read records without depending on `ato-cli`. We
@@ -29,6 +31,7 @@ use crate::application::pipeline::phases::run::{
     persist_background_dependency_contracts, setup_dependency_contracts_launch_context,
     DependencyContractGuard, DerivedBridgeManifest, PreparedRunContext,
 };
+use crate::application::session_graph_populate::{EDGE_KIND_PROVIDES, NODE_KIND_PROVIDER};
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
     prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
@@ -255,10 +258,11 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
     let ctx = crate::application::receipt_boundary::ReceiptEmissionContext::for_boundary(
         "ato app session start",
     );
-    futures::executor::block_on(crate::application::receipt_boundary::emit_receipt_on_result(
-        ctx,
-        async { pipeline.run(&mut runner).await },
-    ))?;
+    futures::executor::block_on(
+        crate::application::receipt_boundary::emit_receipt_on_result(ctx, async {
+            pipeline.run(&mut runner).await
+        }),
+    )?;
 
     let info = runner
         .session_info
@@ -637,9 +641,10 @@ pub(super) fn start_runtime_session(
     // subset alongside `dependency_contracts`. Write-only — teardown still
     // reads `dependency_contracts`. Parity is enforced in debug builds by
     // the populator's internal `debug_assert!`.
-    let graph = crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
-        dependency_contracts.as_ref(),
-    );
+    let graph =
+        crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
+            dependency_contracts.as_ref(),
+        );
     let session = StoredSessionInfo {
         session_id,
         handle: handle.to_string(),
@@ -929,9 +934,10 @@ pub(super) fn start_orchestration_session_in_process(
     // subset alongside `dependency_contracts`. Write-only — teardown still
     // reads `dependency_contracts`. Parity is enforced in debug builds by
     // the populator's internal `debug_assert!`.
-    let graph = crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
-        dependency_contracts.as_ref(),
-    );
+    let graph =
+        crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
+            dependency_contracts.as_ref(),
+        );
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
         handle: handle.to_string(),
@@ -2119,43 +2125,226 @@ fn stop_recorded_dependency_contracts(
     let Some(record) = record else {
         return Ok(false);
     };
-    let Some(snapshot) = record.dependency_contracts.as_ref() else {
+    let Some(plan) = dependency_teardown_plan(record)? else {
         return Ok(false);
     };
-    if snapshot.providers.is_empty() {
-        return Ok(false);
-    }
-
-    let targets = snapshot
-        .providers
-        .iter()
-        .map(
-            |provider| crate::application::dependency_runtime::TeardownTarget {
-                dep: provider.alias.clone(),
-                pid: provider.pid,
-                state_dir: provider.state_dir.clone(),
-                needs: Vec::new(),
-            },
-        )
-        .collect();
     let grace = if force {
         Duration::from_secs(0)
     } else {
         Duration::from_secs(10)
     };
-    crate::application::dependency_runtime::teardown_reverse_topological(targets, grace)
-        .with_context(|| {
-            format!(
-                "Failed to stop dependency contracts for {}",
-                record.session_id
+    match plan.strategy {
+        DependencyTeardownStrategy::Graph => {
+            crate::application::dependency_runtime::teardown::teardown_in_order(
+                &plan.targets,
+                grace,
             )
-        })?;
-    for provider in &snapshot.providers {
-        let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
-            &provider.state_dir,
-        );
+        }
+        DependencyTeardownStrategy::LegacyDependencyContracts => {
+            crate::application::dependency_runtime::teardown_reverse_topological(
+                plan.targets,
+                grace,
+            )
+        }
+    }
+    .with_context(|| {
+        format!(
+            "Failed to stop dependency contracts for {}",
+            record.session_id
+        )
+    })?;
+    for state_dir in &plan.state_dirs {
+        let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(state_dir);
     }
     Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DependencyTeardownStrategy {
+    Graph,
+    LegacyDependencyContracts,
+}
+
+#[derive(Debug, Clone)]
+struct DependencyTeardownPlan {
+    strategy: DependencyTeardownStrategy,
+    targets: Vec<crate::application::dependency_runtime::TeardownTarget>,
+    state_dirs: Vec<PathBuf>,
+}
+
+fn dependency_teardown_plan(record: &StoredSessionInfo) -> Result<Option<DependencyTeardownPlan>> {
+    if let Some(plan) = dependency_teardown_plan_from_graph(record) {
+        return Ok(Some(plan));
+    }
+
+    let Some(snapshot) = record.dependency_contracts.as_ref() else {
+        return Ok(None);
+    };
+    if snapshot.providers.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(DependencyTeardownPlan {
+        strategy: DependencyTeardownStrategy::LegacyDependencyContracts,
+        targets: snapshot
+            .providers
+            .iter()
+            .map(
+                |provider| crate::application::dependency_runtime::TeardownTarget {
+                    dep: provider.alias.clone(),
+                    pid: provider.pid,
+                    state_dir: provider.state_dir.clone(),
+                    needs: Vec::new(),
+                },
+            )
+            .collect(),
+        state_dirs: snapshot
+            .providers
+            .iter()
+            .map(|provider| provider.state_dir.clone())
+            .collect(),
+    }))
+}
+
+fn dependency_teardown_plan_from_graph(
+    record: &StoredSessionInfo,
+) -> Option<DependencyTeardownPlan> {
+    let graph = record.graph.as_ref()?;
+    let snapshot = record.dependency_contracts.as_ref()?;
+    let ordered_aliases = graph_provider_aliases_in_reverse_topological_order(graph);
+    if ordered_aliases.is_empty() {
+        return None;
+    }
+
+    let graph_aliases_sorted =
+        sorted_provider_aliases(ordered_aliases.iter().map(|alias| alias.as_str()));
+    let contract_aliases_sorted = sorted_provider_aliases(
+        snapshot
+            .providers
+            .iter()
+            .map(|provider| provider.alias.as_str()),
+    );
+    debug_assert_eq!(
+        graph_aliases_sorted,
+        contract_aliases_sorted,
+        "session record graph/provider alias divergence (graph={graph_aliases_sorted:?}, contracts={contract_aliases_sorted:?})"
+    );
+    if graph_aliases_sorted != contract_aliases_sorted {
+        return None;
+    }
+
+    let providers_by_alias = snapshot
+        .providers
+        .iter()
+        .map(|provider| (provider.alias.as_str(), provider))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut targets = Vec::with_capacity(ordered_aliases.len());
+    let mut state_dirs = Vec::with_capacity(ordered_aliases.len());
+    for alias in ordered_aliases {
+        let provider = providers_by_alias.get(alias.as_str())?;
+        targets.push(crate::application::dependency_runtime::TeardownTarget {
+            dep: provider.alias.clone(),
+            pid: provider.pid,
+            state_dir: provider.state_dir.clone(),
+            needs: Vec::new(),
+        });
+        state_dirs.push(provider.state_dir.clone());
+    }
+
+    Some(DependencyTeardownPlan {
+        strategy: DependencyTeardownStrategy::Graph,
+        targets,
+        state_dirs,
+    })
+}
+
+fn graph_provider_aliases_in_reverse_topological_order(
+    graph: &ato_session_core::StoredExecutionGraph,
+) -> Vec<String> {
+    let provider_aliases = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_PROVIDER)
+        .map(|node| node.identifier.clone())
+        .collect::<BTreeSet<_>>();
+    if provider_aliases.is_empty() {
+        return Vec::new();
+    }
+
+    let mut adjacency = provider_aliases
+        .iter()
+        .map(|alias| (alias.clone(), Vec::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut subset_has_provides = false;
+    for edge in &graph.edges {
+        if edge.kind != EDGE_KIND_PROVIDES {
+            continue;
+        }
+        if !provider_aliases.contains(&edge.source) {
+            continue;
+        }
+        subset_has_provides = true;
+        adjacency
+            .entry(edge.source.clone())
+            .or_default()
+            .push(edge.target.clone());
+        adjacency.entry(edge.target.clone()).or_default();
+    }
+    if !subset_has_provides {
+        return Vec::new();
+    }
+
+    let mut visited = BTreeSet::<String>::new();
+    let mut visiting = BTreeSet::<String>::new();
+    let mut order = Vec::<String>::new();
+    let mut stack = Vec::<String>::new();
+    for node in adjacency.keys().cloned().collect::<Vec<_>>() {
+        topo_visit(
+            &node,
+            &adjacency,
+            &mut visited,
+            &mut visiting,
+            &mut order,
+            &mut stack,
+        );
+    }
+
+    order.reverse();
+    order
+        .into_iter()
+        .filter(|node| provider_aliases.contains(node))
+        .collect()
+}
+
+fn topo_visit(
+    node: &str,
+    adjacency: &BTreeMap<String, Vec<String>>,
+    visited: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+    order: &mut Vec<String>,
+    stack: &mut Vec<String>,
+) {
+    if visited.contains(node) || visiting.contains(node) {
+        return;
+    }
+    visiting.insert(node.to_string());
+    stack.push(node.to_string());
+    if let Some(neighbors) = adjacency.get(node) {
+        for next in neighbors {
+            topo_visit(next, adjacency, visited, visiting, order, stack);
+        }
+    }
+    stack.pop();
+    visiting.remove(node);
+    visited.insert(node.to_string());
+    order.push(node.to_string());
+}
+
+fn sorted_provider_aliases<'a>(aliases: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut aliases = aliases.collect::<Vec<_>>();
+    aliases.sort_unstable();
+    aliases
 }
 
 fn dependency_sidecar_has_providers(
@@ -2718,6 +2907,303 @@ mod tests {
         );
         assert_eq!(parsed_graph.nodes.len(), 2);
         assert_eq!(parsed_graph.edges.len(), 2);
+    }
+
+    #[test]
+    fn dependency_teardown_plan_prefers_graph_when_provider_subset_is_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-stop".to_string(),
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![
+                    StoredDependencyProvider {
+                        alias: "db".to_string(),
+                        pid: 1,
+                        state_dir: temp.path().join("state/db"),
+                        resolved: "capsule://example/db@1".to_string(),
+                        allocated_port: Some(5432),
+                        log_path: None,
+                        runtime_export_keys: vec![],
+                    },
+                    StoredDependencyProvider {
+                        alias: "cache".to_string(),
+                        pid: 2,
+                        state_dir: temp.path().join("state/cache"),
+                        resolved: "capsule://example/cache@1".to_string(),
+                        allocated_port: Some(6379),
+                        log_path: None,
+                        runtime_export_keys: vec![],
+                    },
+                ],
+            }),
+            graph: Some(ato_session_core::StoredExecutionGraph {
+                schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![
+                    ato_session_core::StoredGraphNode {
+                        kind: NODE_KIND_PROVIDER.to_string(),
+                        identifier: "cache".to_string(),
+                    },
+                    ato_session_core::StoredGraphNode {
+                        kind: NODE_KIND_PROVIDER.to_string(),
+                        identifier: "db".to_string(),
+                    },
+                ],
+                edges: vec![
+                    ato_session_core::StoredGraphEdge {
+                        source: "cache".to_string(),
+                        target: "output://cache".to_string(),
+                        kind: EDGE_KIND_PROVIDES.to_string(),
+                    },
+                    ato_session_core::StoredGraphEdge {
+                        source: "db".to_string(),
+                        target: "output://db".to_string(),
+                        kind: EDGE_KIND_PROVIDES.to_string(),
+                    },
+                ],
+            }),
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let plan = super::dependency_teardown_plan(&record)
+            .expect("plan result")
+            .expect("plan present");
+        assert_eq!(plan.strategy, super::DependencyTeardownStrategy::Graph);
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| target.dep.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db", "cache"]
+        );
+    }
+
+    #[test]
+    fn dependency_teardown_plan_falls_back_to_legacy_when_graph_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-v0_5-stop".to_string(),
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: 1,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec![],
+                }],
+            }),
+            graph: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let plan = super::dependency_teardown_plan(&record)
+            .expect("plan result")
+            .expect("plan present");
+        assert_eq!(
+            plan.strategy,
+            super::DependencyTeardownStrategy::LegacyDependencyContracts
+        );
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| target.dep.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_recorded_dependency_contracts_graph_path_kills_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-kill".to_string(),
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: provider.id() as i32,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec![],
+                }],
+            }),
+            graph: Some(ato_session_core::StoredExecutionGraph {
+                schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![ato_session_core::StoredGraphNode {
+                    kind: NODE_KIND_PROVIDER.to_string(),
+                    identifier: "db".to_string(),
+                }],
+                edges: vec![ato_session_core::StoredGraphEdge {
+                    source: "db".to_string(),
+                    target: "output://db".to_string(),
+                    kind: EDGE_KIND_PROVIDES.to_string(),
+                }],
+            }),
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
+            .expect("stop graph path");
+        assert!(stopped);
+        for _ in 0..40 {
+            if provider.try_wait().expect("provider wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = provider.kill();
+        panic!("graph-backed provider teardown did not stop provider within 1s");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_recorded_dependency_contracts_v0_5_fallback_kills_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-v0_5-kill".to_string(),
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: provider.id() as i32,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec![],
+                }],
+            }),
+            graph: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
+            .expect("stop legacy fallback");
+        assert!(stopped);
+        for _ in 0..40 {
+            if provider.try_wait().expect("provider wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = provider.kill();
+        panic!("legacy dependency-contract fallback did not stop provider within 1s");
     }
 
     #[test]
