@@ -26,8 +26,6 @@
   }
 
   .frame {
-    /* Fills the whole window — outer chrome lives in the host window
-       frame, the card has no body padding around it. */
     width: 100%; height: 100%;
     padding: 36px 30px 22px;
     background: var(--card);
@@ -117,6 +115,18 @@
   }
   .abort:hover { color: var(--text); }
 </style>
+
+<script>
+  // Early-binding stub so `evaluate_script` calls that arrive before
+  // DOMContentLoaded (steps 0/1) are buffered rather than lost.
+  // After the DOM is ready the real implementation overwrites this and
+  // replays the latest buffered step.
+  (function () {
+    var pending = null;
+    window.__atoStep = function (n) { pending = n; };
+    window.__atoPending = function () { return pending; };
+  })();
+</script>
 </head>
 <body>
 
@@ -132,34 +142,24 @@
   </div>
 
   <div class="steps" id="steps">
-    <div class="step done">
-      <span class="step-tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-      <span class="step-label">Capsule を取得中</span>
-      <span class="step-time">完了</span>
-    </div>
-    <div class="step done">
-      <span class="step-tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
-      <span class="step-label">依存関係を解決中</span>
-      <span class="step-time">完了</span>
-    </div>
-    <div class="step active">
+    <div class="step active" id="step-0">
       <span class="step-tick"></span>
-      <span class="step-label">起動環境を準備中</span>
+      <span class="step-label">検証中</span>
       <span class="step-time">進行中</span>
     </div>
-    <div class="step pending">
+    <div class="step pending" id="step-1">
       <span class="step-tick"></span>
-      <span class="step-label">セキュリティ確認</span>
+      <span class="step-label">解決中</span>
       <span class="step-time">待機</span>
     </div>
-    <div class="step pending">
+    <div class="step pending" id="step-2">
       <span class="step-tick"></span>
-      <span class="step-label">データ保護</span>
+      <span class="step-label">起動中</span>
       <span class="step-time">待機</span>
     </div>
-    <div class="step pending">
+    <div class="step pending" id="step-3">
       <span class="step-tick"></span>
-      <span class="step-label">プライバシー設定</span>
+      <span class="step-label">接続中</span>
       <span class="step-time">待機</span>
     </div>
   </div>
@@ -180,6 +180,8 @@
     : (m) => console.log('[no bridge]', m);
   const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
 
+  const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
   // Inject real capsule identity when the host provides __ATO_BOOT.
   const boot = (window.__ATO_BOOT && typeof window.__ATO_BOOT === 'object')
     ? window.__ATO_BOOT : null;
@@ -188,29 +190,35 @@
     if (el) el.textContent = boot.handle || boot.name || '';
   }
 
-  // Phase 1: auto-cycle through the pending steps every 1.2s so the
-  // wizard is visually demonstrable. Phase 2 will be driven by real
-  // orchestrator events (host pushes "step N done" over a future
-  // protocol-direction-reverse channel; for now this is decorative).
-  const stepNodes = Array.from(document.querySelectorAll('#steps .step'));
-  let activeIndex = stepNodes.findIndex(n => n.classList.contains('active'));
-  setInterval(() => {
-    if (activeIndex < 0 || activeIndex >= stepNodes.length) return;
-    const cur = stepNodes[activeIndex];
-    cur.classList.remove('active');
-    cur.classList.add('done');
-    cur.querySelector('.step-time').textContent = '完了';
-    cur.querySelector('.step-tick').innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-    activeIndex++;
-    const next = stepNodes[activeIndex];
-    if (next) {
-      next.classList.remove('pending');
-      next.classList.add('active');
-      next.querySelector('.step-tick').innerHTML = '';
-      next.querySelector('.step-time').textContent = '進行中';
-    }
-  }, 1200);
+  const stepNodes = [0, 1, 2, 3].map(i => document.getElementById('step-' + i));
+
+  function markDone(node) {
+    node.classList.remove('active', 'pending');
+    node.classList.add('done');
+    node.querySelector('.step-time').textContent = '完了';
+    node.querySelector('.step-tick').innerHTML = CHECK_SVG;
+  }
+
+  function markActive(node) {
+    node.classList.remove('done', 'pending');
+    node.classList.add('active');
+    node.querySelector('.step-tick').innerHTML = '';
+    node.querySelector('.step-time').textContent = '進行中';
+  }
+
+  // Real step handler: marks all steps before n as done, step n as active.
+  // Idempotent — safe to call with the same or lower step index.
+  window.__atoStep = function (n) {
+    stepNodes.forEach(function (node, i) {
+      if (i < n) { markDone(node); }
+      else if (i === n) { markActive(node); }
+      // else: leave pending
+    });
+  };
+
+  // Replay any step buffered before the DOM was ready.
+  var pending = window.__atoPending ? window.__atoPending() : null;
+  if (pending !== null) { window.__atoStep(pending); }
 
   document.getElementById('abort').addEventListener('click', () => {
     BRIDGE({ kind: 'abort_boot' });
@@ -222,3 +230,4 @@
 
 </body>
 </html>
+

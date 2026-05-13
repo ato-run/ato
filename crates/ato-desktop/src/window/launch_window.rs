@@ -30,10 +30,11 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, WindowBounds,
-    WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Render,
+    WeakEntity, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use std::sync::{Arc, Mutex};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
@@ -84,6 +85,16 @@ pub struct BootWindowSlot {
 
 impl gpui::Global for BootWindowSlot {}
 
+/// Weak handle to the `LaunchWindowShell` entity that owns the boot progress
+/// WebView. Set by `open_boot_window` as a side effect so `AppCapsuleShell::new`
+/// can drain orchestrator step events to the wizard without changing any
+/// caller signatures. Cleared after `AppCapsuleShell::new` consumes it to
+/// prevent cross-launch leakage.
+#[derive(Default, Clone)]
+pub struct PendingBootShell(pub Option<WeakEntity<LaunchWindowShell>>);
+
+impl gpui::Global for PendingBootShell {}
+
 pub struct LaunchWindowShell {
     _webview: WebView,
 }
@@ -96,6 +107,21 @@ impl Render for LaunchWindowShell {
     ) -> impl IntoElement {
         // White backdrop in case the HTML is still painting.
         div().size_full().bg(rgb(0xffffff))
+    }
+}
+
+impl LaunchWindowShell {
+    /// Advance the boot wizard UI to step `n`. Called from the foreground
+    /// polling task inside `AppCapsuleShell` as the orchestrator emits
+    /// progress. The JS guards with `typeof window.__atoStep === 'function'`
+    /// so a missed early-step call is silent (the HTML buffers pending steps
+    /// via DOMContentLoaded replay).
+    pub fn push_step(&self, step: u8) {
+        let script = format!(
+            "typeof window.__atoStep==='function'&&window.__atoStep({})",
+            step
+        );
+        let _ = self._webview.evaluate_script(&script);
     }
 }
 
@@ -214,6 +240,8 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
 
 /// Spawn the boot progress wizard. Returns the `AnyWindowHandle` so the
 /// caller can store it in `BootWindowSlot` for later programmatic close.
+/// Also sets `PendingBootShell` so `AppCapsuleShell::new` can drain
+/// orchestrator progress events to the wizard's WebView.
 ///
 /// `route` is optional — when `Some`, injects `window.__ATO_BOOT = { name, handle }`
 /// so the boot HTML can show the real capsule identity instead of the
@@ -242,5 +270,67 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
             serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string())
         )
     });
-    open_wizard(cx, BOOT_HTML, BOOT_W, BOOT_H, init_script)
+    let (handle, shell) = open_boot_wizard_inner(cx, init_script)?;
+    cx.set_global(PendingBootShell(Some(shell.downgrade())));
+    Ok(handle)
+}
+
+/// Internal helper: opens the boot wizard window and returns both the GPUI
+/// window handle and the `Entity<LaunchWindowShell>` so the caller can
+/// store a `WeakEntity` in `PendingBootShell` for progress injection.
+fn open_boot_wizard_inner(
+    cx: &mut App,
+    init_script: Option<String>,
+) -> Result<(AnyWindowHandle, Entity<LaunchWindowShell>)> {
+    let bounds = Bounds::centered(None, size(px(BOOT_W), px(BOOT_H)), cx);
+    let options = WindowOptions {
+        titlebar: Some(TitleBar::title_bar_options()),
+        focus: true,
+        show: true,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_decorations: Some(WindowDecorations::Client),
+        ..Default::default()
+    };
+
+    let queue = system_ipc::new_queue();
+    // Arc<Mutex<...>> so the entity can be captured across the Send closure.
+    let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> =
+        Arc::new(Mutex::new(None));
+    let shell_slot_inner = Arc::clone(&shell_slot);
+    let queue_for_closure = queue.clone();
+
+    let handle = cx.open_window(options, move |window, cx| {
+        let win_size = window.bounds().size;
+        let webview_rect = Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(win_size.width) as u32,
+                f32::from(win_size.height) as u32,
+            )
+            .into(),
+        };
+        let mut builder = WebViewBuilder::new()
+            .with_html(BOOT_HTML)
+            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_bounds(webview_rect);
+        if let Some(script) = init_script {
+            builder = builder.with_initialization_script(script);
+        }
+        let webview = builder
+            .build_as_child(window)
+            .expect("build_as_child must succeed for the boot WebView");
+        let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
+        if let Ok(mut slot) = shell_slot_inner.lock() {
+            *slot = Some(shell.clone());
+        }
+        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+    })?;
+
+    system_ipc::spawn_drain_loop(cx, queue, *handle);
+    let shell = shell_slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("LaunchWindowShell entity must be populated by open_window closure");
+    Ok((*handle, shell))
 }

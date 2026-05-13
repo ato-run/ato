@@ -216,15 +216,17 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                             ?route,
                                                             "ForceApprovePending: consuming pending target"
                                                         );
-                                                        if let Err(err) =
-                                                            crate::window::open_app_window(cx, route.clone())
-                                                        {
-                                                            tracing::error!(?err, "open_app_window failed");
-                                                        }
+                                                        // Open boot window FIRST so PendingBootShell
+                                                        // is set before AppCapsuleShell::new reads it.
                                                         if let Err(err) =
                                                             crate::window::launch_window::open_boot_window(cx, Some(&route))
                                                         {
                                                             tracing::error!(?err, "open_boot_window failed");
+                                                        }
+                                                        if let Err(err) =
+                                                            crate::window::open_app_window(cx, route.clone())
+                                                        {
+                                                            tracing::error!(?err, "open_app_window failed");
                                                         }
                                                     }
                                                     None => tracing::warn!(
