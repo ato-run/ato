@@ -52,11 +52,18 @@ pub fn teardown_reverse_topological(
     let by_dep: BTreeMap<String, TeardownTarget> =
         targets.into_iter().map(|t| (t.dep.clone(), t)).collect();
 
-    for dep_name in order {
-        let target = match by_dep.get(&dep_name) {
-            Some(t) => t,
-            None => continue,
-        };
+    let ordered_targets = order
+        .into_iter()
+        .filter_map(|dep_name| by_dep.get(&dep_name).cloned())
+        .collect::<Vec<_>>();
+    teardown_in_order(&ordered_targets, grace)
+}
+
+pub(crate) fn teardown_in_order(
+    targets: &[TeardownTarget],
+    grace: Duration,
+) -> Result<(), TeardownError> {
+    for target in targets {
         stop_one(target, grace)?;
     }
     Ok(())
