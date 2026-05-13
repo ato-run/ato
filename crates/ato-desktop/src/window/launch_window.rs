@@ -66,8 +66,8 @@ impl Render for LaunchWindowShell {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Pale-violet backdrop in case the HTML is still painting.
-        div().size_full().bg(rgb(0xf7f4ff))
+        // White backdrop in case the HTML is still painting.
+        div().size_full().bg(rgb(0xffffff))
     }
 }
 
