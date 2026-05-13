@@ -657,18 +657,25 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         .open(route.clone());
 
     let route_for_view = route.clone();
-    let app_handle = cx.open_window(options, move |window, cx| {
+    let open_result = cx.open_window(options, move |window, cx| {
         // Branch on route kind:
-        //   - ExternalUrl → WebLinkView (Wry WebView + browser
-        //     chrome). This is the Desktop's built-in browser view
-        //     for https links — NOT a capsule.
-        //   - Everything else → AppWindowShell hero placeholder for
-        //     now. Real capsule runtime will replace this once the
-        //     per-window WebViewManager migration lands.
+        //   - ExternalUrl → WebLinkView (Wry WebView + browser chrome).
+        //   - CapsuleHandle → AppCapsuleShell (real session orchestration,
+        //     #176). Spawns background thread for `resolve_and_start_guest`
+        //     and lazily creates a Wry WebView when the session is ready.
+        //   - Everything else → AppWindowShell placeholder for now.
         match route_for_view.clone() {
             crate::state::GuestRoute::ExternalUrl(url) => {
                 let shell = cx.new(|cx| {
                     crate::window::web_link_view::WebLinkViewShell::new(url, window, cx)
+                });
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+            }
+            crate::state::GuestRoute::CapsuleHandle { handle, .. } => {
+                let shell = cx.new(|cx| {
+                    crate::window::app_capsule_shell::AppCapsuleShell::new(
+                        handle, window, cx,
+                    )
                 });
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             }
@@ -677,7 +684,17 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             }
         }
-    })?;
+    });
+    let app_handle = match open_result {
+        Ok(h) => h,
+        Err(err) => {
+            // Clean up the pre-registered registry entry so the
+            // registry doesn't accumulate stale entries.
+            cx.global_mut::<crate::state::AppWindowRegistry>()
+                .close(app_window_id);
+            return Err(err.into());
+        }
+    };
 
     // Stamp the GPUI WindowId on the registry entry so
     // `cx.on_window_closed` in `app.rs` can map a close event back
