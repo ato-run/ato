@@ -47,7 +47,12 @@ use persistence::*;
 
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
-const DEFAULT_STORE_API_TIMEOUT_SECS: u64 = 8;
+/// Total per-request timeout. Generous enough to survive Cloudflare Worker cold starts.
+const DEFAULT_STORE_API_TIMEOUT_SECS: u64 = 30;
+/// TCP connect-only timeout — fail fast when the host is truly unreachable.
+const DEFAULT_STORE_API_CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Number of automatic retries for transient errors (timeout, connection reset).
+const STORE_API_RETRIES: u32 = 2;
 const SEGMENT_MAX_LEN: usize = 63;
 const LEASE_REFRESH_INTERVAL_SECS: u64 = 300;
 const NEGOTIATE_DEFAULT_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -751,6 +756,7 @@ pub fn parse_github_run_ref(input: &str) -> Result<Option<String>> {
 
 fn store_api_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(DEFAULT_STORE_API_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(DEFAULT_STORE_API_TIMEOUT_SECS))
         .build()
         .with_context(|| "Failed to build store API client")
@@ -768,26 +774,55 @@ pub async fn fetch_github_install_draft(repository: &str) -> Result<GitHubInstal
         urlencoding::encode(owner),
         urlencoding::encode(repo)
     );
-    let response = client
-        .get(&endpoint)
-        .header(reqwest::header::USER_AGENT, "ato-cli")
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch GitHub install draft: {normalized}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!(
-            "Failed to fetch GitHub install draft (status={}): {}",
-            status,
-            body
-        );
-    }
 
-    response
-        .json::<GitHubInstallDraftResponse>()
-        .await
-        .with_context(|| format!("Failed to parse GitHub install draft: {normalized}"))
+    let mut last_err: anyhow::Error =
+        anyhow::anyhow!("fetch_github_install_draft: no attempts made");
+    for attempt in 0..=STORE_API_RETRIES {
+        if attempt > 0 {
+            let delay = Duration::from_secs(u64::from(attempt) * 2);
+            tracing::warn!(
+                attempt,
+                ?delay,
+                repository = %normalized,
+                "install-draft fetch timed out; retrying"
+            );
+            tokio::time::sleep(delay).await;
+        }
+        let result = client
+            .get(&endpoint)
+            .header(reqwest::header::USER_AGENT, "ato-cli")
+            .send()
+            .await;
+        let response = match result {
+            Ok(r) => r,
+            Err(err) if err.is_timeout() || err.is_connect() => {
+                last_err =
+                    anyhow::Error::new(err).context(format!(
+                        "Failed to fetch GitHub install draft: {normalized}"
+                    ));
+                continue;
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context(format!(
+                    "Failed to fetch GitHub install draft: {normalized}"
+                )));
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "Failed to fetch GitHub install draft (status={}): {}",
+                status,
+                body
+            );
+        }
+        return response
+            .json::<GitHubInstallDraftResponse>()
+            .await
+            .with_context(|| format!("Failed to parse GitHub install draft: {normalized}"));
+    }
+    Err(last_err)
 }
 
 pub async fn retry_github_install_draft(
