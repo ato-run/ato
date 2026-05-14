@@ -17,6 +17,7 @@ use objc2::rc::Retained;
 use objc2_app_kit::{
     NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode,
 };
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
 
@@ -128,6 +129,73 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, radius: f64) 
     });
     if let Err(err) = result {
         warn!(error = ?err, "round_window_corners: handle update failed");
+    }
+}
+
+/// Resize the NSWindow associated with `handle` to `new_w × new_h` logical
+/// pixels, keeping the **top edge** and **horizontal centre** anchored so
+/// the pill does not jump around the screen during expand/collapse
+/// transitions. Also re-applies a `cornerRadius` of `new_h / 2` so the
+/// rounded-pill shape stays correct at the new dimensions.
+///
+/// Uses `setFrame:display:animate:` with `animate = false` for an
+/// immediate, synchronous resize — GPUI receives the resulting window-resize
+/// notification on the next event-loop tick and re-renders the content area
+/// at the new size.
+pub fn resize_window_to(cx: &mut App, handle: AnyWindowHandle, new_w: f32, new_h: f32) {
+    let result = handle.update(cx, |_view, window, _cx| {
+        let rwh = match window.window_handle() {
+            Ok(h) => h,
+            Err(e) => {
+                warn!(error = %e, "resize_window_to: window_handle failed");
+                return;
+            }
+        };
+        let view: &NSView = match rwh.as_raw() {
+            RawWindowHandle::AppKit(h) => unsafe {
+                &*(h.ns_view.as_ptr() as *const NSView)
+            },
+            other => {
+                warn!(handle = ?other, "resize_window_to: not AppKit");
+                return;
+            }
+        };
+        let nswindow: Retained<NSWindow> = match view.window() {
+            Some(w) => w,
+            None => {
+                warn!("resize_window_to: view has no window yet");
+                return;
+            }
+        };
+        // Cocoa screen coordinates have Y increasing upward and the window
+        // origin at the bottom-left corner.  Compute the new frame so that
+        // the top edge and horizontal centre stay fixed.
+        let current = unsafe { nswindow.frame() };
+        let top_y = current.origin.y + current.size.height;
+        let center_x = current.origin.x + current.size.width / 2.0;
+        let new_origin_x = center_x - new_w as f64 / 2.0;
+        let new_origin_y = top_y - new_h as f64;
+        let new_frame = NSRect::new(
+            NSPoint::new(new_origin_x, new_origin_y),
+            NSSize::new(new_w as f64, new_h as f64),
+        );
+        unsafe {
+            nswindow.setFrame_display_animate(new_frame, true, false);
+            // Re-apply corner radius for the new height so the pill keeps
+            // its fully-rounded capsule shape at both expanded and compact
+            // dimensions.
+            if let Some(content_view) = nswindow.contentView() {
+                content_view.setWantsLayer(true);
+                if let Some(layer) = content_view.layer() {
+                    layer.setCornerRadius(new_h as f64 / 2.0);
+                    layer.setMasksToBounds(true);
+                }
+            }
+            nswindow.invalidateShadow();
+        }
+    });
+    if let Err(err) = result {
+        warn!(error = ?err, "resize_window_to: handle update failed");
     }
 }
 
