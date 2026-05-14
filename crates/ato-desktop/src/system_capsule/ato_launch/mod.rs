@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
+use crate::state::GuestRoute;
 use crate::system_capsule::broker::{BrokerError, Capability};
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +132,17 @@ pub fn dispatch(
                     boot_window: boot_handle,
                     app_window: app_handle,
                 });
+
+                // Record launch in the start-page history so the next
+                // time the start page opens, this capsule appears in
+                // the "recent capsules" row.
+                if let GuestRoute::CapsuleHandle { handle, label } | GuestRoute::CapsuleUrl { handle, label, .. } = &route {
+                    let mut store = crate::system_capsule::ato_start::StartPageHistoryStore::load();
+                    store.record_open(handle, label);
+                    if let Err(err) = store.save() {
+                        tracing::warn!(error = %err, "ato_launch: failed to save start history");
+                    }
+                }
             } else {
                 tracing::info!(
                     "ato_launch: approve from MCP/standalone (no pending target) — wizard closed, no AppWindow spawned"

@@ -97,6 +97,20 @@ const TABLE: &[SystemCapsuleManifest] = &[
             Capability::LaunchSystemCapsule,
         ],
     },
+    SystemCapsuleManifest {
+        id: SystemCapsuleId::AtoStart,
+        slug: "ato-start",
+        display_name: "Start",
+        // Start page: can list open windows, open capsules via consent
+        // (WebviewCreate), open system capsules like the Store
+        // (LaunchSystemCapsule), and close its own window (WindowsClose).
+        allowed_capabilities: &[
+            Capability::WindowsList,
+            Capability::WindowsClose,
+            Capability::WebviewCreate,
+            Capability::LaunchSystemCapsule,
+        ],
+    },
 ];
 
 pub fn lookup(id: SystemCapsuleId) -> &'static SystemCapsuleManifest {

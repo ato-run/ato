@@ -31,6 +31,7 @@ use serde::Deserialize;
 use super::ato_identity::IdentityCommand;
 use super::ato_launch::LaunchCommand;
 use super::ato_settings::SettingsCommand;
+use super::ato_start::AtoStartCommand;
 use super::ato_store::StoreCommand;
 use super::ato_web_viewer::WebViewerCommand;
 use super::ato_windows::WindowsCommand;
@@ -76,6 +77,7 @@ pub fn make_ipc_handler(
             "ato-web-viewer" => SystemCapsuleId::AtoWebViewer,
             "ato-launch" => SystemCapsuleId::AtoLaunch,
             "ato-identity" => SystemCapsuleId::AtoIdentity,
+            "ato-start" => SystemCapsuleId::AtoStart,
             other => {
                 tracing::warn!(slug = %other, "system_capsule::ipc: unknown capsule slug");
                 return;
@@ -99,6 +101,10 @@ pub fn make_ipc_handler(
             SystemCapsuleId::AtoIdentity => {
                 serde_json::from_value::<IdentityCommand>(envelope.command)
                     .map(SystemCommand::AtoIdentity)
+            }
+            SystemCapsuleId::AtoStart => {
+                serde_json::from_value::<AtoStartCommand>(envelope.command)
+                    .map(SystemCommand::AtoStart)
             }
         };
         match command_result {
