@@ -16,9 +16,10 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
-    FontWeight, IntoElement, MouseButton, Pixels, Render, SharedString, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    canvas, div, hsla, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds, Context,
+    DispatchPhase, Entity, FontWeight, IntoElement, MouseButton, MouseExitEvent, Pixels, Render,
+    SharedString, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
@@ -406,12 +407,12 @@ impl Render for ControlBarShellPlaceholder {
             })
             .on_hover(move |hovered, window, cx| {
                 if *hovered {
-                    // mouseEntered: fires via NSTrackingArea regardless of
-                    // whether any normal window has acceptsMouseMovedEvents.
-                    // This is the reliable expand trigger when the control bar
-                    // is the only window (no store/settings open), because in
-                    // that case mouseMoved: — which drives on_mouse_move — is
-                    // never delivered to the floating PopUp window alone.
+                    // on_hover(true) is driven by MouseMoveEvent. When the
+                    // control bar is the only window (PopUp with no normal
+                    // window open), NSTrackingArea's NSTrackingMouseMoved with
+                    // NSTrackingActiveAlways still delivers mouseMoved: while
+                    // the cursor is inside the window rect — so this path fires
+                    // reliably for expand in all cases.
                     let was_expanded = cx.global::<ControlBarController>().expanded;
                     cx.global_mut::<ControlBarController>().expand();
                     let now_expanded = cx.global::<ControlBarController>().expanded;
@@ -422,8 +423,11 @@ impl Render for ControlBarShellPlaceholder {
                         shell.update(cx, |_shell, cx| cx.notify());
                     }
                 } else if !omnibar_focused {
-                    // mouseExited: — collapse when the mouse leaves, unless
-                    // the omnibar is focused (InputEvent::Blur handles that).
+                    // on_hover(false) fires via MouseMoveEvent when a normal
+                    // window is open (acceptsMouseMovedEvents is satisfied
+                    // app-wide). Handles the common "store/settings also open"
+                    // case. When only the bar is open this path is unreliable
+                    // — the canvas MouseExitEvent listener below handles it.
                     let was_expanded = cx.global::<ControlBarController>().expanded;
                     cx.global_mut::<ControlBarController>().collapse();
                     if was_expanded && !cx.global::<ControlBarController>().expanded {
@@ -434,6 +438,46 @@ impl Render for ControlBarShellPlaceholder {
                     }
                 }
             })
+            // NSTrackingArea fires mouseExited: → MouseExitEvent when the
+            // cursor leaves the window frame, regardless of whether any normal
+            // window has acceptsMouseMovedEvents. Register the collapse handler
+            // here so the bar collapses even when it is the only open window.
+            // (on_hover(false) is driven by MouseMoveEvent which stops firing
+            // once the cursor exits the window, so it cannot handle this case.)
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    {
+                        move |_, _, window, cx| {
+                            window.on_mouse_event(
+                                move |_: &MouseExitEvent, phase, window, cx| {
+                                    if phase != DispatchPhase::Bubble {
+                                        return;
+                                    }
+                                    if omnibar_focused {
+                                        return;
+                                    }
+                                    let was_expanded =
+                                        cx.global::<ControlBarController>().expanded;
+                                    cx.global_mut::<ControlBarController>().collapse();
+                                    if was_expanded
+                                        && !cx.global::<ControlBarController>().expanded
+                                    {
+                                        resize_bar_window_in_handler(window, false);
+                                    }
+                                    if let Some(shell) =
+                                        cx.global::<ControlBarController>().shell.clone()
+                                    {
+                                        shell.update(cx, |_shell, cx| cx.notify());
+                                    }
+                                },
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .size(px(0.0)),
+            )
             .child(if expanded {
                 bar_pill(
                     self.omnibar.clone(),
