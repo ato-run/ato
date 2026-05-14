@@ -217,9 +217,27 @@ pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
     Ok(handle)
 }
 
-/// Resize the control bar NSWindow to match the expanded or compact
-/// dimensions.  Keeps the top edge and horizontal centre fixed so the
-/// pill does not jump on screen.  No-op if no window is currently open.
+/// Resize the control bar NSWindow **from within a window event handler**
+/// (on_mouse_move, on_hover, subscribe_in callbacks). These callbacks
+/// already have a `&mut Window` from GPUI, so we use it directly rather
+/// than going through `handle.update(cx, ...)`, which would silently fail
+/// because GPUI removes the window from its map for the duration of an
+/// update and nested updates on the same window return "window not found".
+fn resize_bar_window_in_handler(window: &mut Window, expanded: bool) {
+    let (new_w, new_h) = if expanded {
+        (BAR_WIDTH, BAR_HEIGHT)
+    } else {
+        (COMPACT_BAR_WIDTH, COMPACT_HEIGHT)
+    };
+    #[cfg(target_os = "macos")]
+    super::macos::resize_window_in_handler(window, new_w, new_h);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (new_w, new_h, window);
+}
+
+/// Resize the control bar NSWindow **from outside a window event handler**
+/// (show_control_bar, focus_control_bar_input, etc.) where no `&mut Window`
+/// is available. Uses `handle.update(cx, ...)` to enter the window context.
 fn resize_bar_window(cx: &mut App, expanded: bool) {
     let handle = match cx.global::<ControlBarController>().handle {
         Some(h) => h,
@@ -289,7 +307,7 @@ impl ControlBarShellPlaceholder {
                 InputEvent::Blur => {
                     this.omnibar_focused = false;
                     cx.global_mut::<ControlBarController>().collapse();
-                    resize_bar_window(&mut *cx, false);
+                    resize_bar_window_in_handler(window, false);
                     cx.notify();
                 }
             },
@@ -375,18 +393,18 @@ impl Render for ControlBarShellPlaceholder {
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_move(|_event, _window, cx| {
+            .on_mouse_move(|_event, window, cx| {
                 let was_expanded = cx.global::<ControlBarController>().expanded;
                 cx.global_mut::<ControlBarController>().expand();
                 let now_expanded = cx.global::<ControlBarController>().expanded;
                 if now_expanded && !was_expanded {
-                    resize_bar_window(cx, true);
+                    resize_bar_window_in_handler(window, true);
                 }
                 if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                     shell.update(cx, |_shell, cx| cx.notify());
                 }
             })
-            .on_hover(move |hovered, _window, cx| {
+            .on_hover(move |hovered, window, cx| {
                 // Collapse when the mouse leaves — unless the omnibar is
                 // focused (user is typing), in which case InputEvent::Blur
                 // will handle the collapse instead.
@@ -394,7 +412,7 @@ impl Render for ControlBarShellPlaceholder {
                     let was_expanded = cx.global::<ControlBarController>().expanded;
                     cx.global_mut::<ControlBarController>().collapse();
                     if was_expanded && !cx.global::<ControlBarController>().expanded {
-                        resize_bar_window(cx, false);
+                        resize_bar_window_in_handler(window, false);
                     }
                     if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                         shell.update(cx, |_shell, cx| cx.notify());

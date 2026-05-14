@@ -12,7 +12,7 @@
 
 #![cfg(target_os = "macos")]
 
-use gpui::{AnyWindowHandle, App};
+use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode,
@@ -142,60 +142,70 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, radius: f64) 
 /// immediate, synchronous resize — GPUI receives the resulting window-resize
 /// notification on the next event-loop tick and re-renders the content area
 /// at the new size.
+///
+/// **Call this variant from OUTSIDE a window event handler** (e.g.,
+/// `show_control_bar`, `focus_control_bar_input`). If you already have a
+/// `&mut Window` from an event callback, use [`resize_window_in_handler`]
+/// instead — calling `handle.update(cx, ...)` from within the same window's
+/// own event handler silently fails because GPUI removes the window from the
+/// map for the duration of the update.
 pub fn resize_window_to(cx: &mut App, handle: AnyWindowHandle, new_w: f32, new_h: f32) {
     let result = handle.update(cx, |_view, window, _cx| {
-        let rwh = match window.window_handle() {
-            Ok(h) => h,
-            Err(e) => {
-                warn!(error = %e, "resize_window_to: window_handle failed");
-                return;
-            }
-        };
-        let view: &NSView = match rwh.as_raw() {
-            RawWindowHandle::AppKit(h) => unsafe {
-                &*(h.ns_view.as_ptr() as *const NSView)
-            },
-            other => {
-                warn!(handle = ?other, "resize_window_to: not AppKit");
-                return;
-            }
-        };
-        let nswindow: Retained<NSWindow> = match view.window() {
-            Some(w) => w,
-            None => {
-                warn!("resize_window_to: view has no window yet");
-                return;
-            }
-        };
-        // Cocoa screen coordinates have Y increasing upward and the window
-        // origin at the bottom-left corner.  Compute the new frame so that
-        // the top edge and horizontal centre stay fixed.
-        let current = unsafe { nswindow.frame() };
-        let top_y = current.origin.y + current.size.height;
-        let center_x = current.origin.x + current.size.width / 2.0;
-        let new_origin_x = center_x - new_w as f64 / 2.0;
-        let new_origin_y = top_y - new_h as f64;
-        let new_frame = NSRect::new(
-            NSPoint::new(new_origin_x, new_origin_y),
-            NSSize::new(new_w as f64, new_h as f64),
-        );
-        unsafe {
-            nswindow.setFrame_display_animate(new_frame, true, false);
-            // Re-apply corner radius for the new height so the pill keeps
-            // its fully-rounded capsule shape at both expanded and compact
-            // dimensions.
-            if let Some(content_view) = nswindow.contentView() {
-                content_view.setWantsLayer(true);
-                if let Some(layer) = content_view.layer() {
-                    layer.setCornerRadius(new_h as f64 / 2.0);
-                    layer.setMasksToBounds(true);
-                }
-            }
-            nswindow.invalidateShadow();
-        }
+        resize_window_in_handler(window, new_w, new_h);
     });
     if let Err(err) = result {
         warn!(error = ?err, "resize_window_to: handle update failed");
+    }
+}
+
+/// Same resize logic as [`resize_window_to`] but uses a `&mut Window`
+/// reference directly. **Use this from within window event handlers**
+/// (`on_mouse_move`, `on_hover`, `subscribe_in` callbacks) where
+/// `handle.update(cx, ...)` for the same window would fail because GPUI
+/// has already removed the window from the map.
+pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
+    let rwh = match window.window_handle() {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(error = %e, "resize_window_in_handler: window_handle failed");
+            return;
+        }
+    };
+    let view: &NSView = match rwh.as_raw() {
+        RawWindowHandle::AppKit(h) => unsafe {
+            &*(h.ns_view.as_ptr() as *const NSView)
+        },
+        other => {
+            warn!(handle = ?other, "resize_window_in_handler: not AppKit");
+            return;
+        }
+    };
+    let nswindow: Retained<NSWindow> = match view.window() {
+        Some(w) => w,
+        None => {
+            warn!("resize_window_in_handler: view has no window yet");
+            return;
+        }
+    };
+    let current = unsafe { nswindow.frame() };
+    let top_y = current.origin.y + current.size.height;
+    let center_x = current.origin.x + current.size.width / 2.0;
+    let new_origin_x = center_x - new_w as f64 / 2.0;
+    let new_origin_y = top_y - new_h as f64;
+    let new_frame = NSRect::new(
+        NSPoint::new(new_origin_x, new_origin_y),
+        NSSize::new(new_w as f64, new_h as f64),
+    );
+    unsafe {
+        nswindow.setFrame_display_animate(new_frame, true, false);
+        if let Some(content_view) = nswindow.contentView() {
+            content_view.setWantsLayer(true);
+            if let Some(layer) = content_view.layer() {
+                layer.setCornerRadius(new_h as f64 / 2.0);
+                layer.setMasksToBounds(true);
+            }
+        }
+        nswindow.invalidateShadow();
     }
 }
 
