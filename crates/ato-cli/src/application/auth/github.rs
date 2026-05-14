@@ -77,7 +77,7 @@ pub(super) async fn fetch_github_app_installations(
     Ok(payload.installations)
 }
 
-fn choose_active_installation(
+pub(super) fn choose_active_installation(
     installations: &[GitHubAppInstallation],
 ) -> Option<GitHubAppInstallation> {
     installations
