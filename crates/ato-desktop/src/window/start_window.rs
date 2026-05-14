@@ -16,6 +16,7 @@ use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::system_capsule::ato_start::build_start_snapshot;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
@@ -41,13 +42,15 @@ const START_HTML: &str = include_str!("../../assets/system/ato-start/index.html"
 /// construction time via `with_initialization_script`.
 pub fn open_start_window(cx: &mut App) -> Result<()> {
     let config = crate::config::load_config();
-    let snapshot = build_start_snapshot(cx, &config);
+    let locale = resolve_locale(config.general.language);
+    let snapshot = build_start_snapshot(cx, &config, locale);
     let snapshot_json = serde_json::to_string(&snapshot)
         .unwrap_or_else(|_| "{}".to_string());
-    let init_script = format!(
+    let snapshot_script = format!(
         "window.__ATO_START_SNAPSHOT__ = {};",
         snapshot_json
     );
+    let init_script = compose_init_script(locale, Some(&snapshot_script));
 
     let win_size = size(px(1100.0), px(760.0));
     // Position just below the Focus-mode Control Bar (36 top + 56 height + 16 gap = 108).
@@ -98,8 +101,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         ContentWindowEntry {
             handle: *handle,
             kind: ContentWindowKind::Start,
-            title: gpui::SharedString::from("新しいウィンドウ"),
-            subtitle: gpui::SharedString::from("カプセル / URL / コマンドから始める"),
+            title: gpui::SharedString::from(tr(locale, "start.title")),
+            subtitle: gpui::SharedString::from(tr(locale, "start.subtitle")),
             url: gpui::SharedString::from("capsule://run.ato.desktop/ato-start"),
             last_focused_at: std::time::Instant::now(),
         },

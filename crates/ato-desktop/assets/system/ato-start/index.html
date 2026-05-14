@@ -411,7 +411,8 @@
       </div>
       <div class="card-list" id="recentList">
         <div class="empty-state" id="recentEmpty">
-          まだ履歴がありません<br>起動したカプセルがここに表示されます
+          <span data-i18n="start.recent.empty_line1">まだ履歴がありません</span><br>
+          <span data-i18n="start.recent.empty_line2">起動したカプセルがここに表示されます</span>
         </div>
       </div>
     </div>
@@ -422,7 +423,8 @@
       </div>
       <div class="card-list" id="localList">
         <div class="empty-state" id="localEmpty">
-          capsule.toml を持つディレクトリが<br>見つかりませんでした
+          <span data-i18n="start.local.empty_line1">capsule.toml を持つディレクトリが</span><br>
+          <span data-i18n="start.local.empty_line2">見つかりませんでした</span>
         </div>
       </div>
     </div>
@@ -508,24 +510,31 @@
 
   // ── Featured apps ─────────────────────────────────────────
   const featuredGrid = document.getElementById('featuredGrid');
+  const _t = window.__ATO_T__;
   const DEFAULT_FEATURED = [
     {
       label: 'Weather Demo',
-      description: 'シンプルな天気アプリのデモカプセル',
+      description: _t ? _t('start.featured.weather_desc') : 'Weather app demo capsule',
       handle: 'capsule://weather-demo',
       icon: '⛅',
       icon_bg: 'linear-gradient(135deg,#0ea5e9,#38bdf8)',
-      tags: ['ローカル実行', 'オフライン'],
+      tags: [
+        _t ? _t('start.featured.tag.local_run') : 'Local',
+        _t ? _t('start.featured.tag.offline') : 'Offline',
+      ],
       rating: 4.8, installs: 412,
       installed: true
     },
     {
       label: 'Todo App Demo',
-      description: 'ローカルファースト Todo アプリ',
+      description: _t ? _t('start.featured.todo_desc') : 'Local-first Todo app',
       handle: 'capsule://todo-app-demo',
       icon: '✅',
       icon_bg: 'linear-gradient(135deg,#10b981,#34d399)',
-      tags: ['ローカル実行', 'プライバシー重視'],
+      tags: [
+        _t ? _t('start.featured.tag.local_run') : 'Local',
+        _t ? _t('start.featured.tag.privacy') : 'Privacy',
+      ],
       rating: 4.6, installs: 387,
       installed: false
     }
