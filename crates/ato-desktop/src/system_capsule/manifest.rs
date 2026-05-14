@@ -14,7 +14,7 @@ use super::broker::{Capability, SystemCapsuleId};
 #[derive(Debug)]
 pub struct SystemCapsuleManifest {
     pub id: SystemCapsuleId,
-    /// Stable URL slug. `capsule://system/<slug>/...` resolves here.
+    /// Stable URL slug. `capsule://run.ato.desktop/<slug>/...` resolves here.
     pub slug: &'static str,
     /// Human label rendered in places that show "what's running"
     /// (Card Switcher cards, Control Bar). Kept short.

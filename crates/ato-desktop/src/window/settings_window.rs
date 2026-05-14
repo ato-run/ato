@@ -128,8 +128,8 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
     }
 
     // Register in the cross-window content registry. The Control
-    // Bar reads MRU front URL to display `ato://settings` while the
-    // window is in focus.
+    // Bar reads MRU front URL to display `capsule://run.ato.desktop/ato-settings`
+    // while the window is in focus.
     cx.global_mut::<OpenContentWindows>().insert(
         handle.window_id().as_u64(),
         ContentWindowEntry {
@@ -137,7 +137,7 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
             kind: ContentWindowKind::Settings,
             title: gpui::SharedString::from("設定"),
             subtitle: gpui::SharedString::from("セキュリティ · ランタイム · ストア"),
-            url: gpui::SharedString::from("ato://settings"),
+            url: gpui::SharedString::from("capsule://run.ato.desktop/ato-settings"),
             last_focused_at: std::time::Instant::now(),
         },
     );
