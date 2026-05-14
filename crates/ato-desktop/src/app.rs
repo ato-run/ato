@@ -614,12 +614,6 @@ pub fn run() {
         // action is still registered so MCP / keybind paths reach
         // the same target.
         cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
-            if !crate::window::is_multi_window_enabled() {
-                tracing::debug!(
-                    "OpenStartWindow dispatched but multi-window flag is off"
-                );
-                return;
-            }
             if let Err(err) = crate::window::start_window::open_start_window(cx) {
                 tracing::error!(error = %err, "failed to open start window");
             }
