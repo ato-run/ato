@@ -35,6 +35,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
             Capability::WindowsList,
             Capability::WindowsActivate,
             Capability::WindowsClose,
+            Capability::WindowsCloseTarget,
             Capability::WebviewCreate,
             Capability::LaunchSystemCapsule,
         ],
