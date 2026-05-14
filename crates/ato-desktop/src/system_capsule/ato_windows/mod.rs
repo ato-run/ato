@@ -40,9 +40,6 @@ pub enum WindowsCommand {
     },
     /// Open a fresh StartWindow + dismiss the calling switcher.
     OpenStart,
-    /// Open the demo AppWindow with the WasedaP2P route — invoked
-    /// from a StartWindow quick action. Closes the StartWindow.
-    OpenAppWindow,
 }
 
 impl WindowsCommand {
@@ -53,7 +50,6 @@ impl WindowsCommand {
             }
             WindowsCommand::ActivateWindow { .. } => Capability::WindowsActivate,
             WindowsCommand::OpenStart => Capability::LaunchSystemCapsule,
-            WindowsCommand::OpenAppWindow => Capability::WebviewCreate,
         }
     }
 }
@@ -95,20 +91,6 @@ pub fn dispatch(
                 tracing::error!(error = %err, "ato_windows: open_start_window failed");
             }
             cx.set_global(CardSwitcherWindowSlot(None));
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-        }
-        WindowsCommand::OpenAppWindow => {
-            // Go through the consent wizard so the user sees the
-            // capsule identity before the session starts.
-            let route = crate::state::GuestRoute::CapsuleHandle {
-                handle: "github.com/Koh0920/WasedaP2P".to_string(),
-                label: "WasedaP2P".to_string(),
-            };
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
-            {
-                tracing::error!(error = %err, "ato_windows: open_consent_window_for_route failed");
-            }
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
     }
