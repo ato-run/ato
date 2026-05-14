@@ -15,6 +15,7 @@
   "control_bar.settings": "Settings",
   "control_bar.store": "Store",
   "control_bar.dev_console": "Console",
+  "control_bar.dock": "Dock",
   "control_bar.omnibar_placeholder": "Enter https://… or capsule://…",
 
   "start.title": "New Window",
@@ -145,6 +146,8 @@
 
   "dev_console.title": "Developer Console",
   "dev_console.subtitle": "Manage your published and draft capsules",
+  "dock.title": "Dock",
+  "dock.subtitle": "Your developer hub on ato",
 
   "windows.title": "Open Windows",
   "windows.subtitle": "Switch between sessions",

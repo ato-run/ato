@@ -33,9 +33,7 @@ pub enum ContentWindowKind {
     /// variant — the legacy Launcher window was retired in Stage D
     /// of the system-capsule refactor.
     Settings,
-    /// Developer Console — publisher tool for managing capsules, Dock
-    /// setup, and publish status.
-    DevConsole,
+    Dock,
 }
 
 #[derive(Clone, Debug)]
