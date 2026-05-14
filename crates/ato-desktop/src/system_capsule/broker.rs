@@ -64,6 +64,10 @@ pub enum Capability {
     /// Open another system capsule (e.g. `ato-windows` asking the
     /// broker to launch `ato-store`).
     LaunchSystemCapsule,
+    /// Close a specific target window identified by its GPUI window ID.
+    /// Stronger than `WindowsClose` (which only closes the caller's own
+    /// window). Only granted to `AtoWindows`.
+    WindowsCloseTarget,
 }
 
 /// Typed envelope: every privileged request from a system capsule

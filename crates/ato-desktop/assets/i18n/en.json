@@ -160,6 +160,7 @@
   "windows.badge.sync": "Sync",
   "windows.new_window": "New Window",
   "windows.open_start": "Open Start Page",
+  "windows.close_window": "Close",
 
   "launch.title": "Review Before Launch",
   "launch.subtitle": "Verify the capsule name and permissions, then launch.",
