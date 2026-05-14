@@ -1748,7 +1748,7 @@ fn detect_install_steps(
         acc.push(InstallStepSpec {
             id: step_id(relative_dir, "install"),
             cwd: relative_dir.to_string(),
-            run: "uv venv && uv pip install -r requirements.txt".to_string(),
+            run: "uv venv --seed && uv pip install -r requirements.txt 'setuptools<72'".to_string(),
             depends_on: Vec::new(),
             evidence: vec!["requirements.txt inferred into uv venv install".to_string()],
         });
