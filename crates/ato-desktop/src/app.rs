@@ -320,6 +320,8 @@ pub fn run() {
         cx.set_global(crate::window::store::StoreWindowSlot::default());
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
+        // Slot tracking the in-Desktop OAuth login window.
+        cx.set_global(crate::window::auth_login_window::AuthLoginWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
