@@ -440,6 +440,46 @@ fn filter_already_provided_secrets(
 fn collect_preflight_requirements(
     handle: &str,
 ) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+    Ok(collect_preflight_envelope(handle)?.requirements)
+}
+
+/// Full capsule identity + requirements returned by `ato internal preflight --json`.
+#[derive(Debug, Clone)]
+pub(crate) struct ConsentPreflightData {
+    pub capsule_id: String,
+    pub capsule_version: String,
+    pub visited_targets: Vec<String>,
+    pub requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+}
+
+/// Collect full preflight data for the consent wizard UI.
+/// Normalizes the handle (adds `capsule://` prefix for bare `github.com/` handles).
+pub(crate) fn collect_preflight_for_consent(handle: &str) -> Result<ConsentPreflightData> {
+    let normalized = normalize_preflight_handle(handle);
+    let envelope = collect_preflight_envelope(&normalized)?;
+    Ok(ConsentPreflightData {
+        capsule_id: envelope.capsule_id,
+        capsule_version: envelope.capsule_version,
+        visited_targets: envelope.visited_targets,
+        requirements: envelope.requirements,
+    })
+}
+
+/// Adds `capsule://` prefix to bare `github.com/owner/repo` handles.
+fn normalize_preflight_handle(handle: &str) -> String {
+    if handle.starts_with("capsule://")
+        || handle.starts_with('/')
+        || handle.starts_with('~')
+    {
+        handle.to_string()
+    } else if handle.starts_with("github.com/") {
+        format!("capsule://{handle}")
+    } else {
+        handle.to_string()
+    }
+}
+
+fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope> {
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
     let output = Command::new(&ato_bin)
@@ -463,10 +503,8 @@ fn collect_preflight_requirements(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let trimmed = stdout.trim();
-    let payload: PreflightAggregateEnvelope = serde_json::from_str(trimmed)
-        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))?;
-
-    Ok(payload.requirements)
+    serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,6 +512,12 @@ struct PreflightAggregateEnvelope {
     #[serde(default)]
     #[allow(dead_code)]
     schema_version: Option<String>,
+    #[serde(default)]
+    capsule_id: String,
+    #[serde(default)]
+    capsule_version: String,
+    #[serde(default)]
+    visited_targets: Vec<String>,
     #[serde(default)]
     requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
 }
