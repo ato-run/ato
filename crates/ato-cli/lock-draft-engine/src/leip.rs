@@ -365,14 +365,14 @@ fn detect_unsupported_runtimes(input: &LeipInput) -> Vec<(&'static str, &'static
         found.push((
             "rust",
             "Rust projects are not yet supported by LEIP v1 (supports Node.js and Python only). \
-             Add a capsule.toml with a `run` command to specify the launch target.",
+             Add a capsule.toml with `run = \"cargo run\"` to specify the launch target.",
         ));
     }
     if file_present(&file_set, "go.mod") {
         found.push((
             "go",
             "Go projects are not yet supported by LEIP v1 (supports Node.js and Python only). \
-             Add a capsule.toml with a `run` command to specify the launch target.",
+             Add a capsule.toml with `run = \"go run ./...\"` to specify the launch target.",
         ));
     }
     if file_present(&file_set, "wrangler.toml") {
@@ -398,6 +398,26 @@ fn detect_unsupported_runtimes(input: &LeipInput) -> Vec<(&'static str, &'static
             "Docker Compose project detected with no Node.js or Python root manifest. \
              LEIP v1 does not infer compose launch graphs. \
              Run `docker compose up` directly, or add a capsule.toml with `run = \"docker compose up\"`.",
+        ));
+    }
+    // PHP: composer.json or any root .php file
+    let has_php = file_present(&file_set, "composer.json")
+        || file_set.iter().any(|f| f.ends_with(".php") && !f.contains('/'));
+    if has_php && !has_node && !has_python {
+        found.push((
+            "php",
+            "PHP project detected. LEIP v1 does not infer PHP launch graphs. \
+             Run `php -S localhost:8080 -t public` or `composer install && php -S localhost:8080 -t public` directly, \
+             or add a capsule.toml with `run = \"php -S localhost:8080 -t public\"`.",
+        ));
+    }
+    // C#: any .sln or .csproj file in the repository
+    let has_csharp = file_set.iter().any(|f| f.ends_with(".sln") || f.ends_with(".csproj"));
+    if has_csharp && !has_node && !has_python {
+        found.push((
+            "csharp",
+            "C# (.NET) project detected. LEIP v1 does not infer .NET launch graphs. \
+             Add a capsule.toml with `run = \"dotnet run\"` to specify the launch target.",
         ));
     }
     found
@@ -824,6 +844,8 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
         "main.py",
         "app.py",
         "server.py",
+        "run.py",
+        "start.py",
         "manage.py",
         "__main__.py",
         "src/main.py",
@@ -3032,6 +3054,126 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             !result.diagnostics.iter().any(|d| d.message.contains("Docker Compose project detected with no")),
             "should not have compose-only diagnostic when package.json is present"
         );
+    }
+
+    #[test]
+    fn php_root_index_php_unresolved_with_actionable_diagnostic() {
+        let input = LeipInput {
+            repo_file_index: vec![file("index.php"), file("login.php"), file("README.md")],
+            file_text_map: Default::default(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::Unresolved { .. }),
+            "PHP root files should be Unresolved, got {:?}", result.decision
+        );
+        let diag_msg = result.diagnostics.iter().find(|d| d.message.contains("PHP")).map(|d| d.message.as_str());
+        assert!(diag_msg.is_some(), "should have PHP diagnostic");
+        assert!(diag_msg.unwrap().contains("php -S"), "PHP diagnostic should hint at php -S command");
+    }
+
+    #[test]
+    fn php_composer_json_unresolved_with_actionable_diagnostic() {
+        let input = LeipInput {
+            repo_file_index: vec![file("composer.json"), file("public/index.php")],
+            file_text_map: Default::default(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::Unresolved { .. }),
+            "PHP composer.json should be Unresolved, got {:?}", result.decision
+        );
+        assert!(
+            result.diagnostics.iter().any(|d| d.message.contains("PHP")),
+            "should have PHP diagnostic"
+        );
+    }
+
+    #[test]
+    fn csharp_sln_unresolved_with_dotnet_run_hint() {
+        let input = LeipInput {
+            repo_file_index: vec![file("NotionClone.sln"), file("NotionClone/Program.cs")],
+            file_text_map: Default::default(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::Unresolved { .. }),
+            "C# .sln should be Unresolved, got {:?}", result.decision
+        );
+        let diag_msg = result.diagnostics.iter().find(|d| d.message.contains("dotnet")).map(|d| d.message.as_str());
+        assert!(diag_msg.is_some(), "should have dotnet diagnostic");
+        assert!(diag_msg.unwrap().contains("dotnet run"), "C# diagnostic should hint at dotnet run");
+    }
+
+    #[test]
+    fn go_diagnostic_includes_go_run_command() {
+        let input = LeipInput {
+            repo_file_index: vec![file("go.mod"), file("main.go")],
+            file_text_map: Default::default(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        let diag = result.diagnostics.iter().find(|d| d.message.contains("Go projects")).expect("should have Go diagnostic");
+        assert!(diag.message.contains("go run ./..."), "Go diagnostic should include `go run ./...`, got: {}", diag.message);
+    }
+
+    #[test]
+    fn rust_diagnostic_includes_cargo_run_command() {
+        let input = LeipInput {
+            repo_file_index: vec![file("Cargo.toml"), file("src/main.rs")],
+            file_text_map: Default::default(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        let diag = result.diagnostics.iter().find(|d| d.message.contains("Rust projects")).expect("should have Rust diagnostic");
+        assert!(diag.message.contains("cargo run"), "Rust diagnostic should include `cargo run`, got: {}", diag.message);
+    }
+
+    #[test]
+    fn python_run_py_entrypoint_auto_accepts() {
+        // Repo with requirements.txt + flask dep + run.py at root (like GhostStream)
+        let reqs = "flask>=3.0.0\ngevent>=24.2.1\n";
+        let input = LeipInput {
+            repo_file_index: vec![file("requirements.txt"), file("run.py"), file("setup.py")],
+            file_text_map: [
+                ("requirements.txt".to_string(), reqs.to_string()),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "flask + run.py should AutoAccept, got {:?}", result.decision
+        );
+        let top = &result.candidates[0];
+        let node = &top.graph.nodes[0];
+        let cmd = node.envelope.as_ref().map(|e| e.cmd.clone()).unwrap_or_default();
+        assert_eq!(cmd, vec!["flask", "run"], "flask dep + run.py should infer `flask run`, got {:?}", cmd);
+    }
+
+    #[test]
+    fn python_manage_py_django_auto_accepts() {
+        // Repo with requirements.txt + Django + manage.py at root (like qlinks)
+        let reqs = "Django>=4.2,<5\nrequests\n";
+        let input = LeipInput {
+            repo_file_index: vec![file("requirements.txt"), file("manage.py"), file("README.md")],
+            file_text_map: [
+                ("requirements.txt".to_string(), reqs.to_string()),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "Django + manage.py should AutoAccept, got {:?}", result.decision
+        );
+        let top = &result.candidates[0];
+        let node = &top.graph.nodes[0];
+        let cmd = node.envelope.as_ref().map(|e| e.cmd.clone()).unwrap_or_default();
+        assert_eq!(cmd[..2], ["python", "manage.py"], "Django should infer `python manage.py runserver`, got {:?}", cmd);
     }
 }
 
