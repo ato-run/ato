@@ -25,12 +25,12 @@ use gpui_component::{Icon, IconName};
 
 use crate::app::{
     NavigateToUrl, OpenCardSwitcher, OpenDockWindow, OpenStoreWindow,
-    ShowSettings, StopActiveSession,
+    ShowSettings,
 };
 use crate::config::ControlBarMode;
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
-use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
+use crate::window::content_windows::{ContentWindowEntry, OpenContentWindows};
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
@@ -365,7 +365,6 @@ impl Render for ControlBarShellPlaceholder {
                     is_capsule,
                     window_count,
                     self.locale,
-                    active,
                 )
                 .into_any_element()
             } else {
@@ -379,7 +378,6 @@ fn bar_pill(
     is_capsule: bool,
     window_count: usize,
     locale: LocaleCode,
-    active: Option<ContentWindowEntry>,
 ) -> impl IntoElement {
     div()
         .size_full()
@@ -420,22 +418,6 @@ fn bar_pill(
             ActionTarget::Store,
             None,
         ))
-        .child(pill_button(
-            "dock",
-            Some(PillIcon::Custom("icons/code.svg")),
-            Some(tr(locale, "control_bar.dock").into()),
-            ActionTarget::Dock,
-            None,
-        ))
-        .child(active_context_chip(active.as_ref()))
-        .child(stop_button(active.as_ref()))
-        // Right-end Identity / Account button. Phase 1 is a
-        // placeholder click target — the popover with
-        // Profile / Account / Workspace / Trust / Preferences /
-        // Help / About lands in Phase 2. Visually: a round chip
-        // with the user-silhouette glyph, indigo-tinted to
-        // distinguish it from the action-icon affordances on the
-        // left without competing with the URL pill's accent.
         .child(identity_button())
 }
 
@@ -460,11 +442,7 @@ fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl 
                 .w(px(8.0))
                 .h(px(8.0))
                 .rounded_full()
-                .bg(if stop_enabled(active.as_ref()) {
-                    rgb(0x22c55e)
-                } else {
-                    rgb(0xa1a1aa)
-                }),
+                .bg(rgb(0xa1a1aa)),
         )
         .child(
             div()
@@ -476,7 +454,6 @@ fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl 
                 .overflow_hidden()
                 .child(title),
         )
-        .child(stop_button(active.as_ref()))
         .child(pill_button(
             "compact-url",
             Some(PillIcon::Builtin(IconName::Globe)),
@@ -488,87 +465,6 @@ fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl 
             locale,
             "control_bar.omnibar_placeholder",
         ))))
-}
-
-fn active_context_chip(active: Option<&ContentWindowEntry>) -> impl IntoElement {
-    let label = active
-        .map(|entry| entry.title.clone())
-        .unwrap_or_else(|| SharedString::from("Ato Desktop"));
-    div()
-        .max_w(px(150.0))
-        .h(px(30.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(15.0))
-        .bg(rgb(0xf8fafc))
-        .border_1()
-        .border_color(rgb(0xe2e8f0))
-        .text_xs()
-        .font_weight(FontWeight(600.0))
-        .text_color(rgb(0x334155))
-        .child(
-            div()
-                .w(px(7.0))
-                .h(px(7.0))
-                .rounded_full()
-                .bg(if stop_enabled(active) {
-                    rgb(0x22c55e)
-                } else {
-                    rgb(0x94a3b8)
-                }),
-        )
-        .child(div().overflow_hidden().child(label))
-}
-
-fn stop_button(active: Option<&ContentWindowEntry>) -> impl IntoElement {
-    let enabled = stop_enabled(active);
-    div()
-        .id("stop-active")
-        .h(px(32.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(16.0))
-        .bg(if enabled { rgb(0xfef2f2) } else { rgb(0xf4f4f5) })
-        .border_1()
-        .border_color(if enabled { rgb(0xfee2e2) } else { rgb(0xe4e4e7) })
-        .text_color(if enabled { rgb(0xb91c1c) } else { rgb(0xa1a1aa) })
-        .text_xs()
-        .font_weight(FontWeight(700.0))
-        .cursor_pointer()
-        .hover(move |s| {
-            if enabled {
-                s.bg(rgb(0xfee2e2)).border_color(rgb(0xfecaca))
-            } else {
-                s
-            }
-        })
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            if enabled {
-                window.dispatch_action(Box::new(StopActiveSession), cx);
-            }
-        })
-        .child(Icon::new(IconName::Close).size(px(13.0)))
-        .child(SharedString::from("Stop"))
-}
-
-fn stop_enabled(active: Option<&ContentWindowEntry>) -> bool {
-    let Some(entry) = active else {
-        return false;
-    };
-    matches!(
-        &entry.kind,
-        ContentWindowKind::AppWindow {
-            route:
-                GuestRoute::CapsuleHandle { .. }
-                    | GuestRoute::CapsuleUrl { .. }
-                    | GuestRoute::Capsule { .. }
-                    | GuestRoute::Terminal { .. }
-        }
-    )
 }
 
 fn identity_button() -> impl IntoElement {
@@ -601,7 +497,6 @@ fn identity_button() -> impl IntoElement {
 enum ActionTarget {
     Settings,
     Store,
-    Dock,
     CardSwitcher,
     FocusUrl,
 }
@@ -653,9 +548,6 @@ fn pill_button(
             }
             ActionTarget::Store => {
                 window.dispatch_action(Box::new(OpenStoreWindow), cx);
-            }
-            ActionTarget::Dock => {
-                window.dispatch_action(Box::new(OpenDockWindow), cx);
             }
             ActionTarget::CardSwitcher => {
                 window.dispatch_action(Box::new(OpenCardSwitcher), cx);
