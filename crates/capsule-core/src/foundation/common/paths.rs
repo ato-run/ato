@@ -49,13 +49,25 @@ pub fn nacelle_home_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(ENV_ATO_HOME) {
         let path = PathBuf::from(path);
         if !path.as_os_str().is_empty() {
-            return Ok(path);
+            return absolutize_ato_home(path);
         }
     }
 
     let home = dirs::home_dir()
         .ok_or_else(|| CapsuleError::Config("Failed to determine home directory".to_string()))?;
     Ok(home.join(".ato"))
+}
+
+fn absolutize_ato_home(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let cwd = std::env::current_dir().map_err(|err| {
+        CapsuleError::Config(format!(
+            "Failed to resolve relative ATO_HOME against current directory: {err}"
+        ))
+    })?;
+    Ok(cwd.join(path))
 }
 
 /// Returns the best-effort ato home directory without ever falling back to `/tmp`.
@@ -432,6 +444,26 @@ mod tests {
         assert_eq!(
             ato_path("run/ato-desktop-current.json").expect("ato path"),
             PathBuf::from(&ato_home).join("run/ato-desktop-current.json")
+        );
+    }
+
+    #[test]
+    fn ato_path_absolutizes_relative_ato_home_override() {
+        let _lock = env_lock();
+        let current_dir = std::env::current_dir().expect("cwd");
+        let temp = tempfile::tempdir_in(&current_dir).expect("tempdir in cwd");
+        let ato_home = temp.path().join("isolated-ato-home");
+        std::fs::create_dir_all(&ato_home).expect("mkdir ato_home");
+        let relative = ato_home
+            .strip_prefix(&current_dir)
+            .expect("ato_home under cwd");
+        let _guard = EnvVarGuard::set_path("ATO_HOME", relative);
+
+        assert_eq!(
+            ato_path("run/ato-desktop-current.json").expect("ato path"),
+            current_dir
+                .join(relative)
+                .join("run/ato-desktop-current.json")
         );
     }
 }
