@@ -177,21 +177,29 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                         .lock()
                         .map(|g| g.clone())
                         .unwrap_or_else(|_| json!({ "authenticated": false }));
+                    let authenticated = current_identity
+                        .get("authenticated")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let identity_json = serde_json::to_string(&current_identity)
                         .unwrap_or_else(|_| "null".to_string());
                     // Embed identity directly in the HTML so it is available
                     // before any scripts run — more reliable than WKUserScript.
-                    let html = DOCK_HTML.replacen(
-                        "<head>",
-                        &format!(
-                            "<head><script>window.__ATO_IDENTITY={};</script>",
-                            identity_json
-                        ),
-                        1,
+                    let inject = format!(
+                        "<head><script>window.__ATO_IDENTITY={};</script>",
+                        identity_json
+                    );
+                    let html = DOCK_HTML.replacen("<head>", &inject, 1);
+                    let injected = html.contains("window.__ATO_IDENTITY");
+                    tracing::info!(
+                        authenticated,
+                        injected,
+                        "dock protocol handler: serving HTML with identity"
                     );
                     let body: Cow<'static, [u8]> = Cow::Owned(html.into_bytes());
                     let response = Response::builder()
                         .header("Content-Type", "text/html; charset=utf-8")
+                        .header("Cache-Control", "no-store, no-cache")
                         .body(body)
                         .expect("dev console HTML response must build");
                     responder.respond(response);
@@ -228,31 +236,57 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     Ok(*handle)
 }
 
-/// Update the existing Dock WebView's identity in-place after a successful login,
-/// without closing/reopening the window. Updates the shared identity state and
-/// reloads the page so the custom-protocol handler serves the new identity
-/// embedded directly in the HTML. Falls back to opening a fresh Dock if no
-/// live entity is tracked.
+/// Update the existing Dock WebView's identity in-place after a successful login.
+///
+/// Strategy:
+/// 1. Update the shared `identity_state` Arc so future page loads embed the new identity.
+/// 2. Call `evaluate_script_with_callback` to set `window.__ATO_IDENTITY` and call
+///    `showInitialPage()` directly in the live page — instant, no navigation.
+///
+/// NOTE: do NOT call `load_url` here. Calling `load_url` immediately after
+/// `evaluate_script` cancels the pending JS evaluation in WKWebView before it runs.
+///
+/// Falls back to opening a fresh Dock if no live entity is tracked.
 pub fn notify_login_success(cx: &mut App) {
     let entity = cx.try_global::<DockEntitySlot>().and_then(|s| s.0.clone());
     if let Some(entity) = entity {
         let identity = fetch_identity();
         let authenticated = identity.get("authenticated").and_then(|v| v.as_bool()).unwrap_or(false);
-        tracing::info!(authenticated, "notify_login_success: updating identity state and reloading dock WebView");
-        let url = format!("{}://localhost/", DOCK_SCHEME);
-        let result = entity.update(cx, |view, _cx| {
-            // Update shared identity so the protocol handler serves new HTML.
+        tracing::info!(authenticated, "notify_login_success: injecting identity into live dock WebView");
+
+        let identity_json = serde_json::to_string(&identity)
+            .unwrap_or_else(|_| "null".to_string());
+
+        // IIFE: set identity on window, then immediately route to correct page.
+        // showInitialPage() only reads window.__ATO_IDENTITY and calls querySelectorAll
+        // — safe to invoke on any already-loaded page.
+        let script = format!(
+            concat!(
+                "(function(){{",
+                "window.__ATO_IDENTITY={id};",
+                "if(typeof showInitialPage==='function'){{showInitialPage();return'ok';}}",
+                "return'no-fn';",
+                "}})();"
+            ),
+            id = identity_json
+        );
+
+        entity.update(cx, |view, _cx| {
+            // 1. Update Arc so future page loads (from protocol handler) also get new identity.
             if let Ok(mut guard) = view.identity_state.lock() {
                 *guard = identity;
             }
-            // Reload the page — the protocol handler will embed the new identity.
-            view._webview.load_url(&url)
+            // 2. Transition the live page — use callback to log outcome (silently swallowed otherwise).
+            let result = view._webview.evaluate_script_with_callback(&script, |response| {
+                tracing::info!(response, "notify_login_success: evaluate_script_with_callback result");
+            });
+            match result {
+                Ok(()) => tracing::info!("notify_login_success: evaluate_script_with_callback dispatched"),
+                Err(e) => tracing::warn!("notify_login_success: evaluate_script_with_callback failed: {:?}", e),
+            }
         });
-        match result {
-            Ok(()) => tracing::info!("notify_login_success: dock WebView reload triggered"),
-            Err(e) => tracing::warn!("notify_login_success: load_url error: {:?}", e),
-        }
-        // Bring dock window to front
+
+        // Bring dock window to front.
         if let Some(handle) = cx.try_global::<DockWindowSlot>().and_then(|s| s.0) {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         }
