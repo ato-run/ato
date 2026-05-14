@@ -16,8 +16,9 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
-    NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher, OpenIdentityMenu,
-    OpenStartWindow, OpenStoreWindow, ShowSettings,
+    FocusControlBarInput, HideControlBar, NavigateToUrl, OpenAppWindowExperiment,
+    OpenCardSwitcher, OpenDockWindow, OpenStartWindow, OpenStoreWindow,
+    ShowControlBar, ShowSettings, ToggleControlBar,
 };
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
@@ -110,9 +111,37 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 );
                                                 Ok(())
                                             }
-                                            "OpenIdentityMenu" => {
+                                            "OpenIdentityMenu" | "OpenDockWindow" => {
                                                 window.dispatch_action(
-                                                    Box::new(OpenIdentityMenu),
+                                                    Box::new(OpenDockWindow),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "ShowControlBar" => {
+                                                window.dispatch_action(
+                                                    Box::new(ShowControlBar),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "HideControlBar" => {
+                                                window.dispatch_action(
+                                                    Box::new(HideControlBar),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "ToggleControlBar" => {
+                                                window.dispatch_action(
+                                                    Box::new(ToggleControlBar),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "FocusControlBarInput" => {
+                                                window.dispatch_action(
+                                                    Box::new(FocusControlBarInput),
                                                     cx,
                                                 );
                                                 Ok(())

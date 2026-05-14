@@ -70,8 +70,9 @@ actions!(
         ResolutionFormNext,
         ResolutionFormBack,
         ToggleRouteMetadataPopover,
-        ToggleDevConsole,
+        ToggleDock,
         ToggleAutoDevtools,
+        ToggleDevConsole,
         CheckForUpdates,
         OpenLatestReleasePage,
         Quit,
@@ -111,10 +112,10 @@ actions!(
         // Phase 2 will open a real popover (Profile / Account /
         // Workspace / Trust / Preferences / Help / About).
         OpenIdentityMenu,
-        // Opens the Developer Console window — the publisher tool for
-        // managing capsules, setting up a Dock, and monitoring publish
-        // status. URL: capsule://run.ato.desktop/dev-console
-        OpenDevConsoleWindow
+        // Opens the Dock window — the publisher tool for managing
+        // capsules, setting up a Dock, and monitoring publish status.
+        // URL: capsule://run.ato.desktop/dock
+        OpenDockWindow
     ]
 );
 
@@ -318,7 +319,7 @@ pub fn run() {
         // on ato.run).
         cx.set_global(crate::window::store::StoreWindowSlot::default());
         // Slot tracking the currently-open Developer Console window.
-        cx.set_global(crate::window::dev_console::DevConsoleWindowSlot::default());
+        cx.set_global(crate::window::dock::DockWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
@@ -340,7 +341,7 @@ pub fn run() {
             KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
             KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
             KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
-            KeyBinding::new("cmd-alt-i", ToggleDevConsole, None),
+            KeyBinding::new("cmd-alt-i", ToggleDock, None),
             KeyBinding::new("cmd-shift-b", ToggleControlBar, None),
             KeyBinding::new("ctrl-shift-b", ToggleControlBar, None),
             KeyBinding::new("cmd-l", FocusControlBarInput, None),
@@ -458,15 +459,15 @@ pub fn run() {
                 cx.set_global(crate::window::store::StoreWindowSlot(None));
                 tracing::info!("Store window closed; slot cleared");
             }
-            let dev_console_slot = cx
-                .global::<crate::window::dev_console::DevConsoleWindowSlot>()
+            let dock_slot = cx
+                .global::<crate::window::dock::DockWindowSlot>()
                 .0;
-            if dev_console_slot
+            if dock_slot
                 .map(|h| h.window_id() == window_id)
                 .unwrap_or(false)
             {
-                cx.set_global(crate::window::dev_console::DevConsoleWindowSlot(None));
-                tracing::info!("Dev Console window closed; slot cleared");
+                cx.set_global(crate::window::dock::DockWindowSlot(None));
+                tracing::info!("Dock window closed; slot cleared");
             }
 
             // In Focus mode the Control Bar is a process-lifetime
@@ -709,16 +710,16 @@ pub fn run() {
             }
         });
 
-        // Open / focus the Developer Console window.
-        cx.on_action(|_: &OpenDevConsoleWindow, cx: &mut App| {
+        // Open / focus the Dock window.
+        cx.on_action(|_: &OpenDockWindow, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 tracing::debug!(
-                    "OpenDevConsoleWindow dispatched but multi-window flag is off"
+                    "OpenDockWindow dispatched but multi-window flag is off"
                 );
                 return;
             }
-            if let Err(err) = crate::window::dev_console::open_dev_console_window(cx) {
-                tracing::error!(error = %err, "failed to open dev console window");
+            if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                tracing::error!(error = %err, "failed to open dock window");
             }
         });
 
