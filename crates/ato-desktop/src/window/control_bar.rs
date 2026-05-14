@@ -35,6 +35,7 @@ use crate::window::content_windows::{ContentWindowEntry, OpenContentWindows};
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
 const COMPACT_BAR_WIDTH: f32 = 360.0;
+const COMPACT_HEIGHT: f32 = 28.0;
 /// Host NSWindow is sized flush to the pill — the rectangle of the
 /// window and the rectangle of the pill are the same; the only
 /// transparent area is the four rounded-corner cut-outs created by
@@ -127,8 +128,11 @@ impl ControlBarController {
     }
 
     fn should_render_expanded(&self) -> bool {
-        matches!(self.mode, ControlBarMode::Floating)
-            || (matches!(self.mode, ControlBarMode::AutoHide) && self.expanded)
+        // `expanded` is set to `true` by `set_mode` for Floating, by
+        // `expand()` for AutoHide, and by `force_expand()` for AutoHide and
+        // CompactPill (e.g. via Cmd+L).  It is the single source of truth
+        // for whether the bar should currently show the full pill layout.
+        self.expanded
     }
 }
 
@@ -161,6 +165,7 @@ pub fn show_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
     if let Some(handle) = existing {
         if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
             cx.global_mut::<ControlBarController>().expand();
+            resize_bar_window(cx, true);
             return Ok(handle);
         }
         let mode = cx.global::<ControlBarController>().mode();
@@ -202,6 +207,7 @@ pub fn toggle_control_bar(cx: &mut App) -> Result<Option<AnyWindowHandle>> {
 pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
     let handle = show_control_bar(cx)?;
     cx.global_mut::<ControlBarController>().force_expand();
+    resize_bar_window(cx, true);
     if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
         let _ = handle.update(cx, |_, window, cx| {
             window.activate_window();
@@ -209,6 +215,25 @@ pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
         });
     }
     Ok(handle)
+}
+
+/// Resize the control bar NSWindow to match the expanded or compact
+/// dimensions.  Keeps the top edge and horizontal centre fixed so the
+/// pill does not jump on screen.  No-op if no window is currently open.
+fn resize_bar_window(cx: &mut App, expanded: bool) {
+    let handle = match cx.global::<ControlBarController>().handle {
+        Some(h) => h,
+        None => return,
+    };
+    let (new_w, new_h) = if expanded {
+        (BAR_WIDTH, BAR_HEIGHT)
+    } else {
+        (COMPACT_BAR_WIDTH, COMPACT_HEIGHT)
+    };
+    #[cfg(target_os = "macos")]
+    super::macos::resize_window_to(cx, handle, new_w, new_h);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (new_w, new_h, handle);
 }
 
 pub struct ControlBarShellPlaceholder {
@@ -264,6 +289,7 @@ impl ControlBarShellPlaceholder {
                 InputEvent::Blur => {
                     this.omnibar_focused = false;
                     cx.global_mut::<ControlBarController>().collapse();
+                    resize_bar_window(&mut *cx, false);
                     cx.notify();
                 }
             },
@@ -353,9 +379,13 @@ impl Render for ControlBarShellPlaceholder {
             .items_center()
             .justify_center()
             .on_mouse_move(|_event, _window, cx| {
-                let controller = cx.global_mut::<ControlBarController>();
-                controller.expand();
-                if let Some(shell) = controller.shell.clone() {
+                let was_expanded = cx.global::<ControlBarController>().expanded;
+                cx.global_mut::<ControlBarController>().expand();
+                let now_expanded = cx.global::<ControlBarController>().expanded;
+                if now_expanded && !was_expanded {
+                    resize_bar_window(cx, true);
+                }
+                if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                     shell.update(cx, |_shell, cx| cx.notify());
                 }
             })
@@ -428,19 +458,20 @@ fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl 
         .unwrap_or_else(|| SharedString::from("Ato Desktop"));
     div()
         .w(px(COMPACT_BAR_WIDTH))
-        .h(px(BAR_HEIGHT))
-        .px(px(8.0))
+        .h(px(COMPACT_HEIGHT))
+        .px(px(10.0))
         .flex()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(6.0))
         .bg(rgb(0xffffff))
         .rounded_full()
         .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.04))
+        .border_color(hsla(0.0, 0.0, 0.0, 0.06))
         .child(
             div()
-                .w(px(8.0))
-                .h(px(8.0))
+                .w(px(6.0))
+                .h(px(6.0))
+                .flex_shrink_0()
                 .rounded_full()
                 .bg(rgb(0xa1a1aa)),
         )
@@ -448,19 +479,37 @@ fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl 
             div()
                 .min_w(px(0.0))
                 .flex_1()
-                .text_sm()
+                .text_xs()
                 .font_weight(FontWeight(600.0))
                 .text_color(rgb(0x18181b))
                 .overflow_hidden()
                 .child(title),
         )
-        .child(pill_button(
-            "compact-url",
-            Some(PillIcon::Builtin(IconName::Globe)),
-            Some(SharedString::from("⌘L")),
-            ActionTarget::FocusUrl,
-            None,
-        ))
+        .child(
+            div()
+                .id("compact-url")
+                .w(px(20.0))
+                .h(px(20.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0xf4f4f5)))
+                .on_mouse_down(MouseButton::Left, |_, _window, cx| {
+                    if let Err(err) = focus_control_bar_input(cx) {
+                        tracing::error!(error = %err, "compact pill ⌘L failed");
+                    }
+                })
+                .child(
+                    Icon::new(IconName::Globe)
+                        .size(px(12.0))
+                        .text_color(rgb(0x3f3f46)),
+                ),
+        )
+        // Zero-width omnibar placeholder keeps the omnibar accessible
+        // for keyboard dispatch even in compact mode.
         .child(div().w(px(0.0)).overflow_hidden().child(SharedString::from(tr(
             locale,
             "control_bar.omnibar_placeholder",
@@ -687,14 +736,25 @@ fn url_pill(omnibar: Entity<InputState>, is_capsule: bool) -> impl IntoElement {
 //         .child(dot())
 // }
 
+/// Return the initial `(width, height)` for the control bar window.
+/// In non-expanded modes (AutoHide, CompactPill) the window starts at
+/// the compact dimensions so there is never a first-frame flash at the
+/// full-bar size.
+fn initial_bar_size(cx: &App) -> (Pixels, Pixels) {
+    if cx.global::<ControlBarController>().should_render_expanded() {
+        (px(BAR_WIDTH), px(BAR_HEIGHT))
+    } else {
+        (px(COMPACT_BAR_WIDTH), px(COMPACT_HEIGHT))
+    }
+}
+
 /// Open the bar anchored above a parent app window's bounds.
 pub fn open_control_bar_window_at(
     cx: &mut App,
     parent_bounds: Bounds<Pixels>,
     route: GuestRoute,
 ) -> Result<AnyWindowHandle> {
-    let win_w = px(BAR_WIDTH);
-    let win_h = px(BAR_HEIGHT);
+    let (win_w, win_h) = initial_bar_size(cx);
     let origin = gpui::Point {
         x: parent_bounds.origin.x + (parent_bounds.size.width - win_w) / 2.0,
         y: parent_bounds.origin.y - win_h + px(BAR_GAP_ABOVE_APP),
@@ -709,8 +769,7 @@ pub fn open_control_bar_window_at(
 /// Standalone bar opener — keeps the legacy code path callable
 /// without parent bounds.
 pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    let win_w = px(BAR_WIDTH);
-    let win_h = px(BAR_HEIGHT);
+    let (win_w, win_h) = initial_bar_size(cx);
     let bounds = Bounds::centered(None, size(win_w, win_h), cx);
     open_control_bar_inner(
         cx,
@@ -735,8 +794,7 @@ pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
     ) {
         return Err(anyhow::anyhow!("Control Bar mode is hidden"));
     }
-    let win_w = px(BAR_WIDTH);
-    let win_h = px(BAR_HEIGHT);
+    let (win_w, win_h) = initial_bar_size(cx);
     let bounds = match cx.primary_display() {
         Some(d) => {
             let display_bounds = d.bounds();
@@ -806,7 +864,16 @@ fn open_control_bar_inner(
     // to share the pill's white fill (e.g. when the Store sits below
     // the bar). macOS treats the rounded contentView as the window
     // shape for clicking, screen-grabs, and shadow casting.
+    // Use the actual initial bar height so the radius is correct for
+    // both the full-bar (56 px) and compact-pill (28 px) opening sizes.
     #[cfg(target_os = "macos")]
-    super::macos::round_window_corners(cx, *handle, (BAR_HEIGHT / 2.0) as f64);
+    {
+        let initial_h = if cx.global::<ControlBarController>().should_render_expanded() {
+            BAR_HEIGHT
+        } else {
+            COMPACT_HEIGHT
+        };
+        super::macos::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
+    }
     Ok(*handle)
 }
