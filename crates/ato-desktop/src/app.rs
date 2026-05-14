@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
+use crate::config::ControlBarMode;
 use crate::ui::DesktopShell;
 use gpui::AsyncApp;
 use gpui_component::TitleBar;
@@ -97,6 +98,10 @@ actions!(
         // rather than stacking duplicates. Gated on the multi-window
         // flag.
         OpenStoreWindow,
+        ShowControlBar,
+        HideControlBar,
+        ToggleControlBar,
+        FocusControlBarInput,
         // Opens a fresh StartWindow — the standalone "compose a new
         // window" surface that the Card Switcher's new-window tile
         // routes to. Always spawns a new window (no slot reuse).
@@ -105,7 +110,11 @@ actions!(
         // Bar's right-end Identity button. Phase 1 logs the click;
         // Phase 2 will open a real popover (Profile / Account /
         // Workspace / Trust / Preferences / Help / About).
-        OpenIdentityMenu
+        OpenIdentityMenu,
+        // Opens the Developer Console window — the publisher tool for
+        // managing capsules, setting up a Dock, and monitoring publish
+        // status. URL: capsule://run.ato.desktop/dev-console
+        OpenDevConsoleWindow
     ]
 );
 
@@ -113,6 +122,12 @@ actions!(
 #[action(namespace = ato_desktop, no_json)]
 pub struct NavigateToUrl {
     pub url: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct SetControlBarMode {
+    pub mode: ControlBarMode,
 }
 
 /// Hand a URL to the OS so it opens in the user's default browser
@@ -290,6 +305,7 @@ pub fn run() {
         // of hardcoded placeholders.
         cx.set_global(crate::state::AppWindowRegistry::default());
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
+        crate::window::install_control_bar_controller(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
@@ -301,6 +317,8 @@ pub fn run() {
         // Slot tracking the currently-open Store window (Wry WebView
         // on ato.run).
         cx.set_global(crate::window::store::StoreWindowSlot::default());
+        // Slot tracking the currently-open Developer Console window.
+        cx.set_global(crate::window::dev_console::DevConsoleWindowSlot::default());
 
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
@@ -323,6 +341,10 @@ pub fn run() {
             KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
             KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
             KeyBinding::new("cmd-alt-i", ToggleDevConsole, None),
+            KeyBinding::new("cmd-shift-b", ToggleControlBar, None),
+            KeyBinding::new("ctrl-shift-b", ToggleControlBar, None),
+            KeyBinding::new("cmd-l", FocusControlBarInput, None),
+            KeyBinding::new("ctrl-l", FocusControlBarInput, None),
             KeyBinding::new("cmd-r", BrowserReload, Some("AtoDesktopShell")),
             KeyBinding::new("cmd-left", BrowserBack, Some("AtoDesktopShell")),
             KeyBinding::new("cmd-right", BrowserForward, Some("AtoDesktopShell")),
@@ -407,6 +429,13 @@ pub fn run() {
                     "content window evicted from registry on close"
                 );
             }
+            if let Some(handle) = cx.global::<crate::window::ControlBarController>().handle {
+                if handle.window_id() == window_id {
+                    cx.global_mut::<crate::window::ControlBarController>()
+                        .clear_window(handle);
+                    tracing::info!("Control Bar window closed; controller cleared");
+                }
+            }
 
             // Clear singleton slots when their tracked window closes
             // so the next Settings / Store / switcher click opens a
@@ -429,6 +458,16 @@ pub fn run() {
                 cx.set_global(crate::window::store::StoreWindowSlot(None));
                 tracing::info!("Store window closed; slot cleared");
             }
+            let dev_console_slot = cx
+                .global::<crate::window::dev_console::DevConsoleWindowSlot>()
+                .0;
+            if dev_console_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                cx.set_global(crate::window::dev_console::DevConsoleWindowSlot(None));
+                tracing::info!("Dev Console window closed; slot cleared");
+            }
 
             // In Focus mode the Control Bar is a process-lifetime
             // singleton with its own lifecycle, decoupled from any
@@ -436,11 +475,75 @@ pub fn run() {
             // NOT auto-open a Launcher — the bar is already there as
             // the user's landing surface. We quit only when every
             // remaining window (including the Control Bar) is gone.
-            if cx.windows().is_empty() {
+            if cx.windows().is_empty() && !crate::window::is_multi_window_enabled() {
                 cx.quit();
             }
         })
         .detach();
+
+        cx.on_action(|_: &ShowControlBar, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) = crate::window::show_control_bar(cx) {
+                tracing::error!(error = %err, "ShowControlBar failed");
+            }
+        });
+
+        cx.on_action(|_: &HideControlBar, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            crate::window::hide_control_bar(cx);
+        });
+
+        cx.on_action(|_: &ToggleControlBar, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) = crate::window::toggle_control_bar(cx) {
+                tracing::error!(error = %err, "ToggleControlBar failed");
+            }
+        });
+
+        cx.on_action(|_: &FocusControlBarInput, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) = crate::window::focus_control_bar_input(cx) {
+                tracing::error!(error = %err, "FocusControlBarInput failed");
+            }
+        });
+
+        cx.on_action(|action: &SetControlBarMode, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            let mut config = crate::config::load_config();
+            config.desktop.control_bar.mode = action.mode;
+            config.desktop.control_bar.visible_on_startup =
+                !matches!(action.mode, ControlBarMode::Hidden);
+            config.desktop.control_bar.auto_hide =
+                matches!(action.mode, ControlBarMode::AutoHide);
+            crate::config::save_config(&config);
+            if let Err(err) = crate::window::set_control_bar_mode(cx, action.mode) {
+                tracing::error!(error = %err, "SetControlBarMode failed");
+            }
+        });
+
+        cx.on_action(|_: &StopActiveSession, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            stop_active_focus_capsule(cx);
+        });
+
+        cx.on_action(|_: &StopAllRetainedSessions, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            stop_all_focus_capsules(cx);
+        });
 
         // #169 — multi-window experiment action. Opens a placeholder
         // `AppWindowShell` window when `ATO_DESKTOP_MULTI_WINDOW=1`.
@@ -606,6 +709,19 @@ pub fn run() {
             }
         });
 
+        // Open / focus the Developer Console window.
+        cx.on_action(|_: &OpenDevConsoleWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "OpenDevConsoleWindow dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            if let Err(err) = crate::window::dev_console::open_dev_console_window(cx) {
+                tracing::error!(error = %err, "failed to open dev console window");
+            }
+        });
+
         // Spawn a fresh StartWindow. Unlike the Launcher / Store
         // handlers, there is no slot — every dispatch produces a new
         // window. The Card Switcher's new-window tile invokes the
@@ -633,12 +749,20 @@ pub fn run() {
             // new AppWindow re-uses the existing bar. The bar stays
             // until the user explicitly closes it or the process
             // exits.
-            let control_bar_handle = match crate::window::open_focus_control_bar(cx) {
-                Ok(h) => h,
-                Err(err) => {
-                    tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
-                    cx.quit();
-                    return;
+            let control_bar_handle = if matches!(
+                crate::window::control_bar_mode(cx),
+                ControlBarMode::Hidden
+            ) {
+                tracing::info!("Focus View Control Bar starts hidden");
+                None
+            } else {
+                match crate::window::open_focus_control_bar(cx) {
+                    Ok(h) => Some(h),
+                    Err(err) => {
+                        tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
+                        cx.quit();
+                        return;
+                    }
                 }
             };
             tracing::info!("Focus View Control Bar opened at startup");
@@ -703,7 +827,13 @@ pub fn run() {
             // Actions are App-level so dispatching via any window handle
             // reaches the registered handler — the Control Bar handle
             // is used here since the Store window is deferred.
-            crate::window::focus_dispatcher::start(cx, control_bar_handle);
+            if let Some(control_bar_handle) = control_bar_handle {
+                crate::window::focus_dispatcher::start(cx, control_bar_handle);
+            } else {
+                tracing::warn!(
+                    "Focus dispatcher not started because the Control Bar is hidden at startup"
+                );
+            }
         } else {
             tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
@@ -732,13 +862,110 @@ pub fn run() {
     });
 }
 
+fn stop_active_focus_capsule(cx: &mut App) {
+    use crate::state::GuestRoute;
+    use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+
+    let active = cx
+        .global::<OpenContentWindows>()
+        .mru_order()
+        .into_iter()
+        .find(|entry| {
+            matches!(
+                &entry.kind,
+                ContentWindowKind::AppWindow {
+                    route:
+                        GuestRoute::CapsuleHandle { .. }
+                            | GuestRoute::CapsuleUrl { .. }
+                            | GuestRoute::Capsule { .. }
+                            | GuestRoute::Terminal { .. }
+                }
+            )
+        });
+
+    if let Some(entry) = active {
+        let _ = entry.handle.update(cx, |_, window, _| window.remove_window());
+        tracing::info!(title = %entry.title, "Focus View active capsule stopped by closing its AppWindow");
+    } else {
+        tracing::info!("StopActiveSession ignored: no active Focus View capsule window");
+    }
+}
+
+fn stop_all_focus_capsules(cx: &mut App) {
+    use crate::state::GuestRoute;
+    use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+
+    let targets: Vec<_> = cx
+        .global::<OpenContentWindows>()
+        .mru_order()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                ContentWindowKind::AppWindow {
+                    route:
+                        GuestRoute::CapsuleHandle { .. }
+                            | GuestRoute::CapsuleUrl { .. }
+                            | GuestRoute::Capsule { .. }
+                            | GuestRoute::Terminal { .. }
+                }
+            )
+        })
+        .collect();
+    let count = targets.len();
+    for entry in targets {
+        let _ = entry.handle.update(cx, |_, window, _| window.remove_window());
+    }
+    tracing::info!(count, "Focus View capsule windows stopped");
+}
+
 #[cfg(target_os = "macos")]
 fn install_app_menus(cx: &mut App) {
+    let mode = crate::window::control_bar_mode(cx);
     cx.set_menus(vec![
         Menu {
             name: "ato-desktop".into(),
             items: vec![
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Show Control Bar", ShowControlBar),
+                MenuItem::action("Hide Control Bar", HideControlBar),
+                MenuItem::submenu(Menu::new("Control Bar Mode").items([
+                    MenuItem::action(
+                        "Floating",
+                        SetControlBarMode {
+                            mode: ControlBarMode::Floating,
+                        },
+                    )
+                    .checked(mode == ControlBarMode::Floating),
+                    MenuItem::action(
+                        "Auto-hide",
+                        SetControlBarMode {
+                            mode: ControlBarMode::AutoHide,
+                        },
+                    )
+                    .checked(mode == ControlBarMode::AutoHide),
+                    MenuItem::action(
+                        "Compact pill",
+                        SetControlBarMode {
+                            mode: ControlBarMode::CompactPill,
+                        },
+                    )
+                    .checked(mode == ControlBarMode::CompactPill),
+                    MenuItem::action(
+                        "Hidden",
+                        SetControlBarMode {
+                            mode: ControlBarMode::Hidden,
+                        },
+                    )
+                    .checked(mode == ControlBarMode::Hidden),
+                ])),
+                MenuItem::separator(),
+                MenuItem::action("Open Store", OpenStoreWindow),
+                MenuItem::action("Open Settings", ShowSettings),
+                MenuItem::separator(),
+                MenuItem::action("Stop Active Capsule", StopActiveSession),
+                MenuItem::action("Stop All Capsules", StopAllRetainedSessions),
                 MenuItem::separator(),
                 MenuItem::action("Quit", Quit),
             ],
