@@ -1863,6 +1863,12 @@ impl DesktopShell {
                 "OpenCardSwitcher" => {
                     window.dispatch_action(Box::new(crate::app::OpenCardSwitcher), cx);
                 }
+                "OpenStartWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenStartWindow), cx);
+                }
+                "OpenStoreWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenStoreWindow), cx);
+                }
                 "ShowSettings" => {
                     window.dispatch_action(Box::new(crate::app::ShowSettings), cx);
                 }
