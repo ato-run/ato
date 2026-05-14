@@ -1340,16 +1340,35 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         lock.contract
             .entries
             .insert("workloads".to_string(), Value::Array(Vec::new()));
+        // Detect workspace monorepo root to provide actionable context.
+        let workspace_packages = detect_workspace_packages(&input.project_root);
+        let (unresolved_reason, unresolved_detail, unresolved_candidates) =
+            if let Some(packages) = workspace_packages {
+                (
+                    UnresolvedReason::ExplicitSelectionRequired,
+                    format!(
+                        "workspace monorepo root detected: run ato from a sub-package directory ({})",
+                        packages.join(", ")
+                    ),
+                    packages,
+                )
+            } else {
+                (
+                    UnresolvedReason::InsufficientEvidence,
+                    "could not infer a primary process from source evidence".to_string(),
+                    Vec::new(),
+                )
+            };
         lock.contract.unresolved.push(UnresolvedValue {
             field: Some("contract.process".to_string()),
-            reason: UnresolvedReason::InsufficientEvidence,
-            detail: Some("could not infer a primary process from source evidence".to_string()),
-            candidates: Vec::new(),
+            reason: unresolved_reason,
+            detail: Some(unresolved_detail.clone()),
+            candidates: unresolved_candidates,
         });
         diagnostics.push(SourceInferenceDiagnostic {
             severity: SourceInferenceDiagnosticSeverity::Error,
             field: "contract.process".to_string(),
-            message: "source inference could not determine a runnable process".to_string(),
+            message: unresolved_detail,
         });
         unresolved.push("contract.process".to_string());
     } else if is_equal_ranked(&process_candidates) {
@@ -2613,26 +2632,28 @@ fn node_package_manager_process(
     package_manager: NodePackageManager,
     script_name: &str,
 ) -> Option<Value> {
-    let (entrypoint, cmd) = match package_manager {
-        NodePackageManager::Bun => (
-            "bun".to_string(),
-            vec!["run".to_string(), script_name.to_string()],
-        ),
-        NodePackageManager::Deno => (
-            "deno".to_string(),
-            vec!["task".to_string(), script_name.to_string()],
-        ),
-        NodePackageManager::Pnpm => ("pnpm".to_string(), vec![script_name.to_string()]),
-        NodePackageManager::Yarn => ("yarn".to_string(), vec![script_name.to_string()]),
-        NodePackageManager::Npm | NodePackageManager::Unknown => (
-            "npm".to_string(),
-            vec!["run".to_string(), script_name.to_string()],
-        ),
-    };
-    Some(json!({
-        "entrypoint": entrypoint,
-        "cmd": cmd,
-    }))
+    match package_manager {
+        NodePackageManager::Bun => Some(json!({
+            "entrypoint": "bun",
+            "cmd": ["run", script_name],
+        })),
+        NodePackageManager::Deno => Some(json!({
+            "entrypoint": "deno",
+            "cmd": ["task", script_name],
+        })),
+        NodePackageManager::Pnpm => Some(json!({
+            "entrypoint": "pnpm",
+            "cmd": [script_name],
+        })),
+        NodePackageManager::Yarn => Some(json!({
+            "entrypoint": "yarn",
+            "cmd": [script_name],
+        })),
+        NodePackageManager::Npm | NodePackageManager::Unknown => Some(json!({
+            "entrypoint": "npm",
+            "cmd": ["run", script_name],
+        })),
+    }
 }
 
 fn native_artifact_launch_path(artifact_path: &Path, artifact_type: &str) -> Result<PathBuf> {
@@ -2785,8 +2806,17 @@ fn enforce_mode_preconditions(
 
     if matches!(mode, MaterializationMode::RunAttempt) {
         if !result.lock.contract.entries.contains_key("process") {
+            let message = result
+                .lock
+                .contract
+                .unresolved
+                .iter()
+                .find(|u| u.field.as_deref() == Some("contract.process"))
+                .and_then(|u| u.detail.as_deref())
+                .unwrap_or("run requires a selected process before execution")
+                .to_string();
             anyhow::bail!(AtoExecutionError::ambiguous_entrypoint(
-                "run requires a selected process before execution",
+                message,
                 explicit_candidates(&result.lock),
             ));
         }
@@ -3969,9 +3999,50 @@ struct LeipProjection {
     candidate_id: String,
 }
 
-/// Build a [`lock_draft_engine::leip::LeipInput`] by reading the project root.
-/// This is the only LEIP-related function that touches the filesystem; the
-/// engine itself is pure.
+/// Detect workspace monorepo root by checking for `pnpm-workspace.yaml` or
+/// `package.json` with a top-level `workspaces` array.  Returns the list of
+/// declared sub-package paths if the root is a workspace root, or `None`.
+fn detect_workspace_packages(root: &Path) -> Option<Vec<String>> {
+    // pnpm-workspace.yaml takes priority
+    let pnpm_ws = root.join("pnpm-workspace.yaml");
+    if pnpm_ws.is_file() {
+        if let Ok(text) = fs::read_to_string(&pnpm_ws) {
+            let packages: Vec<String> = text
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    trimmed
+                        .strip_prefix("- ")
+                        .map(|p| p.trim().trim_matches('\'').trim_matches('"').to_string())
+                })
+                .filter(|p| !p.is_empty())
+                .collect();
+            if !packages.is_empty() {
+                return Some(packages);
+            }
+        }
+    }
+
+    // npm/yarn workspaces in package.json
+    let pkg_json = root.join("package.json");
+    if pkg_json.is_file() {
+        if let Ok(text) = fs::read_to_string(&pkg_json) {
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(workspaces) = v.get("workspaces").and_then(Value::as_array) {
+                    let packages: Vec<String> = workspaces
+                        .iter()
+                        .filter_map(|w| w.as_str().map(str::to_string))
+                        .collect();
+                    if !packages.is_empty() {
+                        return Some(packages);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
 fn build_leip_input_from_root(
     root: &Path,
 ) -> lock_draft_engine::leip::LeipInput {
@@ -6404,4 +6475,70 @@ target = "worker"
             }))
         );
     }
+
+    #[test]
+    fn workspace_root_pnpm_yaml_error_includes_subpackages() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/web\n  - apps/api\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"root","private":true}"#,
+        )
+        .unwrap();
+
+        let (_guard, _env) = isolate_ato_home(&dir);
+        let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+            project_root: dir.path().to_path_buf(),
+            explicit_native_artifact: None,
+            single_script_language: None,
+            authoritative_root: None,
+        });
+        let err = execute_shared_engine(input, MaterializationMode::RunAttempt, true, reporter())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("workspace monorepo root detected"),
+            "expected workspace hint, got: {msg}"
+        );
+        assert!(msg.contains("apps/web"), "expected sub-package in error: {msg}");
+        assert!(msg.contains("apps/api"), "expected sub-package in error: {msg}");
+    }
+
+    #[test]
+    fn workspace_root_package_json_workspaces_error_includes_subpackages() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"root","private":true,"workspaces":["packages/alpha","packages/beta"]}"#,
+        )
+        .unwrap();
+
+        let (_guard, _env) = isolate_ato_home(&dir);
+        let input = SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
+            project_root: dir.path().to_path_buf(),
+            explicit_native_artifact: None,
+            single_script_language: None,
+            authoritative_root: None,
+        });
+        let err = execute_shared_engine(input, MaterializationMode::RunAttempt, true, reporter())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("workspace monorepo root detected"),
+            "expected workspace hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("packages/alpha"),
+            "expected sub-package in error: {msg}"
+        );
+        assert!(
+            msg.contains("packages/beta"),
+            "expected sub-package in error: {msg}"
+        );
+    }
+
 }
