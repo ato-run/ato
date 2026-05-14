@@ -12,6 +12,10 @@
   "common.unknown": "(不明)",
   "common.coming_soon": "準備中",
 
+  "control_bar.settings": "設定",
+  "control_bar.store": "ストア",
+  "control_bar.omnibar_placeholder": "https://… または capsule://… を入力",
+
   "start.title": "新しいウィンドウ",
   "start.subtitle": "カプセル、ローカルアプリ、GitHub repo を開く",
   "start.search.placeholder": "カプセル名、URL、GitHub repo、ローカルパス、またはコマンド",
