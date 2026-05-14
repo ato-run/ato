@@ -144,8 +144,15 @@ pub fn execute_host(
         .args
         .extend(launch_ctx.command_args().iter().cloned());
     let desktop_open_bundle = desktop_native_open_bundle_path(plan, authoritative_lock);
+    let force_python_server_tool =
+        is_python_server_tool(&launch_spec.command)
+            && plan
+                .execution_driver()
+                .map(|d| d.trim().eq_ignore_ascii_case("python"))
+                .unwrap_or(false);
     let force_python_no_bytecode =
-        is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
+        !force_python_server_tool
+            && is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let force_node_runtime =
         is_node_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let injected_port =
@@ -157,6 +164,16 @@ pub fn execute_host(
 
     let mut cmd = if let Some(bundle_path) = desktop_open_bundle.as_ref() {
         build_desktop_open_command(bundle_path, &launch_spec.args)
+    } else if force_python_server_tool {
+        // WSGI/ASGI server tools (gunicorn, uvicorn, flask, streamlit, …) are
+        // installed into `.venv/bin/` by `uv sync`. They are standalone
+        // executables that embed their own Python interpreter entry point —
+        // they must NOT be invoked via `python <tool>` (which would treat the
+        // tool name as a script path). Resolve the binary directly from the
+        // venv when it exists, otherwise fall back to PATH.
+        let tool_bin = venv_tool_binary(&launch_spec.working_dir, &launch_spec.command)
+            .unwrap_or(host_command_path.clone());
+        Command::new(tool_bin)
     } else if force_python_no_bytecode {
         // Prefer the venv's interpreter when the build phase produced
         // one, so installed deps are visible without needing `uv run`.
@@ -198,7 +215,7 @@ pub fn execute_host(
             launch_spec.port,
             launch_ctx,
         )?;
-        apply_python_runtime_hardening(&mut cmd, force_python_no_bytecode);
+        apply_python_runtime_hardening(&mut cmd, force_python_no_bytecode || force_python_server_tool);
 
         if let Some(port) = injected_port {
             cmd.env("PORT", port);
@@ -541,6 +558,37 @@ fn venv_python_binary(working_dir: &Path) -> Option<PathBuf> {
         working_dir.join(".venv").join("Scripts").join("python.exe"),
     ];
     candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Locate a named tool binary inside `<working_dir>/.venv/bin/<tool>`.
+/// Used for WSGI/ASGI server tools (gunicorn, uvicorn, flask, …) that are
+/// venv-installed executables and must be called directly, not via Python.
+fn venv_tool_binary(working_dir: &Path, tool: &str) -> Option<PathBuf> {
+    let candidates = [
+        working_dir.join(".venv").join("bin").join(tool),
+        working_dir
+            .join(".venv")
+            .join("Scripts")
+            .join(format!("{tool}.exe")),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Returns `true` when the command is a WSGI/ASGI server tool that lives as
+/// a standalone executable in `.venv/bin/` and must NOT be invoked via the
+/// Python interpreter (i.e. `python gunicorn` would treat it as a script).
+fn is_python_server_tool(command: &str) -> bool {
+    matches!(
+        command.trim().to_ascii_lowercase().as_str(),
+        "flask"
+            | "uvicorn"
+            | "gunicorn"
+            | "streamlit"
+            | "celery"
+            | "hypercorn"
+            | "daphne"
+            | "waitress-serve"
+    )
 }
 
 fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
