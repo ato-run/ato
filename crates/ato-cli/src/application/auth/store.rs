@@ -477,6 +477,7 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
                 let onboarding = run_publisher_onboarding_flow(
                     &session_token_for_setup,
                     creds.github_username.as_deref(),
+                    false,
                 )
                 .await?;
                 creds.publisher_id = Some(onboarding.publisher_id);
@@ -779,6 +780,7 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                 let onboarding = run_publisher_onboarding_flow(
                     &session_token,
                     creds.github_username.as_deref(),
+                    true,
                 )
                 .await?;
                 creds.publisher_id = Some(onboarding.publisher_id);

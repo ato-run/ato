@@ -8,7 +8,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::github::{ensure_github_app_installation_with_tui, GitHubAppInstallation};
+use super::github::{
+    ensure_github_app_installation_with_tui, fetch_github_app_installations,
+    choose_active_installation, GitHubAppInstallation,
+};
 use super::prompt::prompt_line;
 use super::store::{parse_store_error_text, store_api_base_url, store_session_cookie_header};
 use super::Credentials;
@@ -278,6 +281,7 @@ async fn register_publisher_with_prompt(
 pub(super) async fn run_publisher_onboarding_flow(
     session_token: &str,
     github_username: Option<&str>,
+    desktop_webview: bool,
 ) -> Result<PublisherOnboardingInfo> {
     let api_base = store_api_base_url();
     let client = reqwest::Client::builder()
@@ -308,8 +312,15 @@ pub(super) async fn run_publisher_onboarding_flow(
             }
         };
 
-    let installation =
-        Some(ensure_github_app_installation_with_tui(&client, &api_base, session_token).await?);
+    let installation = if desktop_webview {
+        // In desktop-webview mode there is no TTY for interactive prompts.
+        // Try to pick up an existing active installation; if none is found,
+        // leave it unset — the user can link a GitHub App later.
+        let existing = fetch_github_app_installations(&client, &api_base, session_token).await?;
+        choose_active_installation(&existing)
+    } else {
+        Some(ensure_github_app_installation_with_tui(&client, &api_base, session_token).await?)
+    };
 
     Ok(PublisherOnboardingInfo {
         publisher_id: publisher.id,
