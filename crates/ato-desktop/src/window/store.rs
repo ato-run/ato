@@ -161,7 +161,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             kind: ContentWindowKind::Store,
             title: gpui::SharedString::from("ストア"),
             subtitle: gpui::SharedString::from("カプセルカタログ"),
-            url: gpui::SharedString::from("capsule://system/ato-store/"),
+            url: gpui::SharedString::from("capsule://run.ato.desktop/ato-store"),
             last_focused_at: std::time::Instant::now(),
         },
     );

@@ -8,7 +8,7 @@
 //! just funnels them behind a typed enum + allowlist check.
 //!
 //! Phase 2 will add provenance validation (originating URL matches
-//! `capsule://system/<expected>`, user-gesture sentinel, etc.). The
+//! `capsule://run.ato.desktop/<expected>`, user-gesture sentinel, etc.). The
 //! match arm marked `Phase 2 hook` is the insertion point.
 
 use gpui::{AnyWindowHandle, App};
@@ -139,7 +139,7 @@ impl CapabilityBroker {
 
         // Phase 2 hook: provenance check
         //   - verify the IPC originated from the expected
-        //     `capsule://system/<slug>` URL
+        //     `capsule://run.ato.desktop/<slug>` URL
         //   - if the command requires a user gesture, verify the
         //     gesture sentinel set by the preload script
         //
