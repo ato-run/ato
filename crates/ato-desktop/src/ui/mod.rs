@@ -1872,6 +1872,9 @@ impl DesktopShell {
                 "ShowSettings" => {
                     window.dispatch_action(Box::new(crate::app::ShowSettings), cx);
                 }
+                "OpenDockWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenDockWindow), cx);
+                }
                 other => {
                     tracing::warn!(
                         action = %other,
