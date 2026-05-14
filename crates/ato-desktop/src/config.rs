@@ -696,6 +696,23 @@ fn secrets_path() -> Option<PathBuf> {
     ato_path("secrets.json").ok()
 }
 
+/// Return a human-readable display path for the secrets file, collapsing
+/// the home directory to `~`. Used by the settings UI snapshot.
+pub fn secrets_path_display() -> Option<String> {
+    secrets_path().map(|p| {
+        if let Ok(home) = home_dir_path() {
+            if let Ok(rel) = p.strip_prefix(&home) {
+                return format!("~/{}", rel.display());
+            }
+        }
+        p.display().to_string()
+    })
+}
+
+fn home_dir_path() -> Result<PathBuf, ()> {
+    dirs::home_dir().ok_or(())
+}
+
 pub fn load_secrets() -> SecretStore {
     let Some(path) = secrets_path() else {
         return SecretStore::default();

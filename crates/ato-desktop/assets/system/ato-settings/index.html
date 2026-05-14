@@ -143,6 +143,106 @@
     padding: 32px 0; text-align: center;
     color: var(--muted); font-size: 14px;
   }
+
+  /* ERROR BANNER */
+  .error-banner {
+    background: #fef2f2; border: 1px solid #fca5a5;
+    color: #991b1b; border-radius: 8px; padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  /* BUTTONS */
+  .btn {
+    font-size: 13px; font-weight: 500;
+    border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 12px;
+    cursor: pointer; background: var(--card);
+    color: var(--text); white-space: nowrap;
+  }
+  .btn:hover { background: #f4f4f5; }
+  .btn-primary {
+    background: var(--accent); color: #fff;
+    border-color: var(--accent);
+  }
+  .btn-primary:hover { background: #4338ca; border-color: #4338ca; }
+  .btn-danger {
+    background: #fff; color: #b91c1c;
+    border-color: #fca5a5;
+  }
+  .btn-danger:hover { background: #fef2f2; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* SECRETS TABLE */
+  .secrets-table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  .secrets-table th {
+    text-align: left; font-size: 11px; font-weight: 700;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 4px 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .secrets-table td {
+    padding: 8px 6px; border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .secrets-table tr:last-child td { border-bottom: none; }
+  .secrets-key { font-family: ui-monospace, "SF Mono", monospace; font-weight: 600; }
+  .secrets-mask { color: var(--muted); font-family: ui-monospace, "SF Mono", monospace; }
+  .secrets-badge {
+    display: inline-block; font-size: 11px;
+    background: var(--accent-bg); color: var(--accent);
+    border-radius: 4px; padding: 1px 6px; font-weight: 600;
+  }
+
+  /* FORM ROWS */
+  .form-row {
+    display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap;
+  }
+  .form-field {
+    display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 140px;
+  }
+  .form-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; }
+  .form-input {
+    font-size: 13px; padding: 5px 8px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card); color: var(--text);
+    outline: none; width: 100%;
+    -webkit-user-select: text; user-select: text;
+  }
+  .form-input:focus { border-color: var(--accent); }
+  .form-input::placeholder { color: var(--soft); }
+
+  /* GRANTS LIST */
+  .grants-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .grant-row {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--card-soft); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 12px;
+  }
+  .grant-handle { flex: 1; font-family: ui-monospace, "SF Mono", monospace; font-weight: 500; }
+  .grant-key-chip {
+    background: var(--accent-bg); color: var(--accent);
+    border-radius: 4px; padding: 1px 6px; font-size: 11px; font-weight: 600;
+    font-family: ui-monospace, "SF Mono", monospace;
+  }
+
+  /* CONFIRM MODAL */
+  .confirm-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.35);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 999;
+  }
+  .confirm-box {
+    background: var(--card); border-radius: 12px;
+    padding: 24px; width: 300px; box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .confirm-title { font-size: 15px; font-weight: 700; margin: 0; }
+  .confirm-body { font-size: 13px; color: var(--muted); margin: 0; }
+  .confirm-key { font-family: ui-monospace, "SF Mono", monospace; font-weight: 700; color: var(--text); }
+  .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -155,6 +255,7 @@
       <div class="nav-item" data-tab="desktop">デスクトップ</div>
       <div class="nav-item" data-tab="updates">更新</div>
       <div class="nav-item" data-tab="developer">Developer</div>
+      <div class="nav-item" data-tab="secrets">Secrets</div>
     </div>
 
     <!-- MAIN PANEL -->
@@ -298,6 +399,86 @@
           </div>
         </div>
       </div>
+
+      <!-- ── Secrets ── -->
+      <div class="tab-content" id="tab-secrets">
+        <div id="secrets-error" class="error-banner" style="display:none;"></div>
+
+        <!-- Key list -->
+        <div class="block">
+          <div class="block-title">シークレット一覧</div>
+          <div id="secrets-list-empty" class="state-msg" style="display:none;">シークレットがありません</div>
+          <table class="secrets-table" id="secrets-table" style="display:none;">
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>値</th>
+                <th>Grant 数</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="secrets-tbody"></tbody>
+          </table>
+        </div>
+
+        <!-- Add / overwrite form -->
+        <div class="block">
+          <div class="block-title">追加・上書き</div>
+          <div class="form-row">
+            <div class="form-field">
+              <span class="form-label">Key</span>
+              <input class="form-input" id="sec-key" type="text" placeholder="MY_API_KEY" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="form-field">
+              <span class="form-label">Value</span>
+              <input class="form-input" id="sec-value" type="password" placeholder="secret value" autocomplete="new-password">
+            </div>
+            <button class="btn btn-primary" id="sec-save-btn">保存</button>
+          </div>
+        </div>
+
+        <!-- Grant management -->
+        <div class="block">
+          <div class="block-title">Grant 管理</div>
+          <div class="form-row">
+            <div class="form-field">
+              <span class="form-label">Capsule handle</span>
+              <input class="form-input" id="grant-handle" type="text" placeholder="github.com/user/repo" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="form-field" style="max-width: 200px;">
+              <span class="form-label">Key</span>
+              <select class="setting-select" id="grant-key-select" style="width:100%;"></select>
+            </div>
+            <button class="btn btn-primary" id="grant-btn">Grant</button>
+          </div>
+          <div class="grants-list" id="grants-list"></div>
+        </div>
+
+        <!-- Storage info -->
+        <div class="block">
+          <div class="block-title">ストレージ</div>
+          <div class="row">
+            <span class="row-label">パス</span>
+            <span id="sec-storage-path" style="font-size:12px; color:var(--muted); font-family:ui-monospace,'SF Mono',monospace;">—</span>
+          </div>
+          <div class="row">
+            <span class="row-label">権限</span>
+            <span id="sec-storage-mode" style="font-size:12px; color:var(--muted);">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="confirm-modal" class="confirm-overlay" style="display:none;" role="dialog" aria-modal="true">
+  <div class="confirm-box">
+    <p class="confirm-title">シークレットを削除</p>
+    <p class="confirm-body">「<span id="confirm-key-display" class="confirm-key"></span>」を削除します。このシークレットへの全 capsule grant も削除されます。この操作は元に戻せません。</p>
+    <div class="confirm-actions">
+      <button class="btn" id="confirm-cancel-btn">キャンセル</button>
+      <button class="btn btn-danger" id="confirm-ok-btn">削除する</button>
     </div>
   </div>
 </div>
@@ -324,6 +505,7 @@ const TAB_TITLES = {
   desktop:   'デスクトップ',
   updates:   '更新',
   developer: 'Developer',
+  secrets:   'Secrets',
 };
 
 function showTab(tabId) {
@@ -335,6 +517,9 @@ function showTab(tabId) {
   if (navItem) navItem.classList.add('active');
   document.getElementById('panel-title').textContent = TAB_TITLES[tabId] || tabId;
   BRIDGE({ kind: 'navigateTab', tab: tabId });
+  if (tabId === 'secrets' && !_secretsLoaded) {
+    BRIDGE({ kind: 'loadSecretsSnapshot', requestId: nextReqId() });
+  }
 }
 
 document.querySelectorAll('.nav-item[data-tab]').forEach(el => {
@@ -460,9 +645,188 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
     });
     hydrateFromSnapshot(payload.snapshot);
   }
+  if (payload && payload.secrets) {
+    hydrateSecrets(payload.secrets);
+  }
+  if (payload && !payload.ok && payload.error) {
+    showSecretsError(payload.error.message || String(payload.error));
+  }
 };
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
+let _secretsLoaded = false;
+let _secretsKeys = [];
+let _pendingDeleteKey = null;
+
+function showSecretsError(msg) {
+  const el = document.getElementById('secrets-error');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = '';
+  setTimeout(() => { el.style.display = 'none'; }, 6000);
+}
+
+function hydrateSecrets(secrets) {
+  _secretsLoaded = true;
+  if (!secrets) return;
+  _secretsKeys = (secrets.keys || []).map(k => k.key);
+
+  const tbody = document.getElementById('secrets-tbody');
+  const table = document.getElementById('secrets-table');
+  const emptyMsg = document.getElementById('secrets-list-empty');
+  if (!tbody || !table || !emptyMsg) return;
+
+  while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+
+  if (_secretsKeys.length === 0) {
+    table.style.display = 'none';
+    emptyMsg.style.display = '';
+  } else {
+    table.style.display = '';
+    emptyMsg.style.display = 'none';
+    for (const entry of secrets.keys) {
+      const tr = document.createElement('tr');
+
+      const tdKey = document.createElement('td');
+      const keySpan = document.createElement('span');
+      keySpan.className = 'secrets-key';
+      keySpan.textContent = entry.key;
+      tdKey.appendChild(keySpan);
+
+      const tdMask = document.createElement('td');
+      tdMask.className = 'secrets-mask';
+      tdMask.textContent = entry.hasValue ? '••••••••' : '(空)';
+
+      const tdGrant = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'secrets-badge';
+      badge.textContent = String(entry.grantCount);
+      tdGrant.appendChild(badge);
+
+      const tdActions = document.createElement('td');
+      tdActions.style.textAlign = 'right';
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn btn-danger';
+      delBtn.textContent = '削除';
+      const capturedKey = entry.key;
+      delBtn.addEventListener('click', () => openDeleteConfirm(capturedKey));
+      tdActions.appendChild(delBtn);
+
+      tr.appendChild(tdKey);
+      tr.appendChild(tdMask);
+      tr.appendChild(tdGrant);
+      tr.appendChild(tdActions);
+      tbody.appendChild(tr);
+    }
+  }
+
+  const grantSel = document.getElementById('grant-key-select');
+  if (grantSel) {
+    while (grantSel.firstChild) grantSel.removeChild(grantSel.firstChild);
+    if (_secretsKeys.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = '(シークレットがありません)';
+      grantSel.appendChild(opt);
+    } else {
+      for (const k of _secretsKeys) {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = k;
+        grantSel.appendChild(opt);
+      }
+    }
+  }
+
+  const grantsList = document.getElementById('grants-list');
+  if (grantsList) {
+    while (grantsList.firstChild) grantsList.removeChild(grantsList.firstChild);
+    for (const grant of (secrets.grants || [])) {
+      for (const key of grant.keys) {
+        const row = document.createElement('div');
+        row.className = 'grant-row';
+
+        const handleSpan = document.createElement('span');
+        handleSpan.className = 'grant-handle';
+        handleSpan.textContent = grant.handle;
+
+        const keyChip = document.createElement('span');
+        keyChip.className = 'grant-key-chip';
+        keyChip.textContent = key;
+
+        const capturedHandle = grant.handle;
+        const capturedKey2 = key;
+        const revokeBtn = document.createElement('button');
+        revokeBtn.className = 'btn';
+        revokeBtn.textContent = 'Revoke';
+        revokeBtn.addEventListener('click', () => {
+          BRIDGE({ kind: 'revokeSecret', requestId: nextReqId(), handle: capturedHandle, key: capturedKey2 });
+        });
+
+        row.appendChild(handleSpan);
+        row.appendChild(keyChip);
+        row.appendChild(revokeBtn);
+        grantsList.appendChild(row);
+      }
+    }
+  }
+
+  if (secrets.storage) {
+    const pathEl = document.getElementById('sec-storage-path');
+    const modeEl = document.getElementById('sec-storage-mode');
+    if (pathEl) pathEl.textContent = secrets.storage.path || '—';
+    if (modeEl) modeEl.textContent = secrets.storage.mode || '—';
+  }
+}
+
+function openDeleteConfirm(key) {
+  _pendingDeleteKey = key;
+  const modal = document.getElementById('confirm-modal');
+  const display = document.getElementById('confirm-key-display');
+  if (!modal || !display) return;
+  display.textContent = key;
+  modal.style.display = '';
+}
+
+function closeDeleteConfirm() {
+  _pendingDeleteKey = null;
+  const modal = document.getElementById('confirm-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+document.getElementById('confirm-cancel-btn').addEventListener('click', closeDeleteConfirm);
+document.getElementById('confirm-ok-btn').addEventListener('click', () => {
+  if (!_pendingDeleteKey) return;
+  const key = _pendingDeleteKey;
+  closeDeleteConfirm();
+  BRIDGE({ kind: 'deleteSecret', requestId: nextReqId(), key });
+});
+
+document.getElementById('sec-save-btn').addEventListener('click', () => {
+  const keyEl = document.getElementById('sec-key');
+  const valEl = document.getElementById('sec-value');
+  if (!keyEl || !valEl) return;
+  const key = keyEl.value.trim();
+  const value = valEl.value;
+  if (!key) { showSecretsError('Key を入力してください'); return; }
+  if (!value) { showSecretsError('Value を入力してください'); return; }
+  BRIDGE({ kind: 'putSecret', requestId: nextReqId(), key, value });
+  keyEl.value = '';
+  valEl.value = '';
+});
+
+document.getElementById('grant-btn').addEventListener('click', () => {
+  const handleEl = document.getElementById('grant-handle');
+  const keySel = document.getElementById('grant-key-select');
+  if (!handleEl || !keySel) return;
+  const handle = handleEl.value.trim();
+  const key = keySel.value;
+  if (!handle) { showSecretsError('Capsule handle を入力してください'); return; }
+  if (!key) { showSecretsError('Grant する Key を選択してください'); return; }
+  BRIDGE({ kind: 'grantSecret', requestId: nextReqId(), handle, key });
+  handleEl.value = '';
+});
+
 (function init() {
   // Show the first tab by default.
   showTab('general');
