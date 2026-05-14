@@ -23,6 +23,7 @@ use gpui_component::{Icon, IconName};
 use crate::app::{
     NavigateToUrl, OpenCardSwitcher, OpenIdentityMenu, OpenStoreWindow, ShowSettings,
 };
+use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
 
@@ -54,9 +55,11 @@ impl ControlBarShellPlaceholder {
         cx: &mut Context<Self>,
     ) -> Self {
         let initial = display_url_from_route(route);
+        let locale = resolve_locale(crate::config::load_config().general.language);
+        let placeholder = tr(locale, "control_bar.omnibar_placeholder");
         let omnibar = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("https://… または capsule://… を入力")
+                .placeholder(placeholder)
                 .default_value(initial.clone())
         });
 
@@ -155,7 +158,8 @@ impl Render for ControlBarShellPlaceholder {
             .value()
             .trim_start()
             .starts_with("capsule://");
-        bar_pill(self.omnibar.clone(), is_capsule, window_count)
+        let locale = resolve_locale(crate::config::load_config().general.language);
+        bar_pill(self.omnibar.clone(), is_capsule, window_count, locale)
     }
 }
 
@@ -163,6 +167,7 @@ fn bar_pill(
     omnibar: Entity<InputState>,
     is_capsule: bool,
     window_count: usize,
+    locale: LocaleCode,
 ) -> impl IntoElement {
     div()
         .size_full()
@@ -184,7 +189,7 @@ fn bar_pill(
         .child(pill_button(
             "settings",
             Some(PillIcon::Builtin(IconName::Settings)),
-            Some("設定"),
+            Some(tr(locale, "control_bar.settings").into()),
             ActionTarget::Settings,
             None,
         ))
@@ -199,7 +204,7 @@ fn bar_pill(
         .child(pill_button(
             "store",
             Some(PillIcon::Custom("icons/shopping-bag.svg")),
-            Some("ストア"),
+            Some(tr(locale, "control_bar.store").into()),
             ActionTarget::Store,
             None,
         ))
@@ -259,7 +264,7 @@ enum PillIcon {
 fn pill_button(
     id: &'static str,
     icon: Option<PillIcon>,
-    label: Option<&'static str>,
+    label: Option<SharedString>,
     target: ActionTarget,
     badge: Option<usize>,
 ) -> impl IntoElement {
