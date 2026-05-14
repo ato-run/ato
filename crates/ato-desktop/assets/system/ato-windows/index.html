@@ -167,6 +167,26 @@
   /* Cards hidden by search filter */
   .card.hidden { display: none; }
 
+  /* CLOSE BUTTON — appears top-left of the card on hover */
+  .card { position: relative; }
+  .card-close-btn {
+    position: absolute;
+    top: 6px; left: 6px;
+    width: 20px; height: 20px;
+    border: none; outline: none; padding: 0;
+    background: rgba(0, 0, 0, 0.50);
+    border-radius: 50%;
+    color: rgba(255, 255, 255, 0.90);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.12s ease;
+    z-index: 10;
+  }
+  .card-close-btn svg { width: 10px; height: 10px; pointer-events: none; }
+  .card:hover .card-close-btn { opacity: 1; }
+  .card-close-btn:hover { background: rgba(239, 68, 68, 0.85); }
+
   /* DOCK — frosted dark glass pill */
   .dock {
     display: flex; gap: 10px; align-items: center;
@@ -521,8 +541,16 @@
     const preview = entry.previewDataUrl
       ? previewReal(entry.previewDataUrl)
       : previewFor(entry.kind, accent, idx);
+    const t = window.__ATO_T__;
+    const closeLabel = escapeHtml(t ? t('windows.close_window') : 'Close');
     return `
       <div class="card ${isActive ? 'active' : ''}" data-window-id="${entry.windowId}" data-title="${escapeHtml(entry.title.toLowerCase())}" data-subtitle="${escapeHtml(entry.subtitle.toLowerCase())}">
+        <button class="card-close-btn" aria-label="${closeLabel}" title="${closeLabel}">
+          <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="2" y1="2" x2="10" y2="10"/>
+            <line x1="10" y1="2" x2="2" y2="10"/>
+          </svg>
+        </button>
         <div class="card-head">
           <div class="card-icon" style="background:${accent}">${glyphOrLetter(entry)}</div>
           <div class="card-title">${escapeHtml(entry.title)}</div>
@@ -567,6 +595,23 @@
 
   // Handlers
   document.addEventListener('click', (e) => {
+    // Close-button must be checked before the general [data-window-id]
+    // handler because the button sits inside a card that also carries
+    // data-window-id. stopPropagation prevents activate from firing.
+    const closeBtn = e.target.closest('.card-close-btn');
+    if (closeBtn) {
+      e.stopPropagation();
+      const card = closeBtn.closest('.card[data-window-id]');
+      if (card) {
+        const wid = Number(card.getAttribute('data-window-id'));
+        BRIDGE({ kind: 'close_window', windowId: wid });
+        // Optimistic removal — on_window_closed will clean registries.
+        card.remove();
+        const dockTile = document.querySelector(`.dock-tile[data-window-id="${wid}"]`);
+        if (dockTile) dockTile.remove();
+      }
+      return;
+    }
     const tile = e.target.closest('[data-window-id]');
     if (tile) {
       e.stopPropagation();

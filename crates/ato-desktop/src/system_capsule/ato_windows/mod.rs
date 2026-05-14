@@ -38,6 +38,14 @@ pub enum WindowsCommand {
         #[serde(rename = "windowId")]
         window_id: u64,
     },
+    /// Close the target content window. The Card Switcher stays open;
+    /// the frontend removes the card immediately from the DOM and
+    /// `on_window_closed` handles registry cleanup asynchronously.
+    /// No-op if the target window is already closed.
+    CloseWindow {
+        #[serde(rename = "windowId")]
+        window_id: u64,
+    },
     /// Open a fresh StartWindow + dismiss the calling switcher.
     OpenStart,
 }
@@ -49,6 +57,7 @@ impl WindowsCommand {
                 Capability::WindowsClose
             }
             WindowsCommand::ActivateWindow { .. } => Capability::WindowsActivate,
+            WindowsCommand::CloseWindow { .. } => Capability::WindowsCloseTarget,
             WindowsCommand::OpenStart => Capability::LaunchSystemCapsule,
         }
     }
@@ -92,6 +101,29 @@ pub fn dispatch(
             }
             cx.set_global(CardSwitcherWindowSlot(None));
             let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        WindowsCommand::CloseWindow { window_id } => {
+            // Look up the target handle. If the window was already closed
+            // between the snapshot and the click, treat as no-op.
+            let target = cx
+                .global::<OpenContentWindows>()
+                .get(window_id)
+                .map(|e| e.handle);
+            if let Some(target) = target {
+                let _ = target.update(cx, |_, window, _| window.remove_window());
+                tracing::info!(
+                    window_id,
+                    "ato_windows: close_window dispatched"
+                );
+            } else {
+                tracing::debug!(
+                    window_id,
+                    "ato_windows: close_window — window already closed (no-op)"
+                );
+            }
+            // The Card Switcher stays open; the frontend already removed
+            // the card from the DOM. `on_window_closed` in app.rs handles
+            // registry cleanup when the OS close event fires.
         }
     }
     Ok(())
