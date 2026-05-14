@@ -55,8 +55,9 @@ fn short_title_from_route(route: &GuestRoute) -> String {
 /// AppWindow is the MRU front entry. The bar's URL is the
 /// identifier of the FEATURE, not the page — see the architectural
 /// note in `web_link_view.rs`. So:
-///   - ExternalUrl(...) → `ato://web-viewer` (the WebLinkView is a
-///     Desktop built-in; the in-page chrome shows the real https URL)
+///   - ExternalUrl(...) → `capsule://run.ato.desktop/ato-web-viewer` (the
+///     WebLinkView is a Desktop built-in; the in-page chrome shows the real
+///     https URL)
 ///   - CapsuleHandle / CapsuleUrl / Capsule → `capsule://<...>`
 ///     since the bar's capsule glyph + the capsule:// scheme are
 ///     the user's primary identity cue for capsule apps
@@ -64,7 +65,7 @@ fn short_title_from_route(route: &GuestRoute) -> String {
 fn url_for_route(route: &GuestRoute) -> SharedString {
     use crate::state::GuestRoute as R;
     let s = match route {
-        R::ExternalUrl(_) => "ato://web-viewer".to_string(),
+        R::ExternalUrl(_) => "capsule://run.ato.desktop/ato-web-viewer".to_string(),
         R::CapsuleHandle { handle, .. } => format!("capsule://{handle}"),
         R::CapsuleUrl { handle, url, .. } => format!("capsule://{handle}/{url}"),
         R::Capsule { session, .. } => format!("capsule://{session}/"),
