@@ -179,8 +179,18 @@
   <!-- READY STATE (hidden until hydration) -->
   <div id="ready-state" style="display:none">
 
+    <!-- PREFLIGHT ERROR (shown when preflight_failed === true) -->
+    <div id="preflight-error" class="section" style="display:none">
+      <div class="id-list" style="padding:12px 14px;">
+        <span style="font-size:13px;color:#e05252;">⚠ カプセルの検証に失敗しました</span>
+        <p style="margin:8px 0 0;font-size:12px;color:var(--muted);">
+          起動情報を取得できませんでした。キャンセルして再度お試しください。
+        </p>
+      </div>
+    </div>
+
     <!-- IDENTITY -->
-    <div class="section">
+    <div class="section" id="identity-section">
       <div class="section-title">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -247,6 +257,23 @@
     // Header subtitle
     const sub = document.getElementById('header-sub');
     sub.textContent = p.name + ' の起動前に内容をご確認ください。';
+
+    // Show ready state, hide loading spinner
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('ready-state').style.display = '';
+
+    if (p.preflight_failed) {
+      // Show error, hide identity/requirements
+      document.getElementById('preflight-error').style.display = '';
+      document.getElementById('identity-section').style.display = 'none';
+      document.getElementById('requirements-root').innerHTML = '';
+      checkApproveEnabled();
+      return;
+    }
+
+    // Hide error, show identity
+    document.getElementById('preflight-error').style.display = 'none';
+    document.getElementById('identity-section').style.display = '';
 
     // Identity section
     const idList = document.getElementById('identity-list');
@@ -373,7 +400,7 @@
 
   function updateApproveState() {
     const btn = document.getElementById('approve');
-    if (!_preview || _preview.loading) { btn.disabled = true; return; }
+    if (!_preview || _preview.loading || _preview.preflight_failed) { btn.disabled = true; return; }
 
     // Check that all non-configured required secret/string fields have a value.
     let allFilled = true;
