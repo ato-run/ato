@@ -123,8 +123,18 @@ pub struct LaunchEnvelopeDraft {
     pub cmd: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
+    /// Environment variables with inferred default values. Populated from `.env.example` /
+    /// `.env.template` when a line has a non-placeholder value (e.g. `PORT=3000`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Environment variable names that have no default and must be set before launch.
+    /// Populated from `.env.example` lines with empty or placeholder values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_env: Vec<String>,
+    /// Outbound hostnames this app is expected to connect to, inferred from dependencies.
+    /// Used for network policy generation. Hostnames only (no protocol/path).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_hints: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies_path: Option<String>,
 }
@@ -372,6 +382,24 @@ fn detect_unsupported_runtimes(input: &LeipInput) -> Vec<(&'static str, &'static
              Run `wrangler dev` directly, or add a capsule.toml with `run = \"wrangler dev\"`.",
         ));
     }
+    // Docker Compose only (no Node/Python root manifest): flag as unsupported so
+    // the user gets an actionable message instead of a generic "no viable candidates".
+    let has_compose = file_present(&file_set, "docker-compose.yml")
+        || file_present(&file_set, "docker-compose.yaml")
+        || file_present(&file_set, "compose.yaml")
+        || file_present(&file_set, "compose.yml");
+    let has_node = file_present(&file_set, "package.json");
+    let has_python = file_present(&file_set, "pyproject.toml")
+        || file_present(&file_set, "requirements.txt")
+        || file_present(&file_set, "setup.py");
+    if has_compose && !has_node && !has_python {
+        found.push((
+            "docker-compose",
+            "Docker Compose project detected with no Node.js or Python root manifest. \
+             LEIP v1 does not infer compose launch graphs. \
+             Run `docker compose up` directly, or add a capsule.toml with `run = \"docker compose up\"`.",
+        ));
+    }
     found
 }
 
@@ -480,6 +508,35 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
                           with the correct `run` command."
                     .to_string(),
             });
+        }
+    }
+
+    // Env var and network diagnostics from top accepted candidate's primary node envelope.
+    if matches!(&decision, LeipDecision::AutoAccept { .. } | LeipDecision::NeedsSelection { .. }) {
+        if let Some(top) = beam.first() {
+            if let Some(primary_node) = top.graph.nodes.iter().find(|n| n.id == top.graph.primary_node_id) {
+                if let Some(envelope) = &primary_node.envelope {
+                    if !envelope.required_env.is_empty() {
+                        diagnostics.push(LeipDiagnostic {
+                            severity: LeipDiagnosticSeverity::Warning,
+                            message: format!(
+                                "Required environment variables (no default): {}. \
+                                 Set these before launching.",
+                                envelope.required_env.join(", ")
+                            ),
+                        });
+                    }
+                    if !envelope.egress_hints.is_empty() {
+                        diagnostics.push(LeipDiagnostic {
+                            severity: LeipDiagnosticSeverity::Info,
+                            message: format!(
+                                "Outbound network access likely required: {}.",
+                                envelope.egress_hints.join(", ")
+                            ),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -1360,6 +1417,228 @@ fn detect_node_pkg_manager(input: &LeipInput) -> &'static str {
     }
 }
 
+// ── Env var + network egress inference helpers ────────────────────────────────
+
+/// Returns true if `value` is a placeholder (not a real default). Conservative:
+/// only triggers on strong signals to avoid false-positives that suppress real defaults.
+fn is_placeholder_value(value: &str) -> bool {
+    let v = value.trim_matches('"').trim_matches('\'').trim();
+    if v.is_empty() {
+        return true;
+    }
+    // Angle-bracket / shell-expansion templates: <your-key>, ${FOO}, $(cmd)
+    if v.starts_with('<') || v.starts_with("${") || v.starts_with("$(") {
+        return true;
+    }
+    let lower = v.to_lowercase();
+    // "your_..." or "your-..." prefix
+    if lower.starts_with("your_") || lower.starts_with("your-") {
+        return true;
+    }
+    // Path segments like /location/of/your/db
+    if lower.contains("/your/") || lower.ends_with("/your") {
+        return true;
+    }
+    // Well-known placeholder phrases
+    for phrase in &["changeme", "change_me", "replaceme", "replace_me", "placeholder",
+                    "insert_here", "add_here", "put_here", "fill_in", "fill_here",
+                    "example_key", "example_secret", "example_token"] {
+        if lower.contains(phrase) {
+            return true;
+        }
+    }
+    // Ends with "_here" (but not legitimate paths like "/data/here")
+    if lower.ends_with("_here") && !lower.contains('/') {
+        return true;
+    }
+    false
+}
+
+/// Parse an `.env.example` / `.env.template` / `.env.sample` file.
+///
+/// Returns `(name, default_value_or_none)` where `None` means the variable
+/// has no default (placeholder or empty value) and must be provided by the user.
+///
+/// Pure function — reads only the supplied string.
+fn parse_dot_env_example(content: &str) -> Vec<(String, Option<String>)> {
+    let mut result = Vec::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        // Skip comment lines and blank lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq_pos) = line.find('=') else {
+            continue;
+        };
+        let name = line[..eq_pos].trim().to_string();
+        if name.is_empty() || name.contains(' ') {
+            continue;
+        }
+        let raw_value = line[eq_pos + 1..].trim();
+        if is_placeholder_value(raw_value) {
+            result.push((name, None));
+        } else {
+            // Strip surrounding quotes from value
+            let value = raw_value
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            result.push((name, Some(value)));
+        }
+    }
+    result
+}
+
+/// Scan `file_text_map` for `.env.example`, `.env.template`, `.env.sample` files
+/// and extract env var defaults and required vars.
+///
+/// Returns `(env_defaults, required_var_names)`.
+/// - `env_defaults`: vars with real defaults → populate `LaunchEnvelopeDraft.env`
+/// - `required_var_names`: vars with no default → populate `LaunchEnvelopeDraft.required_env`
+///
+/// Pure function — does not access the filesystem.
+fn extract_env_from_files(
+    file_text_map: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    let mut env_defaults: BTreeMap<String, String> = BTreeMap::new();
+    let mut required: Vec<String> = Vec::new();
+
+    // Priority order: .env.example > .env.template > .env.sample
+    // .env.development is skipped (often contains localhost URLs specific to dev)
+    for key in &[".env.example", ".env.template", ".env.sample"] {
+        let Some(content) = file_text_map.get(*key) else {
+            continue;
+        };
+        for (name, default) in parse_dot_env_example(content) {
+            // First file wins per variable name
+            if env_defaults.contains_key(&name) || required.contains(&name) {
+                continue;
+            }
+            match default {
+                Some(val) => { env_defaults.insert(name, val); }
+                None => { required.push(name); }
+            }
+        }
+        // Use only the first matching file
+        break;
+    }
+
+    required.sort();
+    required.dedup();
+    (env_defaults, required)
+}
+
+/// Known Node.js dependency → (required_env_keys, egress_hostnames).
+///
+/// These are weaker evidence than `.env.example` confirmation. Callers should
+/// use the result to inform diagnostics and optionally merge into `required_env`.
+fn node_dep_hints(pkg_json_text: &str) -> (Vec<String>, Vec<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(pkg_json_text) else {
+        return (Vec::new(), Vec::new());
+    };
+    let deps: Vec<String> = ["dependencies", "devDependencies"]
+        .iter()
+        .flat_map(|section| {
+            v.get(*section)
+                .and_then(|d| d.as_object())
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    dep_hints_for_names(&deps)
+}
+
+/// Known Python dependency → (required_env_keys, egress_hostnames).
+fn python_dep_hints(
+    requirements_text: Option<&str>,
+    pyproject_text: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
+    let mut dep_names: Vec<String> = Vec::new();
+    if let Some(text) = requirements_text {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
+                continue;
+            }
+            // Extract package name: strip version specifiers
+            let name = line
+                .split(|c: char| c == '>' || c == '<' || c == '=' || c == '!' || c == '[' || c == ';')
+                .next()
+                .unwrap_or(line)
+                .trim()
+                .to_lowercase();
+            if !name.is_empty() {
+                dep_names.push(name);
+            }
+        }
+    }
+    if let Some(text) = pyproject_text {
+        if let Ok(v) = toml::from_str::<toml::Value>(text) {
+            // [project].dependencies = ["openai>=1.0", ...]
+            let project_deps = v.get("project")
+                .and_then(|p| p.get("dependencies"))
+                .and_then(|d| d.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|i| i.as_str())
+                        .map(|s| s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').next().unwrap_or("").to_lowercase())
+                        .filter(|n| !n.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for name in project_deps {
+                if !dep_names.contains(&name) {
+                    dep_names.push(name);
+                }
+            }
+        }
+    }
+    dep_hints_for_names(&dep_names)
+}
+
+/// Map dependency names to (required_env_keys, egress_hosts).
+/// Used by both Node and Python paths.
+fn dep_hints_for_names(deps: &[String]) -> (Vec<String>, Vec<String>) {
+    // (package-name-pattern, env-key, egress-host)
+    // Using exact or prefix matches to avoid false positives.
+    const HINTS: &[(&str, &str, &str)] = &[
+        ("openai",              "OPENAI_API_KEY",          "api.openai.com"),
+        ("@anthropic-ai/sdk",   "ANTHROPIC_API_KEY",       "api.anthropic.com"),
+        ("anthropic",           "ANTHROPIC_API_KEY",       "api.anthropic.com"),
+        ("@google/genai",       "GOOGLE_API_KEY",          "generativelanguage.googleapis.com"),
+        ("google-generativeai", "GOOGLE_API_KEY",          "generativelanguage.googleapis.com"),
+        ("stripe",              "STRIPE_SECRET_KEY",       "api.stripe.com"),
+        ("@sendgrid/mail",      "SENDGRID_API_KEY",        "api.sendgrid.com"),
+        ("sendgrid",            "SENDGRID_API_KEY",        "api.sendgrid.com"),
+        ("@mailchimp/mailchimp_marketing", "MAILCHIMP_API_KEY", "api.mailchimp.com"),
+        ("resend",              "RESEND_API_KEY",          "api.resend.com"),
+        ("twilio",              "TWILIO_AUTH_TOKEN",       "api.twilio.com"),
+        // Auth frameworks: env key only, no external egress (they use internal secrets)
+        ("better-auth",         "BETTER_AUTH_SECRET",      ""),
+        ("next-auth",           "NEXTAUTH_SECRET",         ""),
+        ("@auth/core",          "AUTH_SECRET",             ""),
+    ];
+
+    let dep_set: std::collections::BTreeSet<&str> = deps.iter().map(|s| s.as_str()).collect();
+    let mut env_keys: Vec<String> = Vec::new();
+    let mut egress: Vec<String> = Vec::new();
+
+    for (pkg, env_key, host) in HINTS {
+        if dep_set.contains(pkg) {
+            if !env_key.is_empty() && !env_keys.contains(&env_key.to_string()) {
+                env_keys.push(env_key.to_string());
+            }
+            if !host.is_empty() && !egress.contains(&host.to_string()) {
+                egress.push(host.to_string());
+            }
+        }
+    }
+
+    (env_keys, egress)
+}
+
 fn build_node_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<String>) -> LaunchEnvelopeDraft {
     let runtime_version = input
         .target_hint
@@ -1378,11 +1657,36 @@ fn build_node_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<String
                 .map(|e| e.path.clone())
         });
 
+    let (env_defaults, required_env_from_files) = extract_env_from_files(&input.file_text_map);
+    let (dep_suggested_env, dep_egress) =
+        if let Some(pkg_text) = input.file_text_map.get("package.json") {
+            node_dep_hints(pkg_text)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+    // Merge: file-confirmed required vars + dep-suggested vars (deduplicated, sorted).
+    let mut required_env = required_env_from_files;
+    for v in dep_suggested_env {
+        if !required_env.contains(&v) {
+            required_env.push(v);
+        }
+    }
+    required_env.sort();
+    required_env.dedup();
+
+    let mut egress_hints = dep_egress;
+    egress_hints.sort();
+    egress_hints.dedup();
+
     LaunchEnvelopeDraft {
         driver: Some("node".to_string()),
         runtime_version: Some(runtime_version),
         cmd,
         entrypoint,
+        env: env_defaults,
+        required_env,
+        egress_hints,
         ..Default::default()
     }
 }
@@ -1703,11 +2007,33 @@ fn build_python_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<Stri
         .and_then(|h| h.entrypoint.clone())
         .or_else(|| find_python_entrypoint(evidence).map(|s| s.to_string()));
 
+    let (env_defaults, required_env_from_files) = extract_env_from_files(&input.file_text_map);
+    let (dep_suggested_env, dep_egress) = python_dep_hints(
+        input.file_text_map.get("requirements.txt").map(|s| s.as_str()),
+        input.file_text_map.get("pyproject.toml").map(|s| s.as_str()),
+    );
+
+    let mut required_env = required_env_from_files;
+    for v in dep_suggested_env {
+        if !required_env.contains(&v) {
+            required_env.push(v);
+        }
+    }
+    required_env.sort();
+    required_env.dedup();
+
+    let mut egress_hints = dep_egress;
+    egress_hints.sort();
+    egress_hints.dedup();
+
     LaunchEnvelopeDraft {
         driver: Some("python".to_string()),
         runtime_version: Some(runtime_version),
         cmd,
         entrypoint,
+        env: env_defaults,
+        required_env,
+        egress_hints,
         ..Default::default()
     }
 }
@@ -2578,6 +2904,133 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
                 .any(|d| d.message.contains("CLI tool")),
             "should NOT have cli-tool warning when server framework is present, got: {:?}",
             result.diagnostics
+        );
+    }
+
+    // --- Env var inference ---
+
+    #[test]
+    fn dot_env_example_real_defaults_populate_env_map() {
+        // .env.example with only real defaults → env map populated, no required_env
+        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let env_example = "PORT=3000\nDB_PATH=data/app.db\n# comment\n";
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json"), file(".env.example")],
+            file_text_map: [
+                ("package.json".to_string(), pkg_json.to_string()),
+                (".env.example".to_string(), env_example.to_string()),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(matches!(result.decision, LeipDecision::AutoAccept { .. }));
+        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
+        assert_eq!(envelope.env.get("PORT"), Some(&"3000".to_string()), "PORT default should be set");
+        assert_eq!(envelope.env.get("DB_PATH"), Some(&"data/app.db".to_string()), "DB_PATH default should be set");
+        assert!(envelope.required_env.is_empty(), "no required vars expected, got {:?}", envelope.required_env);
+        // No required_env diagnostic
+        assert!(!result.diagnostics.iter().any(|d| d.message.contains("Required environment")));
+    }
+
+    #[test]
+    fn dot_env_example_placeholder_values_become_required_env() {
+        // .env.example with placeholder values → required_env, + warning diagnostic
+        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let env_example = "VITE_BASE_URL=http://localhost:3000\nBETTER_AUTH_SECRET=your_strong_secret_here\nGOOGLE_CLIENT_ID=your_google_client_id\nGOOGLE_CLIENT_SECRET=\n";
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json"), file(".env.example")],
+            file_text_map: [
+                ("package.json".to_string(), pkg_json.to_string()),
+                (".env.example".to_string(), env_example.to_string()),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(matches!(result.decision, LeipDecision::AutoAccept { .. }));
+        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
+        assert_eq!(envelope.env.get("VITE_BASE_URL"), Some(&"http://localhost:3000".to_string()), "VITE_BASE_URL is a real default");
+        assert!(envelope.required_env.contains(&"BETTER_AUTH_SECRET".to_string()), "BETTER_AUTH_SECRET should be required");
+        assert!(envelope.required_env.contains(&"GOOGLE_CLIENT_ID".to_string()), "GOOGLE_CLIENT_ID should be required");
+        assert!(envelope.required_env.contains(&"GOOGLE_CLIENT_SECRET".to_string()), "GOOGLE_CLIENT_SECRET should be required");
+        // Warning diagnostic must mention the required vars
+        let has_warning = result.diagnostics.iter().any(|d| {
+            d.severity == LeipDiagnosticSeverity::Warning && d.message.contains("Required environment")
+        });
+        assert!(has_warning, "expected required-env warning, got: {:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn dot_env_example_path_your_segment_is_placeholder() {
+        // DATABASE_URL="/location/of/your/db" — path contains /your/ — should be required
+        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let env_example = "DATABASE_URL=\"/location/of/your/db\"\n";
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json"), file(".env.example")],
+            file_text_map: [
+                ("package.json".to_string(), pkg_json.to_string()),
+                (".env.example".to_string(), env_example.to_string()),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
+        assert!(envelope.required_env.contains(&"DATABASE_URL".to_string()), "DATABASE_URL with /your/ path should be required");
+        assert!(!envelope.env.contains_key("DATABASE_URL"), "DATABASE_URL should not appear as a default");
+    }
+
+    #[test]
+    fn openai_dep_adds_egress_hint() {
+        // package with openai dep → egress hint diagnostic
+        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4","openai":"4.0.0"}}"#;
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json")],
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(matches!(result.decision, LeipDecision::AutoAccept { .. }));
+        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
+        assert!(envelope.egress_hints.contains(&"api.openai.com".to_string()), "expected api.openai.com egress, got {:?}", envelope.egress_hints);
+        assert!(envelope.required_env.contains(&"OPENAI_API_KEY".to_string()), "expected OPENAI_API_KEY required, got {:?}", envelope.required_env);
+        let has_egress_diag = result.diagnostics.iter().any(|d| d.message.contains("api.openai.com"));
+        assert!(has_egress_diag, "expected egress diagnostic for api.openai.com");
+    }
+
+    #[test]
+    fn docker_compose_only_unresolved_with_specific_diagnostic() {
+        // Only docker-compose.yml at root, no package.json or requirements.txt
+        let input = LeipInput {
+            repo_file_index: vec![file("docker-compose.yml"), file("README.md")],
+            file_text_map: Default::default(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::Unresolved { .. }),
+            "expected Unresolved for compose-only, got {:?}", result.decision
+        );
+        let has_compose_diag = result.diagnostics.iter().any(|d| d.message.contains("Docker Compose"));
+        assert!(has_compose_diag, "expected Docker Compose diagnostic, got {:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn docker_compose_with_package_json_not_compose_diagnostic() {
+        // Both docker-compose.yml and package.json at root → NOT a compose-only project
+        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json"), file("docker-compose.yml")],
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "compose+node should AutoAccept node, got {:?}", result.decision
+        );
+        // Should NOT have docker-compose unsupported diagnostic
+        assert!(
+            !result.diagnostics.iter().any(|d| d.message.contains("Docker Compose project detected with no")),
+            "should not have compose-only diagnostic when package.json is present"
         );
     }
 }
