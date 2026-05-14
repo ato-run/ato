@@ -14,6 +14,8 @@
     --soft:      #a3a3b0;
     --accent:    #6366f1;
     --accent-bg: #eef2ff;
+    --ok:        #22c55e;
+    --ok-bg:     #f0fdf4;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; }
@@ -27,15 +29,11 @@
   }
 
   .frame {
-    /* Fills the whole window — outer chrome lives in the host window
-       frame, the card has no body padding around it. */
     width: 100%; height: 100%;
     padding: 32px 28px 20px;
     background: var(--card);
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
     display: flex; flex-direction: column; gap: 16px;
+    overflow-y: auto;
   }
 
   /* HEADER */
@@ -50,6 +48,21 @@
   .shield svg { width: 24px; height: 24px; }
   .header h1 { margin: 0; font-size: 18px; font-weight: 700; }
   .header p  { margin: 0; font-size: 12.5px; color: var(--muted); text-align: center; }
+
+  /* LOADING */
+  .loading-state {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 24px 0;
+    color: var(--muted); font-size: 13px;
+  }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
   /* SECTIONS */
   .section { display: flex; flex-direction: column; gap: 8px; }
@@ -74,26 +87,47 @@
   .id-value { color: var(--text); font-weight: 500; flex: 1;
               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* ENV VARS */
-  .env { display: flex; flex-direction: column; gap: 6px; }
-  .env-row {
+  /* CONFIG FIELDS */
+  .fields { display: flex; flex-direction: column; gap: 6px; }
+  .field-row {
     display: flex; align-items: center; gap: 8px;
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 6px 10px;
   }
-  .env-key {
+  .field-key {
     width: 130px; flex-shrink: 0;
     font-size: 11.5px; font-weight: 600; color: var(--muted);
     font-family: "SF Mono", ui-monospace, monospace;
   }
-  .env-row input {
+  .field-row input, .field-row select {
     flex: 1; border: 0; outline: 0; background: transparent;
     font: inherit; font-size: 12px; color: var(--text);
     font-family: "SF Mono", ui-monospace, monospace;
   }
-  .env-row input::placeholder { color: var(--soft); }
+  .field-row input::placeholder { color: var(--soft); }
+  .badge-configured {
+    font-size: 11px; font-weight: 600;
+    color: var(--ok);
+    background: var(--ok-bg);
+    border-radius: 6px;
+    padding: 2px 8px;
+  }
+
+  /* CONSENT ITEMS */
+  .consent-item {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: var(--border-soft);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+  }
+  .consent-item input[type=checkbox] { margin-top: 2px; accent-color: var(--accent); }
+  .consent-text { flex: 1; }
+  .consent-summary { color: var(--text); font-weight: 500; }
+  .consent-meta { color: var(--soft); font-size: 11px; margin-top: 2px;
+                  font-family: "SF Mono", ui-monospace, monospace; }
 
   /* BUTTONS */
   .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
@@ -115,7 +149,8 @@
     color: #fff;
     box-shadow: 0 6px 14px rgba(99,102,241,0.30);
   }
-  .btn.approve:hover { filter: brightness(1.05); }
+  .btn.approve:hover:not(:disabled) { filter: brightness(1.05); }
+  .btn.approve:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
   .btn svg { width: 14px; height: 14px; }
 </style>
 </head>
@@ -132,75 +167,43 @@
       </svg>
     </div>
     <h1>起動前にご確認ください</h1>
-    <p>カプセル名と権限を確認の上、起動してください。</p>
+    <p id="header-sub">カプセル名と権限を確認の上、起動してください。</p>
   </div>
 
-  <!-- IDENTITY LIST -->
-  <div class="section">
-    <div class="section-title">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/>
-        <line x1="12" y1="16" x2="12" y2="12"/>
-        <line x1="12" y1="8" x2="12.01" y2="8"/>
-      </svg>
-      <span>起動情報の確認</span>
-    </div>
-    <div class="id-list">
-      <div class="id-row">
-        <span class="id-key">アプリケーション</span>
-        <span class="id-value" id="app-name">WasedaP2P</span>
-      </div>
-      <div class="id-row">
-        <span class="id-key">要求された権限</span>
-        <span class="id-value" id="app-handle">ato.app/shell://wasedap2p</span>
-      </div>
-      <div class="id-row">
-        <span class="id-key">信頼済みの発行元</span>
-        <span class="id-value">Ato Labs (検証済み)</span>
-      </div>
-      <div class="id-row">
-        <span class="id-key">使用可能な権限</span>
-        <span class="id-value">PostgreSQL / fs (RO) / Redis (Cache)</span>
-      </div>
-    </div>
+  <!-- LOADING STATE (visible until preview arrives) -->
+  <div id="loading-state" class="loading-state">
+    <div class="spinner"></div>
+    <span>カプセルを検証中...</span>
   </div>
 
-  <!-- ENV VARS -->
-  <div class="section">
-    <div class="section-title">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="11" width="18" height="10" rx="2"/>
-        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-      </svg>
-      <span>環境変数の確認</span>
-    </div>
-    <div class="env">
-      <div class="env-row">
-        <span class="env-key">PG_PASSWORD</span>
-        <input type="password" data-key="PG_PASSWORD" placeholder="••••••••">
+  <!-- READY STATE (hidden until hydration) -->
+  <div id="ready-state" style="display:none">
+
+    <!-- IDENTITY -->
+    <div class="section">
+      <div class="section-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="16" x2="12" y2="12"/>
+          <line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        <span>起動情報の確認</span>
       </div>
-      <div class="env-row">
-        <span class="env-key">SECRET_KEY</span>
-        <input type="password" data-key="SECRET_KEY" placeholder="••••••••">
-      </div>
-      <div class="env-row">
-        <span class="env-key">DATABASE_URL</span>
-        <input type="text" data-key="DATABASE_URL"
-               value="postgresql://localhost/wasedap2p">
-      </div>
-      <div class="env-row">
-        <span class="env-key">APP_ENV</span>
-        <input type="text" data-key="APP_ENV" value="production">
+      <div class="id-list" id="identity-list">
+        <!-- populated by renderPreview() -->
       </div>
     </div>
+
+    <!-- REQUIREMENTS (secrets + consents injected here) -->
+    <div id="requirements-root"></div>
+
   </div>
 
   <!-- ACTIONS -->
   <div class="actions">
     <button class="btn cancel" id="cancel">キャンセル</button>
-    <button class="btn approve" id="approve">
+    <button class="btn approve" id="approve" disabled>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="5 3 19 12 5 21 5 3"/>
@@ -211,36 +214,225 @@
 </div>
 
 <script>
-  // System-capsule IPC envelope (broker validates via the
-  // ato-launch manifest allowlist).
   const POST = (window.ipc && window.ipc.postMessage)
     ? (m) => window.ipc.postMessage(JSON.stringify(m))
     : (m) => console.log('[no bridge]', m);
   const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
 
-  // The host injects __ATO_LAUNCH = { name, handle, url } via
-  // with_initialization_script before document load. When the wizard
-  // is opened via NavigateToUrl(capsule://...), this carries the real
-  // target. When opened standalone via MCP (AODD), __ATO_LAUNCH is
-  // undefined and we keep the demo identity already in the HTML.
-  const launch = (window.__ATO_LAUNCH && typeof window.__ATO_LAUNCH === 'object')
-    ? window.__ATO_LAUNCH : null;
-  if (launch) {
-    if (launch.name)   document.getElementById('app-name').textContent = launch.name;
-    if (launch.handle) document.getElementById('app-handle').textContent = launch.handle;
+  let _preview = null;
+
+  function esc(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.textContent; // for textContent assignment; just returns the string safely
   }
-  const HANDLE = document.getElementById('app-handle').textContent.trim();
+
+  function addRow(list, key, value) {
+    const row = document.createElement('div');
+    row.className = 'id-row';
+    const k = document.createElement('span');
+    k.className = 'id-key';
+    k.textContent = key;
+    const v = document.createElement('span');
+    v.className = 'id-value';
+    v.textContent = value;
+    row.appendChild(k);
+    row.appendChild(v);
+    list.appendChild(row);
+  }
+
+  function renderPreview(p) {
+    _preview = p;
+
+    // Header subtitle
+    const sub = document.getElementById('header-sub');
+    sub.textContent = p.name + ' の起動前に内容をご確認ください。';
+
+    // Identity section
+    const idList = document.getElementById('identity-list');
+    idList.innerHTML = '';
+    addRow(idList, 'アプリケーション', p.name || '(不明)');
+    addRow(idList, 'ハンドル', p.handle || '(不明)');
+    if (p.capsule_id) addRow(idList, 'Capsule ID', p.capsule_id);
+    if (p.capsule_version) addRow(idList, 'バージョン', p.capsule_version);
+    if (p.visited_targets && p.visited_targets.length > 0) {
+      addRow(idList, 'ターゲット', p.visited_targets.join(', '));
+    }
+
+    // Requirements
+    const reqRoot = document.getElementById('requirements-root');
+    reqRoot.innerHTML = '';
+
+    (p.requirements || []).forEach((req, reqIdx) => {
+      if (req.type === 'secrets_required') {
+        const section = document.createElement('div');
+        section.className = 'section';
+
+        const title = document.createElement('div');
+        title.className = 'section-title';
+        title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+        const titleText = document.createElement('span');
+        titleText.textContent = req.target ? ('環境変数 (' + req.target + ')') : '環境変数の設定';
+        title.appendChild(titleText);
+        section.appendChild(title);
+
+        const fields = document.createElement('div');
+        fields.className = 'fields';
+
+        (req.fields || []).forEach(f => {
+          const row = document.createElement('div');
+          row.className = 'field-row';
+
+          const keyEl = document.createElement('span');
+          keyEl.className = 'field-key';
+          keyEl.textContent = f.label || f.name;
+
+          row.appendChild(keyEl);
+
+          if (f.already_configured) {
+            const badge = document.createElement('span');
+            badge.className = 'badge-configured';
+            badge.textContent = '設定済み';
+            row.appendChild(badge);
+          } else if (f.kind === 'enum' && f.choices && f.choices.length > 0) {
+            const sel = document.createElement('select');
+            sel.dataset.key = f.name;
+            sel.dataset.kind = f.kind;
+            if (f.choices.includes('')) sel.required = true;
+            f.choices.forEach(c => {
+              const opt = document.createElement('option');
+              opt.value = c;
+              opt.textContent = c;
+              sel.appendChild(opt);
+            });
+            row.appendChild(sel);
+          } else {
+            const inp = document.createElement('input');
+            inp.type = (f.kind === 'secret') ? 'password' : 'text';
+            inp.dataset.key = f.name;
+            inp.dataset.kind = f.kind;
+            inp.placeholder = f.placeholder || (f.kind === 'secret' ? '••••••••' : '');
+            inp.addEventListener('input', updateApproveState);
+            row.appendChild(inp);
+          }
+
+          fields.appendChild(row);
+        });
+
+        section.appendChild(fields);
+        reqRoot.appendChild(section);
+
+      } else if (req.type === 'consent_required') {
+        const section = document.createElement('div');
+        section.className = 'section';
+
+        const title = document.createElement('div');
+        title.className = 'section-title';
+        title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/></svg>';
+        const titleText = document.createElement('span');
+        titleText.textContent = '実行ポリシーの同意';
+        title.appendChild(titleText);
+        section.appendChild(title);
+
+        const item = document.createElement('div');
+        item.className = 'consent-item';
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.dataset.consent = JSON.stringify({
+          scoped_id: req.scoped_id,
+          version: req.version,
+          target_label: req.target_label,
+          policy_segment_hash: req.policy_segment_hash,
+          provisioning_policy_hash: req.provisioning_policy_hash,
+        });
+        cb.addEventListener('change', updateApproveState);
+
+        const text = document.createElement('div');
+        text.className = 'consent-text';
+        const summary = document.createElement('div');
+        summary.className = 'consent-summary';
+        summary.textContent = req.summary || req.scoped_id;
+        const meta = document.createElement('div');
+        meta.className = 'consent-meta';
+        meta.textContent = req.scoped_id + '@' + req.version;
+        text.appendChild(summary);
+        text.appendChild(meta);
+
+        item.appendChild(cb);
+        item.appendChild(text);
+        section.appendChild(item);
+        reqRoot.appendChild(section);
+      }
+    });
+
+    document.getElementById('loading-state').style.display = 'none';
+    document.getElementById('ready-state').style.display = '';
+    updateApproveState();
+  }
+
+  function updateApproveState() {
+    const btn = document.getElementById('approve');
+    if (!_preview || _preview.loading) { btn.disabled = true; return; }
+
+    // Check that all non-configured required secret/string fields have a value.
+    let allFilled = true;
+    document.querySelectorAll('[data-key]').forEach(el => {
+      if (el.tagName === 'INPUT' && el.dataset.kind === 'secret' && !el.value.trim()) {
+        allFilled = false;
+      }
+    });
+
+    // Check that all consent checkboxes are checked.
+    let allConsented = true;
+    document.querySelectorAll('input[type=checkbox][data-consent]').forEach(cb => {
+      if (!cb.checked) allConsented = false;
+    });
+
+    btn.disabled = !(allFilled && allConsented);
+  }
+
+  // Called by the Rust side after background preflight completes.
+  // Receives a JS object (JSON value, not string).
+  window.__ato_hydrate_preview = function(previewObj) {
+    renderPreview(previewObj);
+  };
+
+  // Check if init script already injected a ready preview.
+  document.addEventListener('DOMContentLoaded', () => {
+    const p = window.__ATO_LAUNCH_PREVIEW;
+    if (p && !p.loading) {
+      renderPreview(p);
+    }
+    // If loading=true, the Rust background task will call __ato_hydrate_preview.
+  });
 
   document.getElementById('approve').addEventListener('click', () => {
+    if (!_preview || _preview.loading) return;
+    const secrets = {};
     const config = {};
+    const consents = [];
+
     document.querySelectorAll('[data-key]').forEach(el => {
-      if (el.value.trim()) config[el.dataset.key] = el.value.trim();
+      const v = el.value; // do NOT trim secrets; trim non-secrets
+      if (el.dataset.kind === 'secret') {
+        if (v.length > 0) secrets[el.dataset.key] = v;
+      } else {
+        if (v.trim().length > 0) config[el.dataset.key] = v.trim();
+      }
     });
-    BRIDGE({ kind: 'approve', handle: HANDLE, config });
+
+    document.querySelectorAll('input[type=checkbox][data-consent]:checked').forEach(cb => {
+      try { consents.push(JSON.parse(cb.dataset.consent)); } catch (_) {}
+    });
+
+    BRIDGE({ kind: 'approve', preview_id: _preview.preview_id, secrets, config, consents });
   });
+
   document.getElementById('cancel').addEventListener('click', () => {
     BRIDGE({ kind: 'cancel' });
   });
+
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') BRIDGE({ kind: 'cancel' });
   });

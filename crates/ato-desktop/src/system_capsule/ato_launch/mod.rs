@@ -29,23 +29,36 @@ use serde::Deserialize;
 use crate::state::GuestRoute;
 use crate::system_capsule::broker::{BrokerError, Capability};
 
+/// Consent identity sent from the wizard JS on Approve,
+/// matching the fields `approve_execution_plan_consent` expects.
+#[derive(Debug, Deserialize)]
+pub struct ConsentApprovalItem {
+    pub scoped_id: String,
+    pub version: String,
+    pub target_label: String,
+    pub policy_segment_hash: String,
+    pub provisioning_policy_hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LaunchCommand {
-    /// User clicked "承認して起動" in the consent wizard. Carries
-    /// the capsule handle and any env-var config values collected
-    /// from the form so the launch thread can pass them to
-    /// `resolve_and_start_guest` without surfacing a MissingConfig error.
+    /// User clicked "承認して起動" in the consent wizard.
+    /// Carries the preview_id to guard against stale approvals,
+    /// any new secret values to persist, non-secret config values,
+    /// and execution-plan consent items to record.
     Approve {
-        handle: String,
+        preview_id: String,
+        #[serde(default)]
+        secrets: HashMap<String, String>,
         #[serde(default)]
         config: HashMap<String, String>,
+        #[serde(default)]
+        consents: Vec<ConsentApprovalItem>,
     },
     /// User clicked "キャンセル" or dismissed the wizard.
     Cancel,
-    /// Boot wizard's "Cancel during launch" affordance. Identical
-    /// effect to Cancel for Phase 1; Phase 2 will signal the
-    /// orchestrator to abort the in-flight session.
+    /// Boot wizard's "Cancel during launch" affordance.
     AbortBoot,
 }
 
@@ -64,24 +77,87 @@ pub fn dispatch(
     command: LaunchCommand,
 ) -> Result<(), BrokerError> {
     match command {
-        LaunchCommand::Approve { handle, config } => {
-            tracing::info!(target_handle = %handle, "ato_launch: user approved");
-            // Close the consent wizard so the boot wizard takes focus.
-            let _ = host.update(cx, |_, window, _| window.remove_window());
+        LaunchCommand::Approve {
+            preview_id,
+            secrets,
+            config,
+            consents,
+        } => {
+            tracing::info!(preview_id = %preview_id, "ato_launch: user approved");
+
+            // Warn if preview_id doesn't match the active wizard.
+            let pending_preview = cx
+                .try_global::<crate::window::launch_window::PendingConsentPreview>()
+                .and_then(|g| g.0.clone());
+            if let Some(ref preview) = pending_preview {
+                if preview.preview_id != preview_id {
+                    tracing::warn!(
+                        expected = %preview_id,
+                        current = %preview.preview_id,
+                        "ato_launch: preview_id mismatch on approve"
+                    );
+                }
+            }
+            cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
 
             let pending = cx
                 .try_global::<crate::window::launch_window::PendingLaunchTarget>()
                 .and_then(|g| g.0.clone());
             cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
 
-            // Store the config values so `open_app_window` → `AppCapsuleShell::new`
-            // can read them and pass to `resolve_and_start_guest`.
+            // Derive route handle for secret grants (must match what
+            // AppCapsuleShell uses via secrets_for_capsule).
+            let route_handle: Option<String> = match &pending {
+                Some(GuestRoute::CapsuleHandle { handle, .. }) => Some(handle.clone()),
+                Some(GuestRoute::CapsuleUrl { handle, .. }) => Some(handle.clone()),
+                _ => None,
+            };
+
+            // Persist new secret values and grant them to this capsule.
+            if let Some(ref handle) = route_handle {
+                if !secrets.is_empty() {
+                    let mut store = crate::config::load_secrets();
+                    for (key, value) in &secrets {
+                        if !value.is_empty() {
+                            store.add_secret(key.clone(), value.clone());
+                            store.grant_secret(handle, key);
+                        }
+                    }
+                    if let Err(err) = crate::config::save_secrets(&store) {
+                        tracing::error!(
+                            error = %err,
+                            "ato_launch: failed to save secrets — proceeding with in-memory values"
+                        );
+                    }
+                }
+            }
+
+            // Record execution-plan consents.
+            for consent in &consents {
+                if let Err(err) = crate::orchestrator::approve_execution_plan_consent(
+                    &consent.scoped_id,
+                    &consent.version,
+                    &consent.target_label,
+                    &consent.policy_segment_hash,
+                    &consent.provisioning_policy_hash,
+                ) {
+                    tracing::error!(
+                        error = %err,
+                        scoped_id = %consent.scoped_id,
+                        "ato_launch: failed to approve consent"
+                    );
+                }
+            }
+
+            // Close the consent wizard so the boot wizard takes focus.
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+
+            // Store non-secret config so AppCapsuleShell passes it to
+            // resolve_and_start_guest.
             let plain_configs: Vec<(String, String)> = config.into_iter().collect();
             cx.set_global(crate::window::launch_window::PendingLaunchConfigs(plain_configs));
 
             if let Some(route) = pending {
-                // Open boot wizard FIRST so there is visible progress
-                // feedback before the background thread even starts.
                 let boot_handle =
                     match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
                         Ok(h) => Some(h),
@@ -94,9 +170,6 @@ pub fn dispatch(
                         }
                     };
 
-                // Open the destination AppWindow SECOND. AppCapsuleShell
-                // is created inside and immediately starts the background
-                // launch thread.
                 let app_handle = match crate::window::open_app_window(cx, route.clone()) {
                     Ok(h) => Some(h),
                     Err(err) => {
@@ -105,8 +178,6 @@ pub fn dispatch(
                             ?route,
                             "ato_launch: open_app_window failed after approve"
                         );
-                        // Boot wizard is already open with no app to back it;
-                        // close it immediately to avoid an orphaned overlay.
                         if let Some(bh) = boot_handle {
                             let _ = bh.update(cx, |_, window, _| window.remove_window());
                         }
@@ -114,20 +185,11 @@ pub fn dispatch(
                     }
                 };
 
-                // Re-activate the boot wizard: open_app_window opens with
-                // focus: true, which steals focus and puts the app window on
-                // top of the boot wizard. The boot wizard must be the dominant
-                // UI during the boot phase.
                 if let Some(bh) = boot_handle {
                     let _ = bh.update(cx, |_, window, _| window.activate_window());
                     tracing::debug!("ato_launch: boot wizard re-activated after app window opened");
                 }
 
-                // Register both handles in the global slot so AbortBoot and
-                // AppCapsuleShell's polling task can close them.
-                //
-                // GPUI is single-threaded here, so this set is guaranteed
-                // to happen before the polling task's first tick.
                 cx.set_global(crate::window::launch_window::BootWindowSlot {
                     boot_window: boot_handle,
                     app_window: app_handle,
@@ -152,24 +214,21 @@ pub fn dispatch(
         LaunchCommand::Cancel => {
             tracing::info!("ato_launch: user cancelled");
             cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
+            cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         LaunchCommand::AbortBoot => {
             tracing::info!("ato_launch: user aborted boot — closing both windows");
 
-            // Read and clear the slot atomically within this GPUI turn.
             let slot = cx
                 .try_global::<crate::window::launch_window::BootWindowSlot>()
                 .cloned()
                 .unwrap_or_default();
             cx.set_global(crate::window::launch_window::BootWindowSlot::default());
 
-            // Close the boot wizard (may be `host` itself or a sibling).
             if let Some(boot) = slot.boot_window {
                 let _ = boot.update(cx, |_, window, _| window.remove_window());
             }
-            // Close the AppWindow. GPUI drops AppCapsuleShell → its Drop
-            // sets abort_flag and stops any running session.
             if let Some(app) = slot.app_window {
                 let _ = app.update(cx, |_, window, _| window.remove_window());
             }
