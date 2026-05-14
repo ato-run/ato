@@ -165,5 +165,18 @@
   "launch.field.env_config": "環境変数の設定",
   "launch.field.env_config_named": "環境変数 (",
   "launch.field.configured": "設定済み",
-  "launch.field.policy_consent": "実行ポリシーの同意"
+  "launch.field.policy_consent": "実行ポリシーの同意",
+
+  "identity.title": "アカウント",
+  "identity.loading": "確認中…",
+  "identity.menu.store": "ストア",
+  "identity.menu.settings": "設定",
+  "identity.menu.profile": "プロフィール",
+  "identity.menu.account": "アカウント",
+  "identity.menu.workspace": "ワークスペース",
+  "identity.menu.trust": "信頼設定",
+  "identity.phase2_tooltip": "Phase 2 で実装予定",
+  "identity.id_error": "ID 取得失敗",
+  "identity.not_signed_in": "サインインしていません",
+  "identity.sign_in_hint": "ato login で認証してください"
 }
