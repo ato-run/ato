@@ -184,6 +184,7 @@ impl PromptContext {
             "pnpm-lock.yaml",
             "yarn.lock",
             "bun.lockb",
+            "bun.lock",
             "Cargo.toml",
             "requirements.txt",
             "pyproject.toml",

@@ -170,7 +170,9 @@ fn detect_node(dir: &Path) -> Result<DetectedNode> {
     let package_json_path = dir.join("package.json");
     let content = fs::read_to_string(&package_json_path).context("Failed to read package.json")?;
 
-    let bun_project = dir.join("bun.lockb").exists() || dir.join("bunfig.toml").exists();
+    let bun_project = dir.join("bun.lockb").exists()
+        || dir.join("bun.lock").exists()
+        || dir.join("bunfig.toml").exists();
     let pnpm_project = dir.join("pnpm-lock.yaml").exists();
     let yarn_project = dir.join("yarn.lock").exists();
     let _npm_project = dir.join("package-lock.json").exists();
