@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::github::{
-    ensure_github_app_installation_with_tui, fetch_github_app_installations,
-    choose_active_installation, GitHubAppInstallation,
+    ensure_github_app_installation_with_tui, fetch_github_app_installations, GitHubAppInstallation,
 };
 use super::prompt::prompt_line;
 use super::store::{parse_store_error_text, store_api_base_url, store_session_cookie_header};
@@ -190,6 +189,94 @@ async fn fetch_publisher_me(
     Ok(Some(payload))
 }
 
+/// Registers a new publisher record without any interactive prompts.
+/// Used in `--desktop-webview` mode where no TTY is available.
+/// Tries the canonical handle derived from `hint`; on conflict appends
+/// incrementing numeric suffixes (hint-2, hint-3, …) up to 5 attempts.
+async fn register_publisher_silently(
+    client: &reqwest::Client,
+    api_base: &str,
+    session_token: &str,
+    hint: Option<&str>,
+) -> Result<PublisherMeResponse> {
+    let signing_key = ensure_publisher_signing_key()?;
+    let did = signing_key.did()?;
+
+    let base = normalize_handle_candidate(hint.filter(|v| !v.trim().is_empty()).unwrap_or("pub"));
+
+    for attempt in 0u32..5 {
+        let handle = if attempt == 0 {
+            base.clone()
+        } else {
+            let candidate = format!("{}-{}", base, attempt + 1);
+            normalize_handle_candidate(&candidate)
+        };
+
+        if !is_valid_handle(&handle) {
+            continue;
+        }
+
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let signature = signing_key
+            .to_signing_key()?
+            .sign(timestamp.as_bytes())
+            .to_bytes();
+        let signature_b64 = BASE64_STANDARD.encode(signature);
+
+        let payload = serde_json::json!({
+            "handle": handle,
+            "author_did": did,
+            "did_proof": {
+                "did": did,
+                "timestamp": timestamp,
+                "signature": signature_b64,
+            }
+        });
+
+        let response = client
+            .post(format!("{}/v1/publishers/register", api_base))
+            .header("Accept", "application/json")
+            .header("Cookie", store_session_cookie_header(session_token))
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to register publisher")?;
+
+        if response.status().is_success() {
+            let reg = response
+                .json::<PublisherRegisterResponse>()
+                .await
+                .context("Failed to parse publisher register response")?;
+            return Ok(PublisherMeResponse {
+                id: reg.id,
+                handle: reg.handle,
+                author_did: reg.author_did,
+            });
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let err_text = parse_store_error_text(&body);
+
+        if status == StatusCode::CONFLICT && err_text.contains("already_registered") {
+            if let Some(me) = fetch_publisher_me(client, api_base, session_token).await? {
+                return Ok(me);
+            }
+        }
+
+        if status == StatusCode::CONFLICT && err_text.contains("handle_taken") {
+            continue;
+        }
+
+        anyhow::bail!("Publisher registration failed ({}): {}", status, err_text);
+    }
+
+    anyhow::bail!(
+        "Publisher registration failed: all handle candidates were taken. \
+         Run `ato publish` interactively to choose a handle."
+    )
+}
+
 async fn register_publisher_with_prompt(
     client: &reqwest::Client,
     api_base: &str,
@@ -301,6 +388,13 @@ pub(super) async fn run_publisher_onboarding_flow(
                 update_publisher_did(&client, &api_base, session_token, &local_key).await?;
             }
             existing
+        } else if desktop_webview {
+            // In desktop-webview mode there is no TTY for interactive prompts.
+            // Try a silent registration with the supplied username hint; if it
+            // fails (handle taken, network error, etc.) bail so the caller can
+            // fall through to the Failure path — the session token is already
+            // persisted so the Dock will still show as authenticated.
+            register_publisher_silently(&client, &api_base, session_token, github_username).await?
         } else {
             let created =
                 register_publisher_with_prompt(&client, &api_base, session_token, github_username)
@@ -314,10 +408,13 @@ pub(super) async fn run_publisher_onboarding_flow(
 
     let installation = if desktop_webview {
         // In desktop-webview mode there is no TTY for interactive prompts.
-        // Try to pick up an existing active installation; if none is found,
-        // leave it unset — the user can link a GitHub App later.
-        let existing = fetch_github_app_installations(&client, &api_base, session_token).await?;
-        choose_active_installation(&existing)
+        // Try to pick up an existing *active* installation; if none is found
+        // or the lookup fails, leave it unset — the user can link a GitHub
+        // App later via `ato publish`.
+        let existing = fetch_github_app_installations(&client, &api_base, session_token)
+            .await
+            .unwrap_or_default();
+        existing.into_iter().find(|i| i.status.eq_ignore_ascii_case("active"))
     } else {
         Some(ensure_github_app_installation_with_tui(&client, &api_base, session_token).await?)
     };
