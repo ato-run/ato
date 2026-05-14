@@ -21,6 +21,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::system_capsule::ipc as system_ipc;
 
 /// URI scheme used for serving the store HTML via the custom protocol handler.
@@ -90,6 +91,9 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
         }
     }
 
+    let config = crate::config::load_config();
+    let locale = resolve_locale(config.general.language);
+
     let win_size = size(px(1100.0), px(760.0));
     // Position just below the Focus-mode Control Bar (36 top + 56 height + 16 gap = 108).
     let bounds = match cx.primary_display() {
@@ -116,7 +120,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // window.__CAPSULES_DATA__ before the page's init() runs.
     // Currently hardcoded to empty; real data will be fetched and injected
     // via evaluate_script after PageLoadEvent::Finished.
-    let init_script = "window.__CAPSULES_DATA__ = [];".to_string();
+    let init_script = compose_init_script(locale, Some("window.__CAPSULES_DATA__ = [];"));
 
     let handle = cx.open_window(options, move |window, cx| {
         // Size the WebView to fill the window's content area.
@@ -159,8 +163,8 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
         ContentWindowEntry {
             handle: *handle,
             kind: ContentWindowKind::Store,
-            title: gpui::SharedString::from("ストア"),
-            subtitle: gpui::SharedString::from("カプセルカタログ"),
+            title: gpui::SharedString::from(tr(locale, "store.title")),
+            subtitle: gpui::SharedString::from(tr(locale, "store.loading")),
             url: gpui::SharedString::from("capsule://run.ato.desktop/ato-store"),
             last_focused_at: std::time::Instant::now(),
         },
