@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::config::{
     CapsulePolicyOverride, ContentWindowPresentation, ControlBarPosition, DesktopConfig,
-    EgressPolicyMode, LanguageConfig, LogLevel, StartupSurface, ThemeConfig, UpdateChannel,
+    EgressPolicyMode, LanguageConfig, LogLevel, SecretStore, StartupSurface, ThemeConfig,
+    UpdateChannel,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -1117,6 +1118,57 @@ fn parse_control_bar_position(v: &str) -> Option<ControlBarPosition> {
     }
 }
 
+/// Build a JSON snapshot of the current secret store suitable for the settings UI.
+///
+/// **No secret values are ever included.** Only key names, masked indicators,
+/// grant counts, and storage metadata are returned.
+pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
+    let keys: Vec<Value> = store
+        .secrets
+        .iter()
+        .map(|s| {
+            let grant_count = store
+                .grants
+                .values()
+                .filter(|gkeys| gkeys.contains(&s.key))
+                .count();
+            json!({
+                "key": s.key,
+                "hasValue": !s.value.is_empty(),
+                "grantCount": grant_count,
+            })
+        })
+        .collect();
+
+    let grants: Vec<Value> = {
+        let mut g: Vec<_> = store
+            .grants
+            .iter()
+            .filter(|(_, keys)| !keys.is_empty())
+            .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
+            .collect();
+        g.sort_by(|a, b| {
+            a["handle"]
+                .as_str()
+                .cmp(&b["handle"].as_str())
+        });
+        g
+    };
+
+    let path_str = crate::config::secrets_path_display();
+    let mode = if cfg!(unix) { "0600" } else { "platform-acl" };
+
+    json!({
+        "keys": keys,
+        "grants": grants,
+        "storage": {
+            "path": path_str,
+            "mode": mode,
+            "backend": "json-file",
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,5 +1243,80 @@ mod tests {
         assert!(resolved.get("general").is_some());
         assert!(resolved.get("updates").is_some());
         assert!(resolved.get("developer").is_some());
+    }
+
+    // --- Secrets snapshot tests ---
+
+    fn make_store_with_secrets() -> crate::config::SecretStore {
+        let mut store = crate::config::SecretStore::default();
+        store.add_secret("API_KEY".to_string(), "super-secret".to_string());
+        store.add_secret("DB_PASS".to_string(), "hunter2".to_string());
+        store.grant_secret("github.com/user/repo", "API_KEY");
+        store
+    }
+
+    #[test]
+    fn secrets_snapshot_has_no_values() {
+        let store = make_store_with_secrets();
+        let snap = secrets_snapshot_from_store(&store);
+        let snap_str = serde_json::to_string(&snap).unwrap();
+        assert!(
+            !snap_str.contains("super-secret"),
+            "secret value must not appear in snapshot"
+        );
+        assert!(
+            !snap_str.contains("hunter2"),
+            "secret value must not appear in snapshot"
+        );
+    }
+
+    #[test]
+    fn secrets_snapshot_keys_have_metadata() {
+        let store = make_store_with_secrets();
+        let snap = secrets_snapshot_from_store(&store);
+        let keys = snap["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        let api_key_entry = keys
+            .iter()
+            .find(|k| k["key"].as_str() == Some("API_KEY"))
+            .expect("API_KEY must be in snapshot");
+        assert_eq!(api_key_entry["hasValue"], true);
+        assert_eq!(api_key_entry["grantCount"], 1);
+        let db_entry = keys
+            .iter()
+            .find(|k| k["key"].as_str() == Some("DB_PASS"))
+            .expect("DB_PASS must be in snapshot");
+        assert_eq!(db_entry["grantCount"], 0);
+    }
+
+    #[test]
+    fn secrets_snapshot_grants_normalized() {
+        let store = make_store_with_secrets();
+        let snap = secrets_snapshot_from_store(&store);
+        let grants = snap["grants"].as_array().unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0]["handle"].as_str(), Some("github.com/user/repo"));
+        let grant_keys = grants[0]["keys"].as_array().unwrap();
+        assert_eq!(grant_keys.len(), 1);
+        assert_eq!(grant_keys[0].as_str(), Some("API_KEY"));
+    }
+
+    #[test]
+    fn secrets_snapshot_empty_store() {
+        let store = crate::config::SecretStore::default();
+        let snap = secrets_snapshot_from_store(&store);
+        assert_eq!(snap["keys"].as_array().unwrap().len(), 0);
+        assert_eq!(snap["grants"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn secrets_snapshot_storage_metadata_present() {
+        let store = crate::config::SecretStore::default();
+        let snap = secrets_snapshot_from_store(&store);
+        let storage = &snap["storage"];
+        assert_eq!(storage["backend"].as_str(), Some("json-file"));
+        // mode is platform-dependent but must be one of the two values
+        let mode = storage["mode"].as_str().unwrap();
+        assert!(mode == "0600" || mode == "platform-acl");
     }
 }
