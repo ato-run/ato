@@ -12,6 +12,10 @@
   "common.unknown": "(unknown)",
   "common.coming_soon": "Coming Soon",
 
+  "control_bar.settings": "Settings",
+  "control_bar.store": "Store",
+  "control_bar.omnibar_placeholder": "Enter https://… or capsule://…",
+
   "start.title": "New Window",
   "start.subtitle": "Open a capsule, local app, or GitHub repo",
   "start.search.placeholder": "Capsule name, URL, GitHub repo, local path, or command",
