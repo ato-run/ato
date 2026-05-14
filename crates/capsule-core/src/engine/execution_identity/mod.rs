@@ -577,6 +577,17 @@ pub struct ReceiptFailureEnvelope {
     pub target: Option<String>,
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive_resolution_required:
+        Option<crate::interactive_resolution::InteractiveResolutionEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<crate::execution_plan::error::AtoErrorClassification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_status: Option<crate::execution_plan::error::CleanupStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleanup_actions: Vec<crate::execution_plan::error::CleanupActionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_suggestion: Option<crate::execution_plan::error::ManifestSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
 
@@ -1892,6 +1903,11 @@ pub(in crate::engine::execution_identity) mod tests {
                 resource: None,
                 target: None,
                 retryable: false,
+                interactive_resolution_required: None,
+                classification: None,
+                cleanup_status: None,
+                cleanup_actions: Vec::new(),
+                manifest_suggestion: None,
                 details: None,
             }),
         );
@@ -1954,6 +1970,11 @@ pub(in crate::engine::execution_identity) mod tests {
             resource: None,
             target: None,
             retryable: false,
+            interactive_resolution_required: None,
+            classification: None,
+            cleanup_status: None,
+            cleanup_actions: Vec::new(),
+            manifest_suggestion: None,
             details: None,
         };
         let receipt = ExecutionReceiptV2::partial_failure(
@@ -1994,6 +2015,11 @@ pub(in crate::engine::execution_identity) mod tests {
             resource: None,
             target: None,
             retryable: false,
+            interactive_resolution_required: None,
+            classification: None,
+            cleanup_status: None,
+            cleanup_actions: Vec::new(),
+            manifest_suggestion: None,
             details: None,
         };
 
