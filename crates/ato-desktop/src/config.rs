@@ -158,8 +158,11 @@ pub struct DesktopSettings {
     pub control_bar: ControlBarSettings,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ControlBarSettings {
+    /// Display mode for the process-global Control Bar palette.
+    #[serde(default)]
+    pub mode: ControlBarMode,
     /// Whether the Control Bar floats above all other windows.
     #[serde(default = "default_control_bar_always_on_top")]
     pub always_on_top: bool,
@@ -171,6 +174,55 @@ pub struct ControlBarSettings {
     /// Automatically hide the Control Bar when not in use.
     #[serde(default)]
     pub auto_hide: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlBarMode {
+    Floating,
+    #[default]
+    AutoHide,
+    CompactPill,
+    Hidden,
+}
+
+impl<'de> Deserialize<'de> for ControlBarSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawControlBarSettings {
+            mode: Option<ControlBarMode>,
+            #[serde(default = "default_control_bar_always_on_top")]
+            always_on_top: bool,
+            #[serde(default = "default_control_bar_visible_on_startup")]
+            visible_on_startup: bool,
+            #[serde(default)]
+            position: ControlBarPosition,
+            #[serde(default)]
+            auto_hide: bool,
+        }
+
+        let raw = RawControlBarSettings::deserialize(deserializer)?;
+        let mode = raw.mode.unwrap_or_else(|| {
+            if !raw.visible_on_startup {
+                ControlBarMode::Hidden
+            } else if raw.auto_hide {
+                ControlBarMode::AutoHide
+            } else {
+                ControlBarMode::Floating
+            }
+        });
+
+        Ok(Self {
+            mode,
+            always_on_top: raw.always_on_top,
+            visible_on_startup: raw.visible_on_startup,
+            position: raw.position,
+            auto_hide: raw.auto_hide,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -225,10 +277,11 @@ impl Default for DesktopSettings {
 impl Default for ControlBarSettings {
     fn default() -> Self {
         Self {
+            mode: ControlBarMode::AutoHide,
             always_on_top: default_control_bar_always_on_top(),
             visible_on_startup: default_control_bar_visible_on_startup(),
             position: ControlBarPosition::Top,
-            auto_hide: false,
+            auto_hide: true,
         }
     }
 }
@@ -1154,9 +1207,10 @@ mod tests {
         );
         assert!(!d.restore_window_frames);
         assert!(d.control_bar.always_on_top);
+        assert_eq!(d.control_bar.mode, ControlBarMode::AutoHide);
         assert!(d.control_bar.visible_on_startup);
         assert_eq!(d.control_bar.position, ControlBarPosition::Top);
-        assert!(!d.control_bar.auto_hide);
+        assert!(d.control_bar.auto_hide);
     }
 
     #[test]
@@ -1174,8 +1228,30 @@ mod tests {
             parsed.desktop.content_window_default_presentation,
             ContentWindowPresentation::Fullscreen
         );
+        assert_eq!(parsed.desktop.control_bar.mode, ControlBarMode::AutoHide);
         assert_eq!(parsed.desktop.control_bar.position, ControlBarPosition::Bottom);
         assert!(parsed.desktop.control_bar.auto_hide);
+    }
+
+    #[test]
+    fn control_bar_settings_legacy_auto_hide_maps_to_mode() {
+        let json = r#"{"auto_hide": true, "visible_on_startup": true}"#;
+        let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mode, ControlBarMode::AutoHide);
+    }
+
+    #[test]
+    fn control_bar_settings_legacy_hidden_maps_to_mode() {
+        let json = r#"{"visible_on_startup": false, "auto_hide": false}"#;
+        let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mode, ControlBarMode::Hidden);
+    }
+
+    #[test]
+    fn control_bar_settings_explicit_mode_wins_over_legacy_flags() {
+        let json = r#"{"mode": "compact-pill", "visible_on_startup": false, "auto_hide": true}"#;
+        let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mode, ControlBarMode::CompactPill);
     }
 
     #[test]

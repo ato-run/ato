@@ -153,6 +153,13 @@ pub fn dispatch(
             let mut config = load_config();
             let patch_resp = patch_config_for_capsule(&mut config, &patch, request_id.as_deref());
             save_config(&config);
+            if patch.get("controlBarMode").is_some() {
+                if let Err(err) =
+                    crate::window::set_control_bar_mode(cx, config.desktop.control_bar.mode)
+                {
+                    tracing::error!(error = %err, "ato_settings: applying Control Bar mode failed");
+                }
+            }
             let snap = settings_snapshot_from_config(&config);
             let mut response = patch_resp;
             response["snapshot"] = snap;
@@ -310,4 +317,3 @@ fn push_to_settings_webview(cx: &mut App, payload_json: &str) {
         shell.hydrate(&payload);
     });
 }
-

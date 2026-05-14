@@ -418,6 +418,7 @@ dependencies = [
  "jsonschema",
  "junction",
  "libc",
+ "lock-draft-engine",
  "miette",
  "mime_guess",
  "mslnk",
@@ -3876,6 +3877,7 @@ name = "lock-draft-engine"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

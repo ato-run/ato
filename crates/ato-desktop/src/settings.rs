@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{
-    CapsulePolicyOverride, ContentWindowPresentation, ControlBarPosition, DesktopConfig,
+    CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode, ControlBarPosition, DesktopConfig,
     EgressPolicyMode, LanguageConfig, LogLevel, SecretStore, StartupSurface, ThemeConfig,
     UpdateChannel,
 };
@@ -328,6 +328,7 @@ fn desktop_settings_resolved(config: &DesktopConfig) -> Value {
         "contentWindowDefaultPresentation": setting(d.content_window_default_presentation, SettingSource::Global, false, None, SafetyClass::Immediate),
         "restoreWindowFrames": setting(d.restore_window_frames, SettingSource::Global, false, None, SafetyClass::Immediate),
         "controlBar": {
+            "mode": setting(cb.mode, SettingSource::Global, false, None, SafetyClass::Immediate),
             "alwaysOnTop": setting(cb.always_on_top, SettingSource::Global, false, None, SafetyClass::Immediate),
             "visibleOnStartup": setting(cb.visible_on_startup, SettingSource::Global, false, None, SafetyClass::Immediate),
             "position": setting(cb.position, SettingSource::Global, false, None, SafetyClass::Immediate),
@@ -987,8 +988,21 @@ fn apply_desktop_patch_immediate(
         config.desktop.control_bar.always_on_top = v;
         changed.push("controlBarAlwaysOnTop".to_string());
     }
+    if let Some(v) = patch.get("controlBarMode").and_then(Value::as_str) {
+        if let Some(mode) = parse_control_bar_mode(v) {
+            config.desktop.control_bar.mode = mode;
+            config.desktop.control_bar.visible_on_startup = !matches!(mode, ControlBarMode::Hidden);
+            config.desktop.control_bar.auto_hide = matches!(mode, ControlBarMode::AutoHide);
+            changed.push("controlBarMode".to_string());
+        }
+    }
     if let Some(v) = patch.get("controlBarVisibleOnStartup").and_then(Value::as_bool) {
         config.desktop.control_bar.visible_on_startup = v;
+        if !v {
+            config.desktop.control_bar.mode = ControlBarMode::Hidden;
+        } else if matches!(config.desktop.control_bar.mode, ControlBarMode::Hidden) {
+            config.desktop.control_bar.mode = ControlBarMode::Floating;
+        }
         changed.push("controlBarVisibleOnStartup".to_string());
     }
     if let Some(v) = patch.get("controlBarPosition").and_then(Value::as_str) {
@@ -999,6 +1013,13 @@ fn apply_desktop_patch_immediate(
     }
     if let Some(v) = patch.get("controlBarAutoHide").and_then(Value::as_bool) {
         config.desktop.control_bar.auto_hide = v;
+        config.desktop.control_bar.mode = if v {
+            ControlBarMode::AutoHide
+        } else if matches!(config.desktop.control_bar.mode, ControlBarMode::AutoHide) {
+            ControlBarMode::Floating
+        } else {
+            config.desktop.control_bar.mode
+        };
         changed.push("controlBarAutoHide".to_string());
     }
 }
@@ -1118,6 +1139,16 @@ fn parse_control_bar_position(v: &str) -> Option<ControlBarPosition> {
     }
 }
 
+fn parse_control_bar_mode(v: &str) -> Option<ControlBarMode> {
+    match v {
+        "floating" => Some(ControlBarMode::Floating),
+        "auto-hide" => Some(ControlBarMode::AutoHide),
+        "compact-pill" => Some(ControlBarMode::CompactPill),
+        "hidden" => Some(ControlBarMode::Hidden),
+        _ => None,
+    }
+}
+
 /// Build a JSON snapshot of the current secret store suitable for the settings UI.
 ///
 /// **No secret values are ever included.** Only key names, masked indicators,
@@ -1172,7 +1203,7 @@ pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ControlBarPosition, DesktopConfig, StartupSurface};
+    use crate::config::{ControlBarMode, ControlBarPosition, DesktopConfig, StartupSurface};
 
     fn default_config() -> DesktopConfig {
         DesktopConfig::default()
@@ -1190,6 +1221,7 @@ mod tests {
         assert!(desktop.get("startupSurface").is_some());
         assert!(desktop.get("controlBar").is_some());
         let cb = desktop.get("controlBar").unwrap();
+        assert!(cb.get("mode").is_some());
         assert!(cb.get("alwaysOnTop").is_some());
         assert!(cb.get("position").is_some());
     }
@@ -1222,6 +1254,15 @@ mod tests {
         let resp = patch_config_for_capsule(&mut config, &patch, None);
         assert_eq!(config.desktop.control_bar.position, ControlBarPosition::Bottom);
         // controlBarPosition is NOT in NEXT_LAUNCH_KEYS
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_control_bar_mode_updates_declaration() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"controlBarMode": "compact-pill"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.control_bar.mode, ControlBarMode::CompactPill);
         assert_eq!(resp["appliesOnNextLaunch"], false);
     }
 
