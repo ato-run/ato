@@ -49,7 +49,17 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         snapshot_json
     );
 
-    let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
+    let win_size = size(px(1100.0), px(760.0));
+    // Position just below the Focus-mode Control Bar (36 top + 56 height + 16 gap = 108).
+    let bounds = match cx.primary_display() {
+        Some(d) => {
+            let db = d.bounds();
+            let left = db.origin.x + (db.size.width - win_size.width) / 2.0;
+            let top = db.origin.y + px(108.0);
+            Bounds { origin: gpui::point(left, top), size: win_size }
+        }
+        None => Bounds::centered(None, win_size, cx),
+    };
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
         focus: true,
