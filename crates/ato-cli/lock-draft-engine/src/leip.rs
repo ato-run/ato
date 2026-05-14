@@ -339,6 +339,42 @@ pub enum LeipError {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Primary inference API. Pure function — no filesystem / network / env / clock.
+/// Returns (runtime_name, user-visible hint) for each runtime detected in the file index
+/// that LEIP v1 does not yet support. Used to produce actionable diagnostics instead of
+/// the generic "no viable candidates" message.
+fn detect_unsupported_runtimes(input: &LeipInput) -> Vec<(&'static str, &'static str)> {
+    let file_set: std::collections::BTreeSet<String> = input
+        .repo_file_index
+        .iter()
+        .filter(|e| e.kind == RepoFileKind::File)
+        .map(|e| strip_leading_dot_slash(&e.path))
+        .collect();
+
+    let mut found: Vec<(&'static str, &'static str)> = Vec::new();
+    if file_present(&file_set, "Cargo.toml") {
+        found.push((
+            "rust",
+            "Rust projects are not yet supported by LEIP v1 (supports Node.js and Python only). \
+             Add a capsule.toml with a `run` command to specify the launch target.",
+        ));
+    }
+    if file_present(&file_set, "go.mod") {
+        found.push((
+            "go",
+            "Go projects are not yet supported by LEIP v1 (supports Node.js and Python only). \
+             Add a capsule.toml with a `run` command to specify the launch target.",
+        ));
+    }
+    if file_present(&file_set, "wrangler.toml") {
+        found.push((
+            "cloudflare-worker",
+            "Cloudflare Workers projects (wrangler.toml) are not yet supported by LEIP v1. \
+             Run `wrangler dev` directly, or add a capsule.toml with `run = \"wrangler dev\"`.",
+        ));
+    }
+    found
+}
+
 pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
     let all_evidence = extract_evidence(input);
 
@@ -397,6 +433,56 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
 
     let decision = make_decision(&beam, &all_evidence, required_coverage);
 
+    // Build diagnostics
+    let mut diagnostics: Vec<LeipDiagnostic> = Vec::new();
+
+    // Unsupported runtime hints: replace the generic "no viable candidates" message with a
+    // runtime-specific one so users know exactly why inference failed.
+    let unsupported_runtimes = detect_unsupported_runtimes(input);
+    for (_, hint) in &unsupported_runtimes {
+        diagnostics.push(LeipDiagnostic {
+            severity: LeipDiagnosticSeverity::Warning,
+            message: hint.to_string(),
+        });
+    }
+
+    let decision = if matches!(&decision, LeipDecision::Unresolved { .. })
+        && !unsupported_runtimes.is_empty()
+    {
+        let names: Vec<&str> = unsupported_runtimes.iter().map(|(n, _)| *n).collect();
+        LeipDecision::Unresolved {
+            reason: format!(
+                "{} projects are not yet supported by LEIP v1 (supports Node.js and Python only); \
+                 add a capsule.toml",
+                names.join(", ")
+            ),
+        }
+    } else {
+        decision
+    };
+
+    // CLI tool warning: if the auto-accepted launch command belongs to a project that looks like
+    // a batch CLI tool (yargs/commander/etc.) with no server framework, warn the user — the
+    // process may exit immediately instead of serving HTTP.
+    if matches!(&decision, LeipDecision::AutoAccept { .. }) {
+        let has_cli_marker = all_evidence.iter().any(|e| {
+            e.kind == EvidenceKind::FrameworkMarker && e.normalized_value == "cli-tool"
+        });
+        let has_server_framework = all_evidence.iter().any(|e| {
+            e.kind == EvidenceKind::FrameworkMarker
+                && !matches!(e.normalized_value.as_str(), "cli-tool")
+        });
+        if has_cli_marker && !has_server_framework {
+            diagnostics.push(LeipDiagnostic {
+                severity: LeipDiagnosticSeverity::Warning,
+                message: "Inferred launch command may run a CLI tool rather than a long-running \
+                          server. If this is intentional, proceed. Otherwise, add a capsule.toml \
+                          with the correct `run` command."
+                    .to_string(),
+            });
+        }
+    }
+
     LeipResult {
         candidates: beam,
         rejected_candidates: rejected,
@@ -408,7 +494,7 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
             beam_size: BEAM_SIZE,
         },
         evidence: all_evidence,
-        diagnostics: Vec::new(),
+        diagnostics,
     }
 }
 
@@ -874,6 +960,8 @@ fn node_framework_label(dep: &str) -> Option<&'static str> {
         "remix" | "@remix-run/node" => Some("remix"),
         "astro" => Some("astro"),
         "svelte" | "@sveltejs/kit" => Some("svelte"),
+        // CLI tool markers — presence without a server framework triggers a diagnostic warning.
+        "yargs" | "commander" | "minimist" | "meow" | "@oclif/core" | "oclif" => Some("cli-tool"),
         _ => None,
     }
 }
@@ -2370,4 +2458,127 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             cmd
         );
     }
+
+    // ── Gap diagnostics ───────────────────────────────────────────────────────
+
+    #[test]
+    fn rust_project_unresolved_with_specific_reason_and_diagnostic() {
+        let input = LeipInput {
+            repo_file_index: vec![file("Cargo.toml"), file("src/main.rs")],
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        match &result.decision {
+            LeipDecision::Unresolved { reason } => {
+                assert!(
+                    reason.contains("rust"),
+                    "expected Rust hint in reason, got: {}",
+                    reason
+                );
+            }
+            d => panic!("expected Unresolved, got {:?}", d),
+        }
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == LeipDiagnosticSeverity::Warning
+                    && d.message.contains("Rust")),
+            "expected a Warning diagnostic about Rust, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn wrangler_toml_unresolved_with_specific_reason_and_diagnostic() {
+        let input = LeipInput {
+            repo_file_index: vec![file("wrangler.toml"), file("src/index.js")],
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        match &result.decision {
+            LeipDecision::Unresolved { reason } => {
+                assert!(
+                    reason.contains("cloudflare-worker"),
+                    "expected cloudflare-worker hint in reason, got: {}",
+                    reason
+                );
+            }
+            d => panic!("expected Unresolved, got {:?}", d),
+        }
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == LeipDiagnosticSeverity::Warning
+                    && d.message.contains("Cloudflare")),
+            "expected a Warning diagnostic about Cloudflare Workers, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn node_cli_tool_auto_accepts_with_warning_diagnostic() {
+        // pageyou-style: yargs dep, ts-node dev script, no server framework
+        let pkg_json = r#"{
+            "name": "cli-tool",
+            "scripts": { "dev": "ts-node src/index.ts" },
+            "dependencies": { "yargs": "^17.7.2" },
+            "devDependencies": { "ts-node": "^10.9.2", "typescript": "^5.3.3" }
+        }"#;
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json"), file("src/index.ts")],
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "expected AutoAccept even for CLI tool, got {:?}",
+            result.decision
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == LeipDiagnosticSeverity::Warning
+                    && d.message.contains("CLI tool")),
+            "expected a cli-tool Warning diagnostic, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn node_server_with_yargs_no_cli_warning() {
+        // express + yargs: this is a server with a CLI component, not a CLI tool
+        let pkg_json = r#"{
+            "name": "server-with-cli",
+            "scripts": { "start": "node server.js" },
+            "dependencies": { "express": "^4.18.0", "yargs": "^17.0.0" }
+        }"#;
+        let input = LeipInput {
+            repo_file_index: vec![file("package.json"), file("package-lock.json")],
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "expected AutoAccept for server+yargs, got {:?}",
+            result.decision
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("CLI tool")),
+            "should NOT have cli-tool warning when server framework is present, got: {:?}",
+            result.diagnostics
+        );
+    }
 }
+
