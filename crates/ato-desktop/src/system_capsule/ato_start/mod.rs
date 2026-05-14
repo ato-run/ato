@@ -263,6 +263,12 @@ pub struct FeaturedApp {
     pub handle: String,
     pub label: String,
     pub description: String,
+    pub icon: String,
+    pub icon_bg: String,
+    pub tags: Vec<String>,
+    pub rating: f32,
+    pub installs: u32,
+    pub installed: bool,
 }
 
 /// Build a start snapshot from current app state. Called at window
@@ -321,16 +327,34 @@ fn static_featured_apps() -> Vec<FeaturedApp> {
             handle: "github.com/ato-run/demo-weather".to_string(),
             label: "Weather Demo".to_string(),
             description: "シンプルな天気アプリのデモカプセル".to_string(),
+            icon: "⛅".to_string(),
+            icon_bg: "linear-gradient(135deg,#0ea5e9,#38bdf8)".to_string(),
+            tags: vec!["ローカル実行".to_string(), "オフライン".to_string()],
+            rating: 4.8,
+            installs: 412,
+            installed: false,
         },
         FeaturedApp {
             handle: "github.com/ato-run/demo-todo".to_string(),
             label: "Todo App Demo".to_string(),
             description: "ローカルファースト Todo アプリ".to_string(),
+            icon: "✅".to_string(),
+            icon_bg: "linear-gradient(135deg,#10b981,#34d399)".to_string(),
+            tags: vec!["ローカル実行".to_string(), "プライバシー重視".to_string()],
+            rating: 4.6,
+            installs: 387,
+            installed: false,
         },
         FeaturedApp {
             handle: "github.com/ato-run/demo-markdown".to_string(),
             label: "Markdown Editor".to_string(),
             description: "リアルタイムプレビュー付きエディタ".to_string(),
+            icon: "📝".to_string(),
+            icon_bg: "linear-gradient(135deg,#8b5cf6,#a78bfa)".to_string(),
+            tags: vec!["ローカル実行".to_string()],
+            rating: 4.7,
+            installs: 298,
+            installed: false,
         },
     ]
 }
