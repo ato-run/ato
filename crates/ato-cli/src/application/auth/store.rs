@@ -777,20 +777,35 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                 let mut creds = manager.load()?.unwrap_or_default();
                 creds.publisher_handle = exchange.handle.clone();
 
-                let onboarding = run_publisher_onboarding_flow(
+                // Publisher onboarding is best-effort in desktop-webview mode.
+                // The session token is already persisted above, so `ato whoami`
+                // returns authenticated regardless.  Any onboarding failure must
+                // not block the `desktop_login_completed` event.
+                match run_publisher_onboarding_flow(
                     &session_token,
                     creds.github_username.as_deref(),
                     true,
                 )
-                .await?;
-                creds.publisher_id = Some(onboarding.publisher_id);
-                creds.publisher_handle = Some(onboarding.publisher_handle);
-                creds.publisher_did = Some(onboarding.publisher_did);
-                if let Some(installation) = onboarding.installation {
-                    creds.github_app_installation_id = Some(installation.installation_id);
-                    creds.github_app_account_login = Some(installation.account_login);
+                .await
+                {
+                    Ok(onboarding) => {
+                        creds.publisher_id = Some(onboarding.publisher_id);
+                        creds.publisher_handle = Some(onboarding.publisher_handle);
+                        creds.publisher_did = Some(onboarding.publisher_did);
+                        if let Some(installation) = onboarding.installation {
+                            creds.github_app_installation_id =
+                                Some(installation.installation_id);
+                            creds.github_app_account_login =
+                                Some(installation.account_login);
+                        }
+                        let _ = manager.save(&creds);
+                    }
+                    Err(e) => {
+                        // Non-fatal: log to stderr (not stdout) so the NDJSON
+                        // stream stays clean for the Desktop watcher.
+                        eprintln!("[ato-desktop] publisher onboarding skipped: {}", e);
+                    }
                 }
-                manager.save(&creds)?;
 
                 println!(
                     "{}",
