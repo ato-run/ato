@@ -2,31 +2,312 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Store</title>
+<title>sto — カプセルカタログ</title>
 <style>
-  html, body { height: 100%; margin: 0; }
-  body {
-    display: flex; align-items: center; justify-content: center;
-    background: #ffffff;
-    font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-    color: #71717a;
+  :root {
+    --bg-base:    #f4f4f5;
+    --card:       #ffffff;
+    --border:     #e4e4e7;
+    --text:       #18181b;
+    --muted:      #71717a;
+    --soft:       #a1a1aa;
+    --accent:     #2563eb;
+    --accent-bg:  #eff6ff;
+    --tag-bg:     #f1f5f9;
+    --tag-text:   #475569;
   }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg-base); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    -webkit-user-select: none;
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ─────────────────────────────────── */
+  .header {
+    padding: 16px 24px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    -webkit-app-region: drag;
+    flex-shrink: 0;
+  }
+  .header-logo {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--text);
+    -webkit-app-region: no-drag;
+  }
+  .header-logo span { color: var(--accent); }
+  .search-wrap {
+    flex: 1;
+    max-width: 420px;
+    -webkit-app-region: no-drag;
+  }
+  .search-input {
+    width: 100%;
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: inherit;
+    background: var(--bg-base);
+    color: var(--text);
+    outline: none;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .header-link {
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+    -webkit-app-region: no-drag;
+  }
+  .header-link:hover { color: var(--accent); }
+
+  /* ── Content ─────────────────────────────────── */
+  .content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+  }
+
+  /* ── Section heading ─────────────────────────── */
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  /* ── Grid ─────────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+
+  /* ── Capsule card ─────────────────────────────── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .card:hover { border-color: #cbd5e1; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  .card-header { display: flex; align-items: flex-start; gap: 10px; }
+  .card-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: var(--accent-bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .card-meta { flex: 1; min-width: 0; }
+  .card-name {
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .card-handle {
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .card-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .card-footer { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  .card-tags { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; }
+  .tag {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--tag-bg);
+    color: var(--tag-text);
+    font-weight: 500;
+  }
+  .btn-open {
+    font-size: 12px;
+    font-weight: 600;
+    font-family: inherit;
+    padding: 5px 14px;
+    border-radius: 7px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.12s;
+  }
+  .btn-open:hover { background: #1d4ed8; }
+  .btn-open:active { background: #1e40af; }
+
+  /* ── States ─────────────────────────────────── */
+  .state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 60px 0;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+  }
+  .state-icon { font-size: 32px; margin-bottom: 4px; }
+  .state a { color: var(--accent); text-decoration: none; }
+  .spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
-<!--
-  Phase 1: ato-store's actual UI is hosted at https://ato.run/, which
-  `crate::window::store::open_store_window` loads directly via
-  `WebViewBuilder::with_url(...)`. This file exists so the
-  `assets/system/<name>/` directory structure stays consistent
-  across system capsules; it is NOT loaded today.
+<header class="header">
+  <div class="header-logo">sto<span>re</span></div>
+  <div class="search-wrap">
+    <input class="search-input" type="search" id="search"
+           placeholder="カプセルを検索…" autocomplete="off">
+  </div>
+  <a class="header-link" id="web-link" href="#" onclick="openWeb();return false;">
+    ato.run で見る ↗
+  </a>
+</header>
 
-  Phase 2 will (a) host the registry frontend locally and (b) wire
-  IPC for "click capsule card → open AppWindow" via the
-  `ato-store::StoreCommand` vocabulary already defined in
-  `system_capsule::ato_store`.
--->
-<p>Redirecting to <a href="https://ato.run/">ato.run</a>…</p>
-<script>window.location.replace('https://ato.run/');</script>
+<div class="content" id="content">
+  <div class="state">
+    <div class="spinner"></div>
+    <span>カプセルカタログを読み込み中…</span>
+  </div>
+</div>
+
+<script>
+function ipc(msg) {
+  window.ipc.postMessage(JSON.stringify(msg));
+}
+
+function openWeb() {
+  // Open ato.run website in a new WebLinkView window.
+  ipc({ capsule: 'ato-store', command: { kind: 'browse_url', url: 'https://ato.run/' } });
+}
+
+function openCapsule(handle) {
+  ipc({ capsule: 'ato-store', command: { kind: 'open_capsule', handle } });
+}
+
+function capsuleIcon(tags) {
+  if (!tags) return '📦';
+  if (tags.includes('web')) return '🌐';
+  if (tags.includes('ai')) return '🤖';
+  if (tags.includes('tool')) return '🛠';
+  if (tags.includes('game')) return '🎮';
+  return '📦';
+}
+
+function renderCapsules(items) {
+  if (!items || items.length === 0) {
+    return `<div class="state">
+      <div class="state-icon">🔍</div>
+      <span>該当するカプセルはありません</span>
+    </div>`;
+  }
+  return `<div class="grid">${items.map(c => {
+    const handle = c.handle || c.scopedId || c.id || '';
+    const name   = c.name  || handle.split('/').pop() || handle;
+    const desc   = c.description || '';
+    const tags   = Array.isArray(c.tags) ? c.tags.slice(0, 3) : [];
+    const icon   = capsuleIcon(tags);
+    const safeHandle = handle.replace(/"/g, '&quot;');
+    const safeName   = name.replace(/</g, '&lt;');
+    const safeDesc   = desc.replace(/</g, '&lt;');
+    return `<div class="card">
+      <div class="card-header">
+        <div class="card-icon">${icon}</div>
+        <div class="card-meta">
+          <div class="card-name">${safeName}</div>
+          <div class="card-handle">${safeHandle}</div>
+        </div>
+      </div>
+      ${safeDesc ? `<div class="card-desc">${safeDesc}</div>` : ''}
+      <div class="card-footer">
+        <div class="card-tags">${tags.map(t => `<span class="tag">${t}</span>`).join('')}</div>
+        <button class="btn-open" onclick="openCapsule('${safeHandle}')">開く</button>
+      </div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+let allCapsules = [];
+
+function init() {
+  // Data is pre-fetched by Rust and injected as __CAPSULES_DATA__.
+  // Falls back to empty if data is missing (network was unavailable at open time).
+  if (typeof __CAPSULES_DATA__ !== 'undefined') {
+    const data = __CAPSULES_DATA__;
+    allCapsules = Array.isArray(data) ? data : (data.capsules || data.items || []);
+    renderView('');
+  } else {
+    document.getElementById('content').innerHTML = `
+      <div class="state">
+        <div class="state-icon">📡</div>
+        <span>カタログを取得できませんでした</span>
+        <span><a href="#" onclick="openWeb();return false;">ato.run をブラウザで開く ↗</a></span>
+      </div>`;
+  }
+}
+
+function renderView(query) {
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? allCapsules.filter(c => {
+        const text = [(c.handle||c.scopedId||''), (c.name||''), (c.description||'')].join(' ').toLowerCase();
+        return text.includes(q);
+      })
+    : allCapsules;
+
+  const content = document.getElementById('content');
+  content.innerHTML = `
+    <div class="section-title">${q ? `「${query}」の検索結果` : 'カプセル一覧'}</div>
+    ${renderCapsules(filtered)}`;
+}
+
+document.getElementById('search').addEventListener('input', e => {
+  renderView(e.target.value);
+});
+
+init();
+</script>
 </body>
 </html>
