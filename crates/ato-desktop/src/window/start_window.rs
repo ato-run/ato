@@ -103,7 +103,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             kind: ContentWindowKind::Start,
             title: gpui::SharedString::from(tr(locale, "start.title")),
             subtitle: gpui::SharedString::from(tr(locale, "start.subtitle")),
-            url: gpui::SharedString::from("capsule://run.ato.desktop/ato-start"),
+            url: gpui::SharedString::from("capsule://desktop.ato.run/start"),
             last_focused_at: std::time::Instant::now(),
         },
     );
