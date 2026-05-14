@@ -82,8 +82,9 @@ fn fetch_identity() -> Value {
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    tracing::debug!("fetch_identity: whoami stdout = {:?}", stdout.trim());
+    tracing::info!("fetch_identity: whoami stdout = {:?}", stdout.trim());
     if !stdout.contains("✅ Authenticated") {
+        tracing::info!("fetch_identity: not authenticated");
         return json!({ "authenticated": false, "reason": "not_authenticated" });
     }
     let mut user_id = None::<String>;
