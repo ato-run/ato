@@ -519,7 +519,11 @@ fn provision_command_from_python_importer(
             .to_string_lossy()
             .replace('\\', "/");
         return Ok(Some(format!(
-            "uv venv{python_pin} --clear && uv pip install -r {requirements_arg}"
+            // setuptools>=72 dropped `pkg_resources`; pin <72 so legacy packages
+            // (e.g. gunicorn<21) that import pkg_resources still work.
+            // Apps that explicitly pin setuptools>=72 in requirements.txt will
+            // get a clear uv conflict error and can remove the implicit constraint.
+            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} 'setuptools<72'"
         )));
     }
 
@@ -1313,7 +1317,7 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
-            "uv venv --python 3.11.10 --clear && uv pip install -r requirements.txt"
+            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
         );
     }
 
@@ -1342,7 +1346,7 @@ run_command = "main.py"
 
         assert_eq!(
             command,
-            "uv venv --clear && uv pip install -r requirements.txt"
+            "uv venv --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
         );
     }
 
@@ -1371,9 +1375,10 @@ run_command = "main.py"
             .expect("python requirements should provision");
 
         assert!(
-            command.starts_with("uv venv --python 3.11.10 --clear &&"),
+            command.starts_with("uv venv --python 3.11.10 --seed --clear &&"),
             "command={command}"
         );
+        assert!(command.contains("'setuptools<72'"), "command={command}");
     }
 
     #[test]
