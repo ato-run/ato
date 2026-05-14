@@ -14,7 +14,7 @@ use super::broker::{Capability, SystemCapsuleId};
 #[derive(Debug)]
 pub struct SystemCapsuleManifest {
     pub id: SystemCapsuleId,
-    /// Stable URL slug. `capsule://run.ato.desktop/<slug>/...` resolves here.
+    /// Path segment in the handle `capsule://desktop.ato.run/<slug>`.
     pub slug: &'static str,
     /// Human label rendered in places that show "what's running"
     /// (Card Switcher cards, Control Bar). Kept short.
@@ -29,7 +29,7 @@ pub struct SystemCapsuleManifest {
 const TABLE: &[SystemCapsuleManifest] = &[
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoWindows,
-        slug: "ato-windows",
+        slug: "windows",
         display_name: "Windows",
         allowed_capabilities: &[
             Capability::WindowsList,
@@ -41,7 +41,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoStore,
-        slug: "ato-store",
+        slug: "store",
         display_name: "Store",
         allowed_capabilities: &[
             Capability::WebviewCreate,
@@ -50,7 +50,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoSettings,
-        slug: "ato-settings",
+        slug: "settings",
         display_name: "Settings",
         allowed_capabilities: &[
             Capability::SettingsRead,
@@ -60,7 +60,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoWebViewer,
-        slug: "ato-web-viewer",
+        slug: "web-viewer",
         display_name: "Web Viewer",
         allowed_capabilities: &[
             Capability::TabsCreate,
@@ -70,7 +70,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoLaunch,
-        slug: "ato-launch",
+        slug: "launch",
         display_name: "Launch",
         // ato-launch needs WebviewCreate so its `Approve` command
         // can spawn the target AppWindow on the user's behalf. It
@@ -86,7 +86,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoIdentity,
-        slug: "ato-identity",
+        slug: "identity",
         display_name: "Identity",
         // Account / Identity popover invoked from the Control Bar
         // avatar button. Phase 1 menu items either close their own
@@ -99,7 +99,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoStart,
-        slug: "ato-start",
+        slug: "start",
         display_name: "Start",
         // Start page: can list open windows, open capsules via consent
         // (WebviewCreate), open system capsules like the Store
