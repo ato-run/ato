@@ -111,6 +111,18 @@ const TABLE: &[SystemCapsuleManifest] = &[
             Capability::LaunchSystemCapsule,
         ],
     },
+    SystemCapsuleManifest {
+        id: SystemCapsuleId::AtoDock,
+        slug: "dock",
+        display_name: "Dock",
+        // Dock: developer hub that can trigger ato login (WebviewCreate covers
+        // spawning the re-opened window after login completes).
+        allowed_capabilities: &[
+            Capability::WebviewCreate,
+            Capability::WindowsClose,
+            Capability::LaunchSystemCapsule,
+        ],
+    },
 ];
 
 pub fn lookup(id: SystemCapsuleId) -> &'static SystemCapsuleManifest {

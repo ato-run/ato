@@ -1,15 +1,16 @@
-//! Developer Console window — mounts a Wry WebView loading the local
-//! `ato-dev-console` system capsule HTML from
-//! `assets/system/ato-dev-console/index.html`.
+//! Dock window — mounts a Wry WebView loading the local
+//! `ato-dock` system capsule HTML from
+//! `assets/system/ato-dock/index.html`.
 //!
-//! The HTML is served via a `capsule-dev-console://` custom protocol
+//! The HTML is served via a `capsule-dock://` custom protocol
 //! handler so that WKWebView receives it with a proper origin.
 //!
-//! The console lets publishers manage their capsules, set up a Dock,
-//! and monitor publish status. The URL is:
-//!   `capsule://run.ato.desktop/dev-console`
+//! The Dock is the developer hub: it starts with ato login if the
+//! user is not authenticated, then flows to onboarding or the main
+//! capsule management console. URL: `capsule://run.ato.desktop/dock`
 
 use std::borrow::Cow;
+use std::process::Command;
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -18,27 +19,29 @@ use gpui::{
     WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use serde_json::{json, Value};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
+use crate::orchestrator::resolve_ato_binary;
 use crate::system_capsule::ipc as system_ipc;
 
-const DEV_CONSOLE_SCHEME: &str = "capsule-dev-console";
+const DOCK_SCHEME: &str = "capsule-dock";
 
-/// Slot tracking the single open Developer Console window.
+/// Slot tracking the single open Dock window.
 #[derive(Default)]
-pub struct DevConsoleWindowSlot(pub Option<AnyWindowHandle>);
-impl gpui::Global for DevConsoleWindowSlot {}
+pub struct DockWindowSlot(pub Option<AnyWindowHandle>);
+impl gpui::Global for DockWindowSlot {}
 
 /// Lightweight GPUI entity whose only job is to keep the Wry
 /// `WebView` alive for the lifetime of its window.
-pub struct DevConsoleWebView {
+pub struct DockWebView {
     _webview: WebView,
 }
 
-impl Render for DevConsoleWebView {
+impl Render for DockWebView {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
@@ -48,27 +51,69 @@ impl Render for DevConsoleWebView {
     }
 }
 
-const DEV_CONSOLE_HTML: &str =
-    include_str!("../../assets/system/ato-dev-console/index.html");
+const DOCK_HTML: &str =
+    include_str!("../../assets/system/ato-dock/index.html");
 
-/// Open the Developer Console window. On a 2nd+ click the existing
+/// Shell out to `ato whoami` to fetch authentication state.
+/// Returns JSON matching the identity_window pattern.
+fn fetch_identity() -> Value {
+    let bin = match resolve_ato_binary() {
+        Ok(b) => b,
+        Err(_) => return json!({ "authenticated": false, "reason": "binary_not_found" }),
+    };
+    let output = match Command::new(&bin)
+        .arg("whoami")
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return json!({ "authenticated": false, "reason": "whoami_failed" }),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("✅ Authenticated") {
+        return json!({ "authenticated": false, "reason": "not_authenticated" });
+    }
+    let mut user_id = None::<String>;
+    let mut name = None::<String>;
+    let mut email = None::<String>;
+    let mut github = None::<String>;
+    let mut publisher_handle = None::<String>;
+    for line in stdout.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("User ID: ") { user_id = Some(rest.trim().to_string()); }
+        else if let Some(rest) = line.strip_prefix("Name: ") { name = Some(rest.trim().to_string()); }
+        else if let Some(rest) = line.strip_prefix("Email: ") { email = Some(rest.trim().to_string()); }
+        else if let Some(rest) = line.strip_prefix("GitHub: @") { github = Some(rest.trim().to_string()); }
+        else if let Some(rest) = line.strip_prefix("Publisher Handle: ") { publisher_handle = Some(rest.trim().to_string()); }
+    }
+    json!({ "authenticated": true, "user_id": user_id, "name": name, "email": email, "github": github, "publisher_handle": publisher_handle })
+}
+
+/// Open the Dock window. On a 2nd+ click the existing
 /// window gets focused / brought to front rather than spawning a
 /// duplicate. Returns the GPUI `WindowHandle`.
-pub fn open_dev_console_window(cx: &mut App) -> Result<AnyWindowHandle> {
+pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // Focus-on-existing
-    let existing = cx.global::<DevConsoleWindowSlot>().0;
+    let existing = cx.global::<DockWindowSlot>().0;
     if let Some(handle) = existing {
         let result = handle.update(cx, |_, window, _| window.activate_window());
         match result {
             Ok(()) => return Ok(handle),
             Err(_) => {
-                cx.set_global(DevConsoleWindowSlot(None));
+                cx.set_global(DockWindowSlot(None));
             }
         }
     }
 
     let config = crate::config::load_config();
     let locale = resolve_locale(config.general.language);
+
+    let identity = fetch_identity();
+    let identity_script = format!(
+        "window.__ATO_IDENTITY = {};",
+        serde_json::to_string(&identity).unwrap_or_else(|_| "null".to_string())
+    );
+    let init_script = compose_init_script(locale, Some(&identity_script));
 
     let win_size = size(px(1100.0), px(760.0));
     let bounds = match cx.primary_display() {
@@ -91,8 +136,6 @@ pub fn open_dev_console_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let queue = system_ipc::new_queue();
     let drain_queue = queue.clone();
 
-    let init_script = compose_init_script(locale, None);
-
     let handle = cx.open_window(options, move |window, cx| {
         let win_size = window.bounds().size;
         let webview_rect = Rect {
@@ -103,13 +146,13 @@ pub fn open_dev_console_window(cx: &mut App) -> Result<AnyWindowHandle> {
             )
             .into(),
         };
-        let url = format!("{}://localhost/", DEV_CONSOLE_SCHEME);
+        let url = format!("{}://localhost/", DOCK_SCHEME);
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
-                DEV_CONSOLE_SCHEME.to_string(),
+                DOCK_SCHEME.to_string(),
                 |_id, _req, responder| {
                     let body: Cow<'static, [u8]> =
-                        Cow::Borrowed(DEV_CONSOLE_HTML.as_bytes());
+                        Cow::Borrowed(DOCK_HTML.as_bytes());
                     let response = Response::builder()
                         .header("Content-Type", "text/html; charset=utf-8")
                         .body(body)
@@ -123,10 +166,10 @@ pub fn open_dev_console_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Dev Console WebView");
-        let view = cx.new(|_cx| DevConsoleWebView { _webview: webview });
+        let view = cx.new(|_cx| DockWebView { _webview: webview });
         cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })?;
-    cx.set_global(DevConsoleWindowSlot(Some(*handle)));
+    cx.set_global(DockWindowSlot(Some(*handle)));
 
     use crate::window::content_windows::{
         ContentWindowEntry, ContentWindowKind, OpenContentWindows,
@@ -135,10 +178,10 @@ pub fn open_dev_console_window(cx: &mut App) -> Result<AnyWindowHandle> {
         handle.window_id().as_u64(),
         ContentWindowEntry {
             handle: *handle,
-            kind: ContentWindowKind::DevConsole,
-            title: gpui::SharedString::from(tr(locale, "dev_console.title")),
-            subtitle: gpui::SharedString::from(tr(locale, "dev_console.subtitle")),
-            url: gpui::SharedString::from("capsule://run.ato.desktop/dev-console"),
+            kind: ContentWindowKind::Dock,
+            title: gpui::SharedString::from(tr(locale, "dock.title")),
+            subtitle: gpui::SharedString::from(tr(locale, "dock.subtitle")),
+            url: gpui::SharedString::from("capsule://run.ato.desktop/dock"),
             last_focused_at: std::time::Instant::now(),
         },
     );

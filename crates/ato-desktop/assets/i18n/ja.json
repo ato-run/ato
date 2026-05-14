@@ -15,6 +15,7 @@
   "control_bar.settings": "設定",
   "control_bar.store": "ストア",
   "control_bar.dev_console": "コンソール",
+  "control_bar.dock": "Dock",
   "control_bar.omnibar_placeholder": "https://… または capsule://… を入力",
 
   "start.title": "新しいウィンドウ",
@@ -145,6 +146,8 @@
 
   "dev_console.title": "Developer Console",
   "dev_console.subtitle": "公開中・下書きのカプセルを管理",
+  "dock.title": "Dock",
+  "dock.subtitle": "atoでの開発者ハブ",
 
   "windows.title": "開いているウィンドウ",
   "windows.subtitle": "現在のセッションを切り替えます",

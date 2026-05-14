@@ -26,6 +26,7 @@
 //! `capsule://system/<name>` custom protocol, and (c) retire the
 //! Launcher window. See the plan file for stage receipts.
 
+pub mod ato_dock;
 pub mod ato_identity;
 pub mod ato_launch;
 pub mod ato_settings;
