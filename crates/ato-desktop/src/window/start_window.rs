@@ -1,13 +1,10 @@
-//! StartWindow — Wry-hosted HTML "compose a new window" surface.
-//! Stage B: visual layer moved to `assets/system/ato-windows/start.html`
-//! and the IPC envelope is now the typed system-capsule shape
-//! (`{capsule, command}`). The page is part of the `ato-windows`
-//! system capsule even though it owns its own NSWindow — the
-//! distinction is "switcher view vs picker view" inside the same
-//! capsule.
+//! StartWindow — Wry-hosted HTML "new window" start surface.
 //!
-//! Distinct from Launcher: each invocation spawns a fresh window
-//! (no slot, no focus-reuse).
+//! The start page is now the `ato-start` system capsule, served from
+//! `assets/system/ato-start/index.html`. Real data is pre-injected as
+//! `window.__ATO_START_SNAPSHOT__` via `with_initialization_script`
+//! at window construction time, so the page renders immediately without
+//! a round-trip IPC request.
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -19,6 +16,7 @@ use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::system_capsule::ato_start::build_start_snapshot;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 
@@ -32,19 +30,25 @@ impl Render for StartWindowShell {
         _window: &mut gpui::Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Pale-violet backdrop in case the HTML is still painting.
-        div().size_full().bg(rgb(0xf5f3ff))
+        div().size_full().bg(rgb(0x111111))
     }
 }
 
-const START_HTML: &str = include_str!("../../assets/system/ato-windows/start.html");
+const START_HTML: &str = include_str!("../../assets/system/ato-start/index.html");
 
-/// Spawn a fresh StartWindow. Always opens a new window — there is no
-/// slot or focus-reuse pathway here. Callers invoke this directly
-/// (e.g. the switcher's new-window tile) so opening the window does
-/// not depend on a dispatch queue surviving any close-soon-after on
-/// the caller side.
+/// Spawn a fresh ato-start window. Always opens a new window — there
+/// is no slot or focus-reuse pathway. Snapshot data is injected at
+/// construction time via `with_initialization_script`.
 pub fn open_start_window(cx: &mut App) -> Result<()> {
+    let config = crate::config::load_config();
+    let snapshot = build_start_snapshot(cx, &config);
+    let snapshot_json = serde_json::to_string(&snapshot)
+        .unwrap_or_else(|_| "{}".to_string());
+    let init_script = format!(
+        "window.__ATO_START_SNAPSHOT__ = {};",
+        snapshot_json
+    );
+
     let bounds = Bounds::centered(None, size(px(1200.0), px(880.0)), cx);
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
@@ -56,7 +60,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
     };
 
     let queue = system_ipc::new_queue();
-    let handle = cx.open_window(options, |window, cx| {
+    let queue_for_drain = queue.clone();
+    let handle = cx.open_window(options, move |window, cx| {
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -69,6 +74,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         let queue_for_ipc = queue.clone();
         let webview = WebViewBuilder::new()
             .with_html(START_HTML)
+            .with_initialization_script(&init_script)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
             .with_bounds(webview_rect)
             .build_as_child(window)
@@ -77,8 +83,6 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
-    // Register in the cross-window content registry so the Control
-    // Bar badge increments AND the Card Switcher renders a card.
     cx.global_mut::<OpenContentWindows>().insert(
         handle.window_id().as_u64(),
         ContentWindowEntry {
@@ -91,13 +95,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         },
     );
 
-    system_ipc::spawn_drain_loop(cx, queue, *handle);
+    system_ipc::spawn_drain_loop(cx, queue_for_drain, *handle);
 
     Ok(())
 }
 
-// Stage B note: the per-window `dispatch` translator from Stage A is
-// gone. start.html now posts `{capsule: "ato-windows", command: ...}`
-// or `{capsule: "ato-store", command: ...}` envelopes directly. The
-// system_capsule::ipc handler resolves the capsule, parses the typed
-// command, and the drain loop invokes `CapabilityBroker::dispatch`.

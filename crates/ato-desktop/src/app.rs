@@ -639,41 +639,77 @@ pub fn run() {
             // new AppWindow re-uses the existing bar. The bar stays
             // until the user explicitly closes it or the process
             // exits.
-            if let Err(err) = crate::window::open_focus_control_bar(cx) {
-                tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
-                cx.quit();
-                return;
-            }
-            tracing::info!("Focus View Control Bar opened at startup");
-
-            // Open the Store (Wry WebView on ato.run) as the
-            // initial content window. The WasedaP2P mock dashboard
-            // is reachable via host_dispatch_action
-            // OpenAppWindowExperiment when an AODD script or
-            // developer needs it; the boot landing surface is the
-            // real Store so first-run feels like landing in the
-            // catalogue.
-            let initial_handle = match crate::window::store::open_store_window(cx) {
-                Ok(handle) => {
-                    tracing::info!("Focus View Store window opened at startup");
-                    handle
-                }
+            let control_bar_handle = match crate::window::open_focus_control_bar(cx) {
+                Ok(h) => h,
                 Err(err) => {
-                    tracing::error!(error = %err, "Focus View startup failed; quitting");
+                    tracing::error!(error = %err, "Focus View Control Bar startup failed; quitting");
                     cx.quit();
                     return;
                 }
             };
+            tracing::info!("Focus View Control Bar opened at startup");
+
+            // Opening a Wry WebView synchronously during GPUI startup
+            // (before the macOS RunLoop has completed its first pass)
+            // causes WKWebView to initialize in a broken state where
+            // inline JavaScript is silently blocked. Defer store window
+            // creation by one event-loop tick so the RunLoop is fully
+            // live before WKWebView initializes.
+            let startup_surface = crate::config::load_config().desktop.startup_surface;
+            let async_cx = cx.to_async();
+            cx.foreground_executor()
+                .spawn(async move {
+                    // One frame is enough for the macOS RunLoop to complete
+                    // its first pass and for WKWebView to initialize normally.
+                    async_cx
+                        .background_executor()
+                        .timer(std::time::Duration::from_millis(32))
+                        .await;
+                    let _ = async_cx.update(|cx| {
+                        match startup_surface {
+                            crate::config::StartupSurface::Start => {
+                                match crate::window::start_window::open_start_window(cx) {
+                                    Ok(_) => tracing::info!("Start window opened at startup"),
+                                    Err(err) => tracing::error!(error = %err, "Start window failed at startup"),
+                                }
+                            }
+                            crate::config::StartupSurface::Blank => {
+                                // No initial window; user opens manually.
+                                tracing::info!("Blank startup surface — no window opened");
+                            }
+                            crate::config::StartupSurface::RestoreLast => {
+                                // TODO: window restore not yet implemented; fall through to Store.
+                                tracing::info!("RestoreLast not yet implemented — falling back to Store");
+                                match crate::window::store::open_store_window(cx) {
+                                    Ok(_) => tracing::info!("Focus View Store window opened at startup"),
+                                    Err(err) => tracing::error!(error = %err, "Focus View Store window failed"),
+                                }
+                            }
+                            crate::config::StartupSurface::Store => {
+                                match crate::window::store::open_store_window(cx) {
+                                    Ok(_) => {
+                                        tracing::info!("Focus View Store window opened at startup");
+                                    }
+                                    Err(err) => {
+                                        tracing::error!(error = %err, "Focus View Store window failed");
+                                    }
+                                }
+                            }
+                        }
+                    });
+                })
+                .detach();
+
             // Focus mode has no DesktopShell / WebViewManager, so the
             // automation socket would never start and host_dispatch_action
             // would have nowhere to land. Start a thin dispatcher that
             // owns its own `AutomationHost`, drains socket-delivered
             // requests, and routes `HostDispatchAction { action }` to
             // the initial window as a real GPUI action dispatch.
-            // Actions are App-level so dispatching via any window
-            // handle reaches the registered handler — the Store
-            // handle is fine here.
-            crate::window::focus_dispatcher::start(cx, initial_handle);
+            // Actions are App-level so dispatching via any window handle
+            // reaches the registered handler — the Control Bar handle
+            // is used here since the Store window is deferred.
+            crate::window::focus_dispatcher::start(cx, control_bar_handle);
         } else {
             tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);

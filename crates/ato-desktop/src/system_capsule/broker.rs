@@ -14,7 +14,8 @@
 use gpui::{AnyWindowHandle, App};
 
 use super::{
-    ato_identity, ato_launch, ato_settings, ato_store, ato_web_viewer, ato_windows, manifest,
+    ato_identity, ato_launch, ato_settings, ato_start, ato_store, ato_web_viewer, ato_windows,
+    manifest,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -30,6 +31,8 @@ pub enum SystemCapsuleId {
     /// Account / Identity popover shown when the user clicks the
     /// avatar at the right of the Control Bar. `ato-identity/index.html`.
     AtoIdentity,
+    /// "New window" start page. `ato-start/index.html`.
+    AtoStart,
 }
 
 /// Vocabulary of system-capability tokens. Each per-capsule command
@@ -73,6 +76,7 @@ pub enum SystemCommand {
     AtoWebViewer(ato_web_viewer::WebViewerCommand),
     AtoLaunch(ato_launch::LaunchCommand),
     AtoIdentity(ato_identity::IdentityCommand),
+    AtoStart(ato_start::AtoStartCommand),
 }
 
 impl SystemCommand {
@@ -86,6 +90,7 @@ impl SystemCommand {
             SystemCommand::AtoWebViewer(c) => c.required_capability(),
             SystemCommand::AtoLaunch(c) => c.required_capability(),
             SystemCommand::AtoIdentity(c) => c.required_capability(),
+            SystemCommand::AtoStart(c) => c.required_capability(),
         }
     }
 }
@@ -150,6 +155,7 @@ impl CapabilityBroker {
             SystemCommand::AtoWebViewer(c) => ato_web_viewer::dispatch(cx, host, c),
             SystemCommand::AtoLaunch(c) => ato_launch::dispatch(cx, host, c),
             SystemCommand::AtoIdentity(c) => ato_identity::dispatch(cx, host, c),
+            SystemCommand::AtoStart(c) => ato_start::dispatch(cx, host, c),
         }
     }
 }

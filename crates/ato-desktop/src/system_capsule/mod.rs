@@ -29,6 +29,7 @@
 pub mod ato_identity;
 pub mod ato_launch;
 pub mod ato_settings;
+pub mod ato_start;
 pub mod ato_store;
 pub mod ato_web_viewer;
 pub mod ato_windows;
