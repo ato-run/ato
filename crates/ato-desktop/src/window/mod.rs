@@ -14,6 +14,7 @@
 //! and tracked in the consolidated PR description.
 
 pub mod app_capsule_shell;
+pub mod auth_login_window;
 pub mod card_switcher;
 pub mod content_windows;
 pub mod control_bar;
