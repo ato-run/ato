@@ -80,6 +80,8 @@
   "settings.controlbar.always_on_top": "常に最前面に表示",
   "settings.controlbar.show_on_start": "起動時に表示",
   "settings.controlbar.position": "位置",
+  "settings.position.top": "上",
+  "settings.position.bottom": "下",
   "settings.controlbar.autohide": "非使用時に自動で隠す",
   "settings.section.update_channel": "アップデートチャンネル",
   "settings.update_channel.channel": "チャンネル",
