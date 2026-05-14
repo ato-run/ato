@@ -160,6 +160,7 @@
   "windows.badge.sync": "同期",
   "windows.new_window": "新しいウィンドウ",
   "windows.open_start": "スタートページを開く",
+  "windows.close_window": "閉じる",
 
   "launch.title": "起動前にご確認ください",
   "launch.subtitle": "カプセル名と権限を確認の上、起動してください。",
