@@ -85,6 +85,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     }
 
     let ato_bin = resolve_ato_binary().context("ato binary not found")?;
+    tracing::info!(ato_bin = %ato_bin.display(), "open_auth_login_window: spawning ato login --desktop-webview");
 
     // ── Launch the CLI subprocess ─────────────────────────────────────────────
     let mut child: Child = Command::new(&ato_bin)
@@ -104,6 +105,7 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     reader
         .read_line(&mut first_line)
         .context("failed to read start event from ato login")?;
+    tracing::debug!(first_line = first_line.trim(), "open_auth_login_window: got first line from CLI");
 
     let event: DesktopLoginEvent = serde_json::from_str(first_line.trim())
         .context("invalid NDJSON start event from ato login")?;
