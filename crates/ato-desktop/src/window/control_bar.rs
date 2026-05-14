@@ -30,12 +30,12 @@ use crate::app::{
 use crate::config::ControlBarMode;
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
-use crate::window::content_windows::{ContentWindowEntry, OpenContentWindows};
+use crate::window::content_windows::OpenContentWindows;
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
 const COMPACT_BAR_WIDTH: f32 = 360.0;
-const COMPACT_HEIGHT: f32 = 28.0;
+const COMPACT_HEIGHT: f32 = 10.0;
 /// Host NSWindow is sized flush to the pill — the rectangle of the
 /// window and the rectangle of the pill are the same; the only
 /// transparent area is the four rounded-corner cut-outs created by
@@ -366,14 +366,11 @@ impl Render for ControlBarShellPlaceholder {
             .value()
             .trim_start()
             .starts_with("capsule://");
-        let active = cx
-            .global::<OpenContentWindows>()
-            .mru_order()
-            .into_iter()
-            .next();
         let expanded = cx.global::<ControlBarController>().should_render_expanded();
+        let omnibar_focused = self.omnibar_focused;
 
         div()
+            .id("control-bar-hover-zone")
             .size_full()
             .flex()
             .items_center()
@@ -389,6 +386,21 @@ impl Render for ControlBarShellPlaceholder {
                     shell.update(cx, |_shell, cx| cx.notify());
                 }
             })
+            .on_hover(move |hovered, _window, cx| {
+                // Collapse when the mouse leaves — unless the omnibar is
+                // focused (user is typing), in which case InputEvent::Blur
+                // will handle the collapse instead.
+                if !hovered && !omnibar_focused {
+                    let was_expanded = cx.global::<ControlBarController>().expanded;
+                    cx.global_mut::<ControlBarController>().collapse();
+                    if was_expanded && !cx.global::<ControlBarController>().expanded {
+                        resize_bar_window(cx, false);
+                    }
+                    if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
+                        shell.update(cx, |_shell, cx| cx.notify());
+                    }
+                }
+            })
             .child(if expanded {
                 bar_pill(
                     self.omnibar.clone(),
@@ -398,7 +410,7 @@ impl Render for ControlBarShellPlaceholder {
                 )
                 .into_any_element()
             } else {
-                compact_pill(active, self.locale).into_any_element()
+                compact_pill().into_any_element()
             })
     }
 }
@@ -451,69 +463,16 @@ fn bar_pill(
         .child(identity_button())
 }
 
-fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl IntoElement {
-    let title = active
-        .as_ref()
-        .map(|entry| entry.title.clone())
-        .unwrap_or_else(|| SharedString::from("Ato Desktop"));
+fn compact_pill() -> impl IntoElement {
+    // Ultra-thin sliver — no text or icons. Just a visible hover target.
+    // On hover the bar expands to full size via on_hover on the container.
     div()
         .w(px(COMPACT_BAR_WIDTH))
         .h(px(COMPACT_HEIGHT))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .bg(rgb(0xffffff))
         .rounded_full()
+        .bg(hsla(0.0, 0.0, 1.0, 0.90))
         .border_1()
-        .border_color(hsla(0.0, 0.0, 0.0, 0.06))
-        .child(
-            div()
-                .w(px(6.0))
-                .h(px(6.0))
-                .flex_shrink_0()
-                .rounded_full()
-                .bg(rgb(0xa1a1aa)),
-        )
-        .child(
-            div()
-                .min_w(px(0.0))
-                .flex_1()
-                .text_xs()
-                .font_weight(FontWeight(600.0))
-                .text_color(rgb(0x18181b))
-                .overflow_hidden()
-                .child(title),
-        )
-        .child(
-            div()
-                .id("compact-url")
-                .w(px(20.0))
-                .h(px(20.0))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0xf4f4f5)))
-                .on_mouse_down(MouseButton::Left, |_, _window, cx| {
-                    if let Err(err) = focus_control_bar_input(cx) {
-                        tracing::error!(error = %err, "compact pill ⌘L failed");
-                    }
-                })
-                .child(
-                    Icon::new(IconName::Globe)
-                        .size(px(12.0))
-                        .text_color(rgb(0x3f3f46)),
-                ),
-        )
-        // Zero-width omnibar placeholder keeps the omnibar accessible
-        // for keyboard dispatch even in compact mode.
-        .child(div().w(px(0.0)).overflow_hidden().child(SharedString::from(tr(
-            locale,
-            "control_bar.omnibar_placeholder",
-        ))))
+        .border_color(hsla(0.0, 0.0, 0.0, 0.08))
 }
 
 fn identity_button() -> impl IntoElement {
