@@ -191,9 +191,11 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                     );
                     let html = DOCK_HTML.replacen("<head>", &inject, 1);
                     let injected = html.contains("window.__ATO_IDENTITY");
+                    let html_prefix = &html[..html.len().min(180)];
                     tracing::info!(
                         authenticated,
                         injected,
+                        html_prefix,
                         "dock protocol handler: serving HTML with identity"
                     );
                     let body: Cow<'static, [u8]> = Cow::Owned(html.into_bytes());
@@ -236,15 +238,17 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     Ok(*handle)
 }
 
-/// Update the existing Dock WebView's identity in-place after a successful login.
+/// Update the existing Dock WebView's identity after a successful login and reload the page.
 ///
 /// Strategy:
-/// 1. Update the shared `identity_state` Arc so future page loads embed the new identity.
-/// 2. Call `evaluate_script_with_callback` to set `window.__ATO_IDENTITY` and call
-///    `showInitialPage()` directly in the live page — instant, no navigation.
+/// 1. Update the shared `identity_state` Arc so the protocol handler embeds the new identity
+///    in the HTML on the next request.
+/// 2. Call `load_url` with a timestamp-suffixed URL to force WKWebView to navigate (different
+///    URL avoids the same-URL no-op) and serve a fresh HTML with authenticated identity.
 ///
-/// NOTE: do NOT call `load_url` here. Calling `load_url` immediately after
-/// `evaluate_script` cancels the pending JS evaluation in WKWebView before it runs.
+/// NOTE: We do NOT use `evaluate_script` here. It is unreliable for driving page transitions
+/// because its completion callback fires asynchronously and mixing it with `load_url` cancels
+/// the pending JS evaluation. Pure `load_url` with a different URL is the guaranteed approach.
 ///
 /// Falls back to opening a fresh Dock if no live entity is tracked.
 pub fn notify_login_success(cx: &mut App) {
@@ -252,37 +256,26 @@ pub fn notify_login_success(cx: &mut App) {
     if let Some(entity) = entity {
         let identity = fetch_identity();
         let authenticated = identity.get("authenticated").and_then(|v| v.as_bool()).unwrap_or(false);
-        tracing::info!(authenticated, "notify_login_success: injecting identity into live dock WebView");
-
-        let identity_json = serde_json::to_string(&identity)
-            .unwrap_or_else(|_| "null".to_string());
-
-        // IIFE: set identity on window, then immediately route to correct page.
-        // showInitialPage() only reads window.__ATO_IDENTITY and calls querySelectorAll
-        // — safe to invoke on any already-loaded page.
-        let script = format!(
-            concat!(
-                "(function(){{",
-                "window.__ATO_IDENTITY={id};",
-                "if(typeof showInitialPage==='function'){{showInitialPage();return'ok';}}",
-                "return'no-fn';",
-                "}})();"
-            ),
-            id = identity_json
-        );
+        tracing::info!(authenticated, "notify_login_success: updating identity and reloading dock WebView");
 
         entity.update(cx, |view, _cx| {
-            // 1. Update Arc so future page loads (from protocol handler) also get new identity.
+            // 1. Update Arc so the protocol handler serves authenticated HTML on next load.
             if let Ok(mut guard) = view.identity_state.lock() {
                 *guard = identity;
             }
-            // 2. Transition the live page — use callback to log outcome (silently swallowed otherwise).
-            let result = view._webview.evaluate_script_with_callback(&script, |response| {
-                tracing::info!(response, "notify_login_success: evaluate_script_with_callback result");
-            });
-            match result {
-                Ok(()) => tracing::info!("notify_login_success: evaluate_script_with_callback dispatched"),
-                Err(e) => tracing::warn!("notify_login_success: evaluate_script_with_callback failed: {:?}", e),
+            // 2. Navigate to a timestamp-suffixed URL.
+            //    The URL differs from the current one, so WKWebView performs a real navigation.
+            //    The protocol handler ignores query params and serves the same HTML
+            //    but now with authenticated identity embedded.
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let reload_url = format!("{}://localhost/?t={}", DOCK_SCHEME, ts);
+            tracing::info!(reload_url, "notify_login_success: navigating to cache-busted URL");
+            match view._webview.load_url(&reload_url) {
+                Ok(()) => tracing::info!("notify_login_success: load_url dispatched"),
+                Err(e) => tracing::warn!("notify_login_success: load_url failed: {:?}", e),
             }
         });
 
