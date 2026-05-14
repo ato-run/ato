@@ -176,8 +176,8 @@ pub struct ControlBarSettings {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum StartupSurface {
-    #[default]
     Store,
+    #[default]
     Start,
     Blank,
     RestoreLast,
@@ -214,7 +214,7 @@ impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
             focus_view_enabled: default_focus_view_enabled(),
-            startup_surface: StartupSurface::Store,
+            startup_surface: StartupSurface::Start,
             content_window_default_presentation: ContentWindowPresentation::Windowed,
             restore_window_frames: false,
             control_bar: ControlBarSettings::default(),
@@ -1147,7 +1147,7 @@ mod tests {
         let config = DesktopConfig::default();
         let d = &config.desktop;
         assert!(d.focus_view_enabled, "focus_view_enabled default must be true");
-        assert_eq!(d.startup_surface, StartupSurface::Store);
+        assert_eq!(d.startup_surface, StartupSurface::Start);
         assert_eq!(
             d.content_window_default_presentation,
             ContentWindowPresentation::Windowed
@@ -1189,7 +1189,7 @@ mod tests {
             parsed.desktop.focus_view_enabled,
             "missing desktop section must default to focus_view_enabled=true"
         );
-        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Store);
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Start);
         assert!(parsed.desktop.control_bar.always_on_top);
     }
 }
