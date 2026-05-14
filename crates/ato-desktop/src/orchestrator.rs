@@ -495,6 +495,24 @@ fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Older ato CLI builds don't have `internal preflight`. In that case,
+        // fall back to an empty envelope so the consent wizard can still proceed
+        // without blocking on preflight requirements.
+        if stderr.contains("unrecognized subcommand") && stderr.contains("preflight") {
+            tracing::debug!(
+                handle,
+                "ato CLI does not support 'internal preflight'; skipping preflight (no requirements)"
+            );
+            return Ok(PreflightAggregateEnvelope {
+                schema_version: None,
+                capsule_id: String::new(),
+                capsule_version: String::new(),
+                visited_targets: vec![],
+                requirements: vec![],
+            });
+        }
+
         bail!(
             "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
             output.status
