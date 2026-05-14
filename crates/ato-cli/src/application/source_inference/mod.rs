@@ -1069,6 +1069,18 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         &info,
         input.explicit_native_artifact.as_deref(),
     )?;
+
+    // LEIP v1 inference — runs only when no explicit desktop_execution override is
+    // present (desktop_execution takes highest precedence).
+    // LaunchGraphDraft is the canonical inference object; the legacy contract below
+    // is a lossy projection of it.  ato.lock.json existence is checked before this
+    // function is ever reached (lock-first invariant upstream).
+    let leip_projection = if desktop_execution.is_none() {
+        leip_projection_from_root(&input.project_root)
+    } else {
+        None
+    };
+
     let metadata = source_metadata(
         &detected,
         input
@@ -1085,8 +1097,15 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .get("driver")
                 .and_then(Value::as_str)
         })
+        // LEIP AutoAccept driver overrides the legacy detect_project heuristic.
+        .or_else(|| {
+            leip_projection
+                .as_ref()
+                .and_then(|p| p.driver.as_deref())
+        })
         .unwrap_or_else(|| runtime_kind_from_project(&detected));
-    let process_candidates = if desktop_execution.is_some() {
+    let process_candidates = if desktop_execution.is_some() || leip_projection.is_some() {
+        // Desktop execution override and LEIP AutoAccept both skip legacy candidate generation.
         Vec::new()
     } else {
         process_candidates_for_source(&detected, &info)
@@ -1140,6 +1159,31 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         desktop_execution
             .as_ref()
             .map(|override_contract| Value::Array(vec![override_contract.resolved_target.clone()]))
+            .or_else(|| {
+                // LEIP AutoAccept: build a single-target entry from the inferred cmd + driver.
+                leip_projection.as_ref().map(|p| {
+                    let mut target = serde_json::Map::new();
+                    target.insert("label".to_string(), Value::String("default".to_string()));
+                    target.insert("runtime".to_string(), Value::String("source".to_string()));
+                    if let Some(driver) = &p.driver {
+                        target.insert("driver".to_string(), Value::String(driver.clone()));
+                    }
+                    if !p.cmd.is_empty() {
+                        target.insert("entrypoint".to_string(), Value::String(p.cmd[0].clone()));
+                        if p.cmd.len() > 1 {
+                            // Multi-token cmd: encode as run_command so the compat bridge
+                            // routes it through sh -c rather than treating the first token
+                            // (e.g. "npm", "uvicorn") as a bare language entrypoint.
+                            target.insert(
+                                "run_command".to_string(),
+                                Value::String(p.cmd.join(" ")),
+                            );
+                        }
+                    }
+                    target.insert("compatible".to_string(), Value::Bool(true));
+                    Value::Array(vec![Value::Object(target)])
+                })
+            })
             .unwrap_or_else(|| {
                 Value::Array(vec![{
                     let mut target = serde_json::Map::new();
@@ -1248,6 +1292,47 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             source_field: Some(override_contract.source_field),
             note: Some(
                 "desktop native execution records a single immutable target-compatible native run contract"
+                    .to_string(),
+            ),
+        });
+    } else if let Some(leip) = leip_projection {
+        // LEIP AutoAccept: project the top LaunchGraphDraft candidate into the
+        // legacy contract.  This is a lossy projection — only cmd, driver, and
+        // workload name are preserved; graph edges and non-primary nodes are not
+        // represented in the legacy schema.
+        let process_val = process_value_from_leip_cmd(&leip.cmd);
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            Value::Array(vec![json!({
+                "name": "main",
+                "process": process_val.clone(),
+            })]),
+        );
+        lock.contract
+            .entries
+            .insert("process".to_string(), process_val);
+        provenance.push(SourceInferenceProvenance {
+            field: "contract.process".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: Some("leip_graph_inference".to_string()),
+            source_field: Some(leip.candidate_id.clone()),
+            note: Some(format!(
+                "LEIP v1 AutoAccept: cmd={} (candidate {})",
+                leip.cmd.join(" "),
+                &leip.candidate_id[..leip.candidate_id.len().min(16)],
+            )),
+        });
+        provenance.push(SourceInferenceProvenance {
+            field: "resolution.resolved_targets".to_string(),
+            kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+            source_path: Some(input.project_root.clone()),
+            importer_id: None,
+            evidence_kind: Some("leip_graph_inference".to_string()),
+            source_field: Some(leip.candidate_id),
+            note: Some(
+                "LEIP v1 AutoAccept projects a single default target with inferred driver and cmd"
                     .to_string(),
             ),
         });
@@ -3860,6 +3945,155 @@ fn extract_pyproject_dependencies(content: &str) -> Vec<String> {
     out
 }
 
+// ─── LEIP v1 adapter ──────────────────────────────────────────────────────────
+//
+// Terminology used inside this block:
+//   LaunchGraphDraft   = canonical inference object produced by lock-draft-engine
+//   LaunchEnvelopeDraft = payload of an AppTarget node in the graph
+//   legacy source_inference contract = compatibility projection from top candidate
+//   capsule.toml       = export/import projection of the contract
+//   ato.lock.json      = resolved execution state (lock-first when present)
+//
+// LEIP sits between desktop_execution (explicit native) and legacy detect_project
+// heuristics.  Only AutoAccept decisions override the legacy path.
+
+/// Carries the parts of a LEIP AutoAccept result that are projected into the
+/// legacy source_inference contract.
+struct LeipProjection {
+    /// Runtime driver (e.g., "node", "python") from the top candidate's envelope.
+    driver: Option<String>,
+    /// Full command vector from the top candidate's primary AppTarget envelope.
+    /// `cmd[0]` is the executable; `cmd[1..]` are arguments.
+    cmd: Vec<String>,
+    /// Deterministic candidate id (sha256 of canonical graph + engine version).
+    candidate_id: String,
+}
+
+/// Build a [`lock_draft_engine::leip::LeipInput`] by reading the project root.
+/// This is the only LEIP-related function that touches the filesystem; the
+/// engine itself is pure.
+fn build_leip_input_from_root(
+    root: &Path,
+) -> lock_draft_engine::leip::LeipInput {
+    use lock_draft_engine::{RepoFileEntry, RepoFileKind};
+
+    // Walk up to 4 levels deep; skip hidden directories.
+    let repo_file_index: Vec<RepoFileEntry> = WalkDir::new(root)
+        .min_depth(1)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let rel = entry.path().strip_prefix(root).ok()?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            // Skip hidden dirs/files (e.g., .git, .venv, node_modules)
+            if rel_str.starts_with('.') || rel_str.contains("/.") {
+                return None;
+            }
+            if rel_str.starts_with("node_modules")
+                || rel_str.contains("/node_modules/")
+                || rel_str.starts_with("target/")
+                || rel_str.starts_with(".venv/")
+                || rel_str.starts_with("venv/")
+            {
+                return None;
+            }
+            let kind = if entry.file_type().is_dir() {
+                RepoFileKind::Dir
+            } else {
+                RepoFileKind::File
+            };
+            let size = entry.metadata().ok().map(|m| m.len());
+            Some(RepoFileEntry { path: rel_str, kind, size })
+        })
+        .collect();
+
+    // Eagerly read key manifest and docs files used by evidence extractors.
+    let key_files = [
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "Pipfile",
+        "README.md",
+        "README.rst",
+        "Makefile",
+    ];
+    let mut file_text_map = std::collections::BTreeMap::new();
+    for name in &key_files {
+        let path = root.join(name);
+        if let Ok(text) = fs::read_to_string(&path) {
+            // Cap individual file reads at 512 KB to avoid blowing the heap.
+            if text.len() <= 512 * 1024 {
+                file_text_map.insert((*name).to_string(), text);
+            }
+        }
+    }
+
+    lock_draft_engine::leip::LeipInput {
+        repo_file_index,
+        file_text_map,
+        target_hint: None,
+        manifest_source: None,
+        existing_ato_lock_summary: None,
+    }
+}
+
+/// Run LEIP inference and return an [`LeipProjection`] only when the engine
+/// reaches an `AutoAccept` decision.  Returns `None` for any other decision
+/// (NeedsSelection, Unresolved, Rejected) so the caller falls through to the
+/// legacy detect_project path.
+fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
+    use lock_draft_engine::leip::{evaluate_launch_graphs, LeipDecision};
+
+    let leip_input = build_leip_input_from_root(root);
+    let result = evaluate_launch_graphs(&leip_input);
+
+    let candidate_id = match &result.decision {
+        LeipDecision::AutoAccept { candidate_id } => candidate_id.clone(),
+        _ => return None,
+    };
+
+    // Locate the accepted candidate and extract its primary AppTarget node.
+    let top = result.candidates.first()?;
+    // Primary node is the one whose id matches the graph's primary_node_id.
+    let primary_node_id = &top.graph.primary_node_id;
+    let primary_node = top
+        .graph
+        .nodes
+        .iter()
+        .find(|n| &n.id == primary_node_id)?;
+    let envelope = primary_node.envelope.as_ref()?;
+
+    if envelope.cmd.is_empty() {
+        return None;
+    }
+
+    Some(LeipProjection {
+        driver: envelope.driver.clone(),
+        cmd: envelope.cmd.clone(),
+        candidate_id,
+    })
+}
+
+/// Build a `contract.process` JSON value from a LEIP cmd vector.
+///
+/// Multi-token commands (e.g. `npm run start`, `uvicorn main:app --host 0.0.0.0`) are
+/// encoded as `run_command` so the compat bridge routes them through `sh -c` rather than
+/// treating the first token as a bare language entrypoint.  Single-token commands (e.g.
+/// `node`, `python`) are encoded as `entrypoint` only.
+fn process_value_from_leip_cmd(cmd: &[String]) -> Value {
+    let entrypoint = cmd[0].clone();
+    if cmd.len() == 1 {
+        return json!({ "entrypoint": entrypoint });
+    }
+    let run_command = cmd.join(" ");
+    json!({ "entrypoint": entrypoint, "run_command": run_command })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -3994,7 +4228,7 @@ mod tests {
     }
 
     #[test]
-    fn source_only_node_project_resolves_package_script_to_npm_specifier() {
+    fn source_only_node_project_with_dev_script_resolves_to_npm_run_dev() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("package.json"),
@@ -4015,12 +4249,13 @@ mod tests {
         )
         .expect("run engine");
 
+        // LEIP infers `npm run dev` directly — resolution of the script body
+        // is deferred to runtime (the capsule runner invokes npm).
         assert_eq!(
             result.lock.contract.entries.get("process"),
             Some(&json!({
-                "entrypoint": "npm:vite",
-                "cmd": ["--host", "127.0.0.1", "--port", "5175"],
-                "run_command": "npm:vite --host 127.0.0.1 --port 5175",
+                "entrypoint": "npm",
+                "run_command": "npm run dev",
             }))
         );
     }
@@ -4064,14 +4299,15 @@ mod tests {
             process,
             Some(&json!({
                 "entrypoint": "npm",
-                "cmd": ["run", "dev"],
+                "run_command": "npm run dev",
             }))
         );
     }
 
-    // Regression: `scripts.dev = "node dist/server"` (extensionless) IS valid for bare node.
+    // Regression: `scripts.dev = "node dist/server"` — LEIP treats this as a package-manager
+    // script command and emits `npm run dev`; bare-node resolution is deferred to runtime.
     #[test]
-    fn node_extensionless_dev_script_is_kept_as_direct_entrypoint() {
+    fn node_dev_script_with_direct_node_call_uses_npm_run_dev() {
         let dir = tempdir().expect("tempdir");
         // create the extensionless file so it can be referenced
         fs::write(
@@ -4096,18 +4332,19 @@ mod tests {
         .expect("run engine");
 
         let process = result.lock.contract.entries.get("process");
+        // LEIP produces `npm run dev` — the dev script's body is not inlined.
         assert_eq!(
             process,
             Some(&json!({
-                "entrypoint": "dist/server",
-                "cmd": [],
-                "run_command": "node dist/server",
+                "entrypoint": "npm",
+                "run_command": "npm run dev",
             }))
         );
     }
 
+    // LEIP detects FastAPI and emits `uvicorn main:app --host 0.0.0.0` as the launch command.
     #[test]
-    fn source_only_python_project_uses_script_path_as_entrypoint() {
+    fn source_only_fastapi_project_uses_uvicorn_entrypoint() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("requirements.txt"), "fastapi==0.115.0\n")
             .expect("write requirements");
@@ -4129,8 +4366,8 @@ mod tests {
         assert_eq!(
             result.lock.contract.entries.get("process"),
             Some(&json!({
-                "entrypoint": "main.py",
-                "cmd": [],
+                "entrypoint": "uvicorn",
+                "run_command": "uvicorn main:app --host 0.0.0.0",
             }))
         );
     }
@@ -4572,8 +4809,9 @@ mod tests {
         assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
+    // LEIP emits `npm run dev`; the resolved script body is not inlined into run_command.
     #[test]
-    fn run_materialization_writes_run_command_for_resolved_package_script() {
+    fn run_materialization_resolves_dev_script_as_npm_run_dev() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("package.json"),
@@ -4601,11 +4839,12 @@ mod tests {
         )
         .expect("route lock");
 
+        // LEIP resolves to `npm run dev`; run_command is set for sh -c wrapping.
+        assert_eq!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
         assert_eq!(
             routed.plan.execution_run_command().as_deref(),
-            Some("npm:vite --host 127.0.0.1 --port 5175")
+            Some("npm run dev")
         );
-        assert_ne!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
     }
 
     #[test]
@@ -4638,8 +4877,10 @@ mod tests {
         assert!(!dir.path().join(".ato.run.generated.capsule.toml").exists());
     }
 
+    // LEIP resolves `index.js` over `main.js` by convention priority — the project is no longer
+    // ambiguous; process is set and the lock is valid after init.
     #[test]
-    fn init_persists_unresolved_when_equal_rank_candidates_remain() {
+    fn init_resolves_index_js_over_main_js_by_convention() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#)
             .expect("write package json");
@@ -4651,12 +4892,12 @@ mod tests {
         let lock = capsule_core::ato_lock::load_unvalidated_from_path(&materialized.lock_path)
             .expect("read materialized lock");
 
-        assert!(!lock.contract.entries.contains_key("process"));
-        assert!(lock
-            .contract
-            .unresolved
-            .iter()
-            .any(|value| value.reason == UnresolvedReason::ExplicitSelectionRequired));
+        // LEIP picks index.js (conventional Node.js entry) — process is resolved.
+        assert!(lock.contract.entries.contains_key("process"));
+        assert_eq!(
+            lock.contract.entries.get("process"),
+            Some(&json!({ "entrypoint": "node", "run_command": "node index.js" }))
+        );
     }
 
     #[test]
@@ -4690,15 +4931,16 @@ mod tests {
         assert!(is_equal_ranked(&candidates));
     }
 
+    // LEIP resolves `index.js` over `main.js` by convention — run succeeds.
     #[test]
-    fn run_fails_when_equal_rank_candidates_remain_without_selection() {
+    fn run_resolves_index_js_over_main_js_by_convention() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("package.json"), r#"{"name":"demo"}"#)
             .expect("write package json");
         fs::write(dir.path().join("index.js"), "console.log('a')").expect("write index");
         fs::write(dir.path().join("main.js"), "console.log('b')").expect("write main");
 
-        let error = execute_shared_engine(
+        let result = execute_shared_engine(
             SourceInferenceInput::SourceEvidence(SourceEvidenceInput {
                 project_root: dir.path().to_path_buf(),
                 explicit_native_artifact: None,
@@ -4709,9 +4951,12 @@ mod tests {
             true,
             reporter(),
         )
-        .expect_err("run should fail without explicit selection");
+        .expect("run should succeed with LEIP resolution");
 
-        assert!(error.to_string().contains("ATO_ERR_AMBIGUOUS_ENTRYPOINT"));
+        assert_eq!(
+            result.lock.contract.entries.get("process"),
+            Some(&json!({ "entrypoint": "node", "run_command": "node index.js" }))
+        );
     }
 
     #[test]

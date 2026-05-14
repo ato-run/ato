@@ -336,12 +336,17 @@
         <div class="block">
           <div class="block-title" data-i18n="settings.section.controlbar">コントロールバー</div>
           <div class="row">
-            <span class="row-label" data-i18n="settings.controlbar.always_on_top">常に最前面に表示</span>
-            <div class="toggle-track" id="tog-controlBarAlwaysOnTop"><div class="toggle-knob"></div></div>
+            <span class="row-label" data-i18n="settings.controlbar.mode">表示モード</span>
+            <select class="setting-select" id="sel-controlBarMode">
+              <option value="floating" data-i18n="settings.controlbar.mode.floating">Floating</option>
+              <option value="auto-hide" data-i18n="settings.controlbar.mode.auto_hide">Auto-hide</option>
+              <option value="compact-pill" data-i18n="settings.controlbar.mode.compact_pill">Compact pill</option>
+              <option value="hidden" data-i18n="settings.controlbar.mode.hidden">Hidden</option>
+            </select>
           </div>
           <div class="row">
-            <span class="row-label"><span data-i18n="settings.controlbar.show_on_start">起動時に表示</span><span class="badge-next">次回起動時</span></span>
-            <div class="toggle-track" id="tog-controlBarVisibleOnStartup"><div class="toggle-knob"></div></div>
+            <span class="row-label" data-i18n="settings.controlbar.always_on_top">常に最前面に表示</span>
+            <div class="toggle-track" id="tog-controlBarAlwaysOnTop"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
             <span class="row-label" data-i18n="settings.controlbar.position">位置</span>
@@ -349,10 +354,6 @@
               <option value="top" data-i18n="settings.position.top">上</option>
               <option value="bottom" data-i18n="settings.position.bottom">下</option>
             </select>
-          </div>
-          <div class="row">
-            <span class="row-label" data-i18n="settings.controlbar.autohide">非使用時に自動で隠す</span>
-            <div class="toggle-track" id="tog-controlBarAutoHide"><div class="toggle-knob"></div></div>
           </div>
         </div>
       </div>
@@ -571,10 +572,9 @@ bindToggle('tog-focusViewEnabled',          'focusViewEnabled');
 bindSelect('sel-startupSurface',            'startupSurface');
 bindSelect('sel-contentWindowDefaultPresentation', 'contentWindowDefaultPresentation');
 bindToggle('tog-restoreWindowFrames',       'restoreWindowFrames');
+bindSelect('sel-controlBarMode',            'controlBarMode');
 bindToggle('tog-controlBarAlwaysOnTop',     'controlBarAlwaysOnTop');
-bindToggle('tog-controlBarVisibleOnStartup','controlBarVisibleOnStartup');
 bindSelect('sel-controlBarPosition',        'controlBarPosition');
-bindToggle('tog-controlBarAutoHide',        'controlBarAutoHide');
 
 bindSelect('sel-updateChannel',             'updateChannel');
 bindToggle('tog-automaticUpdates',          'automaticUpdates');
@@ -606,10 +606,9 @@ function hydrateFromSnapshot(snap) {
   setOptionalSelect('sel-startupSurface',       val(r, 'desktop', 'startupSurface'));
   setOptionalSelect('sel-contentWindowDefaultPresentation', val(r, 'desktop', 'contentWindowDefaultPresentation'));
   setToggleEl('tog-restoreWindowFrames',        val(r, 'desktop', 'restoreWindowFrames'));
+  setOptionalSelect('sel-controlBarMode',        val(r, 'desktop', 'controlBar', 'mode'));
   setToggleEl('tog-controlBarAlwaysOnTop',      val(r, 'desktop', 'controlBar', 'alwaysOnTop'));
-  setToggleEl('tog-controlBarVisibleOnStartup', val(r, 'desktop', 'controlBar', 'visibleOnStartup'));
   setOptionalSelect('sel-controlBarPosition',   val(r, 'desktop', 'controlBar', 'position'));
-  setToggleEl('tog-controlBarAutoHide',         val(r, 'desktop', 'controlBar', 'autoHide'));
 
   // Updates
   setOptionalSelect('sel-updateChannel',  val(r, 'updates', 'channel'));
