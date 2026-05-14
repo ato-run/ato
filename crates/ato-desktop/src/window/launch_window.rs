@@ -43,6 +43,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::state::GuestRoute;
+use crate::localization::{compose_init_script, resolve_locale};
 use crate::system_capsule::ipc as system_ipc;
 
 const CONSENT_HTML: &str = include_str!("../../assets/system/ato-launch/consent.html");
@@ -227,6 +228,8 @@ fn open_wizard(
         ..Default::default()
     };
 
+    let locale = resolve_locale(crate::config::load_config().general.language);
+    let composed = compose_init_script(locale, init_script.as_deref());
     let queue = system_ipc::new_queue();
     let handle = cx.open_window(options, |window, cx| {
         let win_size = window.bounds().size;
@@ -239,14 +242,11 @@ fn open_wizard(
             .into(),
         };
         let queue_for_ipc = queue.clone();
-        let mut builder = WebViewBuilder::new()
+        let webview = WebViewBuilder::new()
             .with_html(html)
+            .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
-            .with_bounds(webview_rect);
-        if let Some(script) = init_script {
-            builder = builder.with_initialization_script(script);
-        }
-        let webview = builder
+            .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Launch wizard WebView");
         let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
@@ -536,6 +536,8 @@ fn open_consent_wizard_inner(
         ..Default::default()
     };
 
+    let locale = resolve_locale(crate::config::load_config().general.language);
+    let composed = compose_init_script(locale, init_script.as_deref());
     let queue = system_ipc::new_queue();
     let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> = Arc::new(Mutex::new(None));
     let shell_slot_inner = Arc::clone(&shell_slot);
@@ -551,14 +553,11 @@ fn open_consent_wizard_inner(
             )
             .into(),
         };
-        let mut builder = WebViewBuilder::new()
+        let webview = WebViewBuilder::new()
             .with_html(CONSENT_HTML)
+            .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
-            .with_bounds(webview_rect);
-        if let Some(script) = init_script {
-            builder = builder.with_initialization_script(script);
-        }
-        let webview = builder
+            .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the consent WebView");
         let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
@@ -631,6 +630,8 @@ fn open_boot_wizard_inner(
         ..Default::default()
     };
 
+    let locale = resolve_locale(crate::config::load_config().general.language);
+    let composed = compose_init_script(locale, init_script.as_deref());
     let queue = system_ipc::new_queue();
     // Arc<Mutex<...>> so the entity can be captured across the Send closure.
     let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> =
@@ -648,14 +649,11 @@ fn open_boot_wizard_inner(
             )
             .into(),
         };
-        let mut builder = WebViewBuilder::new()
+        let webview = WebViewBuilder::new()
             .with_html(BOOT_HTML)
+            .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
-            .with_bounds(webview_rect);
-        if let Some(script) = init_script {
-            builder = builder.with_initialization_script(script);
-        }
-        let webview = builder
+            .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the boot WebView");
         let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
