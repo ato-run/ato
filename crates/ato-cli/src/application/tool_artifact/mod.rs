@@ -207,23 +207,30 @@ fn merge_resolved_into_env(
     out: &mut std::collections::BTreeMap<String, String>,
 ) {
     let prefix = format!("ATO_TOOL_{}", normalize_env_name(&resolved.name));
-    out.insert(format!("{prefix}_ROOT"), resolved.root.display().to_string());
+    out.insert(format!("{prefix}_ROOT"), env_path_value(&resolved.root));
     out.insert(
         format!("{prefix}_BIN_DIR"),
-        resolved.bin_dir.display().to_string(),
+        env_path_value(&resolved.bin_dir),
     );
     out.insert(
         format!("{prefix}_LIB_DIR"),
-        resolved.lib_dir.display().to_string(),
+        env_path_value(&resolved.lib_dir),
     );
     out.insert(
         format!("{prefix}_SHARE_DIR"),
-        resolved.share_dir.display().to_string(),
+        env_path_value(&resolved.share_dir),
     );
     for (cmd, path) in &resolved.provides {
         let key = format!("ATO_TOOL_{}", normalize_env_name(cmd));
-        out.insert(key, path.display().to_string());
+        out.insert(key, env_path_value(path));
     }
+}
+
+fn env_path_value(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn normalize_env_name(s: &str) -> String {
@@ -530,6 +537,73 @@ mod tests {
             }
             other => panic!("unexpected: {other}"),
         }
+    }
+
+    #[test]
+    fn merge_resolved_into_env_canonicalizes_relative_paths() {
+        let current_dir = std::env::current_dir().expect("cwd");
+        let temp = tempfile::tempdir_in(&current_dir).expect("tempdir in cwd");
+        let root = temp.path().join("tool-root");
+        let bin_dir = root.join("bin");
+        let lib_dir = root.join("lib");
+        let share_dir = root.join("share");
+        std::fs::create_dir_all(&bin_dir).expect("create bin");
+        std::fs::create_dir_all(&lib_dir).expect("create lib");
+        std::fs::create_dir_all(&share_dir).expect("create share");
+        let demo = bin_dir.join("demo");
+        std::fs::write(&demo, b"#!/bin/sh\nexit 0\n").expect("write demo");
+
+        let resolved = ResolvedToolArtifact {
+            name: "demo".into(),
+            version: "1.0.0".into(),
+            platform: host_platform().unwrap_or("unknown").into(),
+            url: "test-local://demo".into(),
+            sha256: "deadbeef".into(),
+            root: root.strip_prefix(&current_dir).expect("root under cwd").to_path_buf(),
+            bin_dir: bin_dir
+                .strip_prefix(&current_dir)
+                .expect("bin under cwd")
+                .to_path_buf(),
+            lib_dir: lib_dir
+                .strip_prefix(&current_dir)
+                .expect("lib under cwd")
+                .to_path_buf(),
+            share_dir: share_dir
+                .strip_prefix(&current_dir)
+                .expect("share under cwd")
+                .to_path_buf(),
+            provides: BTreeMap::from([(
+                "demo".into(),
+                demo.strip_prefix(&current_dir)
+                    .expect("demo under cwd")
+                    .to_path_buf(),
+            )]),
+            from_cache: false,
+        };
+
+        let mut env = BTreeMap::new();
+        merge_resolved_into_env(&resolved, &mut env);
+
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_ROOT"),
+            Some(&std::fs::canonicalize(&root).expect("canonical root").display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_BIN_DIR"),
+            Some(&std::fs::canonicalize(&bin_dir).expect("canonical bin").display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_LIB_DIR"),
+            Some(&std::fs::canonicalize(&lib_dir).expect("canonical lib").display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_SHARE_DIR"),
+            Some(&std::fs::canonicalize(&share_dir).expect("canonical share").display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO"),
+            Some(&std::fs::canonicalize(&demo).expect("canonical demo").display().to_string())
+        );
     }
 
     #[test]

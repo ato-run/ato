@@ -78,23 +78,26 @@ impl ReceiptEmissionContext {
 /// diagnostic is emitted on stderr but the original error from the
 /// inner future is always returned. Hiding the failure under a write
 /// error would mask the actual user-visible problem.
-pub(crate) async fn emit_receipt_on_result<F, T>(
-    ctx: ReceiptEmissionContext,
-    inner: F,
-) -> Result<T>
+pub(crate) async fn emit_receipt_on_result<F, T>(ctx: ReceiptEmissionContext, inner: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
     let outcome = inner.await;
     if let Err(error) = outcome.as_ref() {
         if let Some(receipt) = partial_receipt_for_error(error) {
-            if let Err(write_err) =
-                write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt))
-            {
-                eprintln!(
-                    "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
-                    ctx.boundary
-                );
+            match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
+                Ok(path) => eprintln!(
+                    "Execution receipt (v2-experimental, {}): {} ({})",
+                    receipt_result_label(receipt.result),
+                    receipt.execution_id,
+                    path.display()
+                ),
+                Err(write_err) => {
+                    eprintln!(
+                        "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
+                        ctx.boundary
+                    );
+                }
             }
         }
         // No envelope means we couldn't classify the error (e.g. plain
@@ -124,10 +127,9 @@ where
     let outcome = inner.await;
     if let Err(error) = outcome.as_ref() {
         if let Some(receipt) = partial_receipt_for_error(error) {
-            if let Err(write_err) = write_receipt_document_atomic_at(
-                root,
-                &ExecutionReceiptDocument::V2(receipt),
-            ) {
+            if let Err(write_err) =
+                write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V2(receipt))
+            {
                 eprintln!(
                     "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",
                     ctx.boundary
@@ -195,7 +197,20 @@ fn envelope_from_execution_error(error: &AtoExecutionError) -> ReceiptFailureEnv
         resource: error.resource.clone(),
         target: error.target.clone(),
         retryable,
+        interactive_resolution_required: error.interactive_resolution_required.clone(),
+        classification: Some(error.classification),
+        cleanup_status: error.cleanup_status,
+        cleanup_actions: error.cleanup_actions.clone(),
+        manifest_suggestion: error.manifest_suggestion.clone(),
         details: error.details.clone(),
+    }
+}
+
+fn receipt_result_label(result: ReceiptResultClass) -> &'static str {
+    match result {
+        ReceiptResultClass::Passed => "passed",
+        ReceiptResultClass::RecoverableFailure => "recoverable-failure",
+        ReceiptResultClass::Aborted => "aborted",
     }
 }
 
@@ -219,6 +234,7 @@ fn classify_phase(phase: &str) -> ReceiptFailureKind {
 mod tests {
     use super::*;
     use capsule_core::engine::execution_plan::error::AtoErrorCode;
+    use capsule_core::execution_plan::error::AtoErrorClassification;
 
     fn execution_error(code: AtoErrorCode) -> AtoExecutionError {
         AtoExecutionError::new(code, "fixture failure", None, None, None)
@@ -226,9 +242,8 @@ mod tests {
 
     #[test]
     fn inference_phase_classified_as_recoverable() {
-        let envelope = envelope_from_execution_error(&execution_error(
-            AtoErrorCode::AtoErrMissingRequiredEnv,
-        ));
+        let envelope =
+            envelope_from_execution_error(&execution_error(AtoErrorCode::AtoErrMissingRequiredEnv));
         assert_eq!(envelope.kind, ReceiptFailureKind::Recoverable);
         assert_eq!(envelope.phase, "inference");
         assert_eq!(envelope.name, "missing_required_env");
@@ -245,9 +260,8 @@ mod tests {
 
     #[test]
     fn execution_phase_classified_as_recoverable() {
-        let envelope = envelope_from_execution_error(&execution_error(
-            AtoErrorCode::AtoErrRuntimeNotResolved,
-        ));
+        let envelope =
+            envelope_from_execution_error(&execution_error(AtoErrorCode::AtoErrRuntimeNotResolved));
         assert_eq!(envelope.kind, ReceiptFailureKind::Recoverable);
         assert_eq!(envelope.phase, "execution");
     }
@@ -260,6 +274,26 @@ mod tests {
         assert_eq!(envelope.phase, "internal");
     }
 
+    #[test]
+    fn envelope_carries_typed_resolution_and_classification_fields() {
+        let error = AtoExecutionError::missing_required_env(
+            "missing SECRET_KEY",
+            vec!["SECRET_KEY".to_string()],
+            Vec::new(),
+            Some("app"),
+        );
+        let envelope = envelope_from_execution_error(&error);
+
+        assert!(
+            envelope.interactive_resolution_required.is_some(),
+            "partial receipt envelope should preserve the desktop/agent resolution payload"
+        );
+        assert_eq!(
+            envelope.classification,
+            Some(AtoErrorClassification::Manifest)
+        );
+    }
+
     /// `AtoErrInternal` has `retryable() == true` on the typed error
     /// side, but an `Aborted` envelope is by definition not retryable —
     /// the user can't act on it without external intervention. Pin
@@ -269,7 +303,10 @@ mod tests {
     fn aborted_envelope_overrides_retryable_to_false() {
         let mut error = execution_error(AtoErrorCode::AtoErrInternal);
         error.retryable = true; // simulate the typed error claiming retryable=true
-        assert!(error.retryable, "fixture sanity: typed error claims retryable=true");
+        assert!(
+            error.retryable,
+            "fixture sanity: typed error claims retryable=true"
+        );
 
         let envelope = envelope_from_execution_error(&error);
         assert_eq!(envelope.kind, ReceiptFailureKind::Aborted);
@@ -288,7 +325,10 @@ mod tests {
         error.retryable = true;
         let envelope = envelope_from_execution_error(&error);
         assert_eq!(envelope.kind, ReceiptFailureKind::Recoverable);
-        assert!(envelope.retryable, "Recoverable envelope must pass typed retryable through");
+        assert!(
+            envelope.retryable,
+            "Recoverable envelope must pass typed retryable through"
+        );
     }
 
     #[test]
@@ -320,7 +360,10 @@ mod tests {
             )))
         })
         .await;
-        assert!(outcome.is_err(), "wrapper must propagate the original error");
+        assert!(
+            outcome.is_err(),
+            "wrapper must propagate the original error"
+        );
 
         // Find the receipt the wrapper wrote — synthetic id starts with `partial:`.
         let entries: Vec<_> = std::fs::read_dir(temp.path())
@@ -328,7 +371,11 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(entries.len(), 1, "wrapper must write exactly one receipt dir");
+        assert_eq!(
+            entries.len(),
+            1,
+            "wrapper must write exactly one receipt dir"
+        );
         assert!(
             entries[0].starts_with("partial_blake3_"),
             "partial receipt dir name must reflect the synthetic id, got {entries:?}"
@@ -357,6 +404,11 @@ mod tests {
         assert_eq!(
             env.get("phase").and_then(serde_json::Value::as_str),
             Some("inference")
+        );
+        assert_eq!(
+            env.get("classification")
+                .and_then(serde_json::Value::as_str),
+            Some("manifest")
         );
         assert_eq!(
             env.get("kind").and_then(serde_json::Value::as_str),
@@ -407,7 +459,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = ReceiptEmissionContext::for_boundary("test boundary");
 
-        let outcome: Result<u32> = emit_receipt_on_result_at(ctx, temp.path(), async { Ok(42) }).await;
+        let outcome: Result<u32> =
+            emit_receipt_on_result_at(ctx, temp.path(), async { Ok(42) }).await;
         assert_eq!(outcome.expect("ok"), 42);
 
         let entries: Vec<_> = std::fs::read_dir(temp.path())
