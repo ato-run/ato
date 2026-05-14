@@ -8,24 +8,25 @@
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg: #111111;
-    --surface: #1a1a1a;
-    --surface-raised: #222222;
-    --border: rgba(255,255,255,0.08);
-    --border-hover: rgba(255,255,255,0.16);
-    --text-primary: #f0f0f0;
-    --text-secondary: #888888;
-    --text-tertiary: #555555;
-    --accent: #7c6af5;
-    --accent-dim: rgba(124,106,245,0.15);
-    --accent-hover: #9085f8;
-    --green: #4ade80;
-    --card-bg: #161616;
+    --bg: #f0f2f7;
+    --surface: #ffffff;
+    --surface-hover: #f7f8fb;
+    --border: rgba(0,0,0,0.07);
+    --border-hover: rgba(0,0,0,0.13);
+    --text-primary: #1a1a2e;
+    --text-secondary: #6b7280;
+    --text-tertiary: #9ca3af;
+    --accent: #6c60f0;
+    --accent-hover: #7c6af5;
+    --accent-dim: rgba(108,96,240,0.1);
+    --green: #10b981;
+    --card-dark: #1a1b2e;
+    --card-dark2: #231e3a;
     --radius-sm: 8px;
     --radius-md: 12px;
     --radius-lg: 16px;
     --radius-xl: 24px;
-    --titlebar-h: 52px;
+    --drag-h: 28px;
   }
 
   html, body {
@@ -40,254 +41,284 @@
     user-select: none;
   }
 
-  /* ── Titlebar drag region ──────────────────────────────────────── */
-  #titlebar {
-    height: var(--titlebar-h);
+  /* ── Titlebar drag region (GPUI traffic lights sit here) ── */
+  #drag-region {
+    height: var(--drag-h);
     -webkit-app-region: drag;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 20px;
-    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  #titlebar .left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    -webkit-app-region: no-drag;
-  }
-  #titlebar .puck {
-    width: 32px; height: 32px;
-    border-radius: 8px;
-    background: var(--accent-dim);
-    border: 1px solid rgba(124,106,245,0.3);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 16px;
-  }
-  #titlebar .window-title { font-size: 13px; font-weight: 600; }
-  #titlebar .window-subtitle { font-size: 11px; color: var(--text-secondary); }
-  #titlebar .close-btn {
-    -webkit-app-region: no-drag;
-    width: 28px; height: 28px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 14px;
-    transition: background 0.1s, color 0.1s;
-  }
-  #titlebar .close-btn:hover { background: rgba(255,255,255,0.06); color: var(--text-primary); }
 
-  /* ── Main scroll area ─────────────────────────────────────────── */
+  /* ── Main scroll area ─────────────────────────────────── */
   #main {
-    height: calc(100vh - var(--titlebar-h));
+    height: calc(100vh - var(--drag-h));
     overflow-y: auto;
-    padding: 32px 48px 48px;
+    padding: 20px 40px 48px;
     scrollbar-width: none;
   }
   #main::-webkit-scrollbar { display: none; }
 
-  /* ── Search section ───────────────────────────────────────────── */
+  /* ── Hero ─────────────────────────────────────────────── */
+  .hero {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 8px; margin-bottom: 24px;
+  }
+  .hero-icon {
+    width: 56px; height: 56px; border-radius: 14px;
+    background: linear-gradient(135deg, #6c60f0 0%, #9b8ff8 100%);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 4px;
+    box-shadow: 0 4px 16px rgba(108,96,240,0.3);
+  }
+  .hero-icon svg { width: 28px; height: 28px; }
+  .hero-title {
+    font-size: 22px; font-weight: 700; letter-spacing: -0.3px;
+    color: var(--text-primary);
+  }
+  .hero-subtitle {
+    font-size: 13px; color: var(--text-secondary);
+  }
+
+  /* ── Search ───────────────────────────────────────────── */
   .search-section {
     display: flex; flex-direction: column; align-items: center;
-    gap: 16px; margin-bottom: 32px;
-  }
-  .search-label {
-    font-size: 13px; color: var(--text-secondary);
-    letter-spacing: 0.02em;
+    gap: 12px; margin-bottom: 28px;
   }
   .search-bar {
-    width: 100%; max-width: 640px; position: relative;
+    width: 100%; max-width: 600px; position: relative;
+  }
+  .search-icon {
+    position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+    color: var(--text-tertiary); pointer-events: none;
+    display: flex; align-items: center;
   }
   .search-input {
     width: 100%;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1.5px solid var(--border);
     border-radius: var(--radius-xl);
     color: var(--text-primary);
-    font-size: 14px;
-    padding: 14px 48px 14px 20px;
+    font-size: 13.5px;
+    padding: 13px 52px 13px 44px;
     outline: none;
     transition: border-color 0.15s, box-shadow 0.15s;
     font-family: inherit;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   }
   .search-input::placeholder { color: var(--text-tertiary); }
   .search-input:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(124,106,245,0.15);
+    box-shadow: 0 0 0 3px rgba(108,96,240,0.12), 0 1px 4px rgba(0,0,0,0.06);
   }
   .search-hint {
     position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
     font-size: 11px; color: var(--text-tertiary);
-    background: var(--surface-raised); border: 1px solid var(--border);
-    border-radius: 4px; padding: 1px 5px;
+    background: #eef0f5; border: 1px solid var(--border);
+    border-radius: 5px; padding: 2px 6px;
     pointer-events: none;
   }
 
-  /* ── Suggestion chips ─────────────────────────────────────────── */
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  /* ── Suggestion chips ─────────────────────────────────── */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; }
   .chip {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: 20px; padding: 5px 14px;
-    font-size: 12px; color: var(--text-secondary);
+    border-radius: 20px; padding: 4px 13px;
+    font-size: 11.5px; color: var(--text-secondary);
     cursor: pointer; transition: background 0.1s, border-color 0.1s, color 0.1s;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
   }
   .chip:hover {
-    background: var(--surface-raised); border-color: var(--border-hover);
+    background: var(--surface-hover); border-color: var(--border-hover);
     color: var(--text-primary);
   }
 
-  /* ── Error bar ────────────────────────────────────────────────── */
+  /* ── Error bar ────────────────────────────────────────── */
   .error-bar {
-    display: none; width: 100%; max-width: 640px; margin: 8px auto 0;
-    background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
-    border-radius: var(--radius-sm); padding: 8px 14px;
-    font-size: 12px; color: #f87171; text-align: center;
+    display: none; width: 100%; max-width: 600px; margin: 4px auto 0;
+    background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25);
+    border-radius: var(--radius-sm); padding: 7px 14px;
+    font-size: 12px; color: #dc2626; text-align: center;
   }
   .error-bar.visible { display: block; }
 
-  /* ── Section titles ───────────────────────────────────────────── */
-  .section { margin-bottom: 28px; }
-  .section-title {
-    font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
-    text-transform: uppercase; color: var(--text-tertiary);
-    margin-bottom: 12px;
-  }
-
-  /* ── Quick actions grid ───────────────────────────────────────── */
+  /* ── Quick actions ────────────────────────────────────── */
   .quick-grid {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 10px;
+    margin-bottom: 28px;
   }
   .quick-tile {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-md); padding: 16px;
-    cursor: pointer; transition: background 0.1s, border-color 0.1s, transform 0.1s;
+    background: var(--surface); border: 1.5px solid var(--border);
+    border-radius: var(--radius-md); padding: 14px 16px;
+    cursor: pointer; transition: background 0.1s, border-color 0.1s, transform 0.1s, box-shadow 0.1s;
     display: flex; flex-direction: column; gap: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
   }
   .quick-tile:hover:not(.disabled) {
-    background: var(--surface-raised); border-color: var(--border-hover);
+    background: var(--surface-hover); border-color: var(--border-hover);
     transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.08);
   }
-  .quick-tile.disabled { opacity: 0.45; cursor: default; }
-  .quick-tile .tile-icon {
-    width: 32px; height: 32px; border-radius: 8px;
-    background: var(--accent-dim); border: 1px solid rgba(124,106,245,0.2);
-    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  .quick-tile.disabled { opacity: 0.5; cursor: default; }
+  .tile-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
   }
-  .quick-tile .tile-label { font-size: 13px; font-weight: 500; }
-  .quick-tile .tile-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
-  .quick-tile .badge {
+  .tile-icon svg { width: 18px; height: 18px; }
+  .tile-icon.github { background: linear-gradient(135deg, #6c60f0, #9b8ff8); }
+  .tile-icon.local  { background: linear-gradient(135deg, #f97316, #fb923c); }
+  .tile-icon.store  { background: linear-gradient(135deg, #0ea5e9, #38bdf8); }
+  .tile-icon.workspace { background: linear-gradient(135deg, #8b5cf6, #a78bfa); }
+  .tile-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+  .tile-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.45; }
+  .tile-badge {
     display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 4px;
-    background: rgba(100,100,100,0.2); color: var(--text-tertiary);
-    font-weight: 500;
+    background: rgba(0,0,0,0.06); color: var(--text-tertiary); font-weight: 500;
   }
 
-  /* ── Two-column layout ────────────────────────────────────────── */
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  /* ── Section headers ──────────────────────────────────── */
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .section-title {
+    font-size: 13px; font-weight: 600; color: var(--text-primary);
+  }
+  .section-link {
+    font-size: 12px; color: var(--accent); cursor: pointer;
+    text-decoration: none; border: none; background: none; font-family: inherit;
+  }
+  .section-link:hover { text-decoration: underline; }
 
-  /* ── Card list ────────────────────────────────────────────────── */
-  .card-list { display: flex; flex-direction: column; gap: 6px; }
+  /* ── Two-column layout ────────────────────────────────── */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px; }
+
+  /* ── Card list ────────────────────────────────────────── */
+  .card-list { display: flex; flex-direction: column; gap: 4px; }
   .card-item {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius-sm); padding: 10px 14px;
+    background: var(--surface); border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm); padding: 10px 12px;
     cursor: pointer; transition: background 0.1s, border-color 0.1s;
-    display: flex; align-items: center; gap: 12px;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
   }
-  .card-item:hover { background: var(--surface-raised); border-color: var(--border-hover); }
-  .card-item .item-icon {
-    width: 28px; height: 28px; border-radius: 6px;
+  .card-item:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+  .item-icon {
+    width: 30px; height: 30px; border-radius: 7px;
     background: var(--accent-dim); display: flex; align-items: center; justify-content: center;
-    font-size: 13px; flex-shrink: 0;
+    font-size: 14px; flex-shrink: 0;
   }
-  .card-item .item-info { overflow: hidden; }
-  .card-item .item-name {
+  .item-info { overflow: hidden; flex: 1; min-width: 0; }
+  .item-name {
     font-size: 13px; font-weight: 500; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis;
+    overflow: hidden; text-overflow: ellipsis; color: var(--text-primary);
   }
-  .card-item .item-sub {
+  .item-sub {
     font-size: 11px; color: var(--text-secondary); white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis;
   }
+  .item-right {
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  }
+  .item-time { font-size: 11px; color: var(--text-tertiary); white-space: nowrap; }
+  .item-arrow { color: var(--text-tertiary); font-size: 12px; }
   .empty-state {
-    padding: 20px; text-align: center;
-    font-size: 12px; color: var(--text-tertiary);
-    background: var(--surface); border: 1px dashed var(--border);
+    padding: 18px; text-align: center;
+    font-size: 12px; color: var(--text-tertiary); line-height: 1.6;
+    background: var(--surface); border: 1.5px dashed var(--border);
     border-radius: var(--radius-sm);
   }
 
-  /* ── Featured apps ────────────────────────────────────────────── */
-  .featured-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-  }
-  .featured-card {
-    background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: var(--radius-md); padding: 16px 16px 14px;
-    display: flex; flex-direction: column; gap: 10px;
-  }
-  .featured-card .fc-head { display: flex; align-items: center; gap: 10px; }
-  .featured-card .fc-icon {
-    width: 36px; height: 36px; border-radius: 8px;
-    background: var(--accent-dim); display: flex; align-items: center;
-    justify-content: center; font-size: 18px; flex-shrink: 0;
-    border: 1px solid rgba(124,106,245,0.2);
-  }
-  .featured-card .fc-label { font-size: 13px; font-weight: 600; }
-  .featured-card .fc-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
-  .featured-card .fc-actions { display: flex; gap: 8px; }
-  .btn-open {
-    flex: 1; padding: 7px 0; border-radius: 6px;
-    background: var(--accent); color: #fff; border: none; cursor: pointer;
-    font-size: 12px; font-weight: 500; font-family: inherit;
-    transition: background 0.1s;
-  }
-  .btn-open:hover { background: var(--accent-hover); }
-  .btn-install {
-    flex: 1; padding: 7px 0; border-radius: 6px;
-    background: transparent; color: var(--text-secondary);
-    border: 1px solid var(--border); cursor: pointer;
-    font-size: 12px; font-family: inherit;
-    transition: background 0.1s, color 0.1s;
-  }
-  .btn-install:hover { background: var(--surface-raised); color: var(--text-primary); }
-
-  /* ── Open windows pill ────────────────────────────────────────── */
-  .open-windows {
-    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px;
-  }
+  /* ── Open windows pills ───────────────────────────────── */
+  .open-windows { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
   .window-pill {
     display: flex; align-items: center; gap: 6px;
-    background: var(--surface); border: 1px solid var(--border);
+    background: var(--surface); border: 1.5px solid var(--border);
     border-radius: 20px; padding: 4px 12px;
     cursor: pointer; font-size: 12px;
     transition: background 0.1s, border-color 0.1s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
   }
-  .window-pill:hover { background: var(--surface-raised); border-color: var(--border-hover); }
-  .window-pill .dot {
-    width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+  .window-pill:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+  .window-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+  /* ── Featured apps ────────────────────────────────────── */
+  .featured-section { margin-bottom: 8px; }
+  .featured-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px;
   }
+  .featured-card {
+    background: var(--card-dark);
+    border-radius: var(--radius-lg); padding: 18px 18px 14px;
+    display: flex; flex-direction: column; gap: 12px;
+    position: relative; overflow: hidden;
+  }
+  .featured-card::before {
+    content: ''; position: absolute; top: 0; right: 0;
+    width: 180px; height: 160px;
+    background: radial-gradient(circle at top right, rgba(108,96,240,0.15) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .fc-head { display: flex; align-items: flex-start; gap: 12px; }
+  .fc-icon {
+    width: 44px; height: 44px; border-radius: 10px;
+    display: flex; align-items: center;
+    justify-content: center; font-size: 22px; flex-shrink: 0;
+  }
+  .fc-meta { flex: 1; min-width: 0; }
+  .fc-label { font-size: 15px; font-weight: 700; color: #f0f0f5; }
+  .fc-tagline { font-size: 12px; color: rgba(255,255,255,0.55); margin-top: 2px; }
+  .fc-stats {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 12px; color: rgba(255,255,255,0.6);
+  }
+  .fc-avatars { display: flex; }
+  .fc-avatar {
+    width: 20px; height: 20px; border-radius: 50%;
+    border: 1.5px solid var(--card-dark);
+    background: #4a4a6a;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px;
+    margin-left: -6px;
+    overflow: hidden;
+  }
+  .fc-avatar:first-child { margin-left: 0; }
+  .fc-count { font-size: 12px; color: rgba(255,255,255,0.55); }
+  .fc-stars { color: #fbbf24; font-size: 12px; }
+  .fc-rating { color: rgba(255,255,255,0.55); font-size: 12px; }
+  .fc-actions { display: flex; gap: 8px; }
+  .btn-open {
+    flex: 1; padding: 8px 0; border-radius: 7px;
+    background: var(--accent); color: #fff; border: none; cursor: pointer;
+    font-size: 12.5px; font-weight: 600; font-family: inherit;
+    transition: background 0.1s;
+  }
+  .btn-open:hover { background: var(--accent-hover); }
+  .btn-detail {
+    flex: 1; padding: 8px 0; border-radius: 7px;
+    background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.8);
+    border: 1px solid rgba(255,255,255,0.12); cursor: pointer;
+    font-size: 12.5px; font-family: inherit;
+    transition: background 0.1s;
+  }
+  .btn-detail:hover { background: rgba(255,255,255,0.16); }
+  .fc-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .fc-tag {
+    font-size: 10.5px; padding: 2px 8px; border-radius: 5px;
+    background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.5);
+    display: flex; align-items: center; gap: 4px;
+  }
+  .fc-tag svg { width: 10px; height: 10px; opacity: 0.7; }
 </style>
 </head>
 <body>
 
-<!-- Titlebar -->
-<div id="titlebar">
-  <div class="left">
-    <div class="puck">🪐</div>
-    <div>
-      <div class="window-title">新しいウィンドウ</div>
-      <div class="window-subtitle">カプセル / URL / コマンドから始める</div>
-    </div>
-  </div>
-  <button class="close-btn" id="closeBtn" title="閉じる">✕</button>
-</div>
+<!-- GPUI titlebar drag region -->
+<div id="drag-region"></div>
 
 <!-- Main content -->
 <div id="main">
@@ -295,12 +326,30 @@
   <!-- Open windows row (only if any) -->
   <div class="open-windows" id="openWindowsRow" style="display:none;"></div>
 
+  <!-- Hero -->
+  <div class="hero">
+    <div class="hero-icon">
+      <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M6 14L11 9L16 14L21 9" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M6 19L11 14L16 19L21 14" stroke="rgba(255,255,255,0.55)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="hero-title">新しいウィンドウ</div>
+    <div class="hero-subtitle">カプセル、ローカルアプリ、GitHub repo を開く</div>
+  </div>
+
   <!-- Search -->
   <div class="search-section">
-    <div class="search-label">何を開きますか？</div>
     <div class="search-bar">
+      <span class="search-icon">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M1.5 7.5C1.5 7.5 2 5.5 4 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <path d="M10.5 11.5L13.5 14.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </span>
       <input type="text" class="search-input" id="searchInput"
-             placeholder="capsule://  github.com/  https://  ~/path" spellcheck="false">
+             placeholder="カプセル名、URL、GitHub repo、ローカルパス、またはコマンドを入力" spellcheck="false">
       <span class="search-hint">⌘K</span>
     </div>
     <div class="chips" id="chipsRow">
@@ -311,61 +360,78 @@
     <div class="error-bar" id="errorBar"></div>
   </div>
 
-  <!-- Quick actions -->
-  <div class="section">
-    <div class="section-title">クイックアクション</div>
-    <div class="quick-grid">
-      <div class="quick-tile" id="tileGitHub">
-        <div class="tile-icon">🐙</div>
-        <div class="tile-label">GitHub から実行</div>
-        <div class="tile-desc">owner/repo を貼り付けて即起動</div>
+  <!-- Quick actions (no section title, matches mockup) -->
+  <div class="quick-grid">
+    <div class="quick-tile" id="tileGitHub">
+      <div class="tile-icon github">
+        <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M9 1.5C4.86 1.5 1.5 4.86 1.5 9c0 3.315 2.15 6.126 5.132 7.118.375.069.512-.163.512-.362 0-.178-.006-.65-.01-1.275-2.087.454-2.527-.999-2.527-.999-.34-.865-.83-1.095-.83-1.095-.68-.463.051-.454.051-.454.75.053 1.145.77 1.145.77.667 1.143 1.75.812 2.177.621.067-.483.26-.812.474-1-.665-.075-1.364-.332-1.364-1.479 0-.327.117-.594.308-.803-.031-.076-.134-.38.029-.792 0 0 .251-.08.822.307a2.865 2.865 0 0 1 .749-.1c.254.001.51.034.749.1.57-.387.82-.307.82-.307.163.41.061.716.03.792.192.21.308.476.308.803 0 1.15-.7 1.402-1.368 1.476.108.092.203.276.203.556 0 .401-.003.725-.003.823 0 .201.135.435.515.361C15.352 15.122 17.5 12.314 17.5 9c0-4.14-3.36-7.5-7.5-7.5z" fill="white"/>
+        </svg>
       </div>
-      <div class="quick-tile" id="tileLocal">
-        <div class="tile-icon">📂</div>
-        <div class="tile-label">ローカルから開く</div>
-        <div class="tile-desc">capsule.toml のあるパスを入力</div>
+      <div class="tile-label">GitHubから実行</div>
+      <div class="tile-desc">Repo URLをインストールして起動</div>
+    </div>
+    <div class="quick-tile" id="tileLocal">
+      <div class="tile-icon local">
+        <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M2 5.5C2 4.672 2.672 4 3.5 4H7l1.5 1.5H14.5C15.328 5.5 16 6.172 16 7v6.5c0 .828-.672 1.5-1.5 1.5h-11C2.672 15 2 14.328 2 13.5V5.5z" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
       </div>
-      <div class="quick-tile" id="tileStore">
-        <div class="tile-icon">🏪</div>
-        <div class="tile-label">ストアで探す</div>
-        <div class="tile-desc">公開カプセルのカタログを見る</div>
+      <div class="tile-label">ローカルから開く</div>
+      <div class="tile-desc">フォルダ・ファイル・プロジェクトを開く</div>
+    </div>
+    <div class="quick-tile" id="tileStore">
+      <div class="tile-icon store">
+        <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="2" width="14" height="14" rx="3" stroke="white" stroke-width="1.5"/>
+          <path d="M6 9h6M9 6v6" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
       </div>
-      <div class="quick-tile disabled" id="tileWorkspace">
-        <div class="tile-icon">✦</div>
-        <div class="tile-label">空のワークスペース</div>
-        <div class="tile-desc">
-          新しいプロジェクトを作成
-          <span class="badge">準備中</span>
-        </div>
+      <div class="tile-label">ストアで探す</div>
+      <div class="tile-desc">最新のアプリやカプセルを検索</div>
+    </div>
+    <div class="quick-tile disabled" id="tileWorkspace">
+      <div class="tile-icon workspace">
+        <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M9 2v2.5M9 13.5V16M2 9h2.5M13.5 9H16M4.05 4.05l1.77 1.77M12.18 12.18l1.77 1.77M4.05 13.95l1.77-1.77M12.18 5.82l1.77-1.77" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
       </div>
+      <div class="tile-label">空のワークスペース</div>
+      <div class="tile-desc">何もない新しい作業スペースを作成 <span class="tile-badge">準備中</span></div>
     </div>
   </div>
 
   <!-- Two-column: recent + local -->
-  <div class="section">
-    <div class="two-col">
-      <div>
+  <div class="two-col">
+    <div>
+      <div class="section-header">
         <div class="section-title">最近使ったカプセル</div>
-        <div class="card-list" id="recentList">
-          <div class="empty-state" id="recentEmpty">
-            まだ履歴がありません<br>起動したカプセルがここに表示されます
-          </div>
+        <button class="section-link" id="showAllRecent">すべて表示</button>
+      </div>
+      <div class="card-list" id="recentList">
+        <div class="empty-state" id="recentEmpty">
+          まだ履歴がありません<br>起動したカプセルがここに表示されます
         </div>
       </div>
-      <div>
+    </div>
+    <div>
+      <div class="section-header">
         <div class="section-title">ローカルアプリ</div>
-        <div class="card-list" id="localList">
-          <div class="empty-state" id="localEmpty">
-            capsule.toml を持つディレクトリが<br>見つかりませんでした
-          </div>
+        <button class="section-link" id="showAllLocal">すべて表示</button>
+      </div>
+      <div class="card-list" id="localList">
+        <div class="empty-state" id="localEmpty">
+          capsule.toml を持つディレクトリが<br>見つかりませんでした
         </div>
       </div>
     </div>
   </div>
 
   <!-- Featured apps -->
-  <div class="section">
-    <div class="section-title">注目のアプリ</div>
+  <div class="featured-section">
+    <div class="section-header">
+      <div class="section-title">注目のアプリ</div>
+    </div>
     <div class="featured-grid" id="featuredGrid"></div>
   </div>
 
@@ -375,14 +441,14 @@
 (function () {
   'use strict';
 
-  // ── IPC helper ───────────────────────────────────────────────────
+  // ── IPC helper ──────────────────────────────────────────
   function ipc(command) {
     if (window.ipc) {
       window.ipc.postMessage(JSON.stringify({ capsule: 'ato-start', command }));
     }
   }
 
-  // ── Snapshot ─────────────────────────────────────────────────────
+  // ── Snapshot ────────────────────────────────────────────
   const snap = window.__ATO_START_SNAPSHOT__ || {
     open_windows: [],
     recent_capsules: [],
@@ -390,7 +456,7 @@
     featured_apps: []
   };
 
-  // ── Open windows row ─────────────────────────────────────────────
+  // ── Open windows row ─────────────────────────────────────
   const openRow = document.getElementById('openWindowsRow');
   if (snap.open_windows && snap.open_windows.length > 0) {
     openRow.style.display = 'flex';
@@ -403,13 +469,13 @@
     });
   }
 
-  // ── Recent capsules ───────────────────────────────────────────────
+  // ── Recent capsules ──────────────────────────────────────
   const recentList = document.getElementById('recentList');
   const recentEmpty = document.getElementById('recentEmpty');
   if (snap.recent_capsules && snap.recent_capsules.length > 0) {
     recentEmpty.remove();
-    snap.recent_capsules.slice(0, 8).forEach(entry => {
-      const el = makeCardItem('🪐', entry.label, entry.handle);
+    snap.recent_capsules.slice(0, 6).forEach(entry => {
+      const el = makeCardItem('🪐', entry.label, entry.handle, entry.time_ago);
       el.addEventListener('click', () => {
         ipc({ kind: 'open_capsule', handle: entry.handle });
       });
@@ -417,13 +483,13 @@
     });
   }
 
-  // ── Local apps ────────────────────────────────────────────────────
+  // ── Local apps ───────────────────────────────────────────
   const localList = document.getElementById('localList');
   const localEmpty = document.getElementById('localEmpty');
   if (snap.local_apps && snap.local_apps.length > 0) {
     localEmpty.remove();
-    snap.local_apps.slice(0, 8).forEach(app => {
-      const el = makeCardItem('📁', app.name, shortenPath(app.path));
+    snap.local_apps.slice(0, 6).forEach(app => {
+      const el = makeCardItem('📁', app.name, shortenPath(app.path), app.time_ago);
       el.addEventListener('click', () => {
         ipc({ kind: 'open_local_path', path: app.path });
       });
@@ -431,38 +497,87 @@
     });
   }
 
-  // ── Featured apps ─────────────────────────────────────────────────
-  const featuredGrid = document.getElementById('featuredGrid');
-  if (snap.featured_apps && snap.featured_apps.length > 0) {
-    snap.featured_apps.forEach(app => {
-      const card = document.createElement('div');
-      card.className = 'featured-card';
-      card.innerHTML = `
-        <div class="fc-head">
-          <div class="fc-icon">⚡</div>
-          <div class="fc-label">${escHtml(app.label)}</div>
-        </div>
-        <div class="fc-desc">${escHtml(app.description)}</div>
-        <div class="fc-actions">
-          <button class="btn-open">開く</button>
-          <button class="btn-install">インストール</button>
-        </div>`;
-      card.querySelector('.btn-open').addEventListener('click', () => {
-        ipc({ kind: 'open_capsule', handle: app.handle });
-      });
-      card.querySelector('.btn-install').addEventListener('click', () => {
-        ipc({ kind: 'open_capsule', handle: app.handle });
-      });
-      featuredGrid.appendChild(card);
-    });
-  }
-
-  // ── Close button ──────────────────────────────────────────────────
-  document.getElementById('closeBtn').addEventListener('click', () => {
-    ipc({ kind: 'close' });
+  // ── "すべて表示" links ──────────────────────────────────
+  document.getElementById('showAllRecent').addEventListener('click', () => {
+    ipc({ kind: 'show_all_recent' });
+  });
+  document.getElementById('showAllLocal').addEventListener('click', () => {
+    ipc({ kind: 'show_all_local' });
   });
 
-  // ── Search input ──────────────────────────────────────────────────
+  // ── Featured apps ─────────────────────────────────────────
+  const featuredGrid = document.getElementById('featuredGrid');
+  const DEFAULT_FEATURED = [
+    {
+      label: 'Weather Demo',
+      description: 'シンプルな天気アプリのデモカプセル',
+      handle: 'capsule://weather-demo',
+      icon: '⛅',
+      icon_bg: 'linear-gradient(135deg,#0ea5e9,#38bdf8)',
+      tags: ['ローカル実行', 'オフライン'],
+      rating: 4.8, installs: 412,
+      installed: true
+    },
+    {
+      label: 'Todo App Demo',
+      description: 'ローカルファースト Todo アプリ',
+      handle: 'capsule://todo-app-demo',
+      icon: '✅',
+      icon_bg: 'linear-gradient(135deg,#10b981,#34d399)',
+      tags: ['ローカル実行', 'プライバシー重視'],
+      rating: 4.6, installs: 387,
+      installed: false
+    }
+  ];
+  const featuredData = (snap.featured_apps && snap.featured_apps.length >= 2)
+    ? snap.featured_apps
+    : DEFAULT_FEATURED;
+
+  featuredData.slice(0, 4).forEach(app => {
+    const card = document.createElement('div');
+    card.className = 'featured-card';
+    const tagsHtml = (app.tags || []).map(t =>
+      `<span class="fc-tag"><svg viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="3.5" stroke="currentColor" stroke-width="1.2"/></svg>${escHtml(t)}</span>`
+    ).join('');
+    const stars = Math.round(app.rating || 0);
+    const starStr = '★'.repeat(stars) + '☆'.repeat(5 - stars);
+    const iconStyle = app.icon_bg ? `style="background:${app.icon_bg}"` : '';
+    card.innerHTML = `
+      <div class="fc-head">
+        <div class="fc-icon" ${iconStyle}>${escHtml(app.icon || '⚡')}</div>
+        <div class="fc-meta">
+          <div class="fc-label">${escHtml(app.label)}</div>
+          <div class="fc-tagline">${escHtml(app.description)}</div>
+        </div>
+      </div>
+      <div class="fc-stats">
+        <div class="fc-avatars">
+          <div class="fc-avatar">👤</div>
+          <div class="fc-avatar">👤</div>
+          <div class="fc-avatar">👤</div>
+        </div>
+        <span class="fc-count">+${app.installs || 0}</span>
+        <span class="fc-stars">★</span>
+        <span class="fc-rating">${(app.rating || 0).toFixed(1)}</span>
+      </div>
+      <div class="fc-actions">
+        ${app.installed
+          ? `<button class="btn-open">開く</button>`
+          : `<button class="btn-open">インストール</button>`}
+        <button class="btn-detail">詳細</button>
+      </div>
+      <div class="fc-tags">${tagsHtml}</div>`;
+    const mainBtn = card.querySelector('.btn-open');
+    mainBtn.addEventListener('click', () => {
+      ipc({ kind: app.installed ? 'open_capsule' : 'install_capsule', handle: app.handle });
+    });
+    card.querySelector('.btn-detail').addEventListener('click', () => {
+      ipc({ kind: 'show_capsule_detail', handle: app.handle });
+    });
+    featuredGrid.appendChild(card);
+  });
+
+  // ── Search ───────────────────────────────────────────────
   const searchInput = document.getElementById('searchInput');
   const errorBar = document.getElementById('errorBar');
 
@@ -480,7 +595,7 @@
     ipc({ kind: 'open_query', value });
   }
 
-  // ── Suggestion chips ──────────────────────────────────────────────
+  // ── Suggestion chips ──────────────────────────────────────
   document.querySelectorAll('.chip[data-fill]').forEach(chip => {
     chip.addEventListener('click', () => {
       searchInput.value = chip.dataset.fill;
@@ -489,24 +604,22 @@
     });
   });
 
-  // ── Quick tiles ───────────────────────────────────────────────────
+  // ── Quick tiles ───────────────────────────────────────────
   document.getElementById('tileGitHub').addEventListener('click', () => {
     searchInput.value = 'github.com/';
     searchInput.focus();
     searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
   });
-
   document.getElementById('tileLocal').addEventListener('click', () => {
     searchInput.value = '~/';
     searchInput.focus();
     searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
   });
-
   document.getElementById('tileStore').addEventListener('click', () => {
     ipc({ kind: 'open_store' });
   });
 
-  // ── ⌘K shortcut ──────────────────────────────────────────────────
+  // ── ⌘K shortcut ──────────────────────────────────────────
   document.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
@@ -515,25 +628,20 @@
     }
   });
 
-  // Auto-focus search on load
   searchInput.focus();
 
-  // ── Helpers ───────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────
   function escHtml(s) {
     return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
-
   function shortenPath(p) {
     const home = p.match(/^\/Users\/[^/]+/);
     if (home) return '~' + p.slice(home[0].length);
     return p;
   }
-
-  function makeCardItem(icon, name, sub) {
+  function makeCardItem(icon, name, sub, timeAgo) {
     const el = document.createElement('div');
     el.className = 'card-item';
     el.innerHTML = `
@@ -541,6 +649,10 @@
       <div class="item-info">
         <div class="item-name">${escHtml(name)}</div>
         <div class="item-sub">${escHtml(sub)}</div>
+      </div>
+      <div class="item-right">
+        ${timeAgo ? `<span class="item-time">${escHtml(timeAgo)}</span>` : ''}
+        <span class="item-arrow">›</span>
       </div>`;
     return el;
   }
