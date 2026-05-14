@@ -6,6 +6,7 @@ mod cli_install;
 mod config;
 mod egress_policy;
 mod egress_proxy;
+mod localization;
 mod logging;
 mod orchestrator;
 mod retention;
