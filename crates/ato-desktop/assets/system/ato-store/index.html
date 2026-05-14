@@ -214,17 +214,18 @@
 </div>
 
 <script>
-function ipc(msg) {
-  window.ipc.postMessage(JSON.stringify(msg));
-}
+// Wrap Wry's window.ipc to avoid redefining the non-writable window property.
+const POST = (window.ipc && typeof window.ipc.postMessage === 'function')
+  ? (m) => window.ipc.postMessage(JSON.stringify(m))
+  : null;
 
 function openWeb() {
   // Open ato.run website in a new WebLinkView window.
-  ipc({ capsule: 'ato-store', command: { kind: 'browse_url', url: 'https://ato.run/' } });
+  POST && POST({ capsule: 'ato-store', command: { kind: 'browse_url', url: 'https://ato.run/' } });
 }
 
 function openCapsule(handle) {
-  ipc({ capsule: 'ato-store', command: { kind: 'open_capsule', handle } });
+  POST && POST({ capsule: 'ato-store', command: { kind: 'open_capsule', handle } });
 }
 
 function capsuleIcon(tags) {
@@ -272,20 +273,29 @@ function renderCapsules(items) {
 let allCapsules = [];
 
 function init() {
-  // Data is pre-fetched by Rust and injected as __CAPSULES_DATA__.
-  // Falls back to empty if data is missing (network was unavailable at open time).
-  if (typeof __CAPSULES_DATA__ !== 'undefined') {
-    const data = __CAPSULES_DATA__;
-    allCapsules = Array.isArray(data) ? data : (data.capsules || data.items || []);
+  // If Rust pre-injected data via window.__CAPSULES_DATA__, use it immediately.
+  // Otherwise, fetch live from the API (works in WKWebView with custom protocol origin).
+  if (Array.isArray(window.__CAPSULES_DATA__) && window.__CAPSULES_DATA__.length > 0) {
+    allCapsules = window.__CAPSULES_DATA__;
     renderView('');
-  } else {
-    document.getElementById('content').innerHTML = `
-      <div class="state">
-        <div class="state-icon">📡</div>
-        <span>カタログを取得できませんでした</span>
-        <span><a href="#" onclick="openWeb();return false;">ato.run をブラウザで開く ↗</a></span>
-      </div>`;
+    return;
   }
+
+  // Fetch live catalog from the API.
+  fetch('https://api.ato.run/v1/capsules?limit=50')
+    .then(r => r.json())
+    .then(data => {
+      allCapsules = Array.isArray(data) ? data : (data.capsules || data.items || []);
+      renderView('');
+    })
+    .catch(() => {
+      document.getElementById('content').innerHTML = `
+        <div class="state">
+          <div class="state-icon">📡</div>
+          <span>カタログを取得できませんでした</span>
+          <span><a href="#" onclick="openWeb();return false;">ato.run をブラウザで開く ↗</a></span>
+        </div>`;
+    });
 }
 
 function renderView(query) {
