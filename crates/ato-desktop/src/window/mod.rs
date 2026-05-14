@@ -17,6 +17,7 @@ pub mod app_capsule_shell;
 pub mod card_switcher;
 pub mod content_windows;
 pub mod control_bar;
+pub mod dev_console;
 pub mod focus_dispatcher;
 pub mod gestures;
 pub mod identity_window;
@@ -42,7 +43,9 @@ impl gpui::Global for content_windows::OpenContentWindows {}
 
 pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{
-    open_control_bar_window, open_focus_control_bar, ControlBarShellPlaceholder,
+    control_bar_mode, focus_control_bar_input, hide_control_bar, install_control_bar_controller,
+    open_control_bar_window, open_focus_control_bar, set_control_bar_mode, show_control_bar,
+    toggle_control_bar, ControlBarController, ControlBarShellPlaceholder,
 };
 pub use orchestrator::{open_app_window, AppWindowShell};
 

@@ -289,6 +289,7 @@ pub fn build_start_snapshot(
                     crate::window::content_windows::ContentWindowKind::Store => "Store",
                     crate::window::content_windows::ContentWindowKind::Start => "Start",
                     crate::window::content_windows::ContentWindowKind::Settings => "Settings",
+                    crate::window::content_windows::ContentWindowKind::DevConsole => "DevConsole",
                 };
                 OpenWindowSnapshot {
                     id: e.handle.window_id().as_u64(),

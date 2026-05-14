@@ -14,6 +14,7 @@
 
   "control_bar.settings": "Settings",
   "control_bar.store": "Store",
+  "control_bar.dev_console": "Console",
   "control_bar.omnibar_placeholder": "Enter https://… or capsule://…",
 
   "start.title": "New Window",
@@ -77,6 +78,11 @@
   "settings.content_window.fullscreen": "Full Screen",
   "settings.content_window.restore_position": "Restore window position",
   "settings.section.controlbar": "Control Bar",
+  "settings.controlbar.mode": "Display mode",
+  "settings.controlbar.mode.floating": "Floating",
+  "settings.controlbar.mode.auto_hide": "Auto-hide",
+  "settings.controlbar.mode.compact_pill": "Compact pill",
+  "settings.controlbar.mode.hidden": "Hidden",
   "settings.controlbar.always_on_top": "Always on top",
   "settings.controlbar.show_on_start": "Show on startup",
   "settings.controlbar.position": "Position",
@@ -136,6 +142,9 @@
   "store.view.list": "List view",
   "store.search.results": "Results for \"{query}\"",
   "store.search.all": "All Capsules",
+
+  "dev_console.title": "Developer Console",
+  "dev_console.subtitle": "Manage your published and draft capsules",
 
   "windows.title": "Open Windows",
   "windows.subtitle": "Switch between sessions",
