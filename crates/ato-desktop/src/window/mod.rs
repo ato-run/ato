@@ -46,15 +46,15 @@ pub use control_bar::{
 };
 pub use orchestrator::{open_app_window, AppWindowShell};
 
-/// `ATO_DESKTOP_MULTI_WINDOW=1` opt-in flag. Defaults to **off** until
-/// layer 4 (Control Bar UI, #172) lands, at which point the legacy
-/// single-window path is removed and this flag goes away.
+/// Returns true if Focus View (multi-window) mode is active.
+/// Checks the `ATO_DESKTOP_MULTI_WINDOW` env var first (developer override),
+/// then falls back to `desktop.focus_view_enabled` in the config file.
 pub fn is_multi_window_enabled() -> bool {
     match std::env::var("ATO_DESKTOP_MULTI_WINDOW") {
         Ok(v) => {
             let trimmed = v.trim();
             !trimmed.is_empty() && !matches!(trimmed, "0" | "false" | "off" | "no")
         }
-        Err(_) => false,
+        Err(_) => crate::config::load_config().desktop.focus_view_enabled,
     }
 }
