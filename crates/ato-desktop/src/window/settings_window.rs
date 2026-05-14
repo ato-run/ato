@@ -24,6 +24,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::config::load_config;
+use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::settings::settings_snapshot_from_config;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
@@ -72,14 +73,16 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
 
     // Build an initialization script that seeds the snapshot before the
     // page JS runs — same pattern used for consent and launch windows.
-    let init_snapshot = {
+    let (init_snapshot, locale) = {
         let cfg = load_config();
-        settings_snapshot_from_config(&cfg)
+        let locale = resolve_locale(cfg.general.language);
+        (settings_snapshot_from_config(&cfg), locale)
     };
-    let init_script = format!(
+    let settings_script = format!(
         "window.__ATO_SETTINGS_INIT__={};",
         serde_json::to_string(&init_snapshot).unwrap_or_else(|_| "null".to_string())
     );
+    let init_script = compose_init_script(locale, Some(&settings_script));
 
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
@@ -135,8 +138,8 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
         ContentWindowEntry {
             handle: *handle,
             kind: ContentWindowKind::Settings,
-            title: gpui::SharedString::from("設定"),
-            subtitle: gpui::SharedString::from("セキュリティ · ランタイム · ストア"),
+            title: gpui::SharedString::from(tr(locale, "settings.title")),
+            subtitle: gpui::SharedString::from(tr(locale, "settings.nav.general")),
             url: gpui::SharedString::from("capsule://run.ato.desktop/ato-settings"),
             last_focused_at: std::time::Instant::now(),
         },

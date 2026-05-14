@@ -21,6 +21,7 @@ use serde::Serialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::localization::{compose_init_script, resolve_locale};
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 
@@ -217,7 +218,9 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         })
         .collect();
     let cards_json = serde_json::to_string(&cards).unwrap_or_else(|_| "[]".to_string());
-    let init_script = format!("window.__ATO_WINDOWS = {};", cards_json);
+    let windows_script = format!("window.__ATO_WINDOWS = {};", cards_json);
+    let locale = resolve_locale(crate::config::load_config().general.language);
+    let init_script = compose_init_script(locale, Some(&windows_script));
 
     let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), cx);
     let options = WindowOptions {
