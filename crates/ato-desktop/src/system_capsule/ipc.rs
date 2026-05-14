@@ -28,6 +28,7 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
+use super::ato_dock::DockCommand;
 use super::ato_identity::IdentityCommand;
 use super::ato_launch::LaunchCommand;
 use super::ato_settings::SettingsCommand;
@@ -78,6 +79,7 @@ pub fn make_ipc_handler(
             "ato-launch" => SystemCapsuleId::AtoLaunch,
             "ato-identity" => SystemCapsuleId::AtoIdentity,
             "ato-start" => SystemCapsuleId::AtoStart,
+            "ato-dock" => SystemCapsuleId::AtoDock,
             other => {
                 tracing::warn!(slug = %other, "system_capsule::ipc: unknown capsule slug");
                 return;
@@ -105,6 +107,10 @@ pub fn make_ipc_handler(
             SystemCapsuleId::AtoStart => {
                 serde_json::from_value::<AtoStartCommand>(envelope.command)
                     .map(SystemCommand::AtoStart)
+            }
+            SystemCapsuleId::AtoDock => {
+                serde_json::from_value::<DockCommand>(envelope.command)
+                    .map(SystemCommand::AtoDock)
             }
         };
         match command_result {
