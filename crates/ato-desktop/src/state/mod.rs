@@ -2199,7 +2199,11 @@ impl AppState {
                                 handle: label.clone(),
                                 label,
                             },
-                            vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                            vec![
+                                CapabilityGrant::ReadFile,
+                                CapabilityGrant::WorkspaceInfo,
+                                CapabilityGrant::Automation,
+                            ],
                             route_profile_for_source(canonical.source_label()).to_string(),
                             Some(canonical.source_label().to_string()),
                             Some(if canonical.source_label() == "local" {
@@ -4621,6 +4625,7 @@ mod tests {
         assert_eq!(pane.source_label.as_deref(), Some("registry"));
         assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
         assert!(pane.restricted);
+        assert!(pane.capabilities.contains(&CapabilityGrant::Automation));
         assert_eq!(state.command_bar_text, "capsule://ato.run/acme/chat");
     }
 
@@ -4635,6 +4640,7 @@ mod tests {
         assert_eq!(pane.source_label.as_deref(), Some("registry"));
         assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
         assert!(pane.restricted);
+        assert!(pane.capabilities.contains(&CapabilityGrant::Automation));
         assert_eq!(state.command_bar_text, "capsule://localhost:8787/acme/chat");
     }
 
