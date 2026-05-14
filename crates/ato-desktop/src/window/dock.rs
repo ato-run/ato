@@ -11,6 +11,7 @@
 
 use std::borrow::Cow;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -45,6 +46,8 @@ impl gpui::Global for DockEntitySlot {}
 /// `WebView` alive for the lifetime of its window.
 pub struct DockWebView {
     _webview: WebView,
+    /// Shared identity state — updated by `notify_login_success` before reload.
+    identity_state: Arc<Mutex<Value>>,
 }
 
 impl Render for DockWebView {
@@ -123,11 +126,12 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let locale = resolve_locale(config.general.language);
 
     let identity = fetch_identity();
-    let identity_script = format!(
-        "window.__ATO_IDENTITY = {};",
-        serde_json::to_string(&identity).unwrap_or_else(|_| "null".to_string())
-    );
-    let init_script = compose_init_script(locale, Some(&identity_script));
+    // Share identity state so notify_login_success can update it before reload.
+    let identity_state: Arc<Mutex<Value>> = Arc::new(Mutex::new(identity.clone()));
+    let identity_state_for_protocol = identity_state.clone();
+
+    // i18n-only init script (identity is now embedded directly in HTML)
+    let init_script = compose_init_script(locale, None);
 
     let win_size = size(px(1100.0), px(760.0));
     let bounds = match cx.primary_display() {
@@ -168,9 +172,24 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 DOCK_SCHEME.to_string(),
-                |_id, _req, responder| {
-                    let body: Cow<'static, [u8]> =
-                        Cow::Borrowed(DOCK_HTML.as_bytes());
+                move |_id, _req, responder| {
+                    let current_identity = identity_state_for_protocol
+                        .lock()
+                        .map(|g| g.clone())
+                        .unwrap_or_else(|_| json!({ "authenticated": false }));
+                    let identity_json = serde_json::to_string(&current_identity)
+                        .unwrap_or_else(|_| "null".to_string());
+                    // Embed identity directly in the HTML so it is available
+                    // before any scripts run — more reliable than WKUserScript.
+                    let html = DOCK_HTML.replacen(
+                        "<head>",
+                        &format!(
+                            "<head><script>window.__ATO_IDENTITY={};</script>",
+                            identity_json
+                        ),
+                        1,
+                    );
+                    let body: Cow<'static, [u8]> = Cow::Owned(html.into_bytes());
                     let response = Response::builder()
                         .header("Content-Type", "text/html; charset=utf-8")
                         .body(body)
@@ -184,7 +203,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Dev Console WebView");
-        let view = cx.new(|_cx| DockWebView { _webview: webview });
+        let view = cx.new(|_cx| DockWebView { _webview: webview, identity_state: identity_state.clone() });
         *entity_capture2.borrow_mut() = Some(view.clone());
         cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })?;
@@ -210,25 +229,28 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
 }
 
 /// Update the existing Dock WebView's identity in-place after a successful login,
-/// without closing/reopening the window. Falls back to opening a fresh Dock if
-/// no live entity is tracked.
+/// without closing/reopening the window. Updates the shared identity state and
+/// reloads the page so the custom-protocol handler serves the new identity
+/// embedded directly in the HTML. Falls back to opening a fresh Dock if no
+/// live entity is tracked.
 pub fn notify_login_success(cx: &mut App) {
     let entity = cx.try_global::<DockEntitySlot>().and_then(|s| s.0.clone());
     if let Some(entity) = entity {
         let identity = fetch_identity();
         let authenticated = identity.get("authenticated").and_then(|v| v.as_bool()).unwrap_or(false);
-        tracing::info!(authenticated, "notify_login_success: injecting identity into existing dock WebView");
-        let json = serde_json::to_string(&identity)
-            .unwrap_or_else(|_| "null".to_string());
-        let script = format!(
-            "if(typeof window.__ATO_ON_LOGIN_RESULT__==='function'){{window.__ATO_ON_LOGIN_RESULT__({json});}}",
-        );
+        tracing::info!(authenticated, "notify_login_success: updating identity state and reloading dock WebView");
+        let url = format!("{}://localhost/", DOCK_SCHEME);
         let result = entity.update(cx, |view, _cx| {
-            view._webview.evaluate_script(&script)
+            // Update shared identity so the protocol handler serves new HTML.
+            if let Ok(mut guard) = view.identity_state.lock() {
+                *guard = identity;
+            }
+            // Reload the page — the protocol handler will embed the new identity.
+            view._webview.load_url(&url)
         });
         match result {
-            Ok(()) => tracing::info!("notify_login_success: evaluate_script succeeded"),
-            Err(e) => tracing::warn!("notify_login_success: evaluate_script error: {:?}", e),
+            Ok(()) => tracing::info!("notify_login_success: dock WebView reload triggered"),
+            Err(e) => tracing::warn!("notify_login_success: load_url error: {:?}", e),
         }
         // Bring dock window to front
         if let Some(handle) = cx.try_global::<DockWindowSlot>().and_then(|s| s.0) {
