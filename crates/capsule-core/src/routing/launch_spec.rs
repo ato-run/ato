@@ -146,10 +146,21 @@ fn derive_run_command_launch_spec(
                     tokens[0].clone(),
                     tokens.into_iter().skip(1).collect::<Vec<_>>(),
                 )
+            } else if matches!(
+                first,
+                "flask" | "uvicorn" | "gunicorn" | "streamlit"
+                    | "celery" | "hypercorn" | "daphne" | "waitress-serve"
+            ) {
+                // Python-managed WSGI/ASGI server tools are venv-installed binaries;
+                // treat them as direct commands (same as `npm` for Node).
+                (
+                    tokens[0].clone(),
+                    tokens.into_iter().skip(1).collect::<Vec<_>>(),
+                )
             } else {
                 if !matches!(first, "python" | "python3" | "uv") {
                     return Err(CapsuleError::Config(format!(
-                        "source/python run_command must start with 'python', 'python3', or 'uv', got '{}'",
+                        "source/python run_command must start with 'python', 'python3', 'uv', or a Python server tool (flask/uvicorn/gunicorn/streamlit), got '{}'",
                         first
                     )));
                 }
