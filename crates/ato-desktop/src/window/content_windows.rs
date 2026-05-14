@@ -42,10 +42,10 @@ pub struct ContentWindowEntry {
     pub title: SharedString,
     pub subtitle: SharedString,
     /// Canonical URL string for the Control Bar URL field. For
-    /// AppWindow(ExternalUrl) this is `capsule://run.ato.desktop/ato-web-viewer`;
+    /// AppWindow(ExternalUrl) this is `capsule://desktop.ato.run/web-viewer`;
     /// for AppWindow(CapsuleHandle) it is `capsule://<handle>`; for
     /// system capsules (Store, Start, Settings, Identity) it is
-    /// `capsule://run.ato.desktop/<slug>`.
+    /// `capsule://desktop.ato.run/<slug>`.
     /// Read by the bar when this entry is at the top of MRU.
     pub url: SharedString,
     pub last_focused_at: Instant,

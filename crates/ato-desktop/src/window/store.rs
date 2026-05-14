@@ -165,7 +165,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             kind: ContentWindowKind::Store,
             title: gpui::SharedString::from(tr(locale, "store.title")),
             subtitle: gpui::SharedString::from(tr(locale, "store.loading")),
-            url: gpui::SharedString::from("capsule://run.ato.desktop/ato-store"),
+            url: gpui::SharedString::from("capsule://desktop.ato.run/store"),
             last_focused_at: std::time::Instant::now(),
         },
     );
