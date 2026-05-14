@@ -1915,7 +1915,9 @@ fn select_python_launch_cmd(
         return (cmd, used);
     }
 
-    if frameworks.contains(&"flask") {
+    // Prefer gunicorn over `flask run` when both are present: gunicorn is the
+    // production server, whereas `flask run` is a dev-only convenience command.
+    if frameworks.contains(&"flask") && !frameworks.contains(&"gunicorn") {
         let ep_e = find_python_entrypoint_evidence(evidence);
         add_ep_evidence(ep_e, &mut used, launch_score);
         let cmd = vec!["flask".to_string(), "run".to_string()];
