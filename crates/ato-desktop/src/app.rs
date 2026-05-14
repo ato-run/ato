@@ -321,6 +321,7 @@ pub fn run() {
         cx.set_global(crate::window::store::StoreWindowSlot::default());
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
+        cx.set_global(crate::window::dock::DockEntitySlot::default());
         // Slot tracking the in-Desktop OAuth login window.
         cx.set_global(crate::window::auth_login_window::AuthLoginWindowSlot::default());
 
@@ -480,6 +481,7 @@ pub fn run() {
                 .unwrap_or(false)
             {
                 cx.set_global(crate::window::dock::DockWindowSlot(None));
+                cx.set_global(crate::window::dock::DockEntitySlot(None));
                 tracing::info!("Dock window closed; slot cleared");
             }
 

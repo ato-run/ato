@@ -35,6 +35,12 @@ const DOCK_SCHEME: &str = "capsule-dock";
 pub struct DockWindowSlot(pub Option<AnyWindowHandle>);
 impl gpui::Global for DockWindowSlot {}
 
+/// Slot tracking the live `DockWebView` entity so we can inject
+/// identity updates into the existing WebView without closing the window.
+#[derive(Default)]
+pub struct DockEntitySlot(pub Option<gpui::Entity<DockWebView>>);
+impl gpui::Global for DockEntitySlot {}
+
 /// Lightweight GPUI entity whose only job is to keep the Wry
 /// `WebView` alive for the lifetime of its window.
 pub struct DockWebView {
@@ -59,7 +65,10 @@ const DOCK_HTML: &str =
 fn fetch_identity() -> Value {
     let bin = match resolve_ato_binary() {
         Ok(b) => b,
-        Err(_) => return json!({ "authenticated": false, "reason": "binary_not_found" }),
+        Err(e) => {
+            tracing::warn!("fetch_identity: binary not found: {:?}", e);
+            return json!({ "authenticated": false, "reason": "binary_not_found" });
+        }
     };
     let output = match Command::new(&bin)
         .arg("whoami")
@@ -67,9 +76,13 @@ fn fetch_identity() -> Value {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return json!({ "authenticated": false, "reason": "whoami_failed" }),
+        Err(e) => {
+            tracing::warn!("fetch_identity: whoami failed: {:?}", e);
+            return json!({ "authenticated": false, "reason": "whoami_failed" });
+        }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
+    tracing::debug!("fetch_identity: whoami stdout = {:?}", stdout.trim());
     if !stdout.contains("✅ Authenticated") {
         return json!({ "authenticated": false, "reason": "not_authenticated" });
     }
@@ -136,6 +149,10 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let queue = system_ipc::new_queue();
     let drain_queue = queue.clone();
 
+    let entity_capture: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<DockWebView>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let entity_capture2 = entity_capture.clone();
+
     let handle = cx.open_window(options, move |window, cx| {
         let win_size = window.bounds().size;
         let webview_rect = Rect {
@@ -167,9 +184,11 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .build_as_child(window)
             .expect("build_as_child must succeed for the Dev Console WebView");
         let view = cx.new(|_cx| DockWebView { _webview: webview });
+        *entity_capture2.borrow_mut() = Some(view.clone());
         cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })?;
     cx.set_global(DockWindowSlot(Some(*handle)));
+    cx.set_global(DockEntitySlot(entity_capture.borrow_mut().take()));
 
     use crate::window::content_windows::{
         ContentWindowEntry, ContentWindowKind, OpenContentWindows,
@@ -187,4 +206,28 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     );
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
     Ok(*handle)
+}
+
+/// Update the existing Dock WebView's identity in-place after a successful login,
+/// without closing/reopening the window. Falls back to opening a fresh Dock if
+/// no live entity is tracked.
+pub fn notify_login_success(cx: &mut App) {
+    let entity = cx.try_global::<DockEntitySlot>().and_then(|s| s.0.clone());
+    if let Some(entity) = entity {
+        let identity = fetch_identity();
+        let json = serde_json::to_string(&identity)
+            .unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "if(typeof window.__ATO_ON_LOGIN_RESULT__==='function'){{window.__ATO_ON_LOGIN_RESULT__({json});}}",
+        );
+        let _ = entity.update(cx, |view, _cx| {
+            let _ = view._webview.evaluate_script(&script);
+        });
+        // Bring dock window to front
+        if let Some(handle) = cx.try_global::<DockWindowSlot>().and_then(|s| s.0) {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+    } else {
+        let _ = open_dock_window(cx);
+    }
 }

@@ -405,10 +405,25 @@ impl Render for ControlBarShellPlaceholder {
                 }
             })
             .on_hover(move |hovered, window, cx| {
-                // Collapse when the mouse leaves — unless the omnibar is
-                // focused (user is typing), in which case InputEvent::Blur
-                // will handle the collapse instead.
-                if !hovered && !omnibar_focused {
+                if *hovered {
+                    // mouseEntered: fires via NSTrackingArea regardless of
+                    // whether any normal window has acceptsMouseMovedEvents.
+                    // This is the reliable expand trigger when the control bar
+                    // is the only window (no store/settings open), because in
+                    // that case mouseMoved: — which drives on_mouse_move — is
+                    // never delivered to the floating PopUp window alone.
+                    let was_expanded = cx.global::<ControlBarController>().expanded;
+                    cx.global_mut::<ControlBarController>().expand();
+                    let now_expanded = cx.global::<ControlBarController>().expanded;
+                    if now_expanded && !was_expanded {
+                        resize_bar_window_in_handler(window, true);
+                    }
+                    if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
+                        shell.update(cx, |_shell, cx| cx.notify());
+                    }
+                } else if !omnibar_focused {
+                    // mouseExited: — collapse when the mouse leaves, unless
+                    // the omnibar is focused (InputEvent::Blur handles that).
                     let was_expanded = cx.global::<ControlBarController>().expanded;
                     cx.global_mut::<ControlBarController>().collapse();
                     if was_expanded && !cx.global::<ControlBarController>().expanded {

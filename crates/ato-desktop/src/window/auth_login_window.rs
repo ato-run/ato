@@ -196,7 +196,9 @@ fn watch_login_completion(
     mut child: Child,
 ) -> LoginCompletion {
     for line in reader.lines() {
-        let Ok(line) = line else { break };
+        let Ok(line) = line else {
+            break;
+        };
         let Ok(event) = serde_json::from_str::<DesktopLoginEvent>(line.trim()) else {
             continue;
         };
@@ -241,23 +243,17 @@ fn on_login_completion(cx: &mut App, result: LoginCompletion) {
     }
     cx.set_global(AuthLoginWindowSlot(None));
 
-    // Close the existing Dock window before opening a fresh one.
-    let dock_handle = cx.global::<crate::window::dock::DockWindowSlot>().0;
-    if let Some(handle) = dock_handle {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
-    }
-    cx.set_global(crate::window::dock::DockWindowSlot(None));
-
     match result {
         LoginCompletion::Success { publisher_handle } => {
             tracing::info!(
                 publisher_handle = publisher_handle.as_deref().unwrap_or("(unknown)"),
                 "Desktop login completed successfully"
             );
-            let _ = crate::window::dock::open_dock_window(cx);
+            crate::window::dock::notify_login_success(cx);
         }
         LoginCompletion::Failure { message } => {
             tracing::warn!(message, "Desktop login failed or was cancelled");
+            // Bring existing dock to front (it still shows the login page)
             let _ = crate::window::dock::open_dock_window(cx);
         }
     }
