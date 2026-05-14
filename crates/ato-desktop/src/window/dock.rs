@@ -215,19 +215,26 @@ pub fn notify_login_success(cx: &mut App) {
     let entity = cx.try_global::<DockEntitySlot>().and_then(|s| s.0.clone());
     if let Some(entity) = entity {
         let identity = fetch_identity();
+        let authenticated = identity.get("authenticated").and_then(|v| v.as_bool()).unwrap_or(false);
+        tracing::info!(authenticated, "notify_login_success: injecting identity into existing dock WebView");
         let json = serde_json::to_string(&identity)
             .unwrap_or_else(|_| "null".to_string());
         let script = format!(
             "if(typeof window.__ATO_ON_LOGIN_RESULT__==='function'){{window.__ATO_ON_LOGIN_RESULT__({json});}}",
         );
-        let _ = entity.update(cx, |view, _cx| {
-            let _ = view._webview.evaluate_script(&script);
+        let result = entity.update(cx, |view, _cx| {
+            view._webview.evaluate_script(&script)
         });
+        match result {
+            Ok(()) => tracing::info!("notify_login_success: evaluate_script succeeded"),
+            Err(e) => tracing::warn!("notify_login_success: evaluate_script error: {:?}", e),
+        }
         // Bring dock window to front
         if let Some(handle) = cx.try_global::<DockWindowSlot>().and_then(|s| s.0) {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         }
     } else {
+        tracing::info!("notify_login_success: no live dock entity; opening fresh dock window");
         let _ = open_dock_window(cx);
     }
 }
