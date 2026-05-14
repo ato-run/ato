@@ -17,7 +17,7 @@ pub mod app_capsule_shell;
 pub mod card_switcher;
 pub mod content_windows;
 pub mod control_bar;
-pub mod dev_console;
+pub mod dock;
 pub mod focus_dispatcher;
 pub mod gestures;
 pub mod identity_window;

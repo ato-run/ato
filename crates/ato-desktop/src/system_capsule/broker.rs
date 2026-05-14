@@ -14,8 +14,8 @@
 use gpui::{AnyWindowHandle, App};
 
 use super::{
-    ato_identity, ato_launch, ato_settings, ato_start, ato_store, ato_web_viewer, ato_windows,
-    manifest,
+    ato_dock, ato_identity, ato_launch, ato_settings, ato_start, ato_store, ato_web_viewer,
+    ato_windows, manifest,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -33,6 +33,8 @@ pub enum SystemCapsuleId {
     AtoIdentity,
     /// "New window" start page. `ato-start/index.html`.
     AtoStart,
+    /// Developer Dock. `ato-dock/index.html`.
+    AtoDock,
 }
 
 /// Vocabulary of system-capability tokens. Each per-capsule command
@@ -77,6 +79,7 @@ pub enum SystemCommand {
     AtoLaunch(ato_launch::LaunchCommand),
     AtoIdentity(ato_identity::IdentityCommand),
     AtoStart(ato_start::AtoStartCommand),
+    AtoDock(ato_dock::DockCommand),
 }
 
 impl SystemCommand {
@@ -91,6 +94,7 @@ impl SystemCommand {
             SystemCommand::AtoLaunch(c) => c.required_capability(),
             SystemCommand::AtoIdentity(c) => c.required_capability(),
             SystemCommand::AtoStart(c) => c.required_capability(),
+            SystemCommand::AtoDock(c) => c.required_capability(),
         }
     }
 }
@@ -156,6 +160,9 @@ impl CapabilityBroker {
             SystemCommand::AtoLaunch(c) => ato_launch::dispatch(cx, host, c),
             SystemCommand::AtoIdentity(c) => ato_identity::dispatch(cx, host, c),
             SystemCommand::AtoStart(c) => ato_start::dispatch(cx, host, c),
+            SystemCommand::AtoDock(c) => {
+                ato_dock::dispatch(cx, host, c).map_err(|e| BrokerError::Internal(e.to_string()))
+            }
         }
     }
 }
