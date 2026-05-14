@@ -536,6 +536,283 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
     }
 }
 
+/// Login flow for `ato login --desktop-webview`.
+///
+/// Unlike the normal interactive flow, this:
+/// - Does not prompt the user interactively (no TTY required).
+/// - Auto-creates a passphrase-free age identity if none exists.
+/// - Emits NDJSON events on stdout:
+///   `{"type":"desktop_login_started", "login_url":"...", "user_code":"...", "expires_in":N, "poll_interval_sec":N}`
+///   `{"type":"desktop_login_completed", "publisher_handle":"...", "storage":"age_file"}`
+///   `{"type":"desktop_login_failed", "message":"..."}`
+/// - Exits with a non-zero code on failure.
+#[allow(clippy::needless_return)]
+pub async fn login_with_store_device_flow_desktop() -> Result<()> {
+    use capsule_core::common::paths::nacelle_home_dir;
+    use crate::application::credential::AgeFileBackend;
+
+    // ── Age identity bootstrap (non-interactive) ──────────────────────────────
+    let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;
+    let age = AgeFileBackend::new(ato_home.clone());
+
+    if age.identity_exists() {
+        // Check whether it can be unlocked without a passphrase.
+        if age.load_identity_with_passphrase(None).is_err() {
+            let msg = "age identity is passphrase-protected; unlock with ato session start";
+            println!(
+                "{}",
+                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            );
+            anyhow::bail!("{}", msg);
+        }
+    } else {
+        // Create a passphrase-free identity so the session token survives the process.
+        age.init_identity(None)
+            .context("failed to create age identity for desktop login")?;
+    }
+
+    // ── Bridge device-code flow ────────────────────────────────────────────────
+    let api_base = store_api_base_url();
+    let site_base = store_site_base_url();
+    let client = reqwest::Client::new();
+    let code_verifier = generate_pkce_verifier();
+    let code_challenge = generate_pkce_challenge_s256(&code_verifier);
+
+    let start_response = client
+        .post(format!("{}/v1/auth/bridge/init", api_base))
+        .json(&serde_json::json!({
+            "code_challenge": code_challenge,
+            "method": "S256",
+            "device_info": format!("ato-desktop/{}", env!("CARGO_PKG_VERSION")),
+        }))
+        .send()
+        .await
+        .with_context(|| "Failed to start Store bridge authentication")?;
+
+    if !start_response.status().is_success() {
+        let status = start_response.status();
+        let body = start_response.text().await.unwrap_or_default();
+        let msg = format!("Bridge auth init failed ({}): {}", status, body);
+        println!(
+            "{}",
+            serde_json::json!({"type": "desktop_login_failed", "message": msg})
+        );
+        anyhow::bail!("{}", msg);
+    }
+
+    let start: BridgeInitResponse = start_response
+        .json()
+        .await
+        .context("Invalid bridge auth init response")?;
+
+    let session_id = start.session_id.clone();
+    let activate_url = format!(
+        "{}/v1/auth/bridge/activate?session_id={}",
+        api_base, session_id
+    );
+    let login_url = format!(
+        "{}/auth?next={}",
+        site_base,
+        urlencoding::encode(&activate_url)
+    );
+
+    // Emit the started event so the Desktop can open the WebView.
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "desktop_login_started",
+            "login_url": login_url,
+            "user_code": start.user_code,
+            "expires_in": start.expires_in,
+            "poll_interval_sec": start.poll_interval_sec.unwrap_or(2),
+        })
+    );
+
+    let poll_timeout_secs = start.expires_in.min(300);
+    let mut poll_interval_secs = start.poll_interval_sec.unwrap_or(2).max(1);
+    let started_at = std::time::Instant::now();
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                let _ = client
+                    .post(format!("{}/v1/auth/bridge/cancel", api_base))
+                    .json(&serde_json::json!({
+                        "session_id": &session_id,
+                        "reason": "desktop_cancelled",
+                    }))
+                    .send()
+                    .await;
+                let msg = "Authentication cancelled";
+                println!(
+                    "{}",
+                    serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                );
+                anyhow::bail!("{}", msg);
+            }
+            _ = tokio::time::sleep(Duration::from_secs(poll_interval_secs)) => {}
+        }
+
+        if started_at.elapsed() >= Duration::from_secs(poll_timeout_secs) {
+            let msg = format!(
+                "Authentication timed out after {} seconds",
+                poll_timeout_secs
+            );
+            println!(
+                "{}",
+                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            );
+            anyhow::bail!("{}", msg);
+        }
+
+        let poll_response = client
+            .post(format!("{}/v1/auth/bridge/poll", api_base))
+            .json(&serde_json::json!({
+                "session_id": &session_id,
+                "code_verifier": &code_verifier,
+            }))
+            .send()
+            .await
+            .with_context(|| "Failed to poll bridge authentication state")?;
+
+        if poll_response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let body = poll_response
+                .json::<RetryAfterResponse>()
+                .await
+                .unwrap_or(RetryAfterResponse {
+                    retry_after: Some(poll_interval_secs),
+                });
+            let retry_after = body.retry_after.unwrap_or(poll_interval_secs).max(1);
+            tokio::time::sleep(Duration::from_secs(retry_after)).await;
+            continue;
+        }
+
+        if poll_response.status() == StatusCode::CONFLICT {
+            let msg = "Authentication denied or cancelled";
+            println!(
+                "{}",
+                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            );
+            anyhow::bail!("{}", msg);
+        }
+
+        if poll_response.status() == StatusCode::GONE {
+            let msg = "Authentication session expired";
+            println!(
+                "{}",
+                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            );
+            anyhow::bail!("{}", msg);
+        }
+
+        if poll_response.status() == StatusCode::BAD_REQUEST {
+            let body = poll_response.text().await.unwrap_or_default();
+            let msg = format!("Authentication failed: {}", body);
+            println!(
+                "{}",
+                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            );
+            anyhow::bail!("{}", msg);
+        }
+
+        if !poll_response.status().is_success() {
+            let status = poll_response.status();
+            let body = poll_response.text().await.unwrap_or_default();
+            let msg = format!("Bridge auth poll failed ({}): {}", status, body);
+            println!(
+                "{}",
+                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            );
+            anyhow::bail!("{}", msg);
+        }
+
+        let poll: BridgePollResponse = poll_response
+            .json()
+            .await
+            .context("Invalid bridge auth poll response")?;
+
+        match poll.code.as_str() {
+            "PENDING" => {
+                poll_interval_secs = poll.poll_interval_sec.unwrap_or(poll_interval_secs).max(1);
+            }
+            "SUCCESS" => {
+                let auth_code = poll
+                    .auth_code
+                    .context("Bridge auth approved but no auth code was returned")?;
+
+                let exchange_response = client
+                    .post(format!("{}/v1/auth/bridge/exchange", api_base))
+                    .json(&serde_json::json!({
+                        "session_id": &session_id,
+                        "auth_code": auth_code,
+                        "code_verifier": &code_verifier,
+                    }))
+                    .send()
+                    .await
+                    .context("Failed to exchange bridge auth code")?;
+
+                if !exchange_response.status().is_success() {
+                    let status = exchange_response.status();
+                    let body = exchange_response.text().await.unwrap_or_default();
+                    let msg = format!("Bridge auth exchange failed ({}): {}", status, body);
+                    println!(
+                        "{}",
+                        serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                    );
+                    anyhow::bail!("{}", msg);
+                }
+
+                let exchange: BridgeExchangeResponse = exchange_response
+                    .json()
+                    .await
+                    .context("Invalid bridge auth exchange response")?;
+
+                let session_token = exchange.access_token;
+                let manager = AuthManager::new()?;
+                let storage = manager
+                    .persist_session_token(session_token.clone(), false)
+                    .await?;
+
+                let mut creds = manager.load()?.unwrap_or_default();
+                creds.publisher_handle = exchange.handle.clone();
+
+                let onboarding = run_publisher_onboarding_flow(
+                    &session_token,
+                    creds.github_username.as_deref(),
+                )
+                .await?;
+                creds.publisher_id = Some(onboarding.publisher_id);
+                creds.publisher_handle = Some(onboarding.publisher_handle);
+                creds.publisher_did = Some(onboarding.publisher_did);
+                if let Some(installation) = onboarding.installation {
+                    creds.github_app_installation_id = Some(installation.installation_id);
+                    creds.github_app_account_login = Some(installation.account_login);
+                }
+                manager.save(&creds)?;
+
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "desktop_login_completed",
+                        "publisher_handle": creds.publisher_handle,
+                        "storage": storage.display(),
+                    })
+                );
+                return Ok(());
+            }
+            other => {
+                let msg = format!("Unexpected authentication status: {}", other);
+                println!(
+                    "{}",
+                    serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                );
+                anyhow::bail!("{}", msg);
+            }
+        }
+    }
+}
+
+
 #[allow(clippy::needless_return)]
 pub fn logout() -> Result<()> {
     let manager = AuthManager::new()?;
