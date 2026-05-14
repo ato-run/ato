@@ -2603,6 +2603,15 @@ fn infer_source_native_run_process(
     framework: &str,
 ) -> Option<Value> {
     if let Some(node) = detected.node.as_ref() {
+        // For Tauri apps, prefer `tauri dev` over the plain `dev` script.
+        // The `dev` script is usually just the Vite frontend; `tauri dev`
+        // starts both the Rust backend and the Vite frontend.
+        if framework == "tauri" && node.scripts.has_tauri {
+            let (entrypoint, cmd) =
+                node_script_command(node.package_manager, "tauri", &["dev"]);
+            return Some(json!({ "entrypoint": entrypoint, "cmd": cmd }));
+        }
+
         if node.scripts.has_dev {
             return node_package_manager_process(node.package_manager, "dev");
         }
@@ -5899,6 +5908,53 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         assert_eq!(routed.plan.selected_target_label(), "desktop");
         assert_eq!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
         assert_eq!(routed.plan.targets_oci_cmd(), vec!["run", "dev"]);
+    }
+
+    #[test]
+    fn run_materialization_source_only_tauri_with_tauri_script_prefers_tauri_dev() {
+        // When a Tauri app has a `tauri` npm script (the Tauri CLI wrapper),
+        // `npm run tauri dev` (= tauri dev) should be preferred over `npm run dev`
+        // which usually only starts the Vite frontend without the Rust backend.
+        let dir = tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"vault","scripts":{"dev":"vite","tauri":"tauri"}}"#,
+        )
+        .expect("write package json");
+        fs::write(dir.path().join("package-lock.json"), "{}\n").expect("write package lock");
+        fs::write(dir.path().join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+        fs::create_dir_all(dir.path().join("src-tauri")).expect("create src-tauri");
+        fs::write(
+            dir.path().join("src-tauri/Cargo.toml"),
+            "[package]\nname = \"vault\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write Cargo.toml");
+        fs::write(dir.path().join("src-tauri/tauri.conf.json"), "{}\n")
+            .expect("write tauri config");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: None,
+        };
+        let materialized = materialize_run_from_source_only(&source, None, reporter(), true)
+            .expect("materialize run");
+        let routed = capsule_core::router::route_lock(
+            &materialized.lock_path,
+            &materialized.lock,
+            &materialized.project_root,
+            capsule_core::router::ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route lock");
+
+        assert_eq!(routed.plan.execution_driver().as_deref(), Some("native"));
+        assert_eq!(routed.plan.selected_target_label(), "desktop");
+        assert_eq!(routed.plan.execution_entrypoint().as_deref(), Some("npm"));
+        // Should use `npm run tauri -- dev`, not `npm run dev` (Vite only)
+        assert_eq!(
+            routed.plan.targets_oci_cmd(),
+            vec!["run", "tauri", "--", "dev"]
+        );
     }
 
     #[test]
