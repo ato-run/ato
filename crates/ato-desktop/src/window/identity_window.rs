@@ -33,6 +33,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::orchestrator::resolve_ato_binary;
 use crate::system_capsule::ipc as system_ipc;
+use crate::localization::{compose_init_script, resolve_locale};
 
 const IDENTITY_HTML: &str = include_str!("../../assets/system/ato-identity/index.html");
 
@@ -137,10 +138,12 @@ impl Render for IdentityWindowShell {
 
 pub fn open_identity_window(cx: &mut App) -> Result<()> {
     let identity = fetch_whoami_identity();
-    let init_script = format!(
+    let locale = resolve_locale(crate::config::load_config().general.language);
+    let identity_script = format!(
         "window.__ATO_IDENTITY = {};",
         serde_json::to_string(&identity).unwrap_or_else(|_| "null".to_string())
     );
+    let init_script = compose_init_script(locale, Some(&identity_script));
 
     let bounds = Bounds::centered(None, size(px(IDENTITY_W), px(IDENTITY_H)), cx);
     let options = WindowOptions {
