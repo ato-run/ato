@@ -61,3 +61,5 @@ Desktop.ini
 
 # Direnv
 .envrc.local
+
+claudedocs/
