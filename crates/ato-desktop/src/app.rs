@@ -314,7 +314,8 @@ pub fn run() {
         // Slot tracking the currently-open Launcher window so the
         // Stage D retired the Launcher window — the focused
         // settings cog now opens an `ato-settings` system capsule
-        // window directly. No slot/state global needed for it.
+        // window directly.
+        cx.set_global(crate::window::settings_window::SettingsWindowSlot(None));
         // Slot tracking the currently-open Store window (Wry WebView
         // on ato.run).
         cx.set_global(crate::window::store::StoreWindowSlot::default());
@@ -453,6 +454,16 @@ pub fn run() {
                     crate::window::card_switcher::CardSwitcherWindowSlot(None),
                 );
                 tracing::info!("Card Switcher window closed; slot cleared");
+            }
+            let settings_slot = cx
+                .global::<crate::window::settings_window::SettingsWindowSlot>()
+                .0;
+            if settings_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                cx.set_global(crate::window::settings_window::SettingsWindowSlot(None));
+                tracing::info!("Settings window closed; slot cleared");
             }
             let store_slot = cx
                 .global::<crate::window::store::StoreWindowSlot>()

@@ -7,7 +7,6 @@
 //! own Wry-hosted window loading `assets/system/ato-settings/index.html`
 //! — the same lifecycle pattern as `start_window.rs`.
 //!
-//! Each invocation spawns a fresh window; no slot, no focus-reuse.
 //! Stage D will retire the Launcher window entirely once Settings
 //! lives here permanently.
 
@@ -16,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WeakEntity, WindowBounds,
-    WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, WeakEntity,
+    WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -62,13 +61,32 @@ pub struct ActiveSettingsShell(pub Option<WeakEntity<SettingsWindowShell>>);
 
 impl gpui::Global for ActiveSettingsShell {}
 
+/// Slot tracking the single open Settings window so repeated
+/// `ShowSettings` dispatches focus the existing window instead of
+/// spawning duplicates — same pattern as `StoreWindowSlot`.
+pub struct SettingsWindowSlot(pub Option<AnyWindowHandle>);
+
+impl gpui::Global for SettingsWindowSlot {}
+
 const SETTINGS_HTML: &str = include_str!("../../assets/system/ato-settings/index.html");
 
-/// Spawn a fresh Settings window. Mirrors `open_start_window` — no
-/// slot, no focus-reuse. Stage D will route the Control Bar's
-/// Settings cog through this directly (replacing the legacy
-/// `OpenLauncherWindow + ShowSettings` two-step).
+/// Open the Settings window, or focus it if it is already open.
 pub fn open_settings_window(cx: &mut App) -> Result<()> {
+    // Focus-on-existing: if the window is still alive, bring it to front.
+    let existing = cx.global::<SettingsWindowSlot>().0;
+    if let Some(handle) = existing {
+        let result = handle.update(cx, |_, window, _| window.activate_window());
+        match result {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                // Window was closed without clearing the slot (e.g. user
+                // closed via OS chrome). Clear the stale handle and fall
+                // through to open a fresh window.
+                cx.set_global(SettingsWindowSlot(None));
+            }
+        }
+    }
+
     let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
 
     // Build an initialization script that seeds the snapshot before the
@@ -129,6 +147,9 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
     if let Ok(slot) = shell_slot.lock() {
         cx.set_global(ActiveSettingsShell(slot.clone()));
     }
+
+    // Record this as the active singleton so focus-reuse works on the next call.
+    cx.set_global(SettingsWindowSlot(Some(*handle)));
 
     // Register in the cross-window content registry. The Control
     // Bar reads MRU front URL to display `capsule://desktop.ato.run/settings`
