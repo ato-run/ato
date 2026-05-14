@@ -234,8 +234,19 @@ fn watch_login_completion(
 
 /// Called on the GPUI thread after the child process finishes.
 fn on_login_completion(cx: &mut App, result: LoginCompletion) {
-    // Close the login window.
+    // Close the auth login window.
+    let auth_handle = cx.try_global::<AuthLoginWindowSlot>().and_then(|s| s.0);
+    if let Some(handle) = auth_handle {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
     cx.set_global(AuthLoginWindowSlot(None));
+
+    // Close the existing Dock window before opening a fresh one.
+    let dock_handle = cx.global::<crate::window::dock::DockWindowSlot>().0;
+    if let Some(handle) = dock_handle {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+    cx.set_global(crate::window::dock::DockWindowSlot(None));
 
     match result {
         LoginCompletion::Success { publisher_handle } => {
@@ -243,14 +254,10 @@ fn on_login_completion(cx: &mut App, result: LoginCompletion) {
                 publisher_handle = publisher_handle.as_deref().unwrap_or("(unknown)"),
                 "Desktop login completed successfully"
             );
-            // Refresh the Dock so it picks up the new identity.
-            cx.set_global(crate::window::dock::DockWindowSlot(None));
             let _ = crate::window::dock::open_dock_window(cx);
         }
         LoginCompletion::Failure { message } => {
             tracing::warn!(message, "Desktop login failed or was cancelled");
-            // Re-open the Dock so the user sees the login page again.
-            cx.set_global(crate::window::dock::DockWindowSlot(None));
             let _ = crate::window::dock::open_dock_window(cx);
         }
     }
