@@ -28,6 +28,7 @@ use anyhow::Result;
 use gpui::{AnyWindowHandle, App};
 use serde::{Deserialize, Serialize};
 
+use crate::localization::{tr, LocaleCode};
 use crate::state::GuestRoute;
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::content_windows::OpenContentWindows;
@@ -273,7 +274,11 @@ pub struct FeaturedApp {
 
 /// Build a start snapshot from current app state. Called at window
 /// construction time; injected as `window.__ATO_START_SNAPSHOT__`.
-pub fn build_start_snapshot(cx: &App, config: &crate::config::DesktopConfig) -> StartSnapshot {
+pub fn build_start_snapshot(
+    cx: &App,
+    config: &crate::config::DesktopConfig,
+    locale: LocaleCode,
+) -> StartSnapshot {
     let open_windows = if cx.has_global::<OpenContentWindows>() {
         cx.global::<OpenContentWindows>()
             .mru_order()
@@ -308,7 +313,7 @@ pub fn build_start_snapshot(cx: &App, config: &crate::config::DesktopConfig) -> 
         open_windows,
         recent_capsules,
         local_apps,
-        featured_apps: static_featured_apps(),
+        featured_apps: static_featured_apps(locale),
     }
 }
 
@@ -321,15 +326,18 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn static_featured_apps() -> Vec<FeaturedApp> {
+fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
     vec![
         FeaturedApp {
             handle: "github.com/ato-run/demo-weather".to_string(),
             label: "Weather Demo".to_string(),
-            description: "シンプルな天気アプリのデモカプセル".to_string(),
+            description: tr(locale, "start.featured.weather_desc"),
             icon: "⛅".to_string(),
             icon_bg: "linear-gradient(135deg,#0ea5e9,#38bdf8)".to_string(),
-            tags: vec!["ローカル実行".to_string(), "オフライン".to_string()],
+            tags: vec![
+                tr(locale, "start.featured.tag.local_run"),
+                tr(locale, "start.featured.tag.offline"),
+            ],
             rating: 4.8,
             installs: 412,
             installed: false,
@@ -337,10 +345,13 @@ fn static_featured_apps() -> Vec<FeaturedApp> {
         FeaturedApp {
             handle: "github.com/ato-run/demo-todo".to_string(),
             label: "Todo App Demo".to_string(),
-            description: "ローカルファースト Todo アプリ".to_string(),
+            description: tr(locale, "start.featured.todo_desc"),
             icon: "✅".to_string(),
             icon_bg: "linear-gradient(135deg,#10b981,#34d399)".to_string(),
-            tags: vec!["ローカル実行".to_string(), "プライバシー重視".to_string()],
+            tags: vec![
+                tr(locale, "start.featured.tag.local_run"),
+                tr(locale, "start.featured.tag.privacy"),
+            ],
             rating: 4.6,
             installs: 387,
             installed: false,
@@ -348,10 +359,10 @@ fn static_featured_apps() -> Vec<FeaturedApp> {
         FeaturedApp {
             handle: "github.com/ato-run/demo-markdown".to_string(),
             label: "Markdown Editor".to_string(),
-            description: "リアルタイムプレビュー付きエディタ".to_string(),
+            description: tr(locale, "start.featured.markdown_desc"),
             icon: "📝".to_string(),
             icon_bg: "linear-gradient(135deg,#8b5cf6,#a78bfa)".to_string(),
-            tags: vec!["ローカル実行".to_string()],
+            tags: vec![tr(locale, "start.featured.tag.local_run")],
             rating: 4.7,
             installs: 298,
             installed: false,
