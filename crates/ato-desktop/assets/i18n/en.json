@@ -80,6 +80,8 @@
   "settings.controlbar.always_on_top": "Always on top",
   "settings.controlbar.show_on_start": "Show on startup",
   "settings.controlbar.position": "Position",
+  "settings.position.top": "Top",
+  "settings.position.bottom": "Bottom",
   "settings.controlbar.autohide": "Auto-hide when idle",
   "settings.section.update_channel": "Update Channel",
   "settings.update_channel.channel": "Channel",

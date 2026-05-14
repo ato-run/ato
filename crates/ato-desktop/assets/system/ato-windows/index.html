@@ -392,7 +392,7 @@
     return `
       <div class="pv-app" style="background:${withAlpha(accent, 0.10)}">
         <div class="pv-app-head">
-          <div class="pv-app-tag" style="background:${accent}">アクティブ</div>
+          <div class="pv-app-tag" style="background:${accent}">${t ? t('windows.badge.active') : 'アクティブ'}</div>
           <div class="pv-app-pct" style="color:${accent}">93%</div>
         </div>
         <div class="pv-app-chart">
