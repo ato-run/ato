@@ -146,6 +146,11 @@ pub(crate) enum ConsentRequirementItem {
 pub(crate) struct LaunchConsentPreview {
     pub preview_id: String,
     pub loading: bool,
+    /// Set to `true` when `ato internal preflight` failed and the wizard could
+    /// not collect requirements. The JS side disables Approve and shows an
+    /// error/retry prompt when this flag is set.
+    #[serde(default)]
+    pub preflight_failed: bool,
     pub name: String,
     pub handle: String,
     pub capsule_id: String,
@@ -344,6 +349,7 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
     cx.set_global(PendingConsentPreview(Some(LaunchConsentPreview {
         preview_id: preview_id.clone(),
         loading: true,
+        preflight_failed: false,
         name: display_name.clone(),
         handle: display_handle.clone(),
         capsule_id: String::new(),
@@ -484,6 +490,7 @@ fn build_consent_preview(
             LaunchConsentPreview {
                 preview_id: preview_id.to_string(),
                 loading: false,
+                preflight_failed: false,
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: data.capsule_id,
@@ -495,11 +502,12 @@ fn build_consent_preview(
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "consent preflight failed — wizard shows identity only"
+                "consent preflight failed — wizard shows error state"
             );
             LaunchConsentPreview {
                 preview_id: preview_id.to_string(),
                 loading: false,
+                preflight_failed: true,
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: String::new(),
