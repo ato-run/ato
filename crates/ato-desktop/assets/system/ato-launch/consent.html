@@ -166,14 +166,14 @@
         <polyline points="9 12 11 14 15 10"/>
       </svg>
     </div>
-    <h1>起動前にご確認ください</h1>
-    <p id="header-sub">カプセル名と権限を確認の上、起動してください。</p>
+    <h1 data-i18n="launch.title">起動前にご確認ください</h1>
+    <p id="header-sub" data-i18n="launch.subtitle">カプセル名と権限を確認の上、起動してください。</p>
   </div>
 
   <!-- LOADING STATE (visible until preview arrives) -->
   <div id="loading-state" class="loading-state">
     <div class="spinner"></div>
-    <span>カプセルを検証中...</span>
+    <span data-i18n="launch.loading">カプセルを検証中...</span>
   </div>
 
   <!-- READY STATE (hidden until hydration) -->
@@ -182,9 +182,9 @@
     <!-- PREFLIGHT ERROR (shown when preflight_failed === true) -->
     <div id="preflight-error" class="section" style="display:none">
       <div class="id-list" style="padding:12px 14px;">
-        <span style="font-size:13px;color:#e05252;">⚠ カプセルの検証に失敗しました</span>
+        <span data-i18n="launch.preflight_error" style="font-size:13px;color:#e05252;">⚠ カプセルの検証に失敗しました</span>
         <p style="margin:8px 0 0;font-size:12px;color:var(--muted);">
-          起動情報を取得できませんでした。キャンセルして再度お試しください。
+          <span data-i18n="launch.preflight_error.desc">起動情報を取得できませんでした。キャンセルして再度お試しください。</span>
         </p>
       </div>
     </div>
@@ -198,7 +198,7 @@
           <line x1="12" y1="16" x2="12" y2="12"/>
           <line x1="12" y1="8" x2="12.01" y2="8"/>
         </svg>
-        <span>起動情報の確認</span>
+        <span data-i18n="launch.section.execution_info">起動情報の確認</span>
       </div>
       <div class="id-list" id="identity-list">
         <!-- populated by renderPreview() -->
@@ -212,13 +212,13 @@
 
   <!-- ACTIONS -->
   <div class="actions">
-    <button class="btn cancel" id="cancel">キャンセル</button>
+    <button class="btn cancel" id="cancel" data-i18n="common.cancel">キャンセル</button>
     <button class="btn approve" id="approve" disabled>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="5 3 19 12 5 21 5 3"/>
       </svg>
-      <span>承認して起動</span>
+      <span data-i18n="launch.approve">承認して起動</span>
     </button>
   </div>
 </div>
@@ -256,7 +256,10 @@
 
     // Header subtitle
     const sub = document.getElementById('header-sub');
-    sub.textContent = p.name + ' の起動前に内容をご確認ください。';
+    const t = window.__ATO_T__;
+    sub.textContent = t
+      ? t('launch.subtitle_named').replace('{name}', p.name || '')
+      : (p.name + ' の起動前に内容をご確認ください。');
 
     // Show ready state, hide loading spinner
     document.getElementById('loading-state').style.display = 'none';
@@ -278,12 +281,12 @@
     // Identity section
     const idList = document.getElementById('identity-list');
     idList.innerHTML = '';
-    addRow(idList, 'アプリケーション', p.name || '(不明)');
-    addRow(idList, 'ハンドル', p.handle || '(不明)');
+    addRow(idList, t ? t('launch.field.application') : 'アプリケーション', p.name || (t ? t('common.unknown') : '(不明)'));
+    addRow(idList, t ? t('launch.field.handle') : 'ハンドル', p.handle || (t ? t('common.unknown') : '(不明)'));
     if (p.capsule_id) addRow(idList, 'Capsule ID', p.capsule_id);
-    if (p.capsule_version) addRow(idList, 'バージョン', p.capsule_version);
+    if (p.capsule_version) addRow(idList, t ? t('launch.field.version') : 'バージョン', p.capsule_version);
     if (p.visited_targets && p.visited_targets.length > 0) {
-      addRow(idList, 'ターゲット', p.visited_targets.join(', '));
+      addRow(idList, t ? t('launch.field.targets') : 'ターゲット', p.visited_targets.join(', '));
     }
 
     // Requirements
@@ -299,7 +302,9 @@
         title.className = 'section-title';
         title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
         const titleText = document.createElement('span');
-        titleText.textContent = req.target ? ('環境変数 (' + req.target + ')') : '環境変数の設定';
+        titleText.textContent = req.target
+          ? ((t ? t('launch.field.env_config_named') : '環境変数 (') + req.target + ')')
+          : (t ? t('launch.field.env_config') : '環境変数の設定');
         title.appendChild(titleText);
         section.appendChild(title);
 
@@ -319,7 +324,7 @@
           if (f.already_configured) {
             const badge = document.createElement('span');
             badge.className = 'badge-configured';
-            badge.textContent = '設定済み';
+            badge.textContent = t ? t('launch.field.configured') : '設定済み';
             row.appendChild(badge);
           } else if (f.kind === 'enum' && f.choices && f.choices.length > 0) {
             const sel = document.createElement('select');
@@ -357,7 +362,7 @@
         title.className = 'section-title';
         title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/></svg>';
         const titleText = document.createElement('span');
-        titleText.textContent = '実行ポリシーの同意';
+        titleText.textContent = t ? t('launch.field.policy_consent') : '実行ポリシーの同意';
         title.appendChild(titleText);
         section.appendChild(title);
 
@@ -396,6 +401,7 @@
     document.getElementById('loading-state').style.display = 'none';
     document.getElementById('ready-state').style.display = '';
     updateApproveState();
+    if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
   }
 
   function updateApproveState() {
@@ -427,6 +433,7 @@
 
   // Check if init script already injected a ready preview.
   document.addEventListener('DOMContentLoaded', () => {
+    if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
     const p = window.__ATO_LAUNCH_PREVIEW;
     if (p && !p.loading) {
       renderPreview(p);

@@ -315,8 +315,8 @@
       <rect x="14" y="17" width="7" height="4" rx="2"/>
     </svg>
   </div>
-  <h1>開いているウィンドウ</h1>
-  <p id="subtitle">現在のセッションを切り替えます</p>
+  <h1 data-i18n="windows.title">開いているウィンドウ</h1>
+  <p id="subtitle" data-i18n="windows.subtitle">現在のセッションを切り替えます</p>
 </div>
 
 <!-- Safari Tab Overview-style search/filter -->
@@ -325,12 +325,12 @@
     <circle cx="11" cy="11" r="7"/>
     <line x1="21" y1="21" x2="16.65" y2="16.65"/>
   </svg>
-  <input id="filter" placeholder="ウィンドウを絞り込む" autofocus>
+  <input id="filter" data-i18n-placeholder="windows.filter_placeholder" placeholder="ウィンドウを絞り込む" autofocus>
 </div>
 
 <div id="cards" class="cards"></div>
 
-<div class="footer">クリックで切り替え、Esc または背景クリックで閉じる</div>
+<div class="footer" data-i18n="windows.hint">クリックで切り替え、Esc または背景クリックで閉じる</div>
 
 <div id="dock" class="dock"></div>
 
@@ -410,11 +410,11 @@
         </div>
         <div class="pv-app-stats">
           <div class="pv-app-stat">
-            <span class="pv-app-stat-label">セッション</span>
+            <span class="pv-app-stat-label">${window.__ATO_T__ ? window.__ATO_T__('windows.badge.session') : 'セッション'}</span>
             <span class="pv-app-stat-value">1,240</span>
           </div>
           <div class="pv-app-stat">
-            <span class="pv-app-stat-label">同期</span>
+            <span class="pv-app-stat-label">${window.__ATO_T__ ? window.__ATO_T__('windows.badge.sync') : '同期'}</span>
             <span class="pv-app-stat-value" style="color:${accent}">92%</span>
           </div>
         </div>
@@ -533,11 +533,12 @@
   }
 
   function makeNewWindowCard() {
+    const t = window.__ATO_T__;
     return `
       <div class="card new-window" id="new-window-card">
         <div class="new-window-puck">+</div>
-        <div class="new-window-label">新しいウィンドウ</div>
-        <div class="new-window-sub">スタートページを開く</div>
+        <div class="new-window-label">${t ? t('windows.new_window') : '新しいウィンドウ'}</div>
+        <div class="new-window-sub">${t ? t('windows.open_start') : 'スタートページを開く'}</div>
       </div>`;
   }
 
@@ -557,9 +558,11 @@
     dockEl.insertAdjacentHTML('beforeend', '<div class="dock-tile plus" id="dock-plus">+</div>');
 
     const subEl = document.getElementById('subtitle');
+    const t = window.__ATO_T__;
     subEl.textContent = WINDOWS.length === 0
-      ? 'まだウィンドウはありません — 新しいウィンドウから始めましょう。'
-      : `現在のセッションにある ${WINDOWS.length} つのアプリと、操作中のものを切り替えます。`;
+      ? (t ? t('windows.subtitle_empty') : 'まだウィンドウはありません — 新しいウィンドウから始めましょう。')
+      : (t ? t('windows.subtitle_count').replace('{count}', WINDOWS.length) : `現在のセッションにある ${WINDOWS.length} つのアプリと、操作中のものを切り替えます。`);
+    if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
   })();
 
   // Handlers

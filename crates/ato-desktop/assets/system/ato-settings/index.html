@@ -251,50 +251,50 @@
   <div class="card">
     <!-- LEFT NAV -->
     <div class="nav">
-      <div class="nav-item active" data-tab="general">一般</div>
-      <div class="nav-item" data-tab="desktop">デスクトップ</div>
-      <div class="nav-item" data-tab="updates">更新</div>
+      <div class="nav-item active" data-tab="general" data-i18n="settings.nav.general">一般</div>
+      <div class="nav-item" data-tab="desktop" data-i18n="settings.nav.desktop">デスクトップ</div>
+      <div class="nav-item" data-tab="updates" data-i18n="settings.nav.updates">更新</div>
       <div class="nav-item" data-tab="developer">Developer</div>
       <div class="nav-item" data-tab="secrets">Secrets</div>
     </div>
 
     <!-- MAIN PANEL -->
     <div class="panel">
-      <h1 id="panel-title">一般</h1>
-      <div id="loading" class="state-msg">読み込み中…</div>
+      <h1 id="panel-title" data-i18n="settings.nav.general">一般</h1>
+      <div id="loading" class="state-msg" data-i18n="common.loading">読み込み中…</div>
 
       <!-- ── 一般 ── -->
       <div class="tab-content" id="tab-general">
         <div class="block">
-          <div class="block-title">外観</div>
+          <div class="block-title" data-i18n="settings.section.appearance">外観</div>
           <div class="row">
-            <span class="row-label">テーマ</span>
+            <span class="row-label" data-i18n="settings.appearance.theme">テーマ</span>
             <select class="setting-select" id="sel-theme">
-              <option value="dark">ダーク</option>
-              <option value="light">ライト</option>
+              <option value="dark" data-i18n="settings.appearance.theme.dark">ダーク</option>
+              <option value="light" data-i18n="settings.appearance.theme.light">ライト</option>
             </select>
           </div>
           <div class="row">
-            <span class="row-label">言語</span>
+            <span class="row-label" data-i18n="settings.appearance.language">言語</span>
             <select class="setting-select" id="sel-language">
-              <option value="system">システムに合わせる</option>
-              <option value="japanese">日本語</option>
-              <option value="english">English</option>
+              <option value="system" data-i18n="settings.appearance.language.system">システムに合わせる</option>
+              <option value="japanese" data-i18n="settings.appearance.language.japanese">日本語</option>
+              <option value="english" data-i18n="settings.appearance.language.english">English</option>
             </select>
           </div>
         </div>
         <div class="block">
-          <div class="block-title">起動</div>
+          <div class="block-title" data-i18n="settings.section.startup">起動</div>
           <div class="row">
-            <span class="row-label">ログイン時に自動起動</span>
+            <span class="row-label" data-i18n="settings.startup.autolaunch">ログイン時に自動起動</span>
             <div class="toggle-track" id="tog-launchAtLogin"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
-            <span class="row-label">メニューバーに表示</span>
+            <span class="row-label" data-i18n="settings.startup.menubar">メニューバーに表示</span>
             <div class="toggle-track" id="tog-showInTray"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
-            <span class="row-label">新着情報を表示</span>
+            <span class="row-label" data-i18n="settings.startup.whats_new">新着情報を表示</span>
             <div class="toggle-track" id="tog-showWhatsNew"><div class="toggle-knob"></div></div>
           </div>
         </div>
@@ -306,52 +306,52 @@
           <div class="block-title">Focus View</div>
           <div class="row">
             <div class="row-label-group">
-              <span class="row-label">Focus View を有効にする<span class="badge-next">次回起動時</span></span>
-              <span class="row-sublabel">マルチウィンドウモードを使用します</span>
+              <span class="row-label"><span data-i18n="settings.startup.focus_view">Focus View を有効にする</span><span class="badge-next" data-i18n="settings.nav.updates" style="display:none"></span></span>
+              <span class="row-sublabel" data-i18n="settings.startup.focus_view.hint">マルチウィンドウモードを使用します</span>
             </div>
             <div class="toggle-track" id="tog-focusViewEnabled"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
-            <span class="row-label">起動時の画面<span class="badge-next">次回起動時</span></span>
+            <span class="row-label"><span data-i18n="settings.startup.surface">起動時の画面</span><span class="badge-next">次回起動時</span></span>
             <select class="setting-select" id="sel-startupSurface">
-              <option value="store">ストア</option>
-              <option value="start">スタート</option>
-              <option value="blank">空白</option>
-              <option value="restore-last">前回の画面を復元</option>
+              <option value="store" data-i18n="settings.startup.surface.store">ストア</option>
+              <option value="start" data-i18n="settings.startup.surface.start">スタート</option>
+              <option value="blank" data-i18n="settings.startup.surface.blank">空白</option>
+              <option value="restore-last" data-i18n="settings.startup.surface.restore">前回の画面を復元</option>
             </select>
           </div>
           <div class="row">
-            <span class="row-label">コンテンツウィンドウの初期表示<span class="badge-next">次回起動時</span></span>
+            <span class="row-label"><span data-i18n="settings.section.content_window">コンテンツウィンドウの初期表示</span><span class="badge-next">次回起動時</span></span>
             <select class="setting-select" id="sel-contentWindowDefaultPresentation">
-              <option value="windowed">ウィンドウ</option>
-              <option value="maximized">最大化</option>
-              <option value="fullscreen">フルスクリーン</option>
+              <option value="windowed" data-i18n="settings.content_window.window">ウィンドウ</option>
+              <option value="maximized" data-i18n="settings.content_window.maximized">最大化</option>
+              <option value="fullscreen" data-i18n="settings.content_window.fullscreen">フルスクリーン</option>
             </select>
           </div>
           <div class="row">
-            <span class="row-label">ウィンドウ位置を復元<span class="badge-next">次回起動時</span></span>
+            <span class="row-label"><span data-i18n="settings.content_window.restore_position">ウィンドウ位置を復元</span><span class="badge-next">次回起動時</span></span>
             <div class="toggle-track" id="tog-restoreWindowFrames"><div class="toggle-knob"></div></div>
           </div>
         </div>
         <div class="block">
-          <div class="block-title">コントロールバー</div>
+          <div class="block-title" data-i18n="settings.section.controlbar">コントロールバー</div>
           <div class="row">
-            <span class="row-label">常に最前面に表示</span>
+            <span class="row-label" data-i18n="settings.controlbar.always_on_top">常に最前面に表示</span>
             <div class="toggle-track" id="tog-controlBarAlwaysOnTop"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
-            <span class="row-label">起動時に表示<span class="badge-next">次回起動時</span></span>
+            <span class="row-label"><span data-i18n="settings.controlbar.show_on_start">起動時に表示</span><span class="badge-next">次回起動時</span></span>
             <div class="toggle-track" id="tog-controlBarVisibleOnStartup"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
-            <span class="row-label">位置</span>
+            <span class="row-label" data-i18n="settings.controlbar.position">位置</span>
             <select class="setting-select" id="sel-controlBarPosition">
               <option value="top">上</option>
               <option value="bottom">下</option>
             </select>
           </div>
           <div class="row">
-            <span class="row-label">非使用時に自動で隠す</span>
+            <span class="row-label" data-i18n="settings.controlbar.autohide">非使用時に自動で隠す</span>
             <div class="toggle-track" id="tog-controlBarAutoHide"><div class="toggle-knob"></div></div>
           </div>
         </div>
@@ -360,17 +360,17 @@
       <!-- ── 更新 ── -->
       <div class="tab-content" id="tab-updates">
         <div class="block">
-          <div class="block-title">アップデートチャンネル</div>
+          <div class="block-title" data-i18n="settings.section.update_channel">アップデートチャンネル</div>
           <div class="row">
-            <span class="row-label">チャンネル</span>
+            <span class="row-label" data-i18n="settings.update_channel.channel">チャンネル</span>
             <select class="setting-select" id="sel-updateChannel">
-              <option value="stable">安定版 (Stable)</option>
-              <option value="beta">ベータ</option>
-              <option value="nightly">ナイトリー</option>
+              <option value="stable" data-i18n="settings.update_channel.stable">安定版 (Stable)</option>
+              <option value="beta" data-i18n="settings.update_channel.beta">ベータ</option>
+              <option value="nightly" data-i18n="settings.update_channel.nightly">ナイトリー</option>
             </select>
           </div>
           <div class="row">
-            <span class="row-label">自動でアップデート</span>
+            <span class="row-label" data-i18n="settings.update_channel.auto">自動でアップデート</span>
             <div class="toggle-track" id="tog-automaticUpdates"><div class="toggle-knob"></div></div>
           </div>
         </div>
@@ -379,9 +379,9 @@
       <!-- ── Developer ── -->
       <div class="tab-content" id="tab-developer">
         <div class="block">
-          <div class="block-title">デバッグ</div>
+          <div class="block-title" data-i18n="settings.section.debug">デバッグ</div>
           <div class="row">
-            <span class="row-label">ログレベル</span>
+            <span class="row-label" data-i18n="settings.debug.log_level">ログレベル</span>
             <select class="setting-select" id="sel-logLevel">
               <option value="error">Error</option>
               <option value="warn">Warn</option>
@@ -390,11 +390,11 @@
             </select>
           </div>
           <div class="row">
-            <span class="row-label">テレメトリーを送信</span>
+            <span class="row-label" data-i18n="settings.debug.telemetry">テレメトリーを送信</span>
             <div class="toggle-track" id="tog-telemetry"><div class="toggle-knob"></div></div>
           </div>
           <div class="row">
-            <span class="row-label">DevTools を自動で開く</span>
+            <span class="row-label" data-i18n="settings.debug.devtools">DevTools を自動で開く</span>
             <div class="toggle-track" id="tog-autoOpenDevtools"><div class="toggle-knob"></div></div>
           </div>
         </div>
@@ -406,14 +406,14 @@
 
         <!-- Key list -->
         <div class="block">
-          <div class="block-title">シークレット一覧</div>
-          <div id="secrets-list-empty" class="state-msg" style="display:none;">シークレットがありません</div>
+          <div class="block-title" data-i18n="settings.section.secrets">シークレット一覧</div>
+          <div id="secrets-list-empty" class="state-msg" style="display:none;" data-i18n="settings.secrets.empty">シークレットがありません</div>
           <table class="secrets-table" id="secrets-table" style="display:none;">
             <thead>
               <tr>
                 <th>Key</th>
-                <th>値</th>
-                <th>Grant 数</th>
+                <th data-i18n="settings.secrets.col.value">値</th>
+                <th data-i18n="settings.secrets.col.grants">Grant 数</th>
                 <th></th>
               </tr>
             </thead>
@@ -423,23 +423,23 @@
 
         <!-- Add / overwrite form -->
         <div class="block">
-          <div class="block-title">追加・上書き</div>
+          <div class="block-title" data-i18n="settings.section.secrets_add">追加・上書き</div>
           <div class="form-row">
             <div class="form-field">
               <span class="form-label">Key</span>
               <input class="form-input" id="sec-key" type="text" placeholder="MY_API_KEY" autocomplete="off" spellcheck="false">
             </div>
             <div class="form-field">
-              <span class="form-label">Value</span>
-              <input class="form-input" id="sec-value" type="password" placeholder="secret value" autocomplete="new-password">
+              <span class="form-label" data-i18n="settings.secrets.form.value">Value</span>
+              <input class="form-input" id="sec-value" type="password" data-i18n-placeholder="settings.secrets.form.value.placeholder" placeholder="secret value" autocomplete="new-password">
             </div>
-            <button class="btn btn-primary" id="sec-save-btn">保存</button>
+            <button class="btn btn-primary" id="sec-save-btn" data-i18n="common.save">保存</button>
           </div>
         </div>
 
         <!-- Grant management -->
         <div class="block">
-          <div class="block-title">Grant 管理</div>
+          <div class="block-title" data-i18n="settings.section.grant_mgmt">Grant 管理</div>
           <div class="form-row">
             <div class="form-field">
               <span class="form-label">Capsule handle</span>
@@ -449,20 +449,20 @@
               <span class="form-label">Key</span>
               <select class="setting-select" id="grant-key-select" style="width:100%;"></select>
             </div>
-            <button class="btn btn-primary" id="grant-btn">Grant</button>
+            <button class="btn btn-primary" id="grant-btn" data-i18n="settings.grant.btn">Grant</button>
           </div>
           <div class="grants-list" id="grants-list"></div>
         </div>
 
         <!-- Storage info -->
         <div class="block">
-          <div class="block-title">ストレージ</div>
+          <div class="block-title" data-i18n="settings.section.storage">ストレージ</div>
           <div class="row">
-            <span class="row-label">パス</span>
+            <span class="row-label" data-i18n="settings.storage.path">パス</span>
             <span id="sec-storage-path" style="font-size:12px; color:var(--muted); font-family:ui-monospace,'SF Mono',monospace;">—</span>
           </div>
           <div class="row">
-            <span class="row-label">権限</span>
+            <span class="row-label" data-i18n="settings.storage.permissions">権限</span>
             <span id="sec-storage-mode" style="font-size:12px; color:var(--muted);">—</span>
           </div>
         </div>
@@ -474,11 +474,11 @@
 <!-- Delete confirmation modal -->
 <div id="confirm-modal" class="confirm-overlay" style="display:none;" role="dialog" aria-modal="true">
   <div class="confirm-box">
-    <p class="confirm-title">シークレットを削除</p>
-    <p class="confirm-body">「<span id="confirm-key-display" class="confirm-key"></span>」を削除します。このシークレットへの全 capsule grant も削除されます。この操作は元に戻せません。</p>
+    <p class="confirm-title" data-i18n="settings.secrets.delete.title">シークレットを削除</p>
+    <p class="confirm-body" id="confirm-body-text" data-i18n-template="settings.secrets.delete.body">「<span id="confirm-key-display" class="confirm-key"></span>」を削除します。このシークレットへの全 capsule grant も削除されます。この操作は元に戻せません。</p>
     <div class="confirm-actions">
-      <button class="btn" id="confirm-cancel-btn">キャンセル</button>
-      <button class="btn btn-danger" id="confirm-ok-btn">削除する</button>
+      <button class="btn" id="confirm-cancel-btn" data-i18n="common.cancel">キャンセル</button>
+      <button class="btn btn-danger" id="confirm-ok-btn" data-i18n="settings.secrets.delete.confirm">削除する</button>
     </div>
   </div>
 </div>
@@ -500,12 +500,12 @@ function sendPatch(patch) {
 }
 
 // ── Tab navigation ────────────────────────────────────────────────────────────
-const TAB_TITLES = {
-  general:   '一般',
-  desktop:   'デスクトップ',
-  updates:   '更新',
-  developer: 'Developer',
-  secrets:   'Secrets',
+const TAB_KEYS = {
+  general:   'settings.nav.general',
+  desktop:   'settings.nav.desktop',
+  updates:   'settings.nav.updates',
+  developer: 'settings.nav.developer',
+  secrets:   'settings.nav.secrets',
 };
 
 function showTab(tabId) {
@@ -515,7 +515,8 @@ function showTab(tabId) {
   const navItem = document.querySelector('.nav-item[data-tab="' + tabId + '"]');
   if (content) content.classList.add('visible');
   if (navItem) navItem.classList.add('active');
-  document.getElementById('panel-title').textContent = TAB_TITLES[tabId] || tabId;
+  const key = TAB_KEYS[tabId];
+  document.getElementById('panel-title').textContent = key && window.__ATO_T__ ? window.__ATO_T__(key) : (tabId);
   BRIDGE({ kind: 'navigateTab', tab: tabId });
   if (tabId === 'secrets' && !_secretsLoaded) {
     BRIDGE({ kind: 'loadSecretsSnapshot', requestId: nextReqId() });
@@ -644,6 +645,7 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
       el.style.visibility = '';
     });
     hydrateFromSnapshot(payload.snapshot);
+    if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
   }
   if (payload && payload.secrets) {
     hydrateSecrets(payload.secrets);
@@ -695,7 +697,7 @@ function hydrateSecrets(secrets) {
 
       const tdMask = document.createElement('td');
       tdMask.className = 'secrets-mask';
-      tdMask.textContent = entry.hasValue ? '••••••••' : '(空)';
+      tdMask.textContent = entry.hasValue ? '••••••••' : (window.__ATO_T__ ? window.__ATO_T__('common.empty') : '(空)');
 
       const tdGrant = document.createElement('td');
       const badge = document.createElement('span');
@@ -707,7 +709,7 @@ function hydrateSecrets(secrets) {
       tdActions.style.textAlign = 'right';
       const delBtn = document.createElement('button');
       delBtn.className = 'btn btn-danger';
-      delBtn.textContent = '削除';
+      delBtn.textContent = window.__ATO_T__ ? window.__ATO_T__('common.delete') : '削除';
       const capturedKey = entry.key;
       delBtn.addEventListener('click', () => openDeleteConfirm(capturedKey));
       tdActions.appendChild(delBtn);
@@ -726,7 +728,7 @@ function hydrateSecrets(secrets) {
     if (_secretsKeys.length === 0) {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = '(シークレットがありません)';
+      opt.textContent = window.__ATO_T__ ? window.__ATO_T__('settings.secrets.empty') : '(シークレットがありません)';
       grantSel.appendChild(opt);
     } else {
       for (const k of _secretsKeys) {
@@ -808,8 +810,8 @@ document.getElementById('sec-save-btn').addEventListener('click', () => {
   if (!keyEl || !valEl) return;
   const key = keyEl.value.trim();
   const value = valEl.value;
-  if (!key) { showSecretsError('Key を入力してください'); return; }
-  if (!value) { showSecretsError('Value を入力してください'); return; }
+  if (!key) { showSecretsError(window.__ATO_T__ ? window.__ATO_T__('settings.secrets.error.no_key') : 'Key を入力してください'); return; }
+  if (!value) { showSecretsError(window.__ATO_T__ ? window.__ATO_T__('settings.secrets.error.no_value') : 'Value を入力してください'); return; }
   BRIDGE({ kind: 'putSecret', requestId: nextReqId(), key, value });
   keyEl.value = '';
   valEl.value = '';
@@ -821,8 +823,8 @@ document.getElementById('grant-btn').addEventListener('click', () => {
   if (!handleEl || !keySel) return;
   const handle = handleEl.value.trim();
   const key = keySel.value;
-  if (!handle) { showSecretsError('Capsule handle を入力してください'); return; }
-  if (!key) { showSecretsError('Grant する Key を選択してください'); return; }
+  if (!handle) { showSecretsError(window.__ATO_T__ ? window.__ATO_T__('settings.grant.error.no_handle') : 'Capsule handle を入力してください'); return; }
+  if (!key) { showSecretsError(window.__ATO_T__ ? window.__ATO_T__('settings.grant.error.no_key') : 'Grant する Key を選択してください'); return; }
   BRIDGE({ kind: 'grantSecret', requestId: nextReqId(), handle, key });
   handleEl.value = '';
 });
@@ -840,6 +842,7 @@ document.getElementById('grant-btn').addEventListener('click', () => {
 
   // Seed from the initialization script if available (injected by Rust
   // before the page parsed), otherwise request a fresh snapshot.
+  if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
   if (window.__ATO_SETTINGS_INIT__ && window.__ATO_SETTINGS_INIT__.resolved) {
     const loading = document.getElementById('loading');
     if (loading) loading.style.display = 'none';
