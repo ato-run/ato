@@ -747,6 +747,9 @@ pub(crate) enum Commands {
         token: Option<String>,
         #[arg(long, default_value_t = false)]
         headless: bool,
+        /// Emit NDJSON events instead of opening a browser (used by ato-desktop).
+        #[arg(long = "desktop-webview", hide = true, default_value_t = false)]
+        desktop_webview: bool,
     },
 
     #[command(hide = true, about = "Logout")]

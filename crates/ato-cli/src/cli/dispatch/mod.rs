@@ -588,10 +588,13 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Session { command } => session::execute_session_command(command),
 
-        Commands::Login { token, headless } => {
+        Commands::Login { token, headless, desktop_webview } => {
             let rt = tokio::runtime::Runtime::new()?;
             match token {
                 Some(token) => rt.block_on(auth::login_with_token(token)),
+                None if desktop_webview => {
+                    rt.block_on(auth::login_with_store_device_flow_desktop())
+                }
                 None => rt.block_on(auth::login_with_store_device_flow(headless)),
             }
         }
