@@ -1147,10 +1147,13 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         "filesystem".to_string(),
         inferred_filesystem_contract(&detected),
     );
+    let leip_driver = leip_projection.as_ref().and_then(|p| p.driver.as_deref());
     let runtime_resolution = desktop_execution
         .as_ref()
         .map(|override_contract| override_contract.runtime.clone())
-        .unwrap_or_else(|| inferred_runtime_resolution(&detected, &input.project_root));
+        .unwrap_or_else(|| {
+            inferred_runtime_resolution(&detected, &input.project_root, leip_driver)
+        });
     lock.resolution
         .entries
         .insert("runtime".to_string(), runtime_resolution.clone());
@@ -3288,8 +3291,17 @@ fn runtime_kind_from_process_candidates(candidates: &[RankedCandidate]) -> Optio
     None
 }
 
-fn inferred_runtime_resolution(detected: &DetectedProject, project_root: &Path) -> Value {
-    let runtime_kind = runtime_kind_from_project(detected);
+fn inferred_runtime_resolution(
+    detected: &DetectedProject,
+    project_root: &Path,
+    // LEIP driver takes precedence: for bun-managed Node.js projects LEIP reports
+    // driver="node", but runtime_kind_from_project() returns "bun".  Without the
+    // override, inferred_runtime_version() would store the bun version (e.g. "1.1")
+    // as runtime.version, which resolved_target_string_from_lock() then uses as the
+    // Node.js runtime version — causing "Could not resolve Node version for hint: 1.1".
+    leip_driver_override: Option<&str>,
+) -> Value {
+    let runtime_kind = leip_driver_override.unwrap_or_else(|| runtime_kind_from_project(detected));
     let mut runtime = serde_json::Map::new();
     runtime.insert("kind".to_string(), Value::String(runtime_kind.to_string()));
     runtime.insert(
