@@ -10,25 +10,31 @@
 //! - URL text in muted zinc-grey rather than near-black
 //! TODO: add the avatar icon on the right end
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
     div, hsla, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds, Context, Entity,
-    FontWeight, IntoElement, MouseButton, Pixels, Render, SharedString,
+    FontWeight, IntoElement, MouseButton, Pixels, Render, SharedString, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    NavigateToUrl, OpenCardSwitcher, OpenIdentityMenu, OpenStoreWindow, ShowSettings,
+    NavigateToUrl, OpenCardSwitcher, OpenDevConsoleWindow, OpenIdentityMenu, OpenStoreWindow,
+    ShowSettings, StopActiveSession,
 };
+use crate::config::ControlBarMode;
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
-use crate::window::content_windows::OpenContentWindows;
+use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
+const COMPACT_BAR_WIDTH: f32 = 360.0;
 /// Host NSWindow is sized flush to the pill — the rectangle of the
 /// window and the rectangle of the pill are the same; the only
 /// transparent area is the four rounded-corner cut-outs created by
@@ -36,12 +42,152 @@ const BAR_HEIGHT: f32 = 56.0;
 /// on `bar_pill` because it would be clipped at the window edge.
 const BAR_GAP_ABOVE_APP: f32 = 12.0;
 
+#[derive(Default)]
+pub struct ControlBarController {
+    pub handle: Option<AnyWindowHandle>,
+    shell: Option<Entity<ControlBarShellPlaceholder>>,
+    mode: ControlBarMode,
+    expanded: bool,
+}
+
+impl gpui::Global for ControlBarController {}
+
+impl ControlBarController {
+    pub fn new(mode: ControlBarMode) -> Self {
+        Self {
+            handle: None,
+            shell: None,
+            mode,
+            expanded: matches!(mode, ControlBarMode::Floating),
+        }
+    }
+
+    pub fn mode(&self) -> ControlBarMode {
+        self.mode
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.handle.is_some() && !matches!(self.mode, ControlBarMode::Hidden)
+    }
+
+    fn set_window(
+        &mut self,
+        handle: AnyWindowHandle,
+        shell: Entity<ControlBarShellPlaceholder>,
+    ) {
+        self.handle = Some(handle);
+        self.shell = Some(shell);
+    }
+
+    pub fn clear_window(&mut self, handle: AnyWindowHandle) {
+        if self.handle == Some(handle) {
+            self.handle = None;
+            self.shell = None;
+        }
+    }
+
+    pub fn set_mode(&mut self, mode: ControlBarMode) {
+        self.mode = mode;
+        self.expanded = matches!(mode, ControlBarMode::Floating);
+    }
+
+    pub fn expand(&mut self) {
+        if matches!(self.mode, ControlBarMode::AutoHide) {
+            self.expanded = true;
+        }
+    }
+
+    pub fn collapse(&mut self) {
+        if matches!(self.mode, ControlBarMode::AutoHide) {
+            self.expanded = false;
+        }
+    }
+
+    fn should_render_expanded(&self) -> bool {
+        matches!(self.mode, ControlBarMode::Floating)
+            || (matches!(self.mode, ControlBarMode::AutoHide) && self.expanded)
+    }
+}
+
+pub fn install_control_bar_controller(cx: &mut App) {
+    let mode = crate::config::load_config().desktop.control_bar.mode;
+    cx.set_global(ControlBarController::new(mode));
+}
+
+pub fn control_bar_mode(cx: &App) -> ControlBarMode {
+    cx.global::<ControlBarController>().mode()
+}
+
+pub fn set_control_bar_mode(cx: &mut App, mode: ControlBarMode) -> Result<Option<AnyWindowHandle>> {
+    let old_handle = {
+        let controller = cx.global_mut::<ControlBarController>();
+        controller.set_mode(mode);
+        controller.handle
+    };
+    if let Some(handle) = old_handle {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+    if matches!(mode, ControlBarMode::Hidden) {
+        return Ok(None);
+    }
+    open_focus_control_bar(cx).map(Some)
+}
+
+pub fn show_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
+    let existing = cx.global::<ControlBarController>().handle;
+    if let Some(handle) = existing {
+        if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+            cx.global_mut::<ControlBarController>().expand();
+            return Ok(handle);
+        }
+        cx.set_global(ControlBarController::new(ControlBarMode::AutoHide));
+    }
+
+    if matches!(cx.global::<ControlBarController>().mode(), ControlBarMode::Hidden) {
+        cx.global_mut::<ControlBarController>().set_mode(ControlBarMode::AutoHide);
+    }
+    open_focus_control_bar(cx)
+}
+
+pub fn hide_control_bar(cx: &mut App) {
+    let handle = {
+        let controller = cx.global_mut::<ControlBarController>();
+        controller.set_mode(ControlBarMode::Hidden);
+        controller.handle
+    };
+    if let Some(handle) = handle {
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
+pub fn toggle_control_bar(cx: &mut App) -> Result<Option<AnyWindowHandle>> {
+    if cx.global::<ControlBarController>().is_visible() {
+        hide_control_bar(cx);
+        Ok(None)
+    } else {
+        show_control_bar(cx).map(Some)
+    }
+}
+
+pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
+    let handle = show_control_bar(cx)?;
+    cx.global_mut::<ControlBarController>().expand();
+    if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
+        let _ = handle.update(cx, |_, window, cx| {
+            window.activate_window();
+            shell.update(cx, |shell, cx| shell.focus_omnibar(window, cx));
+        });
+    }
+    Ok(handle)
+}
+
 pub struct ControlBarShellPlaceholder {
     /// Editable URL field in the centre of the bar. Wraps
     /// `gpui_component::input::InputState` so we can subscribe to
     /// PressEnter and read the value at render time for the icon
     /// scheme decision.
     omnibar: Entity<InputState>,
+    locale: LocaleCode,
     /// Track focus so the MRU → omnibar sync does NOT clobber the
     /// user's in-progress typing. Flipped by the InputEvent::Focus
     /// / InputEvent::Blur subscription.
@@ -102,8 +248,13 @@ impl ControlBarShellPlaceholder {
 
         Self {
             omnibar,
+            locale,
             omnibar_focused: false,
         }
+    }
+
+    fn focus_omnibar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.omnibar.update(cx, |state, cx| state.focus(window, cx));
     }
 }
 
@@ -158,8 +309,41 @@ impl Render for ControlBarShellPlaceholder {
             .value()
             .trim_start()
             .starts_with("capsule://");
-        let locale = resolve_locale(crate::config::load_config().general.language);
-        bar_pill(self.omnibar.clone(), is_capsule, window_count, locale)
+        let active = cx
+            .global::<OpenContentWindows>()
+            .mru_order()
+            .into_iter()
+            .next();
+        let expanded = cx.global::<ControlBarController>().should_render_expanded();
+
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_hover(|hovered, _window, cx| {
+                let controller = cx.global_mut::<ControlBarController>();
+                if *hovered {
+                    controller.expand();
+                } else {
+                    controller.collapse();
+                }
+                if let Some(shell) = controller.shell.clone() {
+                    shell.update(cx, |_shell, cx| cx.notify());
+                }
+            })
+            .child(if expanded {
+                bar_pill(
+                    self.omnibar.clone(),
+                    is_capsule,
+                    window_count,
+                    self.locale,
+                    active,
+                )
+                .into_any_element()
+            } else {
+                compact_pill(active, self.locale).into_any_element()
+            })
     }
 }
 
@@ -168,6 +352,7 @@ fn bar_pill(
     is_capsule: bool,
     window_count: usize,
     locale: LocaleCode,
+    active: Option<ContentWindowEntry>,
 ) -> impl IntoElement {
     div()
         .size_full()
@@ -208,6 +393,15 @@ fn bar_pill(
             ActionTarget::Store,
             None,
         ))
+        .child(pill_button(
+            "dev-console",
+            Some(PillIcon::Custom("icons/code.svg")),
+            Some(tr(locale, "control_bar.dev_console").into()),
+            ActionTarget::DevConsole,
+            None,
+        ))
+        .child(active_context_chip(active.as_ref()))
+        .child(stop_button(active.as_ref()))
         // Right-end Identity / Account button. Phase 1 is a
         // placeholder click target — the popover with
         // Profile / Account / Workspace / Trust / Preferences /
@@ -216,6 +410,138 @@ fn bar_pill(
         // distinguish it from the action-icon affordances on the
         // left without competing with the URL pill's accent.
         .child(identity_button())
+}
+
+fn compact_pill(active: Option<ContentWindowEntry>, locale: LocaleCode) -> impl IntoElement {
+    let title = active
+        .as_ref()
+        .map(|entry| entry.title.clone())
+        .unwrap_or_else(|| SharedString::from("Ato Desktop"));
+    div()
+        .w(px(COMPACT_BAR_WIDTH))
+        .h(px(BAR_HEIGHT))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .bg(rgb(0xffffff))
+        .rounded_full()
+        .border_1()
+        .border_color(hsla(0.0, 0.0, 0.0, 0.04))
+        .child(
+            div()
+                .w(px(8.0))
+                .h(px(8.0))
+                .rounded_full()
+                .bg(if stop_enabled(active.as_ref()) {
+                    rgb(0x22c55e)
+                } else {
+                    rgb(0xa1a1aa)
+                }),
+        )
+        .child(
+            div()
+                .min_w(px(0.0))
+                .flex_1()
+                .text_sm()
+                .font_weight(FontWeight(600.0))
+                .text_color(rgb(0x18181b))
+                .overflow_hidden()
+                .child(title),
+        )
+        .child(stop_button(active.as_ref()))
+        .child(pill_button(
+            "compact-url",
+            Some(PillIcon::Builtin(IconName::Globe)),
+            Some(SharedString::from("⌘L")),
+            ActionTarget::FocusUrl,
+            None,
+        ))
+        .child(div().w(px(0.0)).overflow_hidden().child(SharedString::from(tr(
+            locale,
+            "control_bar.omnibar_placeholder",
+        ))))
+}
+
+fn active_context_chip(active: Option<&ContentWindowEntry>) -> impl IntoElement {
+    let label = active
+        .map(|entry| entry.title.clone())
+        .unwrap_or_else(|| SharedString::from("Ato Desktop"));
+    div()
+        .max_w(px(150.0))
+        .h(px(30.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(15.0))
+        .bg(rgb(0xf8fafc))
+        .border_1()
+        .border_color(rgb(0xe2e8f0))
+        .text_xs()
+        .font_weight(FontWeight(600.0))
+        .text_color(rgb(0x334155))
+        .child(
+            div()
+                .w(px(7.0))
+                .h(px(7.0))
+                .rounded_full()
+                .bg(if stop_enabled(active) {
+                    rgb(0x22c55e)
+                } else {
+                    rgb(0x94a3b8)
+                }),
+        )
+        .child(div().overflow_hidden().child(label))
+}
+
+fn stop_button(active: Option<&ContentWindowEntry>) -> impl IntoElement {
+    let enabled = stop_enabled(active);
+    div()
+        .id("stop-active")
+        .h(px(32.0))
+        .px(px(10.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .rounded(px(16.0))
+        .bg(if enabled { rgb(0xfef2f2) } else { rgb(0xf4f4f5) })
+        .border_1()
+        .border_color(if enabled { rgb(0xfee2e2) } else { rgb(0xe4e4e7) })
+        .text_color(if enabled { rgb(0xb91c1c) } else { rgb(0xa1a1aa) })
+        .text_xs()
+        .font_weight(FontWeight(700.0))
+        .cursor_pointer()
+        .hover(move |s| {
+            if enabled {
+                s.bg(rgb(0xfee2e2)).border_color(rgb(0xfecaca))
+            } else {
+                s
+            }
+        })
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            if enabled {
+                window.dispatch_action(Box::new(StopActiveSession), cx);
+            }
+        })
+        .child(Icon::new(IconName::Close).size(px(13.0)))
+        .child(SharedString::from("Stop"))
+}
+
+fn stop_enabled(active: Option<&ContentWindowEntry>) -> bool {
+    let Some(entry) = active else {
+        return false;
+    };
+    matches!(
+        &entry.kind,
+        ContentWindowKind::AppWindow {
+            route:
+                GuestRoute::CapsuleHandle { .. }
+                    | GuestRoute::CapsuleUrl { .. }
+                    | GuestRoute::Capsule { .. }
+                    | GuestRoute::Terminal { .. }
+        }
+    )
 }
 
 fn identity_button() -> impl IntoElement {
@@ -248,7 +574,9 @@ fn identity_button() -> impl IntoElement {
 enum ActionTarget {
     Settings,
     Store,
+    DevConsole,
     CardSwitcher,
+    FocusUrl,
 }
 
 /// Icon source for `pill_button`. `Builtin` uses gpui_component's
@@ -299,8 +627,16 @@ fn pill_button(
             ActionTarget::Store => {
                 window.dispatch_action(Box::new(OpenStoreWindow), cx);
             }
+            ActionTarget::DevConsole => {
+                window.dispatch_action(Box::new(OpenDevConsoleWindow), cx);
+            }
             ActionTarget::CardSwitcher => {
                 window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+            }
+            ActionTarget::FocusUrl => {
+                if let Err(err) = focus_control_bar_input(cx) {
+                    tracing::error!(error = %err, "Control Bar URL focus failed");
+                }
             }
         });
     match icon {
@@ -468,6 +804,18 @@ pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
 
 /// Open the Focus-mode Control Bar as a process-lifetime singleton.
 pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
+    if let Some(existing) = cx.global::<ControlBarController>().handle {
+        if existing.update(cx, |_, window, _| window.activate_window()).is_ok() {
+            return Ok(existing);
+        }
+        cx.global_mut::<ControlBarController>().handle = None;
+    }
+    if matches!(
+        cx.global::<ControlBarController>().mode(),
+        ControlBarMode::Hidden
+    ) {
+        return Err(anyhow::anyhow!("Control Bar mode is hidden"));
+    }
     let win_w = px(BAR_WIDTH);
     let win_h = px(BAR_HEIGHT);
     let bounds = match cx.primary_display() {
@@ -518,10 +866,20 @@ fn open_control_bar_inner(
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
+    let shell_slot: Rc<RefCell<Option<Entity<ControlBarShellPlaceholder>>>> =
+        Rc::new(RefCell::new(None));
+    let shell_slot_for_window = shell_slot.clone();
     let handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, window, cx));
+        *shell_slot_for_window.borrow_mut() = Some(shell.clone());
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+    if let Some(shell) = shell_slot.borrow().clone() {
+        cx.global_mut::<ControlBarController>()
+            .set_window(*handle, shell);
+    } else {
+        cx.global_mut::<ControlBarController>().handle = Some(*handle);
+    }
     // Round the NSWindow's contentView layer so the underlying
     // rectangle does not leak through at the corners of the pill.
     // Without this the pill's gpui-side `rounded_full()` reveals the
