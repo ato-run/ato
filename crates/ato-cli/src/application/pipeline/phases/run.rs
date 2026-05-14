@@ -2832,25 +2832,23 @@ where
         crate::application::execution_receipts::write_receipt_document_atomic(
             &execution_receipt_document,
         )?;
-    if request.verbose {
-        let (execution_id, schema_label) = match &execution_receipt_document {
-            capsule_core::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
-                (receipt.execution_id.clone(), "v1")
-            }
-            capsule_core::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
-                (receipt.execution_id.clone(), "v2-experimental")
-            }
-        };
-        request
-            .reporter
-            .notify(format!(
-                "🧾 Execution receipt ({}): {} ({})",
-                schema_label,
-                execution_id,
-                execution_receipt_path.display()
-            ))
-            .await?;
-    }
+    let (execution_id, schema_label) = match &execution_receipt_document {
+        capsule_core::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
+            (receipt.execution_id.clone(), "v1")
+        }
+        capsule_core::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
+            (receipt.execution_id.clone(), "v2-experimental")
+        }
+    };
+    request
+        .reporter
+        .notify(format!(
+            "Execution receipt ({}): {} ({})",
+            schema_label,
+            execution_id,
+            execution_receipt_path.display()
+        ))
+        .await?;
 
     let run_command_uses_specialized_executor = decision
         .plan

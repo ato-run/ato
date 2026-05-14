@@ -475,6 +475,10 @@ fn start_one(
         alias: alias.to_string(),
         detail: format!("create_dir_all {}: {}", state_dir.display(), err),
     })?;
+    let state_dir = std::fs::canonicalize(&state_dir).map_err(|err| OrchestratorError::StateDirSetup {
+        alias: alias.to_string(),
+        detail: format!("canonicalize {}: {}", state_dir.display(), err),
+    })?;
 
     // §10.4 orphan detection (warn-only, with abort for AliveOtherSession).
     let orphan = detect_orphan_state(&state_dir, input.session_pid).map_err(|err| {
