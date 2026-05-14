@@ -334,8 +334,8 @@
         <path d="M6 19L11 14L16 19L21 14" stroke="rgba(255,255,255,0.55)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     </div>
-    <div class="hero-title">新しいウィンドウ</div>
-    <div class="hero-subtitle">カプセル、ローカルアプリ、GitHub repo を開く</div>
+    <div class="hero-title" data-i18n="start.title">新しいウィンドウ</div>
+    <div class="hero-subtitle" data-i18n="start.subtitle">カプセル、ローカルアプリ、GitHub repo を開く</div>
   </div>
 
   <!-- Search -->
@@ -349,6 +349,7 @@
         </svg>
       </span>
       <input type="text" class="search-input" id="searchInput"
+             data-i18n-placeholder="start.search.placeholder"
              placeholder="カプセル名、URL、GitHub repo、ローカルパス、またはコマンドを入力" spellcheck="false">
       <span class="search-hint">⌘K</span>
     </div>
@@ -368,8 +369,8 @@
           <path d="M9 1.5C4.86 1.5 1.5 4.86 1.5 9c0 3.315 2.15 6.126 5.132 7.118.375.069.512-.163.512-.362 0-.178-.006-.65-.01-1.275-2.087.454-2.527-.999-2.527-.999-.34-.865-.83-1.095-.83-1.095-.68-.463.051-.454.051-.454.75.053 1.145.77 1.145.77.667 1.143 1.75.812 2.177.621.067-.483.26-.812.474-1-.665-.075-1.364-.332-1.364-1.479 0-.327.117-.594.308-.803-.031-.076-.134-.38.029-.792 0 0 .251-.08.822.307a2.865 2.865 0 0 1 .749-.1c.254.001.51.034.749.1.57-.387.82-.307.82-.307.163.41.061.716.03.792.192.21.308.476.308.803 0 1.15-.7 1.402-1.368 1.476.108.092.203.276.203.556 0 .401-.003.725-.003.823 0 .201.135.435.515.361C15.352 15.122 17.5 12.314 17.5 9c0-4.14-3.36-7.5-7.5-7.5z" fill="white"/>
         </svg>
       </div>
-      <div class="tile-label">GitHubから実行</div>
-      <div class="tile-desc">Repo URLをインストールして起動</div>
+      <div class="tile-label" data-i18n="start.tile.github.label">GitHubから実行</div>
+      <div class="tile-desc" data-i18n="start.tile.github.desc">Repo URLをインストールして起動</div>
     </div>
     <div class="quick-tile" id="tileLocal">
       <div class="tile-icon local">
@@ -377,8 +378,8 @@
           <path d="M2 5.5C2 4.672 2.672 4 3.5 4H7l1.5 1.5H14.5C15.328 5.5 16 6.172 16 7v6.5c0 .828-.672 1.5-1.5 1.5h-11C2.672 15 2 14.328 2 13.5V5.5z" stroke="white" stroke-width="1.5" stroke-linejoin="round"/>
         </svg>
       </div>
-      <div class="tile-label">ローカルから開く</div>
-      <div class="tile-desc">フォルダ・ファイル・プロジェクトを開く</div>
+      <div class="tile-label" data-i18n="start.tile.local.label">ローカルから開く</div>
+      <div class="tile-desc" data-i18n="start.tile.local.desc">フォルダ・ファイル・プロジェクトを開く</div>
     </div>
     <div class="quick-tile" id="tileStore">
       <div class="tile-icon store">
@@ -387,8 +388,8 @@
           <path d="M6 9h6M9 6v6" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </div>
-      <div class="tile-label">ストアで探す</div>
-      <div class="tile-desc">最新のアプリやカプセルを検索</div>
+      <div class="tile-label" data-i18n="start.tile.store.label">ストアで探す</div>
+      <div class="tile-desc" data-i18n="start.tile.store.desc">最新のアプリやカプセルを検索</div>
     </div>
     <div class="quick-tile disabled" id="tileWorkspace">
       <div class="tile-icon workspace">
@@ -396,8 +397,8 @@
           <path d="M9 2v2.5M9 13.5V16M2 9h2.5M13.5 9H16M4.05 4.05l1.77 1.77M12.18 12.18l1.77 1.77M4.05 13.95l1.77-1.77M12.18 5.82l1.77-1.77" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </div>
-      <div class="tile-label">空のワークスペース</div>
-      <div class="tile-desc">何もない新しい作業スペースを作成 <span class="tile-badge">準備中</span></div>
+      <div class="tile-label" data-i18n="start.tile.workspace.label">空のワークスペース</div>
+      <div class="tile-desc"><span data-i18n="start.tile.workspace.desc">何もない新しい作業スペースを作成</span> <span class="tile-badge" data-i18n="common.coming_soon">準備中</span></div>
     </div>
   </div>
 
@@ -405,8 +406,8 @@
   <div class="two-col">
     <div>
       <div class="section-header">
-        <div class="section-title">最近使ったカプセル</div>
-        <button class="section-link" id="showAllRecent">すべて表示</button>
+        <div class="section-title" data-i18n="start.section.recent">最近使ったカプセル</div>
+        <button class="section-link" id="showAllRecent" data-i18n="common.show_all">すべて表示</button>
       </div>
       <div class="card-list" id="recentList">
         <div class="empty-state" id="recentEmpty">
@@ -416,8 +417,8 @@
     </div>
     <div>
       <div class="section-header">
-        <div class="section-title">ローカルアプリ</div>
-        <button class="section-link" id="showAllLocal">すべて表示</button>
+        <div class="section-title" data-i18n="start.section.local">ローカルアプリ</div>
+        <button class="section-link" id="showAllLocal" data-i18n="common.show_all">すべて表示</button>
       </div>
       <div class="card-list" id="localList">
         <div class="empty-state" id="localEmpty">
@@ -430,7 +431,7 @@
   <!-- Featured apps -->
   <div class="featured-section">
     <div class="section-header">
-      <div class="section-title">注目のアプリ</div>
+      <div class="section-title" data-i18n="start.section.featured">注目のアプリ</div>
     </div>
     <div class="featured-grid" id="featuredGrid"></div>
   </div>
@@ -561,10 +562,10 @@
         <span class="fc-rating">${(app.rating || 0).toFixed(1)}</span>
       </div>
       <div class="fc-actions">
-        ${app.installed
-          ? `<button class="btn-open">開く</button>`
-          : `<button class="btn-open">インストール</button>`}
-        <button class="btn-detail">詳細</button>
+          ${ app.installed
+            ? `<button class="btn-open">${window.__ATO_T__('start.featured.open')}</button>`
+            : `<button class="btn-open">${window.__ATO_T__('start.featured.install')}</button>`}
+        <button class="btn-detail">${window.__ATO_T__('start.featured.details')}</button>
       </div>
       <div class="fc-tags">${tagsHtml}</div>`;
     const mainBtn = card.querySelector('.btn-open');
@@ -629,6 +630,9 @@
   });
 
   searchInput.focus();
+
+  // Apply i18n attributes after all DOM manipulation is complete
+  if (typeof window.__ATO_APPLY_I18N__ === 'function') window.__ATO_APPLY_I18N__();
 
   // ── Helpers ───────────────────────────────────────────────
   function escHtml(s) {
