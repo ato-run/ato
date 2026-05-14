@@ -165,5 +165,18 @@
   "launch.field.env_config": "Environment config",
   "launch.field.env_config_named": "Env config (",
   "launch.field.configured": "Configured",
-  "launch.field.policy_consent": "Execution policy consent"
+  "launch.field.policy_consent": "Execution policy consent",
+
+  "identity.title": "Account",
+  "identity.loading": "Checking…",
+  "identity.menu.store": "Store",
+  "identity.menu.settings": "Settings",
+  "identity.menu.profile": "Profile",
+  "identity.menu.account": "Account",
+  "identity.menu.workspace": "Workspace",
+  "identity.menu.trust": "Trust Settings",
+  "identity.phase2_tooltip": "Available in Phase 2",
+  "identity.id_error": "ID fetch failed",
+  "identity.not_signed_in": "Not signed in",
+  "identity.sign_in_hint": "Run ato login to authenticate"
 }
