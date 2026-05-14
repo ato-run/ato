@@ -24,7 +24,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    NavigateToUrl, OpenCardSwitcher, OpenDevConsoleWindow, OpenIdentityMenu, OpenStoreWindow,
+    NavigateToUrl, OpenCardSwitcher, OpenDockWindow, OpenStoreWindow,
     ShowSettings, StopActiveSession,
 };
 use crate::config::ControlBarMode;
@@ -47,6 +47,8 @@ pub struct ControlBarController {
     pub handle: Option<AnyWindowHandle>,
     shell: Option<Entity<ControlBarShellPlaceholder>>,
     mode: ControlBarMode,
+    /// Mode to restore when transitioning out of Hidden via show/toggle.
+    previous_mode: ControlBarMode,
     expanded: bool,
 }
 
@@ -54,10 +56,16 @@ impl gpui::Global for ControlBarController {}
 
 impl ControlBarController {
     pub fn new(mode: ControlBarMode) -> Self {
+        let previous_mode = if matches!(mode, ControlBarMode::Hidden) {
+            ControlBarMode::AutoHide
+        } else {
+            mode
+        };
         Self {
             handle: None,
             shell: None,
             mode,
+            previous_mode,
             expanded: matches!(mode, ControlBarMode::Floating),
         }
     }
@@ -87,6 +95,11 @@ impl ControlBarController {
     }
 
     pub fn set_mode(&mut self, mode: ControlBarMode) {
+        // Save the mode we're leaving as the restore point, unless
+        // we're already Hidden (avoid remembering Hidden as previous).
+        if !matches!(self.mode, ControlBarMode::Hidden) {
+            self.previous_mode = self.mode;
+        }
         self.mode = mode;
         self.expanded = matches!(mode, ControlBarMode::Floating);
     }
@@ -97,8 +110,18 @@ impl ControlBarController {
         }
     }
 
-    pub fn collapse(&mut self) {
-        if matches!(self.mode, ControlBarMode::AutoHide) {
+    /// Force-expand the bar regardless of current mode.  Used by
+    /// `focus_control_bar_input` so that Cmd+L works even in
+    /// CompactPill mode (the bar expands temporarily, then collapses
+    /// on omnibar blur like AutoHide).
+    pub fn force_expand(&mut self) {
+        if !matches!(self.mode, ControlBarMode::Floating | ControlBarMode::Hidden) {
+            self.expanded = true;
+        }
+    }
+
+    fn collapse(&mut self) {
+        if matches!(self.mode, ControlBarMode::AutoHide | ControlBarMode::CompactPill) {
             self.expanded = false;
         }
     }
@@ -140,11 +163,13 @@ pub fn show_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
             cx.global_mut::<ControlBarController>().expand();
             return Ok(handle);
         }
-        cx.set_global(ControlBarController::new(ControlBarMode::AutoHide));
+        let mode = cx.global::<ControlBarController>().mode();
+        cx.set_global(ControlBarController::new(mode));
     }
 
     if matches!(cx.global::<ControlBarController>().mode(), ControlBarMode::Hidden) {
-        cx.global_mut::<ControlBarController>().set_mode(ControlBarMode::AutoHide);
+        let restore = cx.global::<ControlBarController>().previous_mode;
+        cx.global_mut::<ControlBarController>().set_mode(restore);
     }
     open_focus_control_bar(cx)
 }
@@ -153,7 +178,12 @@ pub fn hide_control_bar(cx: &mut App) {
     let handle = {
         let controller = cx.global_mut::<ControlBarController>();
         controller.set_mode(ControlBarMode::Hidden);
-        controller.handle
+        let h = controller.handle;
+        // Clear immediately so show_control_bar can't find a stale handle
+        // before the async on_window_closed event fires.
+        controller.handle = None;
+        controller.shell = None;
+        h
     };
     if let Some(handle) = handle {
         let _ = handle.update(cx, |_, window, _| window.remove_window());
@@ -171,7 +201,7 @@ pub fn toggle_control_bar(cx: &mut App) -> Result<Option<AnyWindowHandle>> {
 
 pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
     let handle = show_control_bar(cx)?;
-    cx.global_mut::<ControlBarController>().expand();
+    cx.global_mut::<ControlBarController>().force_expand();
     if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
         let _ = handle.update(cx, |_, window, cx| {
             window.activate_window();
@@ -233,6 +263,7 @@ impl ControlBarShellPlaceholder {
                 }
                 InputEvent::Blur => {
                     this.omnibar_focused = false;
+                    cx.global_mut::<ControlBarController>().collapse();
                     cx.notify();
                 }
             },
@@ -321,13 +352,9 @@ impl Render for ControlBarShellPlaceholder {
             .flex()
             .items_center()
             .justify_center()
-            .on_hover(|hovered, _window, cx| {
+            .on_mouse_move(|_event, _window, cx| {
                 let controller = cx.global_mut::<ControlBarController>();
-                if *hovered {
-                    controller.expand();
-                } else {
-                    controller.collapse();
-                }
+                controller.expand();
                 if let Some(shell) = controller.shell.clone() {
                     shell.update(cx, |_shell, cx| cx.notify());
                 }
@@ -394,10 +421,10 @@ fn bar_pill(
             None,
         ))
         .child(pill_button(
-            "dev-console",
+            "dock",
             Some(PillIcon::Custom("icons/code.svg")),
-            Some(tr(locale, "control_bar.dev_console").into()),
-            ActionTarget::DevConsole,
+            Some(tr(locale, "control_bar.dock").into()),
+            ActionTarget::Dock,
             None,
         ))
         .child(active_context_chip(active.as_ref()))
@@ -560,7 +587,7 @@ fn identity_button() -> impl IntoElement {
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0xe0e7ff)).border_color(rgb(0xc7d2fe)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(OpenIdentityMenu), cx);
+            window.dispatch_action(Box::new(OpenDockWindow), cx);
         })
         .child(
             svg()
@@ -574,7 +601,7 @@ fn identity_button() -> impl IntoElement {
 enum ActionTarget {
     Settings,
     Store,
-    DevConsole,
+    Dock,
     CardSwitcher,
     FocusUrl,
 }
@@ -627,8 +654,8 @@ fn pill_button(
             ActionTarget::Store => {
                 window.dispatch_action(Box::new(OpenStoreWindow), cx);
             }
-            ActionTarget::DevConsole => {
-                window.dispatch_action(Box::new(OpenDevConsoleWindow), cx);
+            ActionTarget::Dock => {
+                window.dispatch_action(Box::new(OpenDockWindow), cx);
             }
             ActionTarget::CardSwitcher => {
                 window.dispatch_action(Box::new(OpenCardSwitcher), cx);
