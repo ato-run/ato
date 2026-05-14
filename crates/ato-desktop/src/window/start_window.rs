@@ -49,7 +49,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         snapshot_json
     );
 
-    let bounds = Bounds::centered(None, size(px(1200.0), px(880.0)), cx);
+    let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
     let options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
         focus: true,
