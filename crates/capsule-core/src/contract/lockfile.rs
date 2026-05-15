@@ -564,7 +564,14 @@ pub async fn ensure_lockfile_for_compat_input(
     let lock_path = lockfile_output_path(manifest_dir);
     let inputs =
         open_lockfile_inputs_for_compat_input(manifest_dir, compat_input.manifest_value())?;
-    let manifest_hash = semantic_manifest_hash_from_text(compat_input.manifest_text())?;
+    // Use the raw on-disk capsule.toml text for the hash so that the cache hit
+    // check is consistent with verify_lockfile_manifest (which reads the raw
+    // file).  Flat v0.3 manifests are normalised by the compat bridge and the
+    // bridge text differs from the raw file text → different hash → always a
+    // cache miss unless we align them here.
+    let raw_manifest_text = fs::read_to_string(manifest_dir.join("capsule.toml"))
+        .unwrap_or_else(|_| compat_input.manifest_text().to_string());
+    let manifest_hash = semantic_manifest_hash_from_text(&raw_manifest_text)?;
 
     if lock_path.exists()
         && verify_lockfile_manifest_hash(&lock_path, &manifest_hash).is_ok()
@@ -1705,11 +1712,19 @@ async fn finalize_lockfile_from_draft(
         Some(tools)
     };
 
+    // Use the raw on-disk capsule.toml text for the hash so that
+    // verify_lockfile_manifest (which always reads the raw file) sees the same
+    // hash.  When the caller came through the compat bridge the `manifest_text`
+    // argument is the *normalised* TOML, which deserialises to a different
+    // CapsuleManifest struct than the original flat v0.3 file — causing E207.
+    let raw_manifest_text = fs::read_to_string(manifest_dir.join("capsule.toml"))
+        .unwrap_or_else(|_| manifest_text.to_string());
+
     Ok(CapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: Utc::now().to_rfc3339(),
-            manifest_hash: semantic_manifest_hash_from_text(manifest_text)?,
+            manifest_hash: semantic_manifest_hash_from_text(&raw_manifest_text)?,
         },
         allowlist,
         capsule_dependencies,
