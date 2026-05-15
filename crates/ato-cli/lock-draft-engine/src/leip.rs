@@ -30,6 +30,7 @@ pub const LEIP_ENGINE_VERSION: &str = "leip-v1.0.0";
 
 const REQUIRED_COVERAGE_NODE: i32 = 25;
 const REQUIRED_COVERAGE_PYTHON: i32 = 25;
+const REQUIRED_COVERAGE_STATIC: i32 = 5;
 const AUTO_ACCEPT_MARGIN_THRESHOLD: f64 = 0.3;
 const BEAM_SIZE: usize = 4;
 
@@ -432,6 +433,7 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
     for mut candidate in [
         generate_node_candidate(input, &all_evidence),
         generate_python_candidate(input, &all_evidence),
+        generate_static_site_candidate(input, &all_evidence),
     ]
     .into_iter()
     .flatten()
@@ -660,6 +662,7 @@ pub fn redact_log_excerpt(raw: &str) -> String {
 fn required_coverage_for(driver: &str) -> i32 {
     match driver {
         "python" => REQUIRED_COVERAGE_PYTHON,
+        "static" => REQUIRED_COVERAGE_STATIC,
         _ => REQUIRED_COVERAGE_NODE,
     }
 }
@@ -788,6 +791,35 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
                 EvidenceSource::RepoFileIndex,
             ));
         }
+    }
+
+    // Static site marker — index.html at root with no stronger runtime present
+    if file_present(&file_set, "index.html")
+        && !file_present(&file_set, "package.json")
+        && !file_present(&file_set, "pyproject.toml")
+        && !file_present(&file_set, "requirements.txt")
+        && !file_present(&file_set, "setup.py")
+        && !file_present(&file_set, "go.mod")
+        && !file_present(&file_set, "Cargo.toml")
+        && !file_present(&file_set, "composer.json")
+        && !file_set.iter().any(|f| f.ends_with(".php") && !f.contains('/'))
+        && !file_set.iter().any(|f| f.ends_with(".sln") || f.ends_with(".csproj"))
+    {
+        ev.push(make_evidence(
+            EvidenceKind::RuntimeMarkerFile,
+            "index.html",
+            "detected_runtime",
+            "static",
+            EvidenceSource::RepoFileIndex,
+        ));
+        // Treat the root directory as the implicit entrypoint so has_launch_evidence passes.
+        ev.push(make_evidence(
+            EvidenceKind::EntrypointFile,
+            "index.html",
+            "entrypoint",
+            ".",
+            EvidenceSource::RepoFileIndex,
+        ));
     }
 
     // Package manager lockfiles
@@ -1833,6 +1865,82 @@ fn generate_python_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option
         launch_score,
         lockfile_score,
         risk_penalty,
+    })
+}
+
+/// Generate a static-site candidate when `index.html` is present at the root and no stronger
+/// runtime marker (Node, Python, Go, Rust) overrides it.  The static candidate has an empty
+/// `cmd` and `driver="static"` / `entrypoint="."` so that `source_inference` can project it
+/// to a `runtime=web, driver=static` resolved target without requiring a process contract.
+fn generate_static_site_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<LaunchGraphCandidate> {
+    let file_set: std::collections::BTreeSet<String> = input
+        .repo_file_index
+        .iter()
+        .filter(|e| e.kind == RepoFileKind::File)
+        .map(|e| strip_leading_dot_slash(&e.path))
+        .collect();
+
+    // Must have index.html at project root
+    if !file_present(&file_set, "index.html") {
+        return None;
+    }
+
+    // Yield to stronger runtime markers
+    if file_present(&file_set, "package.json")
+        || file_present(&file_set, "requirements.txt")
+        || file_present(&file_set, "pyproject.toml")
+        || file_present(&file_set, "setup.py")
+        || file_present(&file_set, "go.mod")
+        || file_present(&file_set, "Cargo.toml")
+        || file_present(&file_set, "composer.json")
+        || file_set.iter().any(|f| f.ends_with(".php") && !f.contains('/'))
+        || file_set.iter().any(|f| f.ends_with(".sln") || f.ends_with(".csproj"))
+    {
+        return None;
+    }
+
+    // Collect the evidence IDs for the static marker and implicit entrypoint added by extract_evidence.
+    let evidence_refs: Vec<String> = evidence
+        .iter()
+        .filter(|e| {
+            (e.kind == EvidenceKind::RuntimeMarkerFile && e.normalized_value == "static")
+                || (e.kind == EvidenceKind::EntrypointFile && e.path == "index.html")
+        })
+        .map(|e| e.id.clone())
+        .collect();
+
+    // Score: a root index.html is moderate evidence of a self-contained static site.
+    // launch_score must meet MIN_LAUNCH_SCORE_FOR_AUTO_ACCEPT — we set it equal to the threshold.
+    let static_score = REQUIRED_COVERAGE_STATIC + 5;
+
+    let envelope = LaunchEnvelopeDraft {
+        driver: Some("static".to_string()),
+        entrypoint: Some(".".to_string()),
+        cmd: Vec::new(),
+        ..Default::default()
+    };
+
+    let graph = single_node_graph(
+        "static-site",
+        LeipNodeKind::AppTarget,
+        "Static website",
+        envelope,
+        evidence_refs.clone(),
+    );
+
+    Some(LaunchGraphCandidate {
+        id: String::new(),
+        graph,
+        score: static_score,
+        relative_confidence: 0.0,
+        margin: 0.0,
+        evidence_refs,
+        risks: Vec::new(),
+        hard_constraint_failures: Vec::new(),
+        runtime_score: static_score,
+        launch_score: MIN_LAUNCH_SCORE_FOR_AUTO_ACCEPT,
+        lockfile_score: 0,
+        risk_penalty: 0,
     })
 }
 
@@ -3176,6 +3284,89 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let node = &top.graph.nodes[0];
         let cmd = node.envelope.as_ref().map(|e| e.cmd.clone()).unwrap_or_default();
         assert_eq!(cmd[..2], ["python", "manage.py"], "Django should infer `python manage.py runserver`, got {:?}", cmd);
+    }
+
+    // ── Static site candidates ────────────────────────────────────────────────
+
+    #[test]
+    fn static_site_index_html_only_auto_accepts_with_static_driver() {
+        let input = LeipInput {
+            repo_file_index: vec![
+                file("index.html"),
+                file("style.css"),
+                file("script.js"),
+            ],
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "index.html only should AutoAccept, got {:?}",
+            result.decision
+        );
+        let top = &result.candidates[0];
+        let node = &top.graph.nodes[0];
+        let env = node.envelope.as_ref().expect("envelope must be present");
+        assert_eq!(env.driver.as_deref(), Some("static"), "driver should be static");
+        assert!(env.cmd.is_empty(), "static site should have empty cmd");
+        assert_eq!(env.entrypoint.as_deref(), Some("."), "entrypoint should be '.'");
+    }
+
+    #[test]
+    fn go_project_is_unresolved_with_actionable_diagnostic() {
+        let input = LeipInput {
+            repo_file_index: vec![
+                file("go.mod"),
+                file("cmd/main.go"),
+                file("README.md"),
+            ],
+            file_text_map: [
+                ("go.mod".to_string(), "module example.com/gotodo\n\ngo 1.21\n".to_string()),
+            ].into_iter().collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::Unresolved { .. }),
+            "Go project should be Unresolved, got {:?}",
+            result.decision
+        );
+        // Must carry an actionable diagnostic mentioning Go
+        let has_go_hint = result.diagnostics.iter().any(|d| {
+            d.message.contains("Go") || d.message.contains("go run")
+        });
+        assert!(has_go_hint, "diagnostics should mention Go, got {:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn node_app_with_index_html_prefers_node_over_static() {
+        // A Node SPA has both index.html and package.json — Node should win.
+        let pkg_json = r#"{
+            "name": "spa",
+            "scripts": { "start": "node server.js" }
+        }"#;
+        let input = LeipInput {
+            repo_file_index: vec![
+                file("package.json"),
+                file("package-lock.json"),
+                file("index.html"),
+                file("server.js"),
+            ],
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let result = evaluate_launch_graphs(&input);
+        assert!(
+            matches!(result.decision, LeipDecision::AutoAccept { .. }),
+            "Node app with index.html should AutoAccept as Node, got {:?}",
+            result.decision
+        );
+        let top = &result.candidates[0];
+        let node = &top.graph.nodes[0];
+        let env = node.envelope.as_ref().expect("envelope must be present");
+        assert_eq!(env.driver.as_deref(), Some("node"), "Node package should prefer node driver over static");
     }
 }
 
