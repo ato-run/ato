@@ -23,10 +23,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context,
-    IntoElement, Render, Window, WindowBounds, WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, Window,
+    WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -186,6 +187,7 @@ pub fn prepare_source(
                         "working_directory": prepared.working_directory.display().to_string(),
                         "manifest_path": prepared.manifest_path.display().to_string(),
                         "manifest_toml": prepared.manifest_toml,
+                        "manifest_inference": prepared.manifest_inference,
                     }),
                 );
             }
@@ -731,13 +733,14 @@ fn prepare_source_blocking(
         DockSourceKind::GithubRepo => clone_public_github_repo(&session_id, value)?,
         DockSourceKind::LocalPath => validate_local_source_path(value)?,
     };
-    let manifest_toml = load_manifest_or_template(&working_directory, source_kind, value)?;
+    let manifest = load_manifest_or_template(&working_directory, source_kind, value)?;
     let manifest_path = working_directory.join("capsule.toml");
     Ok(PreparedDockSource {
         session_id,
         working_directory,
         manifest_path,
-        manifest_toml,
+        manifest_toml: manifest.toml,
+        manifest_inference: manifest.inference,
     })
 }
 
@@ -1015,13 +1018,18 @@ fn stop_preview_via_runtime(runtime: &mut DockRuntimeState) -> bool {
 
 fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> {
     let clone_url = normalize_public_github_url(raw_url)?;
+    // Use the repo name as the working directory so that manifest inference
+    // produces a meaningful capsule name (e.g. "hello-capsule") instead of
+    // the opaque session ID (e.g. "dock-17a2b3c4d5e6f").
+    let repo_name = repo_name_from_clone_url(&clone_url);
     let sources_root = dock_sources_root()?;
-    let target_dir = sources_root.join(session_id);
+    let session_dir = sources_root.join(session_id);
+    let target_dir = session_dir.join(&repo_name);
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir)
             .with_context(|| format!("Failed to clear {}", target_dir.display()))?;
     }
-    fs::create_dir_all(&sources_root)?;
+    fs::create_dir_all(&session_dir)?;
     // Pre-create the target directory so git does not have to create it while
     // inheriting a CWD that is itself inside a git repository (which can confuse
     // git's internal bare-repo detection in some versions).
@@ -1046,7 +1054,7 @@ fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> 
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         // Run from a neutral CWD outside any git working tree.
-        .current_dir(&sources_root)
+        .current_dir(&session_dir)
         .arg("clone")
         .arg("--depth")
         .arg("1")
@@ -1060,11 +1068,19 @@ fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> 
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    anyhow::bail!(
-        "Failed to clone {}. {}",
-        clone_url,
-        stderr.trim()
-    )
+    anyhow::bail!("Failed to clone {}. {}", clone_url, stderr.trim())
+}
+
+/// Extract the repository name from a normalized GitHub clone URL.
+/// `https://github.com/owner/hello-capsule.git` → `"hello-capsule"`
+fn repo_name_from_clone_url(clone_url: &str) -> String {
+    clone_url
+        .rsplit('/')
+        .next()
+        .map(|s| s.trim_end_matches(".git"))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "source".to_string())
 }
 
 /// Find the git binary. Prefers the Homebrew git if present, then falls back
@@ -1100,17 +1116,93 @@ fn load_manifest_or_template(
     working_directory: &Path,
     source_kind: DockSourceKind,
     source_value: &str,
-) -> Result<String> {
+) -> Result<DockManifestDraft> {
     let manifest_path = working_directory.join("capsule.toml");
     if manifest_path.is_file() {
-        return fs::read_to_string(&manifest_path)
-            .with_context(|| format!("Failed to read {}", manifest_path.display()));
+        let toml = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+        return Ok(DockManifestDraft {
+            toml,
+            inference: json!({
+                "mode": "existing_manifest",
+                "warnings": [],
+            }),
+        });
     }
-    Ok(default_manifest_toml(
-        working_directory,
-        source_kind,
-        source_value,
-    ))
+    infer_manifest_or_template(working_directory, source_kind, source_value)
+}
+
+fn infer_manifest_or_template(
+    working_directory: &Path,
+    source_kind: DockSourceKind,
+    source_value: &str,
+) -> Result<DockManifestDraft> {
+    match infer_manifest_toml(working_directory) {
+        Ok(inferred) => Ok(DockManifestDraft {
+            toml: inferred.manifest_toml,
+            inference: json!({
+                "mode": inferred.inference_mode.unwrap_or_else(|| "static_inference".to_string()),
+                "ok": inferred.ok.unwrap_or(true),
+                "diagnostics": inferred.diagnostics.unwrap_or(Value::Array(Vec::new())),
+                "unresolved": inferred.unresolved.unwrap_or(Value::Array(Vec::new())),
+                "selection_gate": inferred.selection_gate.unwrap_or(Value::Null),
+                "approval_gate": inferred.approval_gate.unwrap_or(Value::Null),
+                "warnings": [],
+            }),
+        }),
+        Err(error) => {
+            let fallback = default_manifest_toml(working_directory, source_kind, source_value);
+            Ok(DockManifestDraft {
+                toml: fallback,
+                inference: json!({
+                    "mode": "placeholder_fallback",
+                    "ok": false,
+                    "diagnostics": [],
+                    "unresolved": [],
+                    "warnings": [format!("Static manifest inference failed: {error}")],
+                }),
+            })
+        }
+    }
+}
+
+fn infer_manifest_toml(working_directory: &Path) -> Result<InferredManifestResponse> {
+    let ato_bin = resolve_ato_binary()?;
+    let output = Command::new(&ato_bin)
+        .arg("project")
+        .arg("infer-manifest")
+        .arg(working_directory)
+        .arg("--json")
+        .current_dir(working_directory)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!(
+                "Failed to run `{} project infer-manifest {}`",
+                ato_bin.display(),
+                working_directory.display()
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("infer-manifest exited with status {}", output.status)
+        };
+        anyhow::bail!(detail);
+    }
+
+    let inferred: InferredManifestResponse = serde_json::from_str(&stdout)
+        .with_context(|| "infer-manifest returned invalid JSON".to_string())?;
+    if inferred.manifest_toml.trim().is_empty() {
+        anyhow::bail!("infer-manifest returned an empty manifest");
+    }
+    Ok(inferred)
 }
 
 fn default_manifest_toml(
@@ -1232,11 +1324,34 @@ struct PreparedDockSource {
     working_directory: PathBuf,
     manifest_path: PathBuf,
     manifest_toml: String,
+    manifest_inference: Value,
+}
+
+struct DockManifestDraft {
+    toml: String,
+    inference: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct InferredManifestResponse {
+    manifest_toml: String,
+    ok: Option<bool>,
+    inference_mode: Option<String>,
+    diagnostics: Option<Value>,
+    unresolved: Option<Value>,
+    selection_gate: Option<Value>,
+    approval_gate: Option<Value>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_preview_url, normalize_public_github_url, parse_publish_json_output};
+    use std::fs;
+
+    use super::{
+        detect_preview_url, load_manifest_or_template, normalize_public_github_url,
+        parse_publish_json_output, repo_name_from_clone_url,
+    };
+    use crate::system_capsule::ato_dock::DockSourceKind;
 
     #[test]
     fn parse_publish_json_output_reads_phase_payload() {
@@ -1280,5 +1395,34 @@ mod tests {
         );
         assert!(normalize_public_github_url("https://github.com/ato-run/ato/tree/main").is_err());
         assert!(normalize_public_github_url("http://github.com/ato-run/ato").is_err());
+    }
+
+    #[test]
+    fn load_manifest_or_template_prefers_existing_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = "schema_version = \"0.3\"\nname = \"existing\"\n";
+        fs::write(dir.path().join("capsule.toml"), manifest).expect("manifest");
+
+        let loaded = load_manifest_or_template(
+            dir.path(),
+            DockSourceKind::LocalPath,
+            dir.path().to_string_lossy().as_ref(),
+        )
+        .expect("load manifest");
+
+        assert_eq!(loaded.toml, manifest);
+        assert_eq!(loaded.inference["mode"], "existing_manifest");
+    }
+
+    #[test]
+    fn repo_name_from_clone_url_extracts_repo_slug() {
+        assert_eq!(
+            repo_name_from_clone_url("https://github.com/Koh0920/hello-capsule.git"),
+            "hello-capsule"
+        );
+        assert_eq!(
+            repo_name_from_clone_url("https://github.com/ato-run/ato.git"),
+            "ato"
+        );
     }
 }
