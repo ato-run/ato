@@ -860,6 +860,17 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
 <script>
 const STORAGE_KEY = "ato-dock-ui-state-v1";
 const FILTERS = ["all", "public", "limited", "draft", "review"];
+
+// Track last-focused text input so the Rust paste handler can find the right
+// element even when document.activeElement has been reset to <body>.
+window.__ato_last_focused = null;
+document.addEventListener("focusin", function(e) {
+  const el = e.target;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") &&
+      !el.readOnly && !el.disabled && el.type !== "checkbox" && el.type !== "radio") {
+    window.__ato_last_focused = el;
+  }
+}, true);
 const FILTER_LABELS = { all: "All", public: "Public", limited: "Limited", draft: "Draft", review: "Review" };
 const WIZARD_STEPS = [
   { label: "Source Input" },
