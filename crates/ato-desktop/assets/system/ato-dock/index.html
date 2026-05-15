@@ -1453,6 +1453,7 @@ function handleDockEvent(event) {
       state.wizard.manifestSaved = true;
       state.wizard.manifestPath = event.manifest_path || state.wizard.manifestPath;
       state.wizard.manifestToml = event.manifest_toml || state.wizard.manifestToml;
+      state.wizard.step = Math.max(state.wizard.step, 2);
     } else if (["prepare", "build", "verify"].includes(event.phase)) {
       const item = state.wizard.verificationChecks[event.phase];
       if (item) { item.status = "success"; item.message = event.message || "Completed."; }
