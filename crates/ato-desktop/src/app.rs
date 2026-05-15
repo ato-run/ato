@@ -345,6 +345,13 @@ pub fn run() {
             KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
             KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
             KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
+            // Launch window bindings — delegate keyboard copy/paste to the
+            // consent WebView (WKWebView is not first responder in this window
+            // so native Cmd+V/C never reaches the HTML inputs otherwise).
+            KeyBinding::new("cmd-x", NativeCut, Some("LaunchWindowShell")),
+            KeyBinding::new("cmd-c", NativeCopy, Some("LaunchWindowShell")),
+            KeyBinding::new("cmd-v", NativePaste, Some("LaunchWindowShell")),
+            KeyBinding::new("cmd-a", NativeSelectAll, Some("LaunchWindowShell")),
             KeyBinding::new("cmd-alt-i", ToggleDock, None),
             KeyBinding::new("cmd-shift-b", ToggleControlBar, None),
             KeyBinding::new("ctrl-shift-b", ToggleControlBar, None),
