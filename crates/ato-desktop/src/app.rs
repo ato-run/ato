@@ -373,18 +373,14 @@ pub fn run() {
             KeyBinding::new("cmd-c", NativeCopy, Some("Pane")),
             KeyBinding::new("cmd-v", NativePaste, Some("Pane")),
             KeyBinding::new("cmd-a", NativeSelectAll, Some("Pane")),
-            // Launch window bindings — delegate keyboard copy/paste to the
-            // consent WebView (WKWebView is not first responder in this window
-            // so native Cmd+V/C never reaches the HTML inputs otherwise).
-            KeyBinding::new("cmd-x", NativeCut, Some("LaunchWindowShell")),
-            KeyBinding::new("cmd-c", NativeCopy, Some("LaunchWindowShell")),
-            KeyBinding::new("cmd-v", NativePaste, Some("LaunchWindowShell")),
-            KeyBinding::new("cmd-a", NativeSelectAll, Some("LaunchWindowShell")),
-            // Dock window bindings — same delegation to the Dock WebView.
-            KeyBinding::new("cmd-x", NativeCut, Some("DockWebView")),
-            KeyBinding::new("cmd-c", NativeCopy, Some("DockWebView")),
-            KeyBinding::new("cmd-v", NativePaste, Some("DockWebView")),
-            KeyBinding::new("cmd-a", NativeSelectAll, Some("DockWebView")),
+            // WebView-hosting shell bindings — delegate keyboard copy/paste to
+            // the Wry WKWebView (macOS native child view, not GPUI first-responder).
+            // A single "WebViewShell" context covers all windows that use the
+            // WebViewPasteShell trait (dock, launch wizard, store, settings, etc.).
+            KeyBinding::new("cmd-x", NativeCut, Some("WebViewShell")),
+            KeyBinding::new("cmd-c", NativeCopy, Some("WebViewShell")),
+            KeyBinding::new("cmd-v", NativePaste, Some("WebViewShell")),
+            KeyBinding::new("cmd-a", NativeSelectAll, Some("WebViewShell")),
             KeyBinding::new("cmd-alt-i", ToggleDock, None),
             KeyBinding::new("cmd-shift-b", ToggleControlBar, None),
             KeyBinding::new("ctrl-shift-b", ToggleControlBar, None),

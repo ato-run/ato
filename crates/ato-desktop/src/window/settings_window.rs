@@ -27,9 +27,20 @@ use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::settings::settings_snapshot_from_config;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 pub struct SettingsWindowShell {
     pub(crate) _webview: WebView,
+    paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(SettingsWindowShell, paste);
+
+impl WebViewPasteShell for SettingsWindowShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self._webview)
+    }
 }
 
 impl SettingsWindowShell {
@@ -44,13 +55,8 @@ impl SettingsWindowShell {
 }
 
 impl Render for SettingsWindowShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        // Pale-violet backdrop in case the HTML is still painting.
-        div().size_full().bg(rgb(0xf5f3ff))
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        paste_render_wrap!(div().size_full().bg(rgb(0xf5f3ff)), cx, &self.paste.focus_handle)
     }
 }
 
@@ -136,7 +142,8 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Settings WebView");
-        let shell = cx.new(|_cx| SettingsWindowShell { _webview: webview });
+        let shell = cx.new(|cx| SettingsWindowShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         if let Ok(mut slot) = shell_slot_inner.lock() {
             *slot = Some(shell.downgrade());
         }
@@ -162,6 +169,7 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
             title: gpui::SharedString::from(tr(locale, "settings.title")),
             subtitle: gpui::SharedString::from(tr(locale, "settings.nav.general")),
             url: gpui::SharedString::from("capsule://desktop.ato.run/settings"),
+            capsule: None,
             last_focused_at: std::time::Instant::now(),
         },
     );
