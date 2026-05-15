@@ -1015,14 +1015,38 @@ fn stop_preview_via_runtime(runtime: &mut DockRuntimeState) -> bool {
 
 fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> {
     let clone_url = normalize_public_github_url(raw_url)?;
-    let target_dir = dock_sources_root()?.join(session_id);
+    let sources_root = dock_sources_root()?;
+    let target_dir = sources_root.join(session_id);
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir)
             .with_context(|| format!("Failed to clear {}", target_dir.display()))?;
     }
-    fs::create_dir_all(target_dir.parent().context("Dock sources root missing")?)?;
+    fs::create_dir_all(&sources_root)?;
+    // Pre-create the target directory so git does not have to create it while
+    // inheriting a CWD that is itself inside a git repository (which can confuse
+    // git's internal bare-repo detection in some versions).
+    fs::create_dir_all(&target_dir)?;
 
-    let output = Command::new("git")
+    let git_bin = resolve_git_binary();
+    let output = Command::new(&git_bin)
+        // Bypass any credential helper — we only clone public repos.
+        .arg("-c")
+        .arg("credential.helper=")
+        // Suppress interactive prompts that would block the background thread.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Clear env vars that cargo sets and that git inherits; these can
+        // cause safe.bareRepository or other config injection to interfere
+        // with the fresh git-init that `git clone` performs.
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_KEY_0")
+        .env_remove("GIT_CONFIG_VALUE_0")
+        // Ensure git does not walk up into a parent git repo when its CWD
+        // happens to be inside the ato-desktop source tree.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        // Run from a neutral CWD outside any git working tree.
+        .current_dir(&sources_root)
         .arg("clone")
         .arg("--depth")
         .arg("1")
@@ -1030,16 +1054,33 @@ fn clone_public_github_repo(session_id: &str, raw_url: &str) -> Result<PathBuf> 
         .arg(&target_dir)
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("Failed to run `git clone` for {clone_url}"))?;
+        .with_context(|| format!("Failed to run `{git_bin} clone` for {clone_url}"))?;
     if output.status.success() {
         return Ok(target_dir);
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow::bail!(
-        "Failed to import GitHub repository. Only public GitHub repositories are supported in v1. {}",
+        "Failed to clone {}. {}",
+        clone_url,
         stderr.trim()
     )
+}
+
+/// Find the git binary. Prefers the Homebrew git if present, then falls back
+/// to whatever is on PATH (which is /usr/bin/git on macOS app bundles).
+fn resolve_git_binary() -> String {
+    for candidate in &["/opt/homebrew/bin/git", "/usr/local/bin/git", "git"] {
+        if std::path::Path::new(candidate).is_absolute() {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        } else {
+            // Non-absolute path — rely on PATH resolution; always allow "git".
+            return candidate.to_string();
+        }
+    }
+    "git".to_string()
 }
 
 fn validate_local_source_path(raw_path: &str) -> Result<PathBuf> {
