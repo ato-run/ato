@@ -177,9 +177,13 @@ pub struct LaunchWindowShell {
 impl Render for LaunchWindowShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // White backdrop in case the HTML is still painting.
+        // key_context required so the LaunchWindowShell key bindings fire
+        // (the WKWebView child is not first responder, so native Cmd+V/C
+        // would never reach the HTML inputs without this).
         div()
             .size_full()
             .bg(rgb(0xffffff))
+            .key_context("LaunchWindowShell")
             .on_action(cx.listener(Self::on_native_copy))
             .on_action(cx.listener(Self::on_native_cut))
             .on_action(cx.listener(Self::on_native_paste))
@@ -199,11 +203,9 @@ impl LaunchWindowShell {
     fn on_native_paste(&mut self, _: &NativePaste, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
-                let escaped = text
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-                    .replace('\r', "\\r");
+                // JSON-encode the text so all special characters (backslashes,
+                // quotes, control chars, etc.) are safely embedded in the script.
+                let json_text = serde_json::to_string(&text).unwrap_or_default();
                 let script = format!(
                     r#"(function(t){{
   var e=document.activeElement;
@@ -213,7 +215,8 @@ impl LaunchWindowShell {
     e.selectionStart=e.selectionEnd=s+t.length;
     e.dispatchEvent(new Event('input',{{bubbles:true}}));
   }}
-}})("{escaped}")"#
+}})({})"#,
+                    json_text
                 );
                 let _ = self._webview.evaluate_script(&script);
             }
