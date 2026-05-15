@@ -41,11 +41,13 @@ use gpui_component::TitleBar;
 use serde::Serialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
+#[cfg(target_os = "macos")]
+use wry::WebViewExtMacOS;
 
+use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::state::GuestRoute;
 use crate::system_capsule::ipc as system_ipc;
-use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
 
 const CONSENT_HTML: &str = include_str!("../../assets/system/ato-launch/consent.html");
 const BOOT_HTML: &str = include_str!("../../assets/system/ato-launch/boot.html");
@@ -193,7 +195,9 @@ impl Render for LaunchWindowShell {
 
 impl LaunchWindowShell {
     fn on_native_copy(&mut self, _: &NativeCopy, _window: &mut Window, _cx: &mut Context<Self>) {
-        let _ = self._webview.evaluate_script("document.execCommand('copy')");
+        let _ = self
+            ._webview
+            .evaluate_script("document.execCommand('copy')");
     }
 
     fn on_native_cut(&mut self, _: &NativeCut, _window: &mut Window, _cx: &mut Context<Self>) {
@@ -203,21 +207,14 @@ impl LaunchWindowShell {
     fn on_native_paste(&mut self, _: &NativePaste, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
-                // JSON-encode the text so all special characters (backslashes,
-                // quotes, control chars, etc.) are safely embedded in the script.
-                let json_text = serde_json::to_string(&text).unwrap_or_default();
-                let script = format!(
-                    r#"(function(t){{
-  var e=document.activeElement;
-  if(e&&(e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&!e.readOnly){{
-    var s=e.selectionStart,n=e.selectionEnd;
-    e.value=e.value.slice(0,s)+t+e.value.slice(n);
-    e.selectionStart=e.selectionEnd=s+t.length;
-    e.dispatchEvent(new Event('input',{{bubbles:true}}));
-  }}
-}})({})"#,
-                    json_text
-                );
+                // Ensure WKWebView has OS first-responder before injecting the
+                // paste script. Without this, document.activeElement may be
+                // reset to <body> by the time the GPUI deferred action fires,
+                // causing the isTextInput check in launch_paste_script to fail.
+                #[cfg(target_os = "macos")]
+                let _ = self._webview.focus();
+
+                let script = launch_paste_script(&text);
                 let _ = self._webview.evaluate_script(&script);
             }
         }
@@ -229,7 +226,9 @@ impl LaunchWindowShell {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        let _ = self._webview.evaluate_script("document.execCommand('selectAll')");
+        let _ = self
+            ._webview
+            .evaluate_script("document.execCommand('selectAll')");
     }
 
     /// Advance the boot wizard UI to step `n`. Called from the foreground
@@ -256,6 +255,33 @@ impl LaunchWindowShell {
         );
         let _ = self._webview.evaluate_script(&script);
     }
+}
+
+fn launch_paste_script(text: &str) -> String {
+    let text = serde_json::to_string(text).expect("clipboard text should serialize");
+    format!(
+        r#"(() => {{
+  const text = {text};
+  // Prefer document.activeElement; fall back to the last element that
+  // received a focusin event (stored by the __ato_last_focused tracker).
+  // This is necessary because document.activeElement may be reset to
+  // <body> by the time the GPUI deferred action fires on macOS.
+  const active = (document.activeElement && document.activeElement !== document.body)
+    ? document.activeElement
+    : (window.__ato_last_focused || null);
+  const isTextInput = active && (
+    active.tagName === 'TEXTAREA' ||
+    (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
+  );
+  if (!isTextInput || active.readOnly || active.disabled) return;
+  active.focus();
+  const start = active.selectionStart ?? active.value.length;
+  const end = active.selectionEnd ?? start;
+  active.setRangeText(text, start, end, 'end');
+  active.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: text }}));
+}})();"#,
+        text = text,
+    )
 }
 
 fn open_wizard(
@@ -805,5 +831,20 @@ mod tests {
             "koh0920/flatnotes",
             &err
         ));
+    }
+
+    #[test]
+    fn consent_config_inputs_allow_selection() {
+        assert!(CONSENT_HTML.contains("-webkit-user-select: text;"));
+        assert!(CONSENT_HTML.contains("user-select: text;"));
+    }
+
+    #[test]
+    fn launch_paste_script_uses_safe_text_insertion() {
+        let script = launch_paste_script("a'b\nc");
+
+        assert!(script.contains(r#"const text = "a'b\nc";"#));
+        assert!(script.contains("active.setRangeText(text, start, end, 'end');"));
+        assert!(script.contains("inputType: 'insertText'"));
     }
 }
