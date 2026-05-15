@@ -599,7 +599,11 @@
     _sd = null;
     (p.requirements || []).forEach(req => {
       if (req.type === 'secrets_required') {
-        (req.fields || []).forEach(f => _cfgFields.push({ name:f.name, label:f.label||f.name, kind:f.kind||'text', choices:f.choices||[], placeholder:f.placeholder||'', already_configured:!!f.already_configured, value:'' }));
+        (req.fields || []).forEach(f => {
+          const defaultVal = (f.kind === 'enum' && (f.default || (f.choices && f.choices[0])))
+            ? (f.default || f.choices[0]) : '';
+          _cfgFields.push({ name:f.name, label:f.label||f.name, kind:f.kind||'text', choices:f.choices||[], placeholder:f.placeholder||'', already_configured:!!f.already_configured, value:defaultVal });
+        });
       } else if (req.type === 'consent_required') {
         _consent.push(req);
         if (!_sd && req.summary) _sd = parseSummary(req.summary);
