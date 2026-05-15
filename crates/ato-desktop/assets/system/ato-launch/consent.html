@@ -105,6 +105,8 @@
     flex: 1; border: 0; outline: 0; background: transparent;
     font: inherit; font-size: 12px; color: var(--text);
     font-family: "SF Mono", ui-monospace, monospace;
+    -webkit-user-select: text;
+    user-select: text;
   }
   .field-row input::placeholder { color: var(--soft); }
   .badge-configured {
@@ -228,6 +230,18 @@
     ? (m) => window.ipc.postMessage(JSON.stringify(m))
     : (m) => console.log('[no bridge]', m);
   const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
+
+  // Track last-focused text input so the Rust paste handler can target it
+  // even if document.activeElement was reset to body when GPUI processed
+  // the menu action on macOS.
+  window.__ato_last_focused = null;
+  document.addEventListener('focusin', function(e) {
+    const el = e.target;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') &&
+        !el.readOnly && !el.disabled && el.type !== 'checkbox') {
+      window.__ato_last_focused = el;
+    }
+  }, true);
 
   let _preview = null;
 
