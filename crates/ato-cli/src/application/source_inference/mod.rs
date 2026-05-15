@@ -164,6 +164,16 @@ struct DesktopExecutionOverride {
     source_field: String,
 }
 
+/// Tri-state return from `infer_desktop_execution_override`.
+/// - `Execute`: a desktop run contract was resolved
+/// - `Unsupported`: the project is a desktop app but cannot be run (emit diagnostic, stop)
+/// - `None` (returned as Rust's `Option::None` via the outer `Option`): not a desktop app
+#[derive(Debug, Clone)]
+enum DesktopOverrideResult {
+    Execute(DesktopExecutionOverride),
+    Unsupported(String),
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ElectronBuilderDirectoriesConfig {
     output: Option<String>,
@@ -1063,12 +1073,81 @@ fn apply_gates_phase(
 fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInferenceResult> {
     let detected = detect_project(&input.project_root)?;
     let info = project_info_from_detection(&detected)?;
-    let desktop_execution = infer_desktop_execution_override(
+    let desktop_override = infer_desktop_execution_override(
         &input.project_root,
         &detected,
         &info,
         input.explicit_native_artifact.as_deref(),
     )?;
+
+    // Handle Electron/desktop apps that require a build step before running.
+    // Return early with an actionable diagnostic instead of proceeding to LEIP,
+    // which would fall through to `pnpm start` and produce a confusing runtime error.
+    if let Some(DesktopOverrideResult::Unsupported(msg)) = &desktop_override {
+        let msg = msg.clone();
+        let mut lock = AtoLock::default();
+        let metadata = source_metadata(
+            &detected,
+            input
+                .authoritative_root
+                .as_deref()
+                .unwrap_or(input.project_root.as_path()),
+            input.single_script_language,
+        );
+        lock.contract.entries.insert("metadata".to_string(), metadata);
+        lock.contract.entries.insert("workloads".to_string(), Value::Array(Vec::new()));
+        lock.contract.unresolved.push(UnresolvedValue {
+            field: Some("contract.process".to_string()),
+            reason: UnresolvedReason::InsufficientEvidence,
+            detail: Some(msg.clone()),
+            candidates: Vec::new(),
+        });
+        // materialize.rs requires unresolved markers for all resolution fields when not set.
+        for field in &["resolution.runtime", "resolution.resolved_targets", "resolution.closure"] {
+            lock.resolution.unresolved.push(UnresolvedValue {
+                field: Some(field.to_string()),
+                reason: UnresolvedReason::InsufficientEvidence,
+                detail: Some(msg.clone()),
+                candidates: Vec::new(),
+            });
+        }
+        return Ok(SourceInferenceResult {
+            input_kind: SourceInferenceInputKind::SourceEvidence,
+            lock,
+            provenance: vec![SourceInferenceProvenance {
+                field: "contract.process".to_string(),
+                kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
+                source_path: Some(input.project_root.clone()),
+                importer_id: None,
+                evidence_kind: Some("desktop_unsupported".to_string()),
+                source_field: None,
+                note: Some(msg.clone()),
+            }],
+            diagnostics: vec![SourceInferenceDiagnostic {
+                severity: SourceInferenceDiagnosticSeverity::Error,
+                field: "contract.process".to_string(),
+                message: msg.clone(),
+            }],
+            infer: InferResult {
+                candidate_sets: Vec::new(),
+                unresolved: vec!["contract.process".to_string()],
+            },
+            resolve: ResolveResult {
+                resolved_process: false,
+                resolved_runtime: false,
+                resolved_target_compatibility: false,
+                resolved_dependency_closure: false,
+                unresolved: Vec::new(),
+            },
+            selection_gate: None,
+            approval_gate: None,
+        });
+    }
+
+    let desktop_execution = desktop_override.and_then(|o| match o {
+        DesktopOverrideResult::Execute(e) => Some(e),
+        DesktopOverrideResult::Unsupported(_) => None,
+    });
 
     // LEIP v1 inference — runs only when no explicit desktop_execution override is
     // present (desktop_execution takes highest precedence).
@@ -1079,6 +1158,16 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         leip_projection_from_root(&input.project_root)
     } else {
         None
+    };
+
+    // Pre-compute LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
+    // When hints are present, LEIP already identified the runtime but cannot generate a
+    // candidate — skip legacy candidate generation so we emit an actionable hint instead
+    // of falling through to a `driver="go"` / `driver="rust"` resolved target (E301).
+    let leip_hints = if leip_projection.is_none() && desktop_execution.is_none() {
+        leip_unresolved_hints(&input.project_root)
+    } else {
+        Vec::new()
     };
 
     let metadata = source_metadata(
@@ -1104,8 +1193,12 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .and_then(|p| p.driver.as_deref())
         })
         .unwrap_or_else(|| runtime_kind_from_project(&detected));
-    let process_candidates = if desktop_execution.is_some() || leip_projection.is_some() {
-        // Desktop execution override and LEIP AutoAccept both skip legacy candidate generation.
+    let process_candidates = if desktop_execution.is_some()
+        || leip_projection.is_some()
+        || !leip_hints.is_empty()
+    {
+        // Desktop execution override, LEIP AutoAccept, and LEIP Unresolved-with-hint all
+        // skip legacy candidate generation to avoid a spurious unsupported-driver error.
         Vec::new()
     } else {
         process_candidates_for_source(&detected, &info)
@@ -1167,11 +1260,18 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 leip_projection.as_ref().map(|p| {
                     let mut target = serde_json::Map::new();
                     target.insert("label".to_string(), Value::String("default".to_string()));
-                    target.insert("runtime".to_string(), Value::String("source".to_string()));
+                    // Static sites are web-served content, not source-executed processes.
+                    let runtime = if p.driver.as_deref() == Some("static") { "web" } else { "source" };
+                    target.insert("runtime".to_string(), Value::String(runtime.to_string()));
                     if let Some(driver) = &p.driver {
                         target.insert("driver".to_string(), Value::String(driver.clone()));
                     }
-                    if !p.cmd.is_empty() {
+                    if p.driver.as_deref() == Some("static") {
+                        // Static site: serve from the project root directory on a default port.
+                        // runtime=web requires a port so the web runner can notify the endpoint.
+                        target.insert("entrypoint".to_string(), Value::String(".".to_string()));
+                        target.insert("port".to_string(), Value::Number(serde_json::Number::from(8080u16)));
+                    } else if !p.cmd.is_empty() {
                         target.insert("entrypoint".to_string(), Value::String(p.cmd[0].clone()));
                         if p.cmd.len() > 1 {
                             // Multi-token cmd: encode as run_command so the compat bridge
@@ -1303,17 +1403,35 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
         // legacy contract.  This is a lossy projection — only cmd, driver, and
         // workload name are preserved; graph edges and non-primary nodes are not
         // represented in the legacy schema.
-        let process_val = process_value_from_leip_cmd(&leip.cmd);
-        lock.contract.entries.insert(
-            "workloads".to_string(),
-            Value::Array(vec![json!({
-                "name": "main",
-                "process": process_val.clone(),
-            })]),
-        );
-        lock.contract
-            .entries
-            .insert("process".to_string(), process_val);
+        //
+        // Static sites (driver="static"): insert a process entry with the static driver so that
+        // the RunAttempt contract check passes and the static executor can serve files directly
+        // from the project root without a subprocess.
+        if leip.driver.as_deref() != Some("static") {
+            let process_val = process_value_from_leip_cmd(&leip.cmd);
+            lock.contract.entries.insert(
+                "workloads".to_string(),
+                Value::Array(vec![json!({
+                    "name": "main",
+                    "process": process_val.clone(),
+                })]),
+            );
+            lock.contract
+                .entries
+                .insert("process".to_string(), process_val);
+        } else {
+            let static_process = json!({ "driver": "static", "entrypoint": "." });
+            lock.contract.entries.insert(
+                "workloads".to_string(),
+                Value::Array(vec![json!({
+                    "name": "main",
+                    "process": static_process.clone(),
+                })]),
+            );
+            lock.contract
+                .entries
+                .insert("process".to_string(), static_process);
+        }
         provenance.push(SourceInferenceProvenance {
             field: "contract.process".to_string(),
             kind: SourceInferenceProvenanceKind::DeterministicHeuristic,
@@ -1356,9 +1474,16 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                     packages,
                 )
             } else {
+                // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
+                // leip_hints was computed earlier and is empty only when LEIP had no opinion.
+                let detail = if !leip_hints.is_empty() {
+                    leip_hints.join("; ")
+                } else {
+                    "could not infer a primary process from source evidence".to_string()
+                };
                 (
                     UnresolvedReason::InsufficientEvidence,
-                    "could not infer a primary process from source evidence".to_string(),
+                    detail,
                     Vec::new(),
                 )
             };
@@ -1835,7 +1960,7 @@ fn detect_promotable_native_build_plan(project_root: &Path) -> Result<Option<Nat
     let Some(plan) = infer_source_native_delivery_plan(project_root, &detected)? else {
         return Ok(None);
     };
-    if plan.closure_complete {
+    if plan.closure_complete && plan.plan.source_app_path.exists() {
         return Ok(Some(plan.plan));
     }
     Ok(None)
@@ -2491,37 +2616,50 @@ fn infer_desktop_execution_override(
     detected: &DetectedProject,
     info: &ProjectInfo,
     explicit_native_artifact: Option<&Path>,
-) -> Result<Option<DesktopExecutionOverride>> {
+) -> Result<Option<DesktopOverrideResult>> {
     if let Some(explicit_artifact) = explicit_native_artifact {
         if let Some(artifact_type) = imported_native_artifact_type(explicit_artifact) {
-            return Ok(Some(desktop_execution_from_artifact(
+            return Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_artifact(
                 project_root,
                 explicit_artifact,
                 artifact_type,
                 "explicit-native-artifact".to_string(),
                 "explicit native artifact input fixed the desktop execution path before run"
                     .to_string(),
-            )?));
+            )?)));
         }
     }
 
     if let Some(plan) = infer_source_native_delivery_plan(project_root, detected)? {
+        // For Electron apps: if the built artifact doesn't exist, we cannot run them as a
+        // desktop app.  Electron's `start` / `dev` npm scripts are native desktop launchers,
+        // not web servers, so falling back to `pnpm start` would fail with a missing .app
+        // error.  Emit an unsupported diagnostic early so users get a clear message.
+        if plan.plan.framework == "electron" && !plan.plan.source_app_path.exists() {
+            return Ok(Some(DesktopOverrideResult::Unsupported(
+                "Electron desktop apps must be built before running with ato. \
+                 Run `npm run build` / `pnpm build` (or the equivalent electron-builder command) \
+                 to produce the native application bundle, then retry."
+                    .to_string(),
+            )));
+        }
+
         if let Some(process) =
             infer_source_native_run_process(project_root, detected, info, &plan.plan.framework)
         {
-            return Ok(Some(desktop_execution_from_process(
+            return Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_process(
                 process,
                 format!("framework:{}", plan.plan.framework),
                 format!(
                     "desktop source-derived execution selected a native dev/run process for framework '{}'",
                     plan.plan.framework
                 ),
-            )));
+            ))));
         }
 
         if plan.plan.source_app_path.exists() {
             if let Some(artifact_type) = imported_native_artifact_type(&plan.plan.source_app_path) {
-                return Ok(Some(desktop_execution_from_artifact(
+                return Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_artifact(
                     project_root,
                     &plan.plan.source_app_path,
                     artifact_type,
@@ -2530,20 +2668,20 @@ fn infer_desktop_execution_override(
                         "desktop source-derived execution fell back to the built native artifact for framework '{}'",
                         plan.plan.framework
                     ),
-                )?));
+                )?)));
             }
         }
     }
 
     match infer_imported_native_artifact_candidate(project_root)? {
-        ImportedArtifactProbe::Single(candidate) => Ok(Some(desktop_execution_from_artifact(
+        ImportedArtifactProbe::Single(candidate) => Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_artifact(
             project_root,
             &candidate.artifact_path,
             candidate.artifact_type,
             format!("artifact-import:{}", candidate.artifact_type),
             "desktop artifact-import execution selected the single observed native artifact"
                 .to_string(),
-        )?)),
+        )?))),
         ImportedArtifactProbe::Ambiguous(_) | ImportedArtifactProbe::None => Ok(None),
     }
 }
@@ -4160,7 +4298,10 @@ fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
         .find(|n| &n.id == primary_node_id)?;
     let envelope = primary_node.envelope.as_ref()?;
 
-    if envelope.cmd.is_empty() {
+    // Static-site candidates have an empty cmd — allow them through so the projection
+    // path can emit a web/static resolved target without a process contract.
+    let is_static = envelope.driver.as_deref() == Some("static");
+    if envelope.cmd.is_empty() && !is_static {
         return None;
     }
 
@@ -4169,6 +4310,24 @@ fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
         cmd: envelope.cmd.clone(),
         candidate_id,
     })
+}
+
+/// When LEIP returns `Unresolved`, extract its diagnostic messages.
+/// These provide actionable hints (e.g. Go/Rust unsupported runtime messages) that should
+/// be surfaced to the user instead of the generic "could not infer" fallback.
+fn leip_unresolved_hints(root: &Path) -> Vec<String> {
+    use lock_draft_engine::leip::{evaluate_launch_graphs, LeipDecision};
+    let leip_input = build_leip_input_from_root(root);
+    let result = evaluate_launch_graphs(&leip_input);
+    if matches!(&result.decision, LeipDecision::Unresolved { .. }) {
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Build a `contract.process` JSON value from a LEIP cmd vector.
@@ -5679,7 +5838,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         not(target_os = "macos"),
         ignore = "macOS Electron .app path inference is host-specific"
     )]
-    fn durable_init_source_only_electron_uses_builder_product_name_for_expected_app_path() {
+    fn durable_init_source_only_electron_unbuilt_emits_unsupported_diagnostic() {
         let dir = tempdir().expect("tempdir");
         fs::write(
             dir.path().join("package.json"),
@@ -5693,20 +5852,30 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         )
         .expect("write electron builder config");
 
+        // Unbuilt Electron app: no artifact at dist/...app.
+        // Should succeed but emit an Electron unsupported diagnostic, NOT infer a native artifact path.
         let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
             .expect("materialize electron workspace");
         let lock = load_materialized_lock(&materialized.lock_path);
 
+        // No delivery artifact path should be generated for an unbuilt Electron app.
         let artifact_path = lock
             .contract
             .entries
             .get("delivery")
             .and_then(|value| value.get("artifact"))
             .and_then(|value| value.get("path"))
-            .and_then(Value::as_str)
-            .expect("delivery artifact path");
+            .and_then(Value::as_str);
+        assert!(
+            artifact_path.is_none(),
+            "Expected no delivery artifact path for unbuilt Electron app, got: {artifact_path:?}"
+        );
 
-        assert_eq!(artifact_path, "dist/mac-arm64/sample-project.app");
+        // An unresolved marker for contract.process should be present.
+        let process_unresolved = lock.contract.unresolved.iter().any(|u| {
+            u.field.as_deref() == Some("contract.process")
+        });
+        assert!(process_unresolved, "Expected contract.process unresolved marker for unbuilt Electron app");
     }
 
     #[test]
@@ -6606,6 +6775,79 @@ target = "worker"
         assert!(
             msg.contains("packages/beta"),
             "expected sub-package in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn static_html_source_only_materializes_as_web_static_target() {
+        let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
+        fs::write(
+            dir.path().join("index.html"),
+            "<html><body><h1>Hello</h1></body></html>",
+        )
+        .expect("write index.html");
+        fs::write(dir.path().join("style.css"), "body { margin: 0; }")
+            .expect("write style.css");
+
+        let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
+            .expect("materialize static workspace");
+        let lock = load_materialized_lock(&materialized.lock_path);
+
+        // resolved_targets must have runtime=web, driver=static
+        let targets = lock
+            .resolution
+            .entries
+            .get("resolved_targets")
+            .and_then(Value::as_array)
+            .expect("resolved_targets must be present");
+        let target = &targets[0];
+        assert_eq!(
+            target.get("runtime").and_then(Value::as_str),
+            Some("web"),
+            "static site should have runtime=web"
+        );
+        assert_eq!(
+            target.get("driver").and_then(Value::as_str),
+            Some("static"),
+            "static site should have driver=static"
+        );
+        assert_eq!(
+            target.get("entrypoint").and_then(Value::as_str),
+            Some("."),
+            "static site entrypoint should be '.'"
+        );
+        // port must be set so notify_web_endpoint can resolve it
+        let port = target.get("port").and_then(Value::as_u64);
+        assert!(port.is_some(), "static site must have a port assigned");
+    }
+
+    #[test]
+    fn go_source_only_materializes_with_go_hint_diagnostic() {
+        let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/gotodo\n\ngo 1.21\n",
+        )
+        .expect("write go.mod");
+        fs::create_dir_all(dir.path().join("cmd")).expect("create cmd dir");
+        fs::write(
+            dir.path().join("cmd/main.go"),
+            "package main\n\nfunc main() {}\n",
+        )
+        .expect("write main.go");
+
+        let source = ResolvedSourceOnly {
+            project_root: dir.path().to_path_buf(),
+            single_script: None,
+        };
+        // RunAttempt should fail with an actionable Go hint
+        let err = materialize_run_from_source_only(&source, None, reporter(), true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Go") || msg.contains("go run"),
+            "Go project error should contain Go hint, got: {msg}"
         );
     }
 
