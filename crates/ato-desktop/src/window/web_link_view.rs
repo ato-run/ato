@@ -23,14 +23,17 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, rgb, svg, AnyElement, Context, Entity, IntoElement, MouseButton, Pixels,
-    Render, SharedString, Size,
+    div, hsla, px, rgb, svg, AnyElement, Context, Entity, IntoElement, MouseButton, Pixels, Render,
+    SharedString, Size,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 use url::Url;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
+
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 /// Height of the tab strip at the top of the WebLinkView window.
 const TAB_STRIP_HEIGHT: f32 = 36.0;
@@ -66,14 +69,19 @@ pub struct WebLinkViewShell {
     next_tab_id: usize,
     capsule_nav_queue: CapsuleNavQueue,
     window_size: Size<Pixels>,
+    pub paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(WebLinkViewShell, paste);
+
+impl WebViewPasteShell for WebLinkViewShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        self.active_tab().map(|t| &t.webview)
+    }
 }
 
 impl WebLinkViewShell {
-    pub fn new(
-        initial_url: Url,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(initial_url: Url, window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
         let win_size = window.bounds().size;
         let nav_queue: CapsuleNavQueue = Arc::new(Mutex::new(Vec::new()));
         let first_tab = build_tab(0, initial_url, window, win_size, nav_queue.clone(), cx);
@@ -84,6 +92,7 @@ impl WebLinkViewShell {
             next_tab_id: 1,
             capsule_nav_queue: nav_queue,
             window_size: win_size,
+            paste: WebViewPasteSupport::new(cx),
         }
     }
 
@@ -119,7 +128,14 @@ impl WebLinkViewShell {
     fn add(&mut self, url: Url, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = build_tab(id, url, window, self.window_size, self.capsule_nav_queue.clone(), cx);
+        let tab = build_tab(
+            id,
+            url,
+            window,
+            self.window_size,
+            self.capsule_nav_queue.clone(),
+            cx,
+        );
         self.tabs.push(tab);
         self.active_tab_id = id;
         self.sync_visibility();
@@ -308,11 +324,7 @@ fn handle_capsule_url(cx: &mut gpui::App, url: String) {
 }
 
 impl Render for WebLinkViewShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
 
         let tab_snapshots: Vec<(usize, SharedString, bool)> = self
@@ -328,13 +340,15 @@ impl Render for WebLinkViewShell {
             .map(|t| t.url_input.clone())
             .unwrap_or_else(|| unreachable!("WebLinkViewShell has no active tab"));
 
-        div()
+        let inner = div()
             .size_full()
             .bg(rgb(0xffffff))
             .flex()
             .flex_col()
             .child(tab_strip(tab_snapshots, entity.clone()))
-            .child(chrome_strip(url_input, entity))
+            .child(chrome_strip(url_input, entity));
+
+        paste_render_wrap!(inner, cx, &self.paste.focus_handle)
     }
 }
 
@@ -367,8 +381,16 @@ fn tab_chip(
 ) -> impl IntoElement {
     let entity_for_click = entity.clone();
     let entity_for_close = entity;
-    let bg = if is_active { rgb(0xffffff) } else { rgb(0xeaeaee) };
-    let text = if is_active { rgb(0x18181b) } else { rgb(0x6b6b78) };
+    let bg = if is_active {
+        rgb(0xffffff)
+    } else {
+        rgb(0xeaeaee)
+    };
+    let text = if is_active {
+        rgb(0x18181b)
+    } else {
+        rgb(0x6b6b78)
+    };
     div()
         .id(SharedString::from(format!("tab-{id}")))
         .h(px(TAB_STRIP_HEIGHT - 6.0))

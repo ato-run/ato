@@ -3,16 +3,22 @@
 //! the multi-window UX can be evaluated visually before the real
 //! WKWebView attaches.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
     div, hsla, linear_color_stop, linear_gradient, px, rgb, size, AnyWindowHandle, App, Bounds,
-    Context, FontWeight, IntoElement, Render, SharedString, WindowBounds, WindowDecorations,
-    WindowOptions,
+    Context, Entity, FontWeight, IntoElement, Render, SharedString, WindowBounds,
+    WindowDecorations, WindowOptions,
 };
 use gpui_component::{Icon, IconName, TitleBar};
 
+use crate::orchestrator::GuestLaunchSession;
 use crate::state::GuestRoute;
+use crate::window::app_capsule_shell::{AppCapsuleShell, CapsuleBootInput};
+use crate::window::content_windows::{CapsuleWindowContext, CapsuleWindowStatus};
 
 /// Mock dashboard view rendered inside each spawned `AppWindow`.
 /// Picks up the visual language of the redesign reference (light
@@ -98,12 +104,40 @@ fn title_subtitle_for_route(route: &GuestRoute) -> (SharedString, SharedString) 
     (SharedString::from(title), SharedString::from(subtitle))
 }
 
+fn initial_capsule_context_for_route(
+    route: &GuestRoute,
+    title: &SharedString,
+    url: &SharedString,
+) -> Option<CapsuleWindowContext> {
+    let (handle, current_url) = match route {
+        GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
+            (handle.clone(), url.to_string())
+        }
+        GuestRoute::Capsule { session, .. } => (session.clone(), url.to_string()),
+        _ => return None,
+    };
+
+    Some(CapsuleWindowContext {
+        title: title.to_string(),
+        handle,
+        canonical_handle: None,
+        session_id: None,
+        current_url,
+        local_url: None,
+        snapshot_label: None,
+        trust_state: "pending".to_string(),
+        runtime_label: None,
+        display_strategy: None,
+        capabilities: Vec::new(),
+        log_path: None,
+        status: CapsuleWindowStatus::Starting,
+        restricted: false,
+        error_message: None,
+    })
+}
+
 impl Render for AppWindowShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.title.clone();
         let route_label = self.route_label.clone();
         div()
@@ -182,12 +216,7 @@ fn hero_banner(title: SharedString, route_label: SharedString) -> impl IntoEleme
                         .text_color(rgb(0x52525b))
                         .child("安全・シンプル・つながる"),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x71717a))
-                        .child(route_label),
-                ),
+                .child(div().text_xs().text_color(rgb(0x71717a)).child(route_label)),
         )
 }
 
@@ -224,12 +253,7 @@ fn preview_card(
                         .justify_center()
                         .child(Icon::new(icon).size(px(14.0)).text_color(rgb(0xffffff))),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight(600.0))
-                        .child(label),
-                ),
+                .child(div().text_sm().font_weight(FontWeight(600.0)).child(label)),
         )
         .child(div().flex_1().child(body))
 }
@@ -259,7 +283,11 @@ fn code_preview_body() -> impl IntoElement {
         .child(line(&[(18.0, 0xa78bfa), (40.0, 0xe2e8f0)]))
         .child(line(&[(30.0, 0x60a5fa), (8.0, 0xe2e8f0), (24.0, 0xfb923c)]))
         .child(line(&[(8.0, 0xe2e8f0), (50.0, 0x94a3b8)]))
-        .child(line(&[(14.0, 0xa78bfa), (12.0, 0xe2e8f0), (20.0, 0x22d3ee)]))
+        .child(line(&[
+            (14.0, 0xa78bfa),
+            (12.0, 0xe2e8f0),
+            (20.0, 0x22d3ee),
+        ]))
         .child(line(&[(36.0, 0xe2e8f0)]))
 }
 
@@ -268,11 +296,7 @@ fn code_preview_body() -> impl IntoElement {
 /// the Discover preview card.
 fn chart_preview_body() -> impl IntoElement {
     let bar = |h: f32, color: u32| -> gpui::Div {
-        div()
-            .w(px(10.0))
-            .h(px(h))
-            .rounded(px(2.0))
-            .bg(rgb(color))
+        div().w(px(10.0)).h(px(h)).rounded(px(2.0)).bg(rgb(color))
     };
     div()
         .size_full()
@@ -295,13 +319,7 @@ fn safety_summary_card() -> impl IntoElement {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(
-                div()
-                    .w(px(8.0))
-                    .h(px(8.0))
-                    .rounded_full()
-                    .bg(rgb(accent)),
-            )
+            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(rgb(accent)))
             .child(div().flex_1().text_sm().child(label))
             .child(
                 div()
@@ -351,18 +369,8 @@ fn title_block(title: SharedString, route_label: SharedString) -> impl IntoEleme
         .flex()
         .flex_col()
         .gap(px(4.0))
-        .child(
-            div()
-                .text_3xl()
-                .font_weight(FontWeight(700.0))
-                .child(title),
-        )
-        .child(
-            div()
-                .text_sm()
-                .text_color(rgb(0x71717a))
-                .child(route_label),
-        )
+        .child(div().text_3xl().font_weight(FontWeight(700.0)).child(title))
+        .child(div().text_sm().text_color(rgb(0x71717a)).child(route_label))
 }
 
 fn bottom_panel_row() -> impl IntoElement {
@@ -394,68 +402,49 @@ fn panel_card(accent: u32, title: &'static str) -> gpui::Div {
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .child(
-                    div()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded_full()
-                        .bg(rgb(accent)),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight(600.0))
-                        .child(title),
-                ),
+                .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(rgb(accent)))
+                .child(div().text_sm().font_weight(FontWeight(600.0)).child(title)),
         )
 }
 
 /// `ネットワーク` panel — a small radial peer dot cluster suggesting
 /// a P2P mesh, plus a legend mapping colours to peer categories.
 fn network_panel() -> gpui::Div {
-    let legend_row =
-        |color: u32, label: &'static str, value: &'static str| -> gpui::Div {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_xs()
-                .text_color(rgb(0x52525b))
-                .child(
-                    div()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(rgb(color)),
-                )
-                .child(div().flex_1().child(label))
-                .child(
-                    div()
-                        .font_weight(FontWeight(600.0))
-                        .text_color(rgb(0x18181b))
-                        .child(value),
-                )
-        };
-    panel_card(0x6366f1, "ネットワーク")
-        .child(
-            div()
-                .flex()
-                .gap(px(10.0))
-                .items_stretch()
-                .child(peer_cluster_graph())
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(legend_row(0x6366f1, "Peers", "128"))
-                        .child(legend_row(0xf472b6, "Documents", "368"))
-                        .child(legend_row(0x10b981, "Videos", "96"))
-                        .child(legend_row(0x60a5fa, "Images", "312"))
-                        .child(legend_row(0xa1a1aa, "Others", "64")),
-                ),
-        )
+    let legend_row = |color: u32, label: &'static str, value: &'static str| -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_xs()
+            .text_color(rgb(0x52525b))
+            .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(rgb(color)))
+            .child(div().flex_1().child(label))
+            .child(
+                div()
+                    .font_weight(FontWeight(600.0))
+                    .text_color(rgb(0x18181b))
+                    .child(value),
+            )
+    };
+    panel_card(0x6366f1, "ネットワーク").child(
+        div()
+            .flex()
+            .gap(px(10.0))
+            .items_stretch()
+            .child(peer_cluster_graph())
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(legend_row(0x6366f1, "Peers", "128"))
+                    .child(legend_row(0xf472b6, "Documents", "368"))
+                    .child(legend_row(0x10b981, "Videos", "96"))
+                    .child(legend_row(0x60a5fa, "Images", "312"))
+                    .child(legend_row(0xa1a1aa, "Others", "64")),
+            ),
+    )
 }
 
 /// Tiny peer-mesh dot graph — colours match the legend.
@@ -488,11 +477,7 @@ fn peer_cluster_graph() -> gpui::Div {
 /// `転送状況` panel — three labelled progress bars matching the
 /// reference's Upload / Download / Files-protected rows.
 fn transfer_panel() -> gpui::Div {
-    let bar = |label: &'static str,
-               value: &'static str,
-               filled: f32,
-               accent: u32|
-     -> gpui::Div {
+    let bar = |label: &'static str, value: &'static str, filled: f32, accent: u32| -> gpui::Div {
         div()
             .flex()
             .flex_col()
@@ -536,29 +521,22 @@ fn transfer_panel() -> gpui::Div {
 /// `ストレージ` panel — horizontal stacked bar (donut approximation
 /// since GPUI lacks built-in arc rendering) + legend.
 fn storage_panel() -> gpui::Div {
-    let legend_row =
-        |color: u32, label: &'static str, value: &'static str| -> gpui::Div {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .text_xs()
-                .text_color(rgb(0x52525b))
-                .child(
-                    div()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded(px(2.0))
-                        .bg(rgb(color)),
-                )
-                .child(div().flex_1().child(label))
-                .child(
-                    div()
-                        .font_weight(FontWeight(600.0))
-                        .text_color(rgb(0x18181b))
-                        .child(value),
-                )
-        };
+    let legend_row = |color: u32, label: &'static str, value: &'static str| -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_xs()
+            .text_color(rgb(0x52525b))
+            .child(div().w(px(8.0)).h(px(8.0)).rounded(px(2.0)).bg(rgb(color)))
+            .child(div().flex_1().child(label))
+            .child(
+                div()
+                    .font_weight(FontWeight(600.0))
+                    .text_color(rgb(0x18181b))
+                    .child(value),
+            )
+    };
     panel_card(0xf59e0b, "ストレージ")
         .child(
             div()
@@ -606,7 +584,11 @@ fn terminal_panel() -> impl IntoElement {
         )
         .child(div().text_color(rgb(0x71717a)).child("> ato sync --watch"))
         .child(div().text_color(rgb(0x10b981)).child("> Scanning..."))
-        .child(div().text_color(rgb(0xa1a1aa)).child("> Secure connection: OK"))
+        .child(
+            div()
+                .text_color(rgb(0xa1a1aa))
+                .child("> Secure connection: OK"),
+        )
         .child(div().text_color(rgb(0xa1a1aa)).child("> Syncing 120 files"))
         .child(div().text_color(rgb(0x10b981)).child("> Completed"))
 }
@@ -626,6 +608,30 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         .unwrap_or_default();
     cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
 
+    let capsule_input = match &route {
+        GuestRoute::CapsuleHandle { handle, .. } => Some(CapsuleBootInput::Start {
+            handle: handle.clone(),
+            configs: launch_configs,
+        }),
+        _ => None,
+    };
+
+    open_app_window_with_capsule_input(cx, route, capsule_input)
+}
+
+pub fn open_ready_capsule_window(
+    cx: &mut App,
+    route: GuestRoute,
+    session: GuestLaunchSession,
+) -> Result<AnyWindowHandle> {
+    open_app_window_with_capsule_input(cx, route, Some(CapsuleBootInput::Ready { session }))
+}
+
+fn open_app_window_with_capsule_input(
+    cx: &mut App,
+    route: GuestRoute,
+    capsule_input: Option<CapsuleBootInput>,
+) -> Result<AnyWindowHandle> {
     // Compute bounds explicitly rather than `Bounds::centered` so we
     // can reserve breathing room ABOVE the AppWindow for the floating
     // Control Bar — otherwise the bar sits flush against the macOS
@@ -640,8 +646,7 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
     let app_bounds = match display {
         Some(d) => {
             let display_bounds = d.bounds();
-            let left = display_bounds.origin.x
-                + (display_bounds.size.width - app_w) / 2.0;
+            let left = display_bounds.origin.x + (display_bounds.size.width - app_w) / 2.0;
             let top = display_bounds.origin.y + top_reserve;
             Bounds {
                 origin: gpui::point(left, top),
@@ -667,6 +672,11 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         .open(route.clone());
 
     let route_for_view = route.clone();
+    let capsule_input_for_window = capsule_input.clone();
+    let capsule_shell_slot: Rc<
+        RefCell<Option<Entity<crate::window::app_capsule_shell::AppCapsuleShell>>>,
+    > = Rc::new(RefCell::new(None));
+    let capsule_shell_slot_for_window = capsule_shell_slot.clone();
     let open_result = cx.open_window(options, move |window, cx| {
         // Branch on route kind:
         //   - ExternalUrl → WebLinkView (Wry WebView + browser chrome).
@@ -676,18 +686,35 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         //   - Everything else → AppWindowShell placeholder for now.
         match route_for_view.clone() {
             crate::state::GuestRoute::ExternalUrl(url) => {
-                let shell = cx.new(|cx| {
-                    crate::window::web_link_view::WebLinkViewShell::new(url, window, cx)
-                });
+                let shell = cx
+                    .new(|cx| crate::window::web_link_view::WebLinkViewShell::new(url, window, cx));
+                window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             }
             crate::state::GuestRoute::CapsuleHandle { handle, .. } => {
-                let configs = launch_configs.clone();
-                let shell = cx.new(|cx| {
-                    crate::window::app_capsule_shell::AppCapsuleShell::new(
-                        handle, configs, window, cx,
-                    )
-                });
+                let input = capsule_input_for_window
+                    .clone()
+                    .unwrap_or(CapsuleBootInput::Start {
+                        handle,
+                        configs: Vec::new(),
+                    });
+                let shell = cx.new(|cx| AppCapsuleShell::new_with_input(input, window, cx));
+                *capsule_shell_slot_for_window.borrow_mut() = Some(shell.clone());
+                window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+            }
+            crate::state::GuestRoute::CapsuleUrl { handle, .. }
+                if capsule_input_for_window.is_some() =>
+            {
+                let input = capsule_input_for_window
+                    .clone()
+                    .unwrap_or(CapsuleBootInput::Start {
+                        handle,
+                        configs: Vec::new(),
+                    });
+                let shell = cx.new(|cx| AppCapsuleShell::new_with_input(input, window, cx));
+                *capsule_shell_slot_for_window.borrow_mut() = Some(shell.clone());
+                window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             }
             _ => {
@@ -712,6 +739,9 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
     // to the registry slot and evict the entry. Without this the
     // registry would grow monotonically as AppWindows come and go.
     let gpui_window_id = app_handle.window_id().as_u64();
+    if let Some(shell) = capsule_shell_slot.borrow().clone() {
+        let _ = shell.update(cx, |shell, _cx| shell.set_content_window_id(gpui_window_id));
+    }
     if let Some(entry) = cx
         .global_mut::<crate::state::AppWindowRegistry>()
         .get_mut(app_window_id)
@@ -730,10 +760,13 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         gpui_window_id,
         ContentWindowEntry {
             handle: *app_handle,
-            kind: ContentWindowKind::AppWindow { route: route.clone() },
-            title: entry_title,
+            kind: ContentWindowKind::AppWindow {
+                route: route.clone(),
+            },
+            title: entry_title.clone(),
             subtitle: entry_subtitle,
-            url: entry_url,
+            url: entry_url.clone(),
+            capsule: initial_capsule_context_for_route(&route, &entry_title, &entry_url),
             last_focused_at: std::time::Instant::now(),
         },
     );

@@ -23,6 +23,8 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::system_capsule::ipc as system_ipc;
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 /// URI scheme used for serving the store HTML via the custom protocol handler.
 const STORE_SCHEME: &str = "capsule-store";
@@ -41,20 +43,24 @@ impl gpui::Global for StoreWindowSlot {}
 /// the page is still loading.
 pub struct StoreWebView {
     _webview: WebView,
+    paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(StoreWebView, paste);
+
+impl WebViewPasteShell for StoreWebView {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self._webview)
+    }
 }
 
 impl Render for StoreWebView {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div().size_full().bg(rgb(0xffffff))
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        paste_render_wrap!(div().size_full().bg(rgb(0xffffff)), cx, &self.paste.focus_handle)
     }
 }
 
 const STORE_HTML: &str = include_str!("../../assets/system/ato-store/index.html");
-
 
 /// Fetch the capsule catalog from api.ato.run and return it as a JSON string.
 /// Falls back to an empty array on any error.
@@ -101,7 +107,10 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             let db = d.bounds();
             let left = db.origin.x + (db.size.width - win_size.width) / 2.0;
             let top = db.origin.y + px(108.0);
-            Bounds { origin: gpui::point(left, top), size: win_size }
+            Bounds {
+                origin: gpui::point(left, top),
+                size: win_size,
+            }
         }
         None => Bounds::centered(None, win_size, cx),
     };
@@ -149,7 +158,8 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Store WebView");
-        let store = cx.new(|_cx| StoreWebView { _webview: webview });
+        let store = cx.new(|cx| StoreWebView { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        window.focus(&store.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(store, window, cx))
     })?;
     cx.set_global(StoreWindowSlot(Some(*handle)));
@@ -166,6 +176,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             title: gpui::SharedString::from(tr(locale, "store.title")),
             subtitle: gpui::SharedString::from(tr(locale, "store.loading")),
             url: gpui::SharedString::from("capsule://desktop.ato.run/store"),
+            capsule: None,
             last_focused_at: std::time::Instant::now(),
         },
     );

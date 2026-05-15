@@ -23,17 +23,19 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds,
-    WindowDecorations, WindowOptions,
+    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds, WindowDecorations,
+    WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde_json::{json, Value};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use crate::localization::{compose_init_script, resolve_locale};
 use crate::orchestrator::resolve_ato_binary;
 use crate::system_capsule::ipc as system_ipc;
-use crate::localization::{compose_init_script, resolve_locale};
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 const IDENTITY_HTML: &str = include_str!("../../assets/system/ato-identity/index.html");
 
@@ -59,7 +61,10 @@ fn fetch_whoami_identity() -> Value {
     let bin = match resolve_ato_binary() {
         Ok(b) => b,
         Err(err) => {
-            tracing::warn!(?err, "ato-identity: ato binary not found — popover shows unauthenticated state");
+            tracing::warn!(
+                ?err,
+                "ato-identity: ato binary not found — popover shows unauthenticated state"
+            );
             return json!({ "authenticated": false, "reason": "binary_not_found" });
         }
     };
@@ -124,15 +129,20 @@ fn fetch_whoami_identity() -> Value {
 
 pub struct IdentityWindowShell {
     _webview: WebView,
+    paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(IdentityWindowShell, paste);
+
+impl WebViewPasteShell for IdentityWindowShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self._webview)
+    }
 }
 
 impl Render for IdentityWindowShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div().size_full().bg(rgb(0xffffff))
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        paste_render_wrap!(div().size_full().bg(rgb(0xffffff)), cx, &self.paste.focus_handle)
     }
 }
 
@@ -174,7 +184,8 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Identity WebView");
-        let shell = cx.new(|_cx| IdentityWindowShell { _webview: webview });
+        let shell = cx.new(|cx| IdentityWindowShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 

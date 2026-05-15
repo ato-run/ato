@@ -24,6 +24,8 @@ use wry::{Rect, WebView, WebViewBuilder};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 /// Process-wide slot for the currently-open Card Switcher window so
 /// the Control Bar's switcher button can behave as a toggle: a
@@ -41,15 +43,20 @@ impl gpui::Global for CardSwitcherWindowSlot {}
 /// document layouts).
 pub struct CardSwitcherShell {
     _webview: WebView,
+    paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(CardSwitcherShell, paste);
+
+impl WebViewPasteShell for CardSwitcherShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self._webview)
+    }
 }
 
 impl Render for CardSwitcherShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div().size_full().bg(rgb(0xf5f3ff))
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        paste_render_wrap!(div().size_full().bg(rgb(0xf5f3ff)), cx, &self.paste.focus_handle)
     }
 }
 
@@ -132,20 +139,9 @@ fn snapshot_window(cx: &mut App, handle: AnyWindowHandle) -> Option<String> {
     if win_num <= 0 {
         return None;
     }
-    let tmp = std::env::temp_dir().join(format!(
-        "ato-snap-{}-{}.png",
-        win_num,
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("ato-snap-{}-{}.png", win_num, std::process::id()));
     let out = std::process::Command::new("screencapture")
-        .args([
-            "-l",
-            &win_num.to_string(),
-            "-t",
-            "png",
-            "-x",
-            tmp.to_str()?,
-        ])
+        .args(["-l", &win_num.to_string(), "-t", "png", "-x", tmp.to_str()?])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -260,7 +256,8 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Card Switcher WebView");
-        let shell = cx.new(|_cx| CardSwitcherShell { _webview: webview });
+        let shell = cx.new(|cx| CardSwitcherShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
