@@ -117,6 +117,9 @@ pub(crate) struct ConsentFieldItem {
     pub placeholder: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<String>,
+    /// Default value to prefill in the form (from the capsule manifest).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
     pub already_configured: bool,
 }
 
@@ -576,6 +579,7 @@ fn build_consent_preview(
                                     description: f.description,
                                     placeholder: f.placeholder,
                                     choices,
+                                    default: f.default,
                                     already_configured,
                                 }
                             })
