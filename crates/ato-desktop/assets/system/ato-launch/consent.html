@@ -1,489 +1,925 @@
 <!doctype html>
-<html lang="ja">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>起動前にご確認ください</title>
+<title>Review Before Launch</title>
 <style>
   :root {
-    --bg-base:   #f7f4ff;
-    --card:      #ffffff;
-    --border:    #ececf1;
-    --border-soft: #f4f4f7;
-    --text:      #1a1a1f;
-    --muted:     #6b6b78;
-    --soft:      #a3a3b0;
-    --accent:    #6366f1;
-    --accent-bg: #eef2ff;
-    --ok:        #22c55e;
-    --ok-bg:     #f0fdf4;
+    --bg: #ffffff;
+    --surface: #f7f7fa;
+    --surface-2: #efeff4;
+    --border: #e5e5ea;
+    --border-soft: #f0f0f5;
+    --text: #1a1a1f;
+    --muted: #6b6b78;
+    --soft: #a3a3b0;
+    --accent: #5b5fef;
+    --accent-light: #eef0ff;
+    --accent-border: #c7caff;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --warn-bg: #fffbeb;
+    --danger: #ef4444;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 12px;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; }
   body {
-    background: var(--card);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
-    color: var(--text);
-    -webkit-user-select: none;
-    user-select: none;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px; color: var(--text);
+    -webkit-user-select: none; user-select: none;
+    overflow: hidden;
   }
 
-  .frame {
-    width: 100%; height: 100%;
-    padding: 32px 28px 20px;
-    background: var(--card);
-    display: flex; flex-direction: column; gap: 16px;
-    overflow-y: auto;
-  }
+  /* ── FRAME ── */
+  .frame { position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden; }
 
-  /* HEADER */
-  .header { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-  .shield {
-    width: 48px; height: 48px; border-radius: 14px;
-    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
-    color: #fff;
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 10px 22px rgba(99, 102, 241, 0.32);
+  .scroll-area {
+    flex: 1; overflow-y: auto; overflow-x: hidden;
+    padding: 24px 28px 16px;
+    display: flex; flex-direction: column; gap: 14px;
   }
-  .shield svg { width: 24px; height: 24px; }
-  .header h1 { margin: 0; font-size: 18px; font-weight: 700; }
+  .scroll-area::-webkit-scrollbar { width: 5px; }
+  .scroll-area::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+
+  /* ── HEADER ── */
+  .header { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .header-icon { color: var(--accent); }
+  .header-icon svg { width: 28px; height: 28px; }
+  .header h1 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.4px; }
   .header p  { margin: 0; font-size: 12.5px; color: var(--muted); text-align: center; }
 
-  /* LOADING */
-  .loading-state {
-    display: flex; flex-direction: column; align-items: center; gap: 12px;
-    padding: 24px 0;
-    color: var(--muted); font-size: 13px;
-  }
-  .spinner {
-    width: 28px; height: 28px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
+  /* ── LOADING ── */
+  .loading-state { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 24px 0; color: var(--muted); font-size: 13px; }
+  .spinner { width: 24px; height: 24px; border: 2.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* SECTIONS */
-  .section { display: flex; flex-direction: column; gap: 8px; }
-  .section-title {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 12px; font-weight: 700; color: var(--muted);
-  }
-  .section-title svg { width: 13px; height: 13px; color: var(--accent); }
+  /* ── APP INFO TABLE ── */
+  .app-info { display: grid; grid-template-columns: 1fr 1fr; }
+  .ai-row { display: flex; flex-direction: column; gap: 1px; padding: 7px 0; border-bottom: 1px solid var(--border-soft); }
+  .ai-row:nth-last-child(-n+2) { border-bottom: none; }
+  .ai-label { font-size: 11.5px; color: var(--muted); }
+  .ai-value { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* IDENTITY LIST */
-  .id-list {
-    background: var(--border-soft);
-    border-radius: 10px;
-    padding: 4px 0;
-  }
-  .id-row {
-    display: flex; align-items: center; gap: 12px;
-    padding: 8px 14px;
-    font-size: 12.5px;
-  }
-  .id-key   { color: var(--muted); width: 130px; flex-shrink: 0; }
-  .id-value { color: var(--text); font-weight: 500; flex: 1;
-              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* ── DIVIDER ── */
+  .divider { height: 1px; background: var(--border); }
 
-  /* CONFIG FIELDS */
-  .fields { display: flex; flex-direction: column; gap: 6px; }
-  .field-row {
-    display: flex; align-items: center; gap: 8px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 6px 10px;
-  }
-  .field-key {
-    width: 130px; flex-shrink: 0;
-    font-size: 11.5px; font-weight: 600; color: var(--muted);
-    font-family: "SF Mono", ui-monospace, monospace;
-  }
-  .field-row input, .field-row select {
-    flex: 1; border: 0; outline: 0; background: transparent;
-    font: inherit; font-size: 12px; color: var(--text);
-    font-family: "SF Mono", ui-monospace, monospace;
-    -webkit-user-select: text;
-    user-select: text;
-  }
-  .field-row input::placeholder { color: var(--soft); }
-  .badge-configured {
-    font-size: 11px; font-weight: 600;
-    color: var(--ok);
-    background: var(--ok-bg);
-    border-radius: 6px;
-    padding: 2px 8px;
-  }
+  /* ── SECTION HEADER ── */
+  .sec-header { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+  .sec-header svg { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
 
-  /* CONSENT ITEMS */
-  .consent-item {
-    display: flex; align-items: flex-start; gap: 10px;
-    background: var(--border-soft);
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: 12.5px;
-  }
-  .consent-item input[type=checkbox] { flex-shrink: 0; margin-top: 2px; accent-color: var(--accent); }
-  .consent-text { flex: 1; min-width: 0; overflow-wrap: break-word; }
-  .consent-summary { color: var(--text); font-weight: 500; }
-  .consent-meta { color: var(--soft); font-size: 11px; margin-top: 2px;
-                  font-family: "SF Mono", ui-monospace, monospace; word-break: break-all; }
+  /* ── REQUIRED CONFIGURATION TABLE ── */
+  .config-table { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+  .cfg-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--border-soft); background: var(--bg); }
+  .cfg-row:last-child { border-bottom: none; }
+  .cfg-key { width: 130px; flex-shrink: 0; font-size: 12.5px; font-weight: 500; }
+  .cfg-val { flex: 1; font-size: 12.5px; color: var(--muted); font-family: "SF Mono", ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cfg-val.empty { color: var(--soft); font-style: italic; font-family: inherit; }
+  .edit-btn { padding: 3px 10px; font-size: 11.5px; font-weight: 600; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; color: var(--text); flex-shrink: 0; }
+  .edit-btn:hover { background: var(--surface-2); }
 
-  /* BUTTONS */
-  .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; }
-  .btn {
-    height: 36px; padding: 0 18px;
-    border: 0; cursor: pointer;
-    font-size: 13px; font-weight: 600;
-    border-radius: 10px;
-    display: inline-flex; align-items: center; gap: 8px;
-  }
-  .btn.cancel {
-    background: var(--border-soft);
-    color: var(--text);
-    border: 1px solid var(--border);
-  }
-  .btn.cancel:hover { background: #ececf1; }
-  .btn.approve {
-    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
-    color: #fff;
-    box-shadow: 0 6px 14px rgba(99,102,241,0.30);
-  }
-  .btn.approve:hover:not(:disabled) { filter: brightness(1.05); }
-  .btn.approve:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
-  .btn svg { width: 14px; height: 14px; }
+  /* ── PERMISSIONS ── */
+  .perm-list { display: flex; flex-direction: column; gap: 7px; }
+  .perm-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); }
+  .perm-row.net-hi { background: var(--accent-light); border-color: var(--accent-border); }
+  .perm-icon { width: 32px; height: 32px; border-radius: 8px; background: var(--surface); display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--muted); }
+  .perm-row.net-hi .perm-icon { background: #dde0ff; color: var(--accent); }
+  .perm-icon svg { width: 15px; height: 15px; }
+  .perm-body { flex: 1; min-width: 0; }
+  .perm-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .perm-title { font-size: 13px; font-weight: 700; }
+  .perm-edit-link { font-size: 12px; font-weight: 600; color: var(--accent); background: none; border: none; cursor: pointer; padding: 0; flex-shrink: 0; }
+  .perm-edit-link:hover { text-decoration: underline; }
+  .perm-desc { font-size: 11.5px; color: var(--muted); margin-top: 2px; display: flex; justify-content: space-between; gap: 12px; }
+  .perm-desc-left { flex: 1; min-width: 0; }
+  .perm-desc-right { flex-shrink: 0; text-align: right; }
+
+  /* ── TECHNICAL DETAILS ── */
+  .details-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-weight: 500; background: none; border: none; cursor: pointer; padding: 4px 0 0; }
+  .details-toggle .chevron { transition: transform 0.2s; }
+  .details-toggle.open .chevron { transform: rotate(90deg); }
+  .details-toggle svg { width: 11px; height: 11px; flex-shrink: 0; }
+  .tech-box { margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); padding: 10px 14px; }
+  .tech-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
+  .tech-item { display: flex; align-items: baseline; gap: 6px; padding: 3px 0; }
+  .tech-label { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+  .tech-value { font-size: 11.5px; font-family: "SF Mono", ui-monospace, monospace; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── APPROVAL BLOCK ── */
+  .approval-block { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: var(--radius-md); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+  .approval-block:hover { border-color: var(--accent-border); }
+  .approval-block.checked { border-color: var(--accent); background: var(--accent-light); }
+  .approval-cb { width: 16px; height: 16px; flex-shrink: 0; margin-top: 1px; accent-color: var(--accent); cursor: pointer; -webkit-user-select: none; user-select: none; }
+  .approval-text strong { display: block; font-size: 13px; font-weight: 600; }
+  .approval-text span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+  /* ── PREFLIGHT ERROR ── */
+  .preflight-err { padding: 12px 14px; border: 1px solid #fca5a5; border-radius: var(--radius-md); background: #fff5f5; }
+  .preflight-err strong { color: #c53030; font-size: 13px; }
+  .preflight-err p { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+
+  /* ── FOOTER ── */
+  .footer { padding: 12px 28px 18px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid var(--border); flex-shrink: 0; }
+  .btn { height: 36px; padding: 0 20px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; border-radius: 10px; transition: all 0.12s; }
+  .btn-cancel { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+  .btn-cancel:hover { background: var(--surface-2); }
+  .btn-approve { background: linear-gradient(135deg, #7c82f5 0%, #5558eb 100%); color: #fff; box-shadow: 0 4px 14px rgba(91,95,239,0.32); padding: 0 22px; }
+  .btn-approve:hover:not(:disabled) { filter: brightness(1.06); }
+  .btn-approve:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+
+  /* ── SLIDE PANEL OVERLAY ── */
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.28); opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10; }
+  .backdrop.on { opacity: 1; pointer-events: auto; }
+  .panel { position: fixed; top: 0; right: 0; bottom: 0; width: 90%; background: var(--bg); border-left: 1px solid var(--border); box-shadow: -8px 0 28px rgba(0,0,0,0.14); display: flex; flex-direction: column; transform: translateX(100%); transition: transform 0.24s cubic-bezier(0.32,1,0.62,1); z-index: 20; }
+  .panel.open { transform: translateX(0); }
+  .panel-hd { display: flex; align-items: flex-start; gap: 10px; padding: 18px 18px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .panel-hd-icon { width: 36px; height: 36px; border-radius: 9px; background: var(--accent-light); color: var(--accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .panel-hd-icon svg { width: 17px; height: 17px; }
+  .panel-hd-text { flex: 1; }
+  .panel-hd-text h2 { margin: 0; font-size: 15px; font-weight: 700; }
+  .panel-hd-text p { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+  .panel-close { width: 26px; height: 26px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--muted); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .panel-close:hover { background: var(--surface-2); }
+  .panel-close svg { width: 13px; height: 13px; }
+  .panel-body { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 16px; }
+  .panel-body::-webkit-scrollbar { width: 5px; }
+  .panel-body::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+  .panel-ft { padding: 12px 18px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }
+
+  /* ── PANEL FORM ELEMENTS ── */
+  .fld-group { display: flex; flex-direction: column; gap: 5px; }
+  .fld-label { font-size: 12.5px; font-weight: 700; }
+  .fld-wrap { position: relative; }
+  .fld-input { width: 100%; height: 36px; border: 1px solid var(--border); border-radius: 8px; padding: 0 44px 0 10px; font: inherit; font-size: 13px; color: var(--text); background: var(--bg); outline: none; -webkit-user-select: text; user-select: text; }
+  .fld-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,95,239,0.14); }
+  .fld-hint { font-size: 11.5px; color: var(--muted); }
+  .reveal-btn { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .reveal-btn:hover { color: var(--accent); }
+  .fld-select { width: 100%; height: 36px; border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; font: inherit; font-size: 13px; background: var(--bg); outline: none; cursor: pointer; -webkit-user-select: text; user-select: text; }
+  .fld-select:focus { border-color: var(--accent); }
+
+  /* Notes / info box */
+  .notes-box { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; background: var(--accent-light); border: 1px solid var(--accent-border); font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .notes-box svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--accent); margin-top: 1px; }
+
+  /* Host list */
+  .host-list { display: flex; flex-direction: column; gap: 6px; }
+  .host-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .host-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+  .host-info { flex: 1; min-width: 0; }
+  .host-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host-desc { font-size: 11.5px; color: var(--muted); }
+  .badge-req { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; background: var(--accent-light); color: var(--accent); flex-shrink: 0; }
+  .host-rm { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg); cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--muted); flex-shrink: 0; }
+  .host-rm:hover { background: #fff0f0; border-color: #fca5a5; color: var(--danger); }
+  .host-rm:disabled { opacity: 0.3; cursor: default; }
+  .host-rm svg { width: 10px; height: 10px; }
+  .add-host-btn { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1.5px dashed var(--border); border-radius: 8px; background: transparent; cursor: pointer; font-size: 12.5px; color: var(--muted); font-weight: 500; width: 100%; }
+  .add-host-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .add-host-btn svg { width: 12px; height: 12px; }
+
+  /* Radio group */
+  .radio-group { display: flex; flex-direction: column; gap: 7px; }
+  .radio-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+  .radio-row:has(input:checked) { border-color: var(--accent); background: var(--accent-light); }
+  .radio-row input { margin-top: 2px; accent-color: var(--accent); flex-shrink: 0; }
+  .radio-text { flex: 1; }
+  .radio-title { font-size: 12.5px; font-weight: 600; }
+  .radio-desc { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .badge-warn { padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 700; background: var(--warn-bg); color: var(--warn); border: 1px solid #fde68a; flex-shrink: 0; }
 </style>
 </head>
 <body>
 
 <div class="frame">
-  <!-- HEADER -->
-  <div class="header">
-    <div class="shield">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>
-        <polyline points="9 12 11 14 15 10"/>
-      </svg>
-    </div>
-    <h1 data-i18n="launch.title">起動前にご確認ください</h1>
-    <p id="header-sub" data-i18n="launch.subtitle">カプセル名と権限を確認の上、起動してください。</p>
-  </div>
+  <div class="scroll-area" id="scroll-area">
 
-  <!-- LOADING STATE (visible until preview arrives) -->
-  <div id="loading-state" class="loading-state">
-    <div class="spinner"></div>
-    <span data-i18n="launch.loading">カプセルを検証中...</span>
-  </div>
-
-  <!-- READY STATE (hidden until hydration) -->
-  <div id="ready-state" style="display:none">
-
-    <!-- PREFLIGHT ERROR (shown when preflight_failed === true) -->
-    <div id="preflight-error" class="section" style="display:none">
-      <div class="id-list" style="padding:12px 14px;">
-        <span data-i18n="launch.preflight_error" style="font-size:13px;color:#e05252;">⚠ カプセルの検証に失敗しました</span>
-        <p style="margin:8px 0 0;font-size:12px;color:var(--muted);">
-          <span data-i18n="launch.preflight_error.desc">起動情報を取得できませんでした。キャンセルして再度お試しください。</span>
-        </p>
-      </div>
-    </div>
-
-    <!-- IDENTITY -->
-    <div class="section" id="identity-section">
-      <div class="section-title">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/>
-          <line x1="12" y1="16" x2="12" y2="12"/>
-          <line x1="12" y1="8" x2="12.01" y2="8"/>
+    <!-- HEADER -->
+    <div class="header">
+      <div class="header-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>
+          <polyline points="9 12 11 14 15 10"/>
         </svg>
-        <span data-i18n="launch.section.execution_info">起動情報の確認</span>
       </div>
-      <div class="id-list" id="identity-list">
-        <!-- populated by renderPreview() -->
-      </div>
+      <h1>Review Before Launch</h1>
+      <p>Review what this capsule can access before it runs.</p>
     </div>
 
-    <!-- REQUIREMENTS (secrets + consents injected here) -->
-    <div id="requirements-root"></div>
+    <!-- LOADING STATE -->
+    <div id="loading-state" class="loading-state">
+      <div class="spinner"></div>
+      <span>Verifying capsule...</span>
+    </div>
 
+    <!-- READY STATE -->
+    <div id="ready-state" style="display:none">
+
+      <!-- PREFLIGHT ERROR -->
+      <div id="preflight-err" class="preflight-err" style="display:none">
+        <strong>⚠ Capsule verification failed</strong>
+        <p>Could not retrieve launch information. Please cancel and try again.</p>
+      </div>
+
+      <!-- APP INFO -->
+      <div class="app-info" id="app-info"></div>
+
+      <div class="divider"></div>
+
+      <!-- REQUIRED CONFIGURATION -->
+      <section id="config-sec" style="display:none">
+        <div class="sec-header">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="10" rx="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+          Required Configuration
+        </div>
+        <div class="config-table" id="config-table"></div>
+      </section>
+
+      <div class="divider" id="perm-divider" style="display:none"></div>
+
+      <!-- PERMISSIONS -->
+      <section id="perm-sec" style="display:none">
+        <div class="sec-header">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>
+          </svg>
+          Permissions
+        </div>
+        <div class="perm-list">
+          <!-- Network -->
+          <div class="perm-row" id="perm-network">
+            <div class="perm-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+            </div>
+            <div class="perm-body">
+              <div class="perm-title-row">
+                <span class="perm-title">Network</span>
+                <button class="perm-edit-link" onclick="openPanel('panel-network')">Edit</button>
+              </div>
+              <div class="perm-desc">
+                <span class="perm-desc-left" id="net-desc-left">—</span>
+                <span class="perm-desc-right" id="net-desc-right"></span>
+              </div>
+            </div>
+          </div>
+          <!-- Filesystem -->
+          <div class="perm-row" id="perm-fs">
+            <div class="perm-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+              </svg>
+            </div>
+            <div class="perm-body">
+              <div class="perm-title-row">
+                <span class="perm-title">Filesystem</span>
+                <button class="perm-edit-link" onclick="openPanel('panel-fs')">Edit</button>
+              </div>
+              <div class="perm-desc">
+                <span class="perm-desc-left" id="fs-desc">—</span>
+              </div>
+            </div>
+          </div>
+          <!-- Secrets -->
+          <div class="perm-row" id="perm-secrets">
+            <div class="perm-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="8" cy="15" r="4"/>
+                <line x1="11.3" y1="11.3" x2="19" y2="4"/>
+                <line x1="16" y1="7" x2="18" y2="9"/>
+              </svg>
+            </div>
+            <div class="perm-body">
+              <div class="perm-title-row">
+                <span class="perm-title">Secrets</span>
+                <button class="perm-edit-link" onclick="openPanel('panel-secrets')">Edit</button>
+              </div>
+              <div class="perm-desc">
+                <span class="perm-desc-left" id="secrets-desc">—</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Technical details toggle -->
+        <button class="details-toggle" id="details-toggle" onclick="toggleDetails()">
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+          <span id="details-toggle-text">Show technical details</span>
+        </button>
+        <div id="tech-box" class="tech-box" style="display:none">
+          <div class="tech-grid" id="tech-grid"></div>
+        </div>
+      </section>
+
+      <!-- APPROVAL BLOCK -->
+      <div class="approval-block" id="approval-block" style="display:none" onclick="toggleApproval()">
+        <input type="checkbox" class="approval-cb" id="approval-cb" onclick="event.stopPropagation()" onchange="updateApproveBtn()">
+        <div class="approval-text">
+          <strong>I allow this capsule to run with the permissions shown above.</strong>
+          <span>You can review and change these settings anytime in Ato Desktop.</span>
+          <span id="approval-hint" style="display:none;color:#ef4444;margin-top:4px;font-size:11px">Fill in all required configuration fields above to continue.</span>
+        </div>
+      </div>
+
+    </div><!-- /ready-state -->
+  </div><!-- /scroll-area -->
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <button class="btn btn-cancel" id="cancel">Cancel</button>
+    <button class="btn btn-approve" id="approve" disabled>Allow Permissions & Launch</button>
   </div>
+</div><!-- /frame -->
 
-  <!-- ACTIONS -->
-  <div class="actions">
-    <button class="btn cancel" id="cancel" data-i18n="common.cancel">キャンセル</button>
-    <button class="btn approve" id="approve" disabled>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <polygon points="5 3 19 12 5 21 5 3"/>
+<!-- BACKDROP -->
+<div class="backdrop" id="backdrop" onclick="closeAllPanels()"></div>
+
+<!-- PANEL: Edit Configuration -->
+<div class="panel" id="panel-config">
+  <div class="panel-hd">
+    <div class="panel-hd-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
       </svg>
-      <span data-i18n="launch.approve">承認して起動</span>
+    </div>
+    <div class="panel-hd-text">
+      <h2>Edit Configuration</h2>
+      <p>Update the required settings for this capsule.</p>
+    </div>
+    <button class="panel-close" onclick="closeAllPanels()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
+  </div>
+  <div class="panel-body" id="panel-config-body"></div>
+  <div class="panel-ft">
+    <button class="btn btn-cancel" onclick="closeAllPanels()">Cancel</button>
+    <button class="btn btn-approve" onclick="saveConfig()">Save changes</button>
+  </div>
+</div>
+
+<!-- PANEL: Edit Network -->
+<div class="panel" id="panel-network">
+  <div class="panel-hd">
+    <div class="panel-hd-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="2" y1="12" x2="22" y2="12"/>
+        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+      </svg>
+    </div>
+    <div class="panel-hd-text">
+      <h2>Edit Network Access</h2>
+      <p>Choose which hosts this capsule can connect to.</p>
+    </div>
+    <button class="panel-close" onclick="closeAllPanels()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="panel-body">
+    <div>
+      <div class="fld-label" style="margin-bottom:8px">Allowed hosts</div>
+      <div class="host-list" id="net-host-list"></div>
+      <button class="add-host-btn" style="margin-top:6px" onclick="addNetHost()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add host
+      </button>
+    </div>
+    <div>
+      <div class="fld-label" style="margin-bottom:8px">Access mode</div>
+      <div class="radio-group">
+        <label class="radio-row">
+          <input type="radio" name="net-mode" value="listed" checked>
+          <div class="radio-text">
+            <div class="radio-title">Allow only listed hosts</div>
+            <div class="radio-desc">Only the hosts above can be accessed.</div>
+          </div>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="net-mode" value="block">
+          <div class="radio-text">
+            <div class="radio-title">Block all network</div>
+            <div class="radio-desc">No network connections are allowed.</div>
+          </div>
+        </label>
+        <label class="radio-row">
+          <input type="radio" name="net-mode" value="allow-all">
+          <div class="radio-text">
+            <div class="radio-title">Allow all network</div>
+            <div class="radio-desc">Allows connections to any host.</div>
+          </div>
+          <span class="badge-warn">Less secure</span>
+        </label>
+      </div>
+    </div>
+    <div>
+      <div class="fld-label" style="margin-bottom:6px">Notes</div>
+      <div class="notes-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        All other hosts are blocked by default. Changes may affect app behavior.
+      </div>
+    </div>
+  </div>
+  <div class="panel-ft">
+    <button class="btn btn-cancel" onclick="closeAllPanels()">Cancel</button>
+    <button class="btn btn-approve" onclick="saveNetwork()">Save changes</button>
+  </div>
+</div>
+
+<!-- PANEL: Edit Filesystem -->
+<div class="panel" id="panel-fs">
+  <div class="panel-hd">
+    <div class="panel-hd-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </svg>
+    </div>
+    <div class="panel-hd-text">
+      <h2>Edit Filesystem Access</h2>
+      <p>Configure which directories this capsule can read or write.</p>
+    </div>
+    <button class="panel-close" onclick="closeAllPanels()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="panel-body">
+    <div>
+      <div class="fld-label" style="margin-bottom:4px">Read access</div>
+      <div class="fld-hint" style="margin-bottom:8px">Directories the capsule can read from.</div>
+      <div id="fs-read-list" style="color:var(--muted);font-size:12.5px;padding:6px 0">None</div>
+    </div>
+    <div>
+      <div class="fld-label" style="margin-bottom:4px">Write access</div>
+      <div class="fld-hint" style="margin-bottom:8px">Directories the capsule can write to.</div>
+      <div id="fs-write-list" style="color:var(--muted);font-size:12.5px;padding:6px 0">None</div>
+    </div>
+    <div class="notes-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      The capsule is sandboxed and cannot access files outside its permitted directories.
+    </div>
+  </div>
+  <div class="panel-ft">
+    <button class="btn btn-cancel" onclick="closeAllPanels()">Cancel</button>
+    <button class="btn btn-approve" disabled>Save changes</button>
+  </div>
+</div>
+
+<!-- PANEL: Secrets info -->
+<div class="panel" id="panel-secrets">
+  <div class="panel-hd">
+    <div class="panel-hd-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="8" cy="15" r="4"/>
+        <line x1="11.3" y1="11.3" x2="19" y2="4"/>
+        <line x1="16" y1="7" x2="18" y2="9"/>
+      </svg>
+    </div>
+    <div class="panel-hd-text">
+      <h2>Secrets</h2>
+      <p>Secrets used by this capsule during execution.</p>
+    </div>
+    <button class="panel-close" onclick="closeAllPanels()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="panel-body">
+    <div id="secrets-list-body" style="font-size:12.5px;color:var(--muted)">No secrets required.</div>
+    <div class="notes-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      Secrets are stored encrypted and are only accessible to this capsule.
+    </div>
+  </div>
+  <div class="panel-ft">
+    <button class="btn btn-cancel" onclick="closeAllPanels()">Close</button>
   </div>
 </div>
 
 <script>
   const POST = (window.ipc && window.ipc.postMessage)
-    ? (m) => window.ipc.postMessage(JSON.stringify(m))
-    : (m) => console.log('[no bridge]', m);
-  const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
+    ? m => window.ipc.postMessage(JSON.stringify(m))
+    : m => console.log('[no bridge]', m);
+  const BRIDGE = cmd => POST({ capsule: 'ato-launch', command: cmd });
 
-  // Track last-focused text input so the Rust paste handler can target it
-  // even if document.activeElement was reset to body when GPUI processed
-  // the menu action on macOS.
+  // Track last-focused text input for paste handler
   window.__ato_last_focused = null;
   document.addEventListener('focusin', function(e) {
     const el = e.target;
     if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') &&
-        !el.readOnly && !el.disabled && el.type !== 'checkbox') {
+        !el.readOnly && !el.disabled && el.type !== 'checkbox' && el.type !== 'radio') {
       window.__ato_last_focused = el;
     }
   }, true);
 
   let _preview = null;
+  let _sd = null;       // parsed summary data
+  let _consent = [];    // consent_required items
+  let _cfgFields = [];  // config field state [{name,label,kind,choices,already_configured,value}]
 
-  function esc(str) {
-    const d = document.createElement('div');
-    d.textContent = str;
-    return d.textContent; // for textContent assignment; just returns the string safely
+  // ── Summary parser ──────────────────────────────────────────────────────────
+  function parseSummary(raw) {
+    const r = { network:[], readOnly:[], readWrite:[], secrets:[],
+                runtime:'', driver:'', target:'', capsule:'',
+                policyHash:'', provisioningHash:'', command:'', workingDir:'' };
+    if (!raw) return r;
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^([^:]+):\s*(.*)/);
+      if (!m) continue;
+      const key = m[1].trim().toLowerCase().replace(/\s+/g, '_');
+      const val = m[2].trim();
+      switch (key) {
+        case 'network':     r.network   = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
+        case 'read_only':   r.readOnly  = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
+        case 'read_write':  r.readWrite = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
+        case 'secrets':     r.secrets   = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
+        case 'policy_hash': r.policyHash = val; break;
+        case 'provisioning': r.provisioningHash = val; break;
+        case 'target': {
+          const tm = val.match(/^(\S+)\s*(?:\((.+)\))?/);
+          if (tm) {
+            r.target = tm[1];
+            if (tm[2]) for (const p of tm[2].split(/,\s*/)) {
+              const pm = p.match(/(\w+)=(\S+)/);
+              if (pm) { if (pm[1]==='runtime') r.runtime=pm[2]; if (pm[1]==='driver') r.driver=pm[2]; }
+            }
+          } else r.target = val;
+          break;
+        }
+        case 'capsule': r.capsule = val; break;
+        case 'command': r.command = val; break;
+        case 'working_directory': case 'working_dir': r.workingDir = val; break;
+      }
+    }
+    return r;
   }
 
-  function addRow(list, key, value) {
-    const row = document.createElement('div');
-    row.className = 'id-row';
-    const k = document.createElement('span');
-    k.className = 'id-key';
-    k.textContent = key;
-    const v = document.createElement('span');
-    v.className = 'id-value';
-    v.textContent = value;
-    row.appendChild(k);
-    row.appendChild(v);
-    list.appendChild(row);
-  }
-
+  // ── Render ──────────────────────────────────────────────────────────────────
   function renderPreview(p) {
     _preview = p;
-
-    // Header subtitle
-    const sub = document.getElementById('header-sub');
-    const t = window.__ATO_T__;
-    sub.textContent = t
-      ? t('launch.subtitle_named').replace('{name}', p.name || '')
-      : (p.name + ' の起動前に内容をご確認ください。');
-
-    // Show ready state, hide loading spinner
     document.getElementById('loading-state').style.display = 'none';
     document.getElementById('ready-state').style.display = '';
 
     if (p.preflight_failed) {
-      // Show error, hide identity/requirements
-      document.getElementById('preflight-error').style.display = '';
-      document.getElementById('identity-section').style.display = 'none';
-      document.getElementById('requirements-root').innerHTML = '';
-      checkApproveEnabled();
+      document.getElementById('preflight-err').style.display = '';
+      updateApproveBtn();
       return;
     }
+    document.getElementById('preflight-err').style.display = 'none';
 
-    // Hide error, show identity
-    document.getElementById('preflight-error').style.display = 'none';
-    document.getElementById('identity-section').style.display = '';
+    // App info
+    const ai = document.getElementById('app-info');
+    ai.innerHTML = '';
+    const fields = [
+      { label:'Application', value: p.name || '—' },
+      { label:'Capsule ID',  value: p.capsule_id || '—' },
+      { label:'Handle',      value: p.handle || '—' },
+      { label:'Target',      value: (p.visited_targets||[]).join(', ') || '—' },
+      { label:'Version',     value: p.capsule_version || '—' },
+    ];
+    fields.forEach(f => {
+      const row = document.createElement('div');
+      row.className = 'ai-row';
+      row.innerHTML = `<span class="ai-label">${esc(f.label)}</span><span class="ai-value">${esc(f.value)}</span>`;
+      ai.appendChild(row);
+    });
 
-    // Identity section
-    const idList = document.getElementById('identity-list');
-    idList.innerHTML = '';
-    addRow(idList, t ? t('launch.field.application') : 'アプリケーション', p.name || (t ? t('common.unknown') : '(不明)'));
-    addRow(idList, t ? t('launch.field.handle') : 'ハンドル', p.handle || (t ? t('common.unknown') : '(不明)'));
-    if (p.capsule_id) addRow(idList, 'Capsule ID', p.capsule_id);
-    if (p.capsule_version) addRow(idList, t ? t('launch.field.version') : 'バージョン', p.capsule_version);
-    if (p.visited_targets && p.visited_targets.length > 0) {
-      addRow(idList, t ? t('launch.field.targets') : 'ターゲット', p.visited_targets.join(', '));
-    }
-
-    // Requirements
-    const reqRoot = document.getElementById('requirements-root');
-    reqRoot.innerHTML = '';
-
-    (p.requirements || []).forEach((req, reqIdx) => {
+    // Parse requirements
+    _cfgFields = [];
+    _consent = [];
+    _sd = null;
+    (p.requirements || []).forEach(req => {
       if (req.type === 'secrets_required') {
-        const section = document.createElement('div');
-        section.className = 'section';
-
-        const title = document.createElement('div');
-        title.className = 'section-title';
-        title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
-        const titleText = document.createElement('span');
-        titleText.textContent = req.target
-          ? ((t ? t('launch.field.env_config_named') : '環境変数 (') + req.target + ')')
-          : (t ? t('launch.field.env_config') : '環境変数の設定');
-        title.appendChild(titleText);
-        section.appendChild(title);
-
-        const fields = document.createElement('div');
-        fields.className = 'fields';
-
-        (req.fields || []).forEach(f => {
-          const row = document.createElement('div');
-          row.className = 'field-row';
-
-          const keyEl = document.createElement('span');
-          keyEl.className = 'field-key';
-          keyEl.textContent = f.label || f.name;
-
-          row.appendChild(keyEl);
-
-          if (f.already_configured) {
-            const badge = document.createElement('span');
-            badge.className = 'badge-configured';
-            badge.textContent = t ? t('launch.field.configured') : '設定済み';
-            row.appendChild(badge);
-          } else if (f.kind === 'enum' && f.choices && f.choices.length > 0) {
-            const sel = document.createElement('select');
-            sel.dataset.key = f.name;
-            sel.dataset.kind = f.kind;
-            if (f.choices.includes('')) sel.required = true;
-            f.choices.forEach(c => {
-              const opt = document.createElement('option');
-              opt.value = c;
-              opt.textContent = c;
-              sel.appendChild(opt);
-            });
-            row.appendChild(sel);
-          } else {
-            const inp = document.createElement('input');
-            inp.type = (f.kind === 'secret') ? 'password' : 'text';
-            inp.dataset.key = f.name;
-            inp.dataset.kind = f.kind;
-            inp.placeholder = f.placeholder || (f.kind === 'secret' ? '••••••••' : '');
-            inp.addEventListener('input', updateApproveState);
-            row.appendChild(inp);
-          }
-
-          fields.appendChild(row);
-        });
-
-        section.appendChild(fields);
-        reqRoot.appendChild(section);
-
+        (req.fields || []).forEach(f => _cfgFields.push({ name:f.name, label:f.label||f.name, kind:f.kind||'text', choices:f.choices||[], placeholder:f.placeholder||'', already_configured:!!f.already_configured, value:'' }));
       } else if (req.type === 'consent_required') {
-        const section = document.createElement('div');
-        section.className = 'section';
-
-        const title = document.createElement('div');
-        title.className = 'section-title';
-        title.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/></svg>';
-        const titleText = document.createElement('span');
-        titleText.textContent = t ? t('launch.field.policy_consent') : '実行ポリシーの同意';
-        title.appendChild(titleText);
-        section.appendChild(title);
-
-        const item = document.createElement('div');
-        item.className = 'consent-item';
-
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.dataset.consent = JSON.stringify({
-          scoped_id: req.scoped_id,
-          version: req.version,
-          target_label: req.target_label,
-          policy_segment_hash: req.policy_segment_hash,
-          provisioning_policy_hash: req.provisioning_policy_hash,
-        });
-        cb.addEventListener('change', updateApproveState);
-
-        const text = document.createElement('div');
-        text.className = 'consent-text';
-        const summary = document.createElement('div');
-        summary.className = 'consent-summary';
-        summary.textContent = req.summary || req.scoped_id;
-        const meta = document.createElement('div');
-        meta.className = 'consent-meta';
-        meta.textContent = req.scoped_id + '@' + req.version;
-        text.appendChild(summary);
-        text.appendChild(meta);
-
-        item.appendChild(cb);
-        item.appendChild(text);
-        section.appendChild(item);
-        reqRoot.appendChild(section);
+        _consent.push(req);
+        if (!_sd && req.summary) _sd = parseSummary(req.summary);
       }
     });
 
-    document.getElementById('loading-state').style.display = 'none';
-    document.getElementById('ready-state').style.display = '';
-    updateApproveState();
+    renderConfig();
+    renderPerms();
+
+    document.getElementById('approval-block').style.display = '';
+    updateApproveBtn();
     if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
   }
 
-  function updateApproveState() {
-    const btn = document.getElementById('approve');
-    if (!_preview || _preview.loading || _preview.preflight_failed) { btn.disabled = true; return; }
-
-    // Check that all non-configured required secret/string fields have a value.
-    let allFilled = true;
-    document.querySelectorAll('[data-key]').forEach(el => {
-      if (el.tagName === 'INPUT' && el.dataset.kind === 'secret' && !el.value.trim()) {
-        allFilled = false;
-      }
+  // ── Config section ──────────────────────────────────────────────────────────
+  function renderConfig() {
+    const sec = document.getElementById('config-sec');
+    const tbl = document.getElementById('config-table');
+    tbl.innerHTML = '';
+    if (_cfgFields.length === 0) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    _cfgFields.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'cfg-row';
+      const key = document.createElement('span');
+      key.className = 'cfg-key';
+      key.textContent = f.label;
+      const val = document.createElement('span');
+      val.className = 'cfg-val';
+      val.id = `cfg-val-${i}`;
+      refreshCfgVal(f, val);
+      const btn = document.createElement('button');
+      btn.className = 'edit-btn';
+      btn.textContent = 'Edit';
+      btn.addEventListener('click', () => openConfigPanel());
+      row.appendChild(key); row.appendChild(val); row.appendChild(btn);
+      tbl.appendChild(row);
     });
-
-    // Check that all consent checkboxes are checked.
-    let allConsented = true;
-    document.querySelectorAll('input[type=checkbox][data-consent]').forEach(cb => {
-      if (!cb.checked) allConsented = false;
-    });
-
-    btn.disabled = !(allFilled && allConsented);
   }
 
-  // Called by the Rust side after background preflight completes.
-  // Receives a JS object (JSON value, not string).
-  window.__ato_hydrate_preview = function(previewObj) {
-    renderPreview(previewObj);
-  };
+  function refreshCfgVal(f, el) {
+    if (!el) el = document.getElementById(`cfg-val-${_cfgFields.indexOf(f)}`);
+    if (!el) return;
+    if (f.kind === 'secret') {
+      if (f.value) { el.textContent = f.value.slice(0,3) + '•'.repeat(Math.max(6, Math.min(f.value.length-3,9))); el.classList.remove('empty'); }
+      else if (f.already_configured) { el.textContent = 'sk-' + '•'.repeat(9); el.classList.remove('empty'); }
+      else { el.textContent = 'Not set'; el.classList.add('empty'); }
+    } else if (f.kind === 'enum') {
+      el.textContent = f.value || (f.choices[0] || '—');
+      el.classList.remove('empty');
+    } else {
+      if (f.value) { el.textContent = f.value; el.classList.remove('empty'); }
+      else if (f.already_configured) { el.textContent = '(configured)'; el.classList.remove('empty'); }
+      else { el.textContent = 'Not set'; el.classList.add('empty'); }
+    }
+  }
 
-  // Check if init script already injected a ready preview.
+  // ── Permissions section ─────────────────────────────────────────────────────
+  function renderPerms() {
+    const sec = document.getElementById('perm-sec');
+    const div = document.getElementById('perm-divider');
+    if (!_sd && _consent.length === 0) { sec.style.display = 'none'; div.style.display = 'none'; return; }
+    sec.style.display = ''; div.style.display = '';
+
+    const sd = _sd || { network:[], readOnly:[], readWrite:[], secrets:[] };
+
+    // Network row
+    const netRow = document.getElementById('perm-network');
+    const netL = document.getElementById('net-desc-left');
+    const netR = document.getElementById('net-desc-right');
+    if (sd.network.length > 0) {
+      netRow.classList.add('net-hi');
+      const shown = sd.network.slice(0,3);
+      netL.textContent = shown.join(', ') + (sd.network.length > 3 ? `, +${sd.network.length-3} more` : '');
+      netR.textContent = 'All other hosts are blocked by default.';
+    } else {
+      netRow.classList.remove('net-hi');
+      netL.textContent = 'No network access';
+      netR.textContent = '';
+    }
+
+    // Filesystem row
+    const readStr  = sd.readOnly.length  > 0 ? sd.readOnly.join(', ')  : 'None';
+    const writeStr = sd.readWrite.length > 0 ? sd.readWrite.join(', ') : 'None';
+    document.getElementById('fs-desc').textContent = `Read access: ${readStr}  •  Write access: ${writeStr}`;
+
+    // Secrets row
+    if (sd.secrets.length > 0) {
+      const names = sd.secrets.map(s => s.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase())).join(', ');
+      document.getElementById('secrets-desc').textContent = `Uses ${names}, available only to this capsule.`;
+    } else {
+      document.getElementById('secrets-desc').textContent = 'No secrets required';
+    }
+
+    // Update filesystem panel body
+    document.getElementById('fs-read-list').textContent  = sd.readOnly.join(', ')  || 'None';
+    document.getElementById('fs-write-list').textContent = sd.readWrite.join(', ') || 'None';
+
+    // Update secrets panel body
+    const slBody = document.getElementById('secrets-list-body');
+    if (sd.secrets.length > 0) {
+      slBody.innerHTML = sd.secrets.map(s => `<div style="padding:6px 0;border-bottom:1px solid var(--border-soft)">${esc(s.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()))}</div>`).join('');
+    } else {
+      slBody.textContent = 'No secrets required.';
+    }
+
+    // Tech grid
+    renderTechGrid();
+  }
+
+  function renderTechGrid() {
+    const grid = document.getElementById('tech-grid');
+    grid.innerHTML = '';
+    const sd = _sd || {};
+    const c = _consent[0] || {};
+    const items = [
+      ['Runtime', sd.runtime||'—'],          ['Secrets', (sd.secrets||[]).join(', ')||'None'],
+      ['Driver', sd.driver||'—'],             ['Policy hash', c.policy_segment_hash||sd.policyHash||'—'],
+      ['Target', sd.target||c.target_label||'—'], ['Provisioning hash', c.provisioning_policy_hash||sd.provisioningHash||'—'],
+      ['Network mode', sd.network&&sd.network.length>0 ? 'allow listed hosts only' : 'blocked'], ['Working directory', sd.workingDir||'—'],
+      ['Read access', (sd.readOnly||[]).join(', ')||'none'],  ['Command', sd.command||'—'],
+      ['Write access', (sd.readWrite||[]).join(', ')||'none'], ['', ''],
+    ];
+    items.forEach(([label, value]) => {
+      const item = document.createElement('div');
+      item.className = 'tech-item';
+      item.innerHTML = `<span class="tech-label">${esc(label)}${label?':':''}</span><span class="tech-value" title="${esc(value)}">${esc(value)}</span>`;
+      grid.appendChild(item);
+    });
+  }
+
+  // ── Panel management ────────────────────────────────────────────────────────
+  function openPanel(id) {
+    closeAllPanels();
+    if (id === 'panel-config') { populateConfigPanel(); }
+    else if (id === 'panel-network') { populateNetworkPanel(); }
+    document.getElementById('backdrop').classList.add('on');
+    document.getElementById(id).classList.add('open');
+  }
+
+  function closeAllPanels() {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('open'));
+    document.getElementById('backdrop').classList.remove('on');
+  }
+
+  // Config panel
+  function openConfigPanel() { openPanel('panel-config'); }
+
+  function populateConfigPanel() {
+    const body = document.getElementById('panel-config-body');
+    body.innerHTML = '';
+    _cfgFields.forEach((f, i) => {
+      const grp = document.createElement('div');
+      grp.className = 'fld-group';
+      const lbl = document.createElement('div');
+      lbl.className = 'fld-label';
+      lbl.textContent = f.label;
+      grp.appendChild(lbl);
+      if (f.kind === 'enum' && f.choices.length > 0) {
+        const sel = document.createElement('select');
+        sel.className = 'fld-select';
+        sel.dataset.fieldIdx = i;
+        f.choices.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c; opt.textContent = c;
+          if (c === (f.value || f.choices[0])) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        sel.addEventListener('change', () => { _cfgFields[i].value = sel.value; refreshCfgVal(_cfgFields[i]); updateApproveBtn(); });
+        grp.appendChild(sel);
+      } else {
+        const wrap = document.createElement('div');
+        wrap.className = 'fld-wrap';
+        const inp = document.createElement('input');
+        inp.className = 'fld-input';
+        inp.type = f.kind === 'secret' ? 'password' : 'text';
+        inp.dataset.fieldIdx = i;
+        inp.placeholder = f.placeholder || (f.kind === 'secret' ? '••••••••' : '');
+        inp.value = f.value || '';
+        inp.addEventListener('input', () => { _cfgFields[i].value = inp.value; refreshCfgVal(_cfgFields[i]); updateApproveBtn(); });
+        wrap.appendChild(inp);
+        if (f.kind === 'secret') {
+          const rv = document.createElement('button');
+          rv.className = 'reveal-btn'; rv.type = 'button'; rv.textContent = 'Reveal';
+          rv.addEventListener('click', () => { inp.type = inp.type==='password' ? (rv.textContent='Hide','text') : (rv.textContent='Reveal','password'); });
+          wrap.appendChild(rv);
+        }
+        grp.appendChild(wrap);
+      }
+      // Per-field hint
+      if (f.kind === 'secret') {
+        const hint = document.createElement('div');
+        hint.className = 'fld-hint';
+        hint.textContent = `Used only for ${f.label} requests.`;
+        grp.appendChild(hint);
+      }
+      body.appendChild(grp);
+    });
+    const notes = document.createElement('div');
+    notes.className = 'notes-box';
+    notes.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>These values are stored only for this capsule. Changing the model may affect app behavior.`;
+    body.appendChild(notes);
+  }
+
+  function saveConfig() { _cfgFields.forEach(f => refreshCfgVal(f)); closeAllPanels(); updateApproveBtn(); }
+
+  // Network panel
+  function populateNetworkPanel() {
+    const list = document.getElementById('net-host-list');
+    list.innerHTML = '';
+    const hosts = _sd ? _sd.network : [];
+    hosts.forEach(host => {
+      const row = document.createElement('div');
+      row.className = 'host-row';
+      const dot = document.createElement('span'); dot.className = 'host-dot';
+      const info = document.createElement('div'); info.className = 'host-info';
+      const name = document.createElement('div'); name.className = 'host-name'; name.textContent = host;
+      const desc = document.createElement('div'); desc.className = 'host-desc';
+      desc.textContent = host.startsWith('localhost') || host.startsWith('127.') || host.startsWith('0.0.0.0') ? 'Local' : '';
+      info.appendChild(name); info.appendChild(desc);
+      const rm = document.createElement('button'); rm.className = 'host-rm'; rm.title = 'Remove';
+      rm.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
+      rm.addEventListener('click', () => {
+        if (_sd) _sd.network = _sd.network.filter(h => h !== host);
+        populateNetworkPanel(); renderPerms();
+      });
+      row.appendChild(dot); row.appendChild(info); row.appendChild(rm);
+      list.appendChild(row);
+    });
+  }
+
+  function addNetHost() {
+    const host = prompt('Enter hostname or IP (e.g. api.example.com):');
+    if (host && host.trim()) {
+      if (!_sd) _sd = { network:[], readOnly:[], readWrite:[], secrets:[], runtime:'', driver:'', target:'', capsule:'', policyHash:'', provisioningHash:'', command:'', workingDir:'' };
+      _sd.network.push(host.trim());
+      populateNetworkPanel(); renderPerms();
+    }
+  }
+
+  function saveNetwork() { renderPerms(); closeAllPanels(); }
+
+  // ── Technical details toggle ────────────────────────────────────────────────
+  function toggleDetails() {
+    const btn = document.getElementById('details-toggle');
+    const box = document.getElementById('tech-box');
+    const txt = document.getElementById('details-toggle-text');
+    const open = btn.classList.toggle('open');
+    box.style.display = open ? '' : 'none';
+    txt.textContent = open ? 'Hide technical details' : 'Show technical details';
+  }
+
+  // ── Approval ────────────────────────────────────────────────────────────────
+  function toggleApproval() {
+    const cb = document.getElementById('approval-cb');
+    cb.checked = !cb.checked;
+    updateApproveBtn();
+  }
+
+  function updateApproveBtn() {
+    const btn = document.getElementById('approve');
+    const block = document.getElementById('approval-block');
+    const hint = document.getElementById('approval-hint');
+    if (!_preview || _preview.loading || _preview.preflight_failed) { btn.disabled = true; return; }
+    const approved = document.getElementById('approval-cb').checked;
+    block.classList.toggle('checked', approved);
+    // All secret fields that aren't pre-configured need a value
+    const allFilled = _cfgFields.every(f => f.kind !== 'secret' || f.already_configured || !!f.value);
+    btn.disabled = !(approved && allFilled);
+    if (hint) hint.style.display = (approved && !allFilled) ? '' : 'none';
+  }
+
+  // ── IPC ─────────────────────────────────────────────────────────────────────
+  window.__ato_hydrate_preview = function(p) { renderPreview(p); };
+
   document.addEventListener('DOMContentLoaded', () => {
     if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
     const p = window.__ATO_LAUNCH_PREVIEW;
-    if (p && !p.loading) {
-      renderPreview(p);
-    }
-    // If loading=true, the Rust background task will call __ato_hydrate_preview.
+    if (p && !p.loading) renderPreview(p);
   });
 
   document.getElementById('approve').addEventListener('click', () => {
     if (!_preview || _preview.loading) return;
-    const secrets = {};
-    const config = {};
-    const consents = [];
-
-    document.querySelectorAll('[data-key]').forEach(el => {
-      const v = el.value; // do NOT trim secrets; trim non-secrets
-      if (el.dataset.kind === 'secret') {
-        if (v.length > 0) secrets[el.dataset.key] = v;
-      } else {
-        if (v.trim().length > 0) config[el.dataset.key] = v.trim();
-      }
+    const secrets = {}, config = {};
+    _cfgFields.forEach(f => {
+      if (!f.value) return;
+      if (f.kind === 'secret') secrets[f.name] = f.value;
+      else config[f.name] = f.value;
     });
-
-    document.querySelectorAll('input[type=checkbox][data-consent]:checked').forEach(cb => {
-      try { consents.push(JSON.parse(cb.dataset.consent)); } catch (_) {}
+    // Also collect from any open panel inputs
+    document.querySelectorAll('[data-field-idx]').forEach(el => {
+      const f = _cfgFields[+el.dataset.fieldIdx];
+      if (!f || !el.value) return;
+      if (f.kind === 'secret') secrets[f.name] = el.value;
+      else config[f.name] = el.value.trim();
     });
-
-    BRIDGE({ kind: 'approve', preview_id: _preview.preview_id, secrets, config, consents });
+    const consents = _consent.map(r => ({
+      scoped_id: r.scoped_id, version: r.version,
+      target_label: r.target_label,
+      policy_segment_hash: r.policy_segment_hash,
+      provisioning_policy_hash: r.provisioning_policy_hash,
+    }));
+    BRIDGE({ kind:'approve', preview_id:_preview.preview_id, secrets, config, consents });
   });
 
-  document.getElementById('cancel').addEventListener('click', () => {
-    BRIDGE({ kind: 'cancel' });
+  document.getElementById('cancel').addEventListener('click', () => BRIDGE({ kind:'cancel' }));
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      if (document.querySelector('.panel.open')) closeAllPanels();
+      else BRIDGE({ kind:'cancel' });
+    }
   });
 
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') BRIDGE({ kind: 'cancel' });
-  });
+  function esc(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
 </script>
 
 </body>

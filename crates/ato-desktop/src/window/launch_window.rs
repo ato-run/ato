@@ -359,12 +359,42 @@ pub fn open_consent_window(cx: &mut App) -> Result<()> {
     let demo_preview = serde_json::json!({
         "preview_id": "demo",
         "loading": false,
-        "name": "サンプルカプセル",
-        "handle": "github.com/example/sample",
-        "capsule_id": "",
-        "capsule_version": "",
-        "visited_targets": [],
-        "requirements": [],
+        "name": "chat",
+        "handle": "koh0920/byok-ai-chat",
+        "capsule_id": "byok-ai-chat",
+        "capsule_version": "0.3.4",
+        "visited_targets": ["app"],
+        "requirements": [
+            {
+                "type": "secrets_required",
+                "target": "app",
+                "fields": [
+                    {
+                        "name": "OPENAI_API_KEY",
+                        "label": "OpenAI API Key",
+                        "kind": "secret",
+                        "placeholder": "sk-...",
+                        "already_configured": false,
+                    },
+                    {
+                        "name": "MODEL",
+                        "label": "Model",
+                        "kind": "enum",
+                        "choices": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
+                        "already_configured": true,
+                    },
+                ],
+            },
+            {
+                "type": "consent_required",
+                "scoped_id": "byok-ai-chat",
+                "version": "0.3.4",
+                "target_label": "app",
+                "policy_segment_hash": "blake3:1a087e1a47d13e659d9c65d7cb88e854308dd777aa292296d50c3816a4ccdaf5",
+                "provisioning_policy_hash": "blake3:4cbe69639a92f8d0537b87b8cbb25527df222f30ea842c73e332f655ccc5adee",
+                "summary": "Capsule      : byok-ai-chat@0.3.4\nTarget       : app (runtime=source, driver=node)\nNetwork      : api.openai.com, localhost:3000, 127.0.0.1:3000\nRead Only    : None\nRead Write   : None\nSecrets      : OPENAI_API_KEY\nPolicy Hash  : blake3:1a087e1a47d13e659d9c65d7cb88e854308dd777aa292296d50c3816a4ccdaf5\nProvisioning : blake3:4cbe69639a92f8d0537b87b8cbb25527df222f30ea842c73e332f655ccc5adee\nCommand      : npm run dev\nWorking Directory: /",
+            },
+        ],
     });
     let init_script = format!(
         "window.__ATO_LAUNCH_PREVIEW={};",
