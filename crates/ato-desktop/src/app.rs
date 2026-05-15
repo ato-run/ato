@@ -10,6 +10,7 @@ use gpui_component::input;
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -99,6 +100,7 @@ actions!(
         // rather than stacking duplicates. Gated on the multi-window
         // flag.
         OpenStoreWindow,
+        OpenCapsulePanel,
         ShowControlBar,
         HideControlBar,
         ToggleControlBar,
@@ -152,6 +154,30 @@ pub struct OpenExternalLink {
 #[action(namespace = ato_desktop, no_json)]
 pub struct InstallCapsuleUpdate {
     pub url: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct RestartContentWindow {
+    pub window_id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct StopContentWindow {
+    pub window_id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct OpenContentWindowLogs {
+    pub window_id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct OpenContentWindowSettings {
+    pub window_id: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
@@ -322,6 +348,8 @@ pub fn run() {
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
+        cx.set_global(crate::window::capsule_panel::CapsulePanelWindowSlot::default());
+        cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot::default());
         // Slot tracking the in-Desktop OAuth login window.
         cx.set_global(crate::window::auth_login_window::AuthLoginWindowSlot::default());
 
@@ -352,6 +380,11 @@ pub fn run() {
             KeyBinding::new("cmd-c", NativeCopy, Some("LaunchWindowShell")),
             KeyBinding::new("cmd-v", NativePaste, Some("LaunchWindowShell")),
             KeyBinding::new("cmd-a", NativeSelectAll, Some("LaunchWindowShell")),
+            // Dock window bindings — same delegation to the Dock WebView.
+            KeyBinding::new("cmd-x", NativeCut, Some("DockWebView")),
+            KeyBinding::new("cmd-c", NativeCopy, Some("DockWebView")),
+            KeyBinding::new("cmd-v", NativePaste, Some("DockWebView")),
+            KeyBinding::new("cmd-a", NativeSelectAll, Some("DockWebView")),
             KeyBinding::new("cmd-alt-i", ToggleDock, None),
             KeyBinding::new("cmd-shift-b", ToggleControlBar, None),
             KeyBinding::new("ctrl-shift-b", ToggleControlBar, None),
@@ -473,6 +506,26 @@ pub fn run() {
                 cx.set_global(crate::window::settings_window::SettingsWindowSlot(None));
                 tracing::info!("Settings window closed; slot cleared");
             }
+            let capsule_panel_slot = cx
+                .global::<crate::window::capsule_panel::CapsulePanelWindowSlot>()
+                .0;
+            if capsule_panel_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                cx.set_global(crate::window::capsule_panel::CapsulePanelWindowSlot(None));
+                tracing::info!("Capsule panel window closed; slot cleared");
+            }
+            let capsule_settings_slot = cx
+                .global::<crate::window::capsule_panel::CapsuleSettingsWindowSlot>()
+                .0;
+            if capsule_settings_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot(None));
+                tracing::info!("Capsule settings window closed; slot cleared");
+            }
             let store_slot = cx
                 .global::<crate::window::store::StoreWindowSlot>()
                 .0;
@@ -487,8 +540,7 @@ pub fn run() {
                 .map(|h| h.window_id() == window_id)
                 .unwrap_or(false)
             {
-                cx.set_global(crate::window::dock::DockWindowSlot(None));
-                cx.set_global(crate::window::dock::DockEntitySlot(None));
+                crate::window::dock::cleanup_dock_window(cx);
                 tracing::info!("Dock window closed; slot cleared");
             }
 
@@ -559,6 +611,34 @@ pub fn run() {
                 return;
             }
             stop_active_focus_capsule(cx);
+        });
+        cx.on_action(|action: &StopContentWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            stop_focus_content_window(cx, action.window_id);
+        });
+        cx.on_action(|action: &RestartContentWindow, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            restart_focus_content_window(cx, action.window_id);
+        });
+        cx.on_action(|action: &OpenContentWindowLogs, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            open_focus_content_window_logs(cx, action.window_id);
+        });
+        cx.on_action(|action: &OpenContentWindowSettings, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) =
+                crate::window::capsule_panel::open_capsule_settings_window(cx, action.window_id)
+            {
+                tracing::error!(error = %err, "OpenContentWindowSettings failed");
+            }
         });
 
         cx.on_action(|_: &StopAllRetainedSessions, cx: &mut App| {
@@ -744,6 +824,14 @@ pub fn run() {
                 tracing::error!(error = %err, "failed to open dock window");
             }
         });
+        cx.on_action(|_: &OpenCapsulePanel, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                return;
+            }
+            if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
+                tracing::error!(error = %err, "failed to open capsule panel window");
+            }
+        });
 
         // Spawn a fresh StartWindow. Unlike the Launcher / Store
         // handlers, there is no slot — every dispatch produces a new
@@ -897,20 +985,62 @@ fn stop_active_focus_capsule(cx: &mut App) {
             matches!(
                 &entry.kind,
                 ContentWindowKind::AppWindow {
-                    route:
-                        GuestRoute::CapsuleHandle { .. }
-                            | GuestRoute::CapsuleUrl { .. }
-                            | GuestRoute::Capsule { .. }
-                            | GuestRoute::Terminal { .. }
+                    route: GuestRoute::CapsuleHandle { .. }
+                        | GuestRoute::CapsuleUrl { .. }
+                        | GuestRoute::Capsule { .. }
+                        | GuestRoute::Terminal { .. }
                 }
             )
         });
 
     if let Some(entry) = active {
-        let _ = entry.handle.update(cx, |_, window, _| window.remove_window());
+        let _ = entry
+            .handle
+            .update(cx, |_, window, _| window.remove_window());
         tracing::info!(title = %entry.title, "Focus View active capsule stopped by closing its AppWindow");
     } else {
         tracing::info!("StopActiveSession ignored: no active Focus View capsule window");
+    }
+}
+
+fn stop_focus_content_window(cx: &mut App, window_id: u64) {
+    let target = cx
+        .global::<crate::window::content_windows::OpenContentWindows>()
+        .get(window_id)
+        .map(|entry| entry.handle);
+    if let Some(target) = target {
+        let _ = target.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
+fn restart_focus_content_window(cx: &mut App, window_id: u64) {
+    use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+
+    let Some(entry) = cx.global::<OpenContentWindows>().get(window_id).cloned() else {
+        return;
+    };
+    let ContentWindowKind::AppWindow { route } = entry.kind else {
+        return;
+    };
+    let _ = entry
+        .handle
+        .update(cx, |_, window, _| window.remove_window());
+    if let Err(err) = crate::window::open_app_window(cx, route) {
+        tracing::error!(error = %err, window_id, "RestartContentWindow failed");
+    }
+}
+
+fn open_focus_content_window_logs(cx: &mut App, window_id: u64) {
+    let path = cx
+        .global::<crate::window::content_windows::OpenContentWindows>()
+        .get(window_id)
+        .and_then(|entry| entry.capsule.as_ref())
+        .and_then(|capsule| capsule.log_path.clone());
+    let Some(path) = path else {
+        return;
+    };
+    if let Err(err) = Command::new("open").arg(&path).spawn() {
+        tracing::error!(error = %err, log_path = %path, "OpenContentWindowLogs failed");
     }
 }
 
@@ -926,18 +1056,19 @@ fn stop_all_focus_capsules(cx: &mut App) {
             matches!(
                 &entry.kind,
                 ContentWindowKind::AppWindow {
-                    route:
-                        GuestRoute::CapsuleHandle { .. }
-                            | GuestRoute::CapsuleUrl { .. }
-                            | GuestRoute::Capsule { .. }
-                            | GuestRoute::Terminal { .. }
+                    route: GuestRoute::CapsuleHandle { .. }
+                        | GuestRoute::CapsuleUrl { .. }
+                        | GuestRoute::Capsule { .. }
+                        | GuestRoute::Terminal { .. }
                 }
             )
         })
         .collect();
     let count = targets.len();
     for entry in targets {
-        let _ = entry.handle.update(cx, |_, window, _| window.remove_window());
+        let _ = entry
+            .handle
+            .update(cx, |_, window, _| window.remove_window());
     }
     tracing::info!(count, "Focus View capsule windows stopped");
 }
@@ -953,36 +1084,38 @@ fn install_app_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Show Control Bar", ShowControlBar),
                 MenuItem::action("Hide Control Bar", HideControlBar),
-                MenuItem::submenu(Menu::new("Control Bar Mode").items([
-                    MenuItem::action(
-                        "Floating",
-                        SetControlBarMode {
-                            mode: ControlBarMode::Floating,
-                        },
-                    )
-                    .checked(mode == ControlBarMode::Floating),
-                    MenuItem::action(
-                        "Auto-hide",
-                        SetControlBarMode {
-                            mode: ControlBarMode::AutoHide,
-                        },
-                    )
-                    .checked(mode == ControlBarMode::AutoHide),
-                    MenuItem::action(
-                        "Compact pill",
-                        SetControlBarMode {
-                            mode: ControlBarMode::CompactPill,
-                        },
-                    )
-                    .checked(mode == ControlBarMode::CompactPill),
-                    MenuItem::action(
-                        "Hidden",
-                        SetControlBarMode {
-                            mode: ControlBarMode::Hidden,
-                        },
-                    )
-                    .checked(mode == ControlBarMode::Hidden),
-                ])),
+                MenuItem::submenu(
+                    Menu::new("Control Bar Mode").items([
+                        MenuItem::action(
+                            "Floating",
+                            SetControlBarMode {
+                                mode: ControlBarMode::Floating,
+                            },
+                        )
+                        .checked(mode == ControlBarMode::Floating),
+                        MenuItem::action(
+                            "Auto-hide",
+                            SetControlBarMode {
+                                mode: ControlBarMode::AutoHide,
+                            },
+                        )
+                        .checked(mode == ControlBarMode::AutoHide),
+                        MenuItem::action(
+                            "Compact pill",
+                            SetControlBarMode {
+                                mode: ControlBarMode::CompactPill,
+                            },
+                        )
+                        .checked(mode == ControlBarMode::CompactPill),
+                        MenuItem::action(
+                            "Hidden",
+                            SetControlBarMode {
+                                mode: ControlBarMode::Hidden,
+                            },
+                        )
+                        .checked(mode == ControlBarMode::Hidden),
+                    ]),
+                ),
                 MenuItem::separator(),
                 MenuItem::action("Open Store", OpenStoreWindow),
                 MenuItem::action("Open Settings", ShowSettings),
