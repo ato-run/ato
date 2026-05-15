@@ -34,8 +34,8 @@ use anyhow::Result;
 use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Render,
-    WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable,
+    IntoElement, Render, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
@@ -174,18 +174,25 @@ impl gpui::Global for PendingConsentPreview {}
 
 pub struct LaunchWindowShell {
     _webview: WebView,
+    focus_handle: FocusHandle,
+}
+
+impl Focusable for LaunchWindowShell {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
 }
 
 impl Render for LaunchWindowShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // White backdrop in case the HTML is still painting.
-        // key_context required so the LaunchWindowShell key bindings fire
-        // (the WKWebView child is not first responder, so native Cmd+V/C
-        // would never reach the HTML inputs without this).
+        // track_focus is required so GPUI routes NativePaste actions here
+        // even when the WKWebView child has OS first-responder.
         div()
             .size_full()
             .bg(rgb(0xffffff))
             .key_context("LaunchWindowShell")
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_native_copy))
             .on_action(cx.listener(Self::on_native_cut))
             .on_action(cx.listener(Self::on_native_paste))
@@ -273,7 +280,7 @@ fn launch_paste_script(text: &str) -> String {
     active.tagName === 'TEXTAREA' ||
     (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
   );
-  if (!isTextInput || active.readOnly || active.disabled) return;
+  if (!isTextInput || active.readOnly || active.disabled) {{ return; }}
   active.focus();
   const start = active.selectionStart ?? active.value.length;
   const end = active.selectionEnd ?? start;
@@ -322,7 +329,13 @@ fn open_wizard(
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Launch wizard WebView");
-        let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
+        let shell = cx.new(|cx| LaunchWindowShell {
+            _webview: webview,
+            focus_handle: cx.focus_handle(),
+        });
+        // Give GPUI focus to LaunchWindowShell so NativePaste/NativeCopy
+        // key bindings dispatch here even when WKWebView has OS first-responder.
+        window.focus(&shell.read(cx).focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
@@ -674,10 +687,14 @@ fn open_consent_wizard_inner(
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the consent WebView");
-        let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
+        let shell = cx.new(|cx| LaunchWindowShell {
+            _webview: webview,
+            focus_handle: cx.focus_handle(),
+        });
         if let Ok(mut slot) = shell_slot_inner.lock() {
             *slot = Some(shell.clone());
         }
+        window.focus(&shell.read(cx).focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
@@ -769,10 +786,14 @@ fn open_boot_wizard_inner(
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the boot WebView");
-        let shell = cx.new(|_cx| LaunchWindowShell { _webview: webview });
+        let shell = cx.new(|cx| LaunchWindowShell {
+            _webview: webview,
+            focus_handle: cx.focus_handle(),
+        });
         if let Ok(mut slot) = shell_slot_inner.lock() {
             *slot = Some(shell.clone());
         }
+        window.focus(&shell.read(cx).focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
