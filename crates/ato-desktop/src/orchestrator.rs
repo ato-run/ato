@@ -472,10 +472,7 @@ pub(crate) fn collect_preflight_for_consent(handle: &str) -> Result<ConsentPrefl
 
 /// Adds `capsule://` prefix to bare `github.com/owner/repo` handles.
 fn normalize_preflight_handle(handle: &str) -> String {
-    if handle.starts_with("capsule://")
-        || handle.starts_with('/')
-        || handle.starts_with('~')
-    {
+    if handle.starts_with("capsule://") || handle.starts_with('/') || handle.starts_with('~') {
         handle.to_string()
     } else if handle.starts_with("github.com/") {
         format!("capsule://{handle}")
@@ -1281,7 +1278,30 @@ fn sibling_ato_binary() -> Result<Option<PathBuf>> {
 
     let bin_name = if cfg!(windows) { "ato.exe" } else { "ato" };
     let candidate = parent.join(bin_name);
+
     if candidate.is_file() {
+        // In monorepo dev builds, ato-desktop lives at crates/ato-desktop/target/{profile}/
+        // while ato-cli is built into the root workspace's target/{profile}/.
+        // If a fresher peer exists 4 ancestors up (repo root), prefer it so that
+        // rebuilding ato-cli is immediately picked up without re-bundling.
+        let profile = parent.file_name().and_then(|s| s.to_str()).unwrap_or("debug");
+        if let Some(repo_root) = parent.ancestors().nth(4) {
+            let peer = repo_root.join("target").join(profile).join(bin_name);
+            if peer.is_file() && peer != candidate {
+                let sibling_mtime = candidate.metadata().and_then(|m| m.modified()).ok();
+                let peer_mtime = peer.metadata().and_then(|m| m.modified()).ok();
+                if let (Some(sm), Some(pm)) = (sibling_mtime, peer_mtime) {
+                    if pm > sm {
+                        tracing::debug!(
+                            sibling = %candidate.display(),
+                            peer = %peer.display(),
+                            "using fresher root-workspace ato binary"
+                        );
+                        return Ok(Some(peer));
+                    }
+                }
+            }
+        }
         return Ok(Some(candidate));
     }
     Ok(None)
