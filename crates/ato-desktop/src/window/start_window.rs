@@ -9,8 +9,8 @@
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds,
-    WindowDecorations, WindowOptions,
+    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds, WindowDecorations,
+    WindowOptions,
 };
 use gpui_component::TitleBar;
 use wry::dpi::{LogicalPosition, LogicalSize};
@@ -20,18 +20,25 @@ use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::system_capsule::ato_start::build_start_snapshot;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 pub struct StartWindowShell {
     _webview: WebView,
+    paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(StartWindowShell, paste);
+
+impl WebViewPasteShell for StartWindowShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self._webview)
+    }
 }
 
 impl Render for StartWindowShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div().size_full().bg(rgb(0x111111))
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        paste_render_wrap!(div().size_full().bg(rgb(0x111111)), cx, &self.paste.focus_handle)
     }
 }
 
@@ -44,12 +51,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
     let config = crate::config::load_config();
     let locale = resolve_locale(config.general.language);
     let snapshot = build_start_snapshot(cx, &config, locale);
-    let snapshot_json = serde_json::to_string(&snapshot)
-        .unwrap_or_else(|_| "{}".to_string());
-    let snapshot_script = format!(
-        "window.__ATO_START_SNAPSHOT__ = {};",
-        snapshot_json
-    );
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
+    let snapshot_script = format!("window.__ATO_START_SNAPSHOT__ = {};", snapshot_json);
     let init_script = compose_init_script(locale, Some(&snapshot_script));
 
     let win_size = size(px(1100.0), px(760.0));
@@ -59,7 +62,10 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             let db = d.bounds();
             let left = db.origin.x + (db.size.width - win_size.width) / 2.0;
             let top = db.origin.y + px(108.0);
-            Bounds { origin: gpui::point(left, top), size: win_size }
+            Bounds {
+                origin: gpui::point(left, top),
+                size: win_size,
+            }
         }
         None => Bounds::centered(None, win_size, cx),
     };
@@ -92,7 +98,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Start WebView");
-        let shell = cx.new(|_cx| StartWindowShell { _webview: webview });
+        let shell = cx.new(|cx| StartWindowShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
@@ -104,6 +111,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             title: gpui::SharedString::from(tr(locale, "start.title")),
             subtitle: gpui::SharedString::from(tr(locale, "start.subtitle")),
             url: gpui::SharedString::from("capsule://desktop.ato.run/start"),
+            capsule: None,
             last_focused_at: std::time::Instant::now(),
         },
     );
@@ -112,4 +120,3 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
 
     Ok(())
 }
-

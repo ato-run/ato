@@ -15,11 +15,9 @@
 //! or the NavigateToUrl action): `open_consent_window_for_route` sets
 //! `PendingLaunchTarget` to the target `GuestRoute` and opens the
 //! consent wizard. On Approve, `ato_launch::dispatch` consumes the
-//! pending target, calls `open_app_window` to spawn the real AppWindow,
-//! and opens the boot wizard as a transient launch-ceremony overlay.
-//! Phase 1 boot animation is still decorative; Phase 2 will drive it
-//! from real orchestrator events emitted by
-//! `orchestrator::resolve_and_start_guest`.
+//! pending target, opens the boot wizard, and only spawns the real
+//! AppWindow after `orchestrator::resolve_and_start_guest` returns a
+//! ready session.
 //!
 //! Wizards are intentionally NOT registered in `OpenContentWindows`.
 //! They are launch chrome, not destination content — the Card Switcher
@@ -27,27 +25,28 @@
 //! AppWindow that follows a successful approve flow registers itself
 //! the normal way via `open_app_window`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, FocusHandle, Focusable,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity,
     IntoElement, Render, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
-#[cfg(target_os = "macos")]
-use wry::WebViewExtMacOS;
 
-use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::state::GuestRoute;
 use crate::system_capsule::ipc as system_ipc;
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 const CONSENT_HTML: &str = include_str!("../../assets/system/ato-launch/consent.html");
 const BOOT_HTML: &str = include_str!("../../assets/system/ato-launch/boot.html");
@@ -75,20 +74,20 @@ pub struct PendingLaunchConfigs(pub Vec<(String, String)>);
 
 impl gpui::Global for PendingLaunchConfigs {}
 
-/// Tracks the two transient wizard windows opened during a capsule boot flow:
+/// Tracks the transient boot wizard opened during a capsule boot flow:
 ///
 /// - `boot_window`: the in-flight boot progress wizard
 ///   (`open_boot_window`).
-/// - `app_window`: the destination AppWindow that owns `AppCapsuleShell`.
+/// - `abort_flag`: shared with the background launch task so AbortBoot
+///   can suppress a late successful session and stop it immediately.
 ///
-/// Set by `ato_launch::dispatch(Approve)` after both windows are open.
-/// Consumed by `ato_launch::dispatch(AbortBoot)` to close both windows, and
-/// by `AppCapsuleShell`'s polling task to close the boot wizard on launch
-/// completion or failure.
+/// Set by `start_boot_launch` after the boot window opens. Consumed by
+/// `ato_launch::dispatch(AbortBoot)` to close the boot wizard and mark
+/// the in-flight launch as aborted.
 #[derive(Default, Debug, Clone)]
 pub struct BootWindowSlot {
     pub boot_window: Option<AnyWindowHandle>,
-    pub app_window: Option<AnyWindowHandle>,
+    pub abort_flag: Option<Arc<AtomicBool>>,
 }
 
 impl gpui::Global for BootWindowSlot {}
@@ -175,14 +174,24 @@ pub struct PendingConsentPreview(pub Option<LaunchConsentPreview>);
 
 impl gpui::Global for PendingConsentPreview {}
 
+/// Weak handle to the most recently opened consent wizard shell.
+/// Used by AODD automation entrypoints to open and scroll the demo
+/// configuration panel without relying on macOS Accessibility focus.
+#[derive(Default, Clone)]
+pub struct ActiveConsentShell(pub Option<WeakEntity<LaunchWindowShell>>);
+
+impl gpui::Global for ActiveConsentShell {}
+
 pub struct LaunchWindowShell {
     _webview: WebView,
-    focus_handle: FocusHandle,
+    paste: WebViewPasteSupport,
 }
 
-impl Focusable for LaunchWindowShell {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
-        self.focus_handle.clone()
+impl_focusable_via_paste!(LaunchWindowShell, paste);
+
+impl WebViewPasteShell for LaunchWindowShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self._webview)
     }
 }
 
@@ -191,56 +200,15 @@ impl Render for LaunchWindowShell {
         // White backdrop in case the HTML is still painting.
         // track_focus is required so GPUI routes NativePaste actions here
         // even when the WKWebView child has OS first-responder.
-        div()
-            .size_full()
-            .bg(rgb(0xffffff))
-            .key_context("LaunchWindowShell")
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::on_native_copy))
-            .on_action(cx.listener(Self::on_native_cut))
-            .on_action(cx.listener(Self::on_native_paste))
-            .on_action(cx.listener(Self::on_native_select_all))
+        paste_render_wrap!(
+            div().size_full().bg(rgb(0xffffff)),
+            cx,
+            &self.paste.focus_handle
+        )
     }
 }
 
 impl LaunchWindowShell {
-    fn on_native_copy(&mut self, _: &NativeCopy, _window: &mut Window, _cx: &mut Context<Self>) {
-        let _ = self
-            ._webview
-            .evaluate_script("document.execCommand('copy')");
-    }
-
-    fn on_native_cut(&mut self, _: &NativeCut, _window: &mut Window, _cx: &mut Context<Self>) {
-        let _ = self._webview.evaluate_script("document.execCommand('cut')");
-    }
-
-    fn on_native_paste(&mut self, _: &NativePaste, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
-                // Ensure WKWebView has OS first-responder before injecting the
-                // paste script. Without this, document.activeElement may be
-                // reset to <body> by the time the GPUI deferred action fires,
-                // causing the isTextInput check in launch_paste_script to fail.
-                #[cfg(target_os = "macos")]
-                let _ = self._webview.focus();
-
-                let script = launch_paste_script(&text);
-                let _ = self._webview.evaluate_script(&script);
-            }
-        }
-    }
-
-    fn on_native_select_all(
-        &mut self,
-        _: &NativeSelectAll,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        let _ = self
-            ._webview
-            .evaluate_script("document.execCommand('selectAll')");
-    }
-
     /// Advance the boot wizard UI to step `n`. Called from the foreground
     /// polling task inside `AppCapsuleShell` as the orchestrator emits
     /// progress. The JS guards with `typeof window.__atoStep === 'function'`
@@ -250,6 +218,19 @@ impl LaunchWindowShell {
         let script = format!(
             "typeof window.__atoStep==='function'&&window.__atoStep({})",
             step
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
+
+    /// Show a terminal failure in the boot wizard without opening an
+    /// AppWindow. Used when launch orchestration fails before a ready
+    /// session exists.
+    pub fn show_failure(&self, error: &str) {
+        let error_json =
+            serde_json::to_string(error).unwrap_or_else(|_| "\"Launch failed\"".to_string());
+        let script = format!(
+            "typeof window.__atoFail==='function'&&window.__atoFail({})",
+            error_json
         );
         let _ = self._webview.evaluate_script(&script);
     }
@@ -265,33 +246,18 @@ impl LaunchWindowShell {
         );
         let _ = self._webview.evaluate_script(&script);
     }
-}
 
-fn launch_paste_script(text: &str) -> String {
-    let text = serde_json::to_string(text).expect("clipboard text should serialize");
-    format!(
-        r#"(() => {{
-  const text = {text};
-  // Prefer document.activeElement; fall back to the last element that
-  // received a focusin event (stored by the __ato_last_focused tracker).
-  // This is necessary because document.activeElement may be reset to
-  // <body> by the time the GPUI deferred action fires on macOS.
-  const active = (document.activeElement && document.activeElement !== document.body)
-    ? document.activeElement
-    : (window.__ato_last_focused || null);
-  const isTextInput = active && (
-    active.tagName === 'TEXTAREA' ||
-    (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
-  );
-  if (!isTextInput || active.readOnly || active.disabled) {{ return; }}
-  active.focus();
-  const start = active.selectionStart ?? active.value.length;
-  const end = active.selectionEnd ?? start;
-  active.setRangeText(text, start, end, 'end');
-  active.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: text }}));
-}})();"#,
-        text = text,
-    )
+    pub fn open_config_panel(&self) {
+        let _ = self
+            ._webview
+            .evaluate_script("typeof openConfigPanel==='function'&&openConfigPanel()");
+    }
+
+    pub fn scroll_config_panel_to_bottom(&self) {
+        let _ = self._webview.evaluate_script(
+            "const el=document.getElementById('panel-config-body'); if (el) { el.scrollTop = el.scrollHeight; }",
+        );
+    }
 }
 
 fn open_wizard(
@@ -334,11 +300,11 @@ fn open_wizard(
             .expect("build_as_child must succeed for the Launch wizard WebView");
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
-            focus_handle: cx.focus_handle(),
+            paste: WebViewPasteSupport::new(cx),
         });
         // Give GPUI focus to LaunchWindowShell so NativePaste/NativeCopy
         // key bindings dispatch here even when WKWebView has OS first-responder.
-        window.focus(&shell.read(cx).focus_handle.clone(), cx);
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
@@ -359,6 +325,42 @@ const BOOT_H: f32 = 520.0;
 /// Injects a minimal demo preview so the UI renders rather than showing
 /// the loading spinner indefinitely.
 pub fn open_consent_window(cx: &mut App) -> Result<()> {
+    let mut demo_fields: Vec<serde_json::Value> = [
+        ("OPENAI_API_KEY", "OpenAI API Key", "sk-..."),
+        ("ANTHROPIC_API_KEY", "Anthropic API Key", "sk-ant-..."),
+        ("GOOGLE_API_KEY", "Google API Key", "AIza..."),
+        ("GROQ_API_KEY", "Groq API Key", "gsk_..."),
+        ("MISTRAL_API_KEY", "Mistral API Key", "mis_..."),
+        ("COHERE_API_KEY", "Cohere API Key", "co_..."),
+        ("XAI_API_KEY", "xAI API Key", "xai-..."),
+        ("AZURE_OPENAI_KEY", "Azure OpenAI Key", "aoai-..."),
+        (
+            "AZURE_OPENAI_ENDPOINT",
+            "Azure OpenAI Endpoint",
+            "https://example.openai.azure.com",
+        ),
+        ("LANGFUSE_SECRET_KEY", "Langfuse Secret Key", "sk-lf-..."),
+        ("LANGFUSE_PUBLIC_KEY", "Langfuse Public Key", "pk-lf-..."),
+        ("CUSTOM_MODEL_NAME", "Custom Model Name", "my-model"),
+    ]
+    .into_iter()
+    .map(|(name, label, placeholder)| {
+        serde_json::json!({
+            "name": name,
+            "label": label,
+            "kind": "secret",
+            "placeholder": placeholder,
+            "already_configured": false,
+        })
+    })
+    .collect();
+    demo_fields.push(serde_json::json!({
+        "name": "MODEL",
+        "label": "Model",
+        "kind": "enum",
+        "choices": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
+        "already_configured": true,
+    }));
     let demo_preview = serde_json::json!({
         "preview_id": "demo",
         "loading": false,
@@ -371,22 +373,7 @@ pub fn open_consent_window(cx: &mut App) -> Result<()> {
             {
                 "type": "secrets_required",
                 "target": "app",
-                "fields": [
-                    {
-                        "name": "OPENAI_API_KEY",
-                        "label": "OpenAI API Key",
-                        "kind": "secret",
-                        "placeholder": "sk-...",
-                        "already_configured": false,
-                    },
-                    {
-                        "name": "MODEL",
-                        "label": "Model",
-                        "kind": "enum",
-                        "choices": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
-                        "already_configured": true,
-                    },
-                ],
+                "fields": demo_fields,
             },
             {
                 "type": "consent_required",
@@ -395,7 +382,7 @@ pub fn open_consent_window(cx: &mut App) -> Result<()> {
                 "target_label": "app",
                 "policy_segment_hash": "blake3:1a087e1a47d13e659d9c65d7cb88e854308dd777aa292296d50c3816a4ccdaf5",
                 "provisioning_policy_hash": "blake3:4cbe69639a92f8d0537b87b8cbb25527df222f30ea842c73e332f655ccc5adee",
-                "summary": "Capsule      : byok-ai-chat@0.3.4\nTarget       : app (runtime=source, driver=node)\nNetwork      : api.openai.com, localhost:3000, 127.0.0.1:3000\nRead Only    : None\nRead Write   : None\nSecrets      : OPENAI_API_KEY\nPolicy Hash  : blake3:1a087e1a47d13e659d9c65d7cb88e854308dd777aa292296d50c3816a4ccdaf5\nProvisioning : blake3:4cbe69639a92f8d0537b87b8cbb25527df222f30ea842c73e332f655ccc5adee\nCommand      : npm run dev\nWorking Directory: /",
+                 "summary": "Capsule      : byok-ai-chat@0.3.4\nTarget       : app (runtime=source, driver=node)\nNetwork      : api.openai.com, localhost:3000, 127.0.0.1:3000\nNetwork IDs  : cidr:10.0.0.0/8\nNetwork Note : CIDR/SPIFFE entries are preview-only here; Deno/NodeCompat only apply host/IP allow-net targets.\nRead Only    : None\nRead Write   : None\nSecrets      : OPENAI_API_KEY\nPolicy Hash  : blake3:1a087e1a47d13e659d9c65d7cb88e854308dd777aa292296d50c3816a4ccdaf5\nProvisioning : blake3:4cbe69639a92f8d0537b87b8cbb25527df222f30ea842c73e332f655ccc5adee\nCommand      : npm run dev\nWorking Directory: /",
             },
         ],
     });
@@ -403,7 +390,7 @@ pub fn open_consent_window(cx: &mut App) -> Result<()> {
         "window.__ATO_LAUNCH_PREVIEW={};",
         serde_json::to_string(&demo_preview).unwrap_or_else(|_| "null".to_string())
     );
-    open_wizard(cx, CONSENT_HTML, CONSENT_W, CONSENT_H, Some(init_script)).map(|_| ())
+    open_consent_wizard_inner(cx, Some(init_script)).map(|_| ())
 }
 
 /// Real launch entrypoint: open the consent wizard for a concrete
@@ -676,8 +663,6 @@ fn looks_like_remote_launch_handle(handle: &str) -> bool {
         || trimmed.starts_with("capsule://localhost:")
         || trimmed.starts_with("capsule://127.0.0.1:")
         || trimmed.starts_with("capsule://[::1]:")
-        || (trimmed.split('/').filter(|part| !part.is_empty()).count() >= 2
-            && !trimmed.contains("://"))
 }
 
 /// Internal helper: opens the consent wizard window and returns both the
@@ -723,12 +708,12 @@ fn open_consent_wizard_inner(
             .expect("build_as_child must succeed for the consent WebView");
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
-            focus_handle: cx.focus_handle(),
+            paste: WebViewPasteSupport::new(cx),
         });
         if let Ok(mut slot) = shell_slot_inner.lock() {
             *slot = Some(shell.clone());
         }
-        window.focus(&shell.read(cx).focus_handle.clone(), cx);
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
@@ -738,7 +723,32 @@ fn open_consent_wizard_inner(
         .unwrap()
         .take()
         .expect("LaunchWindowShell entity must be populated by open_window closure");
+    cx.set_global(ActiveConsentShell(Some(shell.downgrade())));
     Ok((*handle, shell))
+}
+
+pub fn open_active_consent_config_panel(cx: &mut App) -> Result<()> {
+    let Some(shell) = cx
+        .try_global::<ActiveConsentShell>()
+        .and_then(|slot| slot.0.clone())
+        .and_then(|shell| shell.upgrade())
+    else {
+        return Err(anyhow::anyhow!("no active consent shell"));
+    };
+    shell.read(cx).open_config_panel();
+    Ok(())
+}
+
+pub fn scroll_active_consent_config_panel_to_bottom(cx: &mut App) -> Result<()> {
+    let Some(shell) = cx
+        .try_global::<ActiveConsentShell>()
+        .and_then(|slot| slot.0.clone())
+        .and_then(|shell| shell.upgrade())
+    else {
+        return Err(anyhow::anyhow!("no active consent shell"));
+    };
+    shell.read(cx).scroll_config_panel_to_bottom();
+    Ok(())
 }
 
 /// Spawn the boot progress wizard. Returns the `AnyWindowHandle` so the
@@ -776,6 +786,208 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
     let (handle, shell) = open_boot_wizard_inner(cx, init_script)?;
     cx.set_global(PendingBootShell(Some(shell.downgrade())));
     Ok(handle)
+}
+
+pub fn start_boot_launch(
+    cx: &mut App,
+    route: GuestRoute,
+    configs: Vec<(String, String)>,
+    boot_handle: AnyWindowHandle,
+) {
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    let boot_shell_weak = cx
+        .try_global::<PendingBootShell>()
+        .and_then(|g| g.0.clone());
+    cx.set_global(PendingBootShell(None));
+    cx.set_global(BootWindowSlot {
+        boot_window: Some(boot_handle),
+        abort_flag: Some(Arc::clone(&abort_flag)),
+    });
+
+    let Some(handle) = launch_handle_for_route(&route) else {
+        show_boot_failure(
+            cx,
+            &boot_shell_weak,
+            "This route cannot be launched as a capsule.",
+        );
+        return;
+    };
+
+    let secret_store = crate::config::load_secrets();
+    let secrets: Vec<_> = secret_store
+        .secrets_for_capsule(&handle)
+        .into_iter()
+        .cloned()
+        .collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
+    let handle_for_thread = handle.clone();
+    let abort_for_thread = Arc::clone(&abort_flag);
+    std::thread::spawn(move || {
+        let result = crate::orchestrator::resolve_and_start_guest(
+            &handle_for_thread,
+            &secrets,
+            &configs,
+            Some(Box::new(move |step| {
+                let _ = progress_tx.send(step);
+            })),
+        );
+        if abort_for_thread.load(Ordering::Acquire) {
+            if let Ok(ref session) = result {
+                let _ = crate::orchestrator::stop_guest_session(&session.session_id);
+            }
+            return;
+        }
+        let _ = tx.send(result);
+    });
+
+    let async_app = cx.to_async();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    async_app
+        .foreground_executor()
+        .spawn(async move {
+            loop {
+                be.timer(Duration::from_millis(100)).await;
+
+                let mut steps = Vec::new();
+                while let Ok(step) = progress_rx.try_recv() {
+                    steps.push(step);
+                }
+                if !steps.is_empty() {
+                    let shell_for_steps = boot_shell_weak.clone();
+                    aa.update(move |cx: &mut App| {
+                        if let Some(shell) = shell_for_steps.and_then(|weak| weak.upgrade()) {
+                            for step in steps {
+                                let _ = shell.update(cx, |shell, _cx| shell.push_step(step));
+                            }
+                        }
+                    });
+                }
+
+                match rx.try_recv() {
+                    Ok(result) => {
+                        let route_for_open = route.clone();
+                        let shell_for_result = boot_shell_weak.clone();
+                        let aborted = abort_flag.load(Ordering::Acquire);
+                        aa.update(move |cx: &mut App| {
+                            if aborted {
+                                if let Ok(session) = result {
+                                    stop_session_async(session.session_id);
+                                }
+                                close_boot_window_handle(cx, boot_handle);
+                                return;
+                            }
+
+                            match result {
+                                Ok(session) => {
+                                    let session_id = session.session_id.clone();
+                                    match crate::window::orchestrator::open_ready_capsule_window(
+                                        cx,
+                                        route_for_open.clone(),
+                                        session,
+                                    ) {
+                                        Ok(app_handle) => {
+                                            close_boot_window_handle(cx, boot_handle);
+                                            let _ = app_handle.update(cx, |_, window, _| {
+                                                window.activate_window()
+                                            });
+                                            record_start_history(&route_for_open);
+                                        }
+                                        Err(err) => {
+                                            stop_session_async(session_id);
+                                            show_boot_failure(
+                                                cx,
+                                                &shell_for_result,
+                                                &format!("App window creation failed: {err}"),
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    let message =
+                                        crate::window::app_capsule_shell::describe_launch_error(
+                                            &err,
+                                        );
+                                    show_boot_failure(cx, &shell_for_result, &message);
+                                }
+                            }
+                        });
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        if !abort_flag.load(Ordering::Acquire) {
+                            let shell_for_result = boot_shell_weak.clone();
+                            aa.update(move |cx: &mut App| {
+                                show_boot_failure(
+                                    cx,
+                                    &shell_for_result,
+                                    "Launch task stopped before returning a result.",
+                                );
+                            });
+                        }
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => {
+                        if abort_flag.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+}
+
+fn launch_handle_for_route(route: &GuestRoute) -> Option<String> {
+    match route {
+        GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
+            Some(handle.clone())
+        }
+        GuestRoute::Capsule { session, .. } => Some(session.clone()),
+        _ => None,
+    }
+}
+
+fn show_boot_failure(
+    cx: &mut App,
+    shell_weak: &Option<WeakEntity<LaunchWindowShell>>,
+    message: &str,
+) {
+    tracing::error!(error = %message, "ato_launch: capsule boot failed");
+    if let Some(shell) = shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
+        let _ = shell.update(cx, |shell, _cx| shell.show_failure(message));
+    }
+}
+
+fn close_boot_window_handle(cx: &mut App, boot_handle: AnyWindowHandle) {
+    let _ = boot_handle.update(cx, |_, window, _| window.remove_window());
+    cx.set_global(BootWindowSlot::default());
+    tracing::info!("ato_launch: boot wizard closed");
+}
+
+fn stop_session_async(session_id: String) {
+    std::thread::spawn(move || {
+        if let Err(err) = crate::orchestrator::stop_guest_session(&session_id) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "ato_launch: failed to stop abandoned session"
+            );
+        }
+    });
+}
+
+fn record_start_history(route: &GuestRoute) {
+    if let GuestRoute::CapsuleHandle { handle, label }
+    | GuestRoute::CapsuleUrl { handle, label, .. } = route
+    {
+        let mut store = crate::system_capsule::ato_start::StartPageHistoryStore::load();
+        store.record_open(handle, label);
+        if let Err(err) = store.save() {
+            tracing::warn!(error = %err, "ato_launch: failed to save start history");
+        }
+    }
 }
 
 /// Internal helper: opens the boot wizard window and returns both the GPUI
@@ -822,12 +1034,12 @@ fn open_boot_wizard_inner(
             .expect("build_as_child must succeed for the boot WebView");
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
-            focus_handle: cx.focus_handle(),
+            paste: WebViewPasteSupport::new(cx),
         });
         if let Ok(mut slot) = shell_slot_inner.lock() {
             *slot = Some(shell.clone());
         }
-        window.focus(&shell.read(cx).focus_handle.clone(), cx);
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
@@ -847,15 +1059,19 @@ mod tests {
     #[test]
     fn remote_manifest_missing_preflight_is_non_blocking() {
         let err = anyhow::anyhow!(
-            "ato internal preflight failed: preflight collection failed: manifest path does not exist: koh0920/flatnotes"
+            "ato internal preflight failed: preflight collection failed: manifest path does not exist: github.com/owner/repo"
         );
 
         assert!(is_non_blocking_remote_preflight_error(
-            "koh0920/flatnotes",
+            "github.com/owner/repo",
             &err
         ));
         assert!(is_non_blocking_remote_preflight_error(
             "capsule://github.com/Koh0920/cupbear",
+            &err
+        ));
+        assert!(is_non_blocking_remote_preflight_error(
+            "capsule://ato.run/koh0920/byok-ai-chat",
             &err
         ));
     }
@@ -872,6 +1088,14 @@ mod tests {
         ));
         assert!(!is_non_blocking_remote_preflight_error(
             "./samples/demo",
+            &err
+        ));
+        assert!(!is_non_blocking_remote_preflight_error(
+            "crates/ato-cli/samples/foo",
+            &err
+        ));
+        assert!(!is_non_blocking_remote_preflight_error(
+            "koh0920/flatnotes",
             &err
         ));
     }
@@ -895,8 +1119,15 @@ mod tests {
     }
 
     #[test]
+    fn consent_preview_supports_network_identity_allowlists() {
+        assert!(CONSENT_HTML.contains("networkIds"));
+        assert!(CONSENT_HTML.contains("case 'network_ids':"));
+        assert!(CONSENT_HTML.contains("Network IDs"));
+    }
+
+    #[test]
     fn launch_paste_script_uses_safe_text_insertion() {
-        let script = launch_paste_script("a'b\nc");
+        let script = crate::window::webview_paste::paste_script("a'b\nc");
 
         assert!(script.contains(r#"const text = "a'b\nc";"#));
         assert!(script.contains("active.setRangeText(text, start, end, 'end');"));
