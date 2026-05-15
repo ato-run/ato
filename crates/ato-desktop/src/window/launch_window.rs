@@ -35,16 +35,17 @@ use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
     div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Render,
-    WeakEntity, WindowBounds, WindowDecorations, WindowOptions,
+    WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
-use crate::state::GuestRoute;
 use crate::localization::{compose_init_script, resolve_locale};
+use crate::state::GuestRoute;
 use crate::system_capsule::ipc as system_ipc;
+use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
 
 const CONSENT_HTML: &str = include_str!("../../assets/system/ato-launch/consent.html");
 const BOOT_HTML: &str = include_str!("../../assets/system/ato-launch/boot.html");
@@ -174,17 +175,60 @@ pub struct LaunchWindowShell {
 }
 
 impl Render for LaunchWindowShell {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // White backdrop in case the HTML is still painting.
-        div().size_full().bg(rgb(0xffffff))
+        div()
+            .size_full()
+            .bg(rgb(0xffffff))
+            .on_action(cx.listener(Self::on_native_copy))
+            .on_action(cx.listener(Self::on_native_cut))
+            .on_action(cx.listener(Self::on_native_paste))
+            .on_action(cx.listener(Self::on_native_select_all))
     }
 }
 
 impl LaunchWindowShell {
+    fn on_native_copy(&mut self, _: &NativeCopy, _window: &mut Window, _cx: &mut Context<Self>) {
+        let _ = self._webview.evaluate_script("document.execCommand('copy')");
+    }
+
+    fn on_native_cut(&mut self, _: &NativeCut, _window: &mut Window, _cx: &mut Context<Self>) {
+        let _ = self._webview.evaluate_script("document.execCommand('cut')");
+    }
+
+    fn on_native_paste(&mut self, _: &NativePaste, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = cx.read_from_clipboard() {
+            if let Some(text) = item.text() {
+                let escaped = text
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r");
+                let script = format!(
+                    r#"(function(t){{
+  var e=document.activeElement;
+  if(e&&(e.tagName==='INPUT'||e.tagName==='TEXTAREA')&&!e.readOnly){{
+    var s=e.selectionStart,n=e.selectionEnd;
+    e.value=e.value.slice(0,s)+t+e.value.slice(n);
+    e.selectionStart=e.selectionEnd=s+t.length;
+    e.dispatchEvent(new Event('input',{{bubbles:true}}));
+  }}
+}})("{escaped}")"#
+                );
+                let _ = self._webview.evaluate_script(&script);
+            }
+        }
+    }
+
+    fn on_native_select_all(
+        &mut self,
+        _: &NativeSelectAll,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let _ = self._webview.evaluate_script("document.execCommand('selectAll')");
+    }
+
     /// Advance the boot wizard UI to step `n`. Called from the foreground
     /// polling task inside `AppCapsuleShell` as the orchestrator emits
     /// progress. The JS guards with `typeof window.__atoStep === 'function'`
@@ -412,7 +456,9 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
 }
 
 /// Build a `LaunchConsentPreview` from preflight results and the current
-/// secret store. Falls back to an identity-only preview if preflight fails.
+/// secret store. Falls back to an identity-only preview when preflight is
+/// unavailable for first-run remote handles; local/cached manifest failures
+/// stay blocking.
 fn build_consent_preview(
     name: &str,
     handle: &str,
@@ -500,14 +546,23 @@ fn build_consent_preview(
             }
         }
         Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "consent preflight failed — wizard shows error state"
-            );
+            let preflight_failed = !is_non_blocking_remote_preflight_error(handle, &err);
+            if preflight_failed {
+                tracing::warn!(
+                    error = %err,
+                    "consent preflight failed — wizard shows error state"
+                );
+            } else {
+                tracing::warn!(
+                    handle,
+                    error = %err,
+                    "consent preflight unavailable for remote handle — continuing with launch fallback"
+                );
+            }
             LaunchConsentPreview {
                 preview_id: preview_id.to_string(),
                 loading: false,
-                preflight_failed: true,
+                preflight_failed,
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: String::new(),
@@ -517,6 +572,36 @@ fn build_consent_preview(
             }
         }
     }
+}
+
+fn is_non_blocking_remote_preflight_error(handle: &str, err: &anyhow::Error) -> bool {
+    if !looks_like_remote_launch_handle(handle) {
+        return false;
+    }
+
+    let message = format!("{err:#}");
+    message.contains("manifest path does not exist")
+}
+
+fn looks_like_remote_launch_handle(handle: &str) -> bool {
+    let trimmed = handle.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("~/")
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+    {
+        return false;
+    }
+
+    trimmed.starts_with("github.com/")
+        || trimmed.starts_with("capsule://github.com/")
+        || trimmed.starts_with("capsule://ato.run/")
+        || trimmed.starts_with("capsule://localhost:")
+        || trimmed.starts_with("capsule://127.0.0.1:")
+        || trimmed.starts_with("capsule://[::1]:")
+        || (trimmed.split('/').filter(|part| !part.is_empty()).count() >= 2
+            && !trimmed.contains("://"))
 }
 
 /// Internal helper: opens the consent wizard window and returns both the
@@ -634,8 +719,7 @@ fn open_boot_wizard_inner(
     let composed = compose_init_script(locale, init_script.as_deref());
     let queue = system_ipc::new_queue();
     // Arc<Mutex<...>> so the entity can be captured across the Send closure.
-    let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> =
-        Arc::new(Mutex::new(None));
+    let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> = Arc::new(Mutex::new(None));
     let shell_slot_inner = Arc::clone(&shell_slot);
     let queue_for_closure = queue.clone();
 
@@ -670,4 +754,53 @@ fn open_boot_wizard_inner(
         .take()
         .expect("LaunchWindowShell entity must be populated by open_window closure");
     Ok((*handle, shell))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_manifest_missing_preflight_is_non_blocking() {
+        let err = anyhow::anyhow!(
+            "ato internal preflight failed: preflight collection failed: manifest path does not exist: koh0920/flatnotes"
+        );
+
+        assert!(is_non_blocking_remote_preflight_error(
+            "koh0920/flatnotes",
+            &err
+        ));
+        assert!(is_non_blocking_remote_preflight_error(
+            "capsule://github.com/Koh0920/cupbear",
+            &err
+        ));
+    }
+
+    #[test]
+    fn local_manifest_missing_preflight_stays_blocking() {
+        let err = anyhow::anyhow!(
+            "ato internal preflight failed: preflight collection failed: manifest path does not exist: /missing/capsule.toml"
+        );
+
+        assert!(!is_non_blocking_remote_preflight_error(
+            "/missing/capsule.toml",
+            &err
+        ));
+        assert!(!is_non_blocking_remote_preflight_error(
+            "./samples/demo",
+            &err
+        ));
+    }
+
+    #[test]
+    fn remote_non_manifest_preflight_error_stays_blocking() {
+        let err = anyhow::anyhow!(
+            "ato internal preflight failed: preflight collection failed: failed to route manifest"
+        );
+
+        assert!(!is_non_blocking_remote_preflight_error(
+            "koh0920/flatnotes",
+            &err
+        ));
+    }
 }
