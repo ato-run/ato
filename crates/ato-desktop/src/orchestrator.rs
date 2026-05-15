@@ -346,7 +346,7 @@ pub fn resolve_and_start_guest(
             // unchanged. An envelope whose schema becomes empty after
             // filtering is dropped entirely — otherwise the modal
             // would show a section header with no inputs.
-            let filtered = filter_already_provided_secrets(envelopes, secrets);
+            let filtered = filter_already_provided_secrets(envelopes, secrets, plain_configs);
             if !filtered.is_empty() {
                 return Err(LaunchError::PreflightAggregate {
                     handle: handle.to_string(),
@@ -375,27 +375,32 @@ pub fn resolve_and_start_guest(
     resolve_and_start_capsule(handle, secrets, plain_configs, on_step)
 }
 
-/// Drop preflight envelopes whose secret requirements are already
-/// satisfied by the per-handle SecretStore snapshot. Returns the
-/// filtered list — consent envelopes pass through, secret envelopes
-/// have their `schema` narrowed to fields not yet in `secrets`, and
-/// envelopes whose schema becomes empty are dropped.
+/// Drop preflight envelopes whose requirements are already satisfied.
+/// `secrets` covers secret fields stored in the per-handle SecretStore;
+/// `plain_configs` covers non-secret fields (enum, string) submitted via
+/// the consent form. Returns the filtered list — consent envelopes pass
+/// through unchanged; secret envelopes have their `schema` narrowed to
+/// fields not yet in either provided set, and envelopes whose schema
+/// becomes empty are dropped.
 ///
-/// The matching key is `ConfigField.name` (the env-var key the
-/// runtime expects), compared against `SecretEntry.key` (the same
-/// env-var name as the SecretStore identifier). The convention is
-/// "same string"; the explicit comparison documents the invariant
-/// so a future divergence (e.g. typed key wrappers) breaks here
-/// instead of silently re-opening the modal.
+/// The matching key is `ConfigField.name` (the env-var key the runtime
+/// expects), compared against `SecretEntry.key` / the plain-config key
+/// (both are the same env-var name). The explicit comparison documents the
+/// invariant so a future divergence breaks here instead of silently
+/// re-opening the modal.
 fn filter_already_provided_secrets(
     envelopes: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
     secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
 ) -> Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope> {
     use capsule_core::interactive_resolution::{
         InteractiveResolutionEnvelope, InteractiveResolutionKind,
     };
-    let provided: std::collections::HashSet<String> =
-        secrets.iter().map(|s| s.key.clone()).collect();
+    let provided: std::collections::HashSet<String> = secrets
+        .iter()
+        .map(|s| s.key.clone())
+        .chain(plain_configs.iter().map(|(k, _)| k.clone()))
+        .collect();
 
     envelopes
         .into_iter()
