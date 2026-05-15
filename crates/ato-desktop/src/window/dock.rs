@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, FocusHandle, Focusable,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context,
     IntoElement, Render, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
@@ -38,10 +38,8 @@ use crate::orchestrator::resolve_ato_binary;
 use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
 use crate::system_capsule::ipc as system_ipc;
-use crate::app::{NativeCopy, NativeCut, NativePaste, NativeSelectAll};
-
-#[cfg(target_os = "macos")]
-use wry::WebViewExtMacOS;
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 const DOCK_SCHEME: &str = "capsule-dock";
 const DOCK_HTML: &str = include_str!("../../assets/system/ato-dock/index.html");
@@ -104,12 +102,14 @@ pub struct DockWebView {
     webview: WebView,
     identity_state: Arc<Mutex<Value>>,
     runtime_state: Arc<Mutex<DockRuntimeState>>,
-    focus_handle: FocusHandle,
+    paste: WebViewPasteSupport,
 }
 
-impl Focusable for DockWebView {
-    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
-        self.focus_handle.clone()
+impl_focusable_via_paste!(DockWebView, paste);
+
+impl WebViewPasteShell for DockWebView {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        Some(&self.webview)
     }
 }
 
@@ -125,80 +125,12 @@ impl DockWebView {
 
 impl Render for DockWebView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .bg(rgb(0xffffff))
-            .key_context("DockWebView")
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::on_native_copy))
-            .on_action(cx.listener(Self::on_native_cut))
-            .on_action(cx.listener(Self::on_native_paste))
-            .on_action(cx.listener(Self::on_native_select_all))
+        paste_render_wrap!(
+            div().size_full().bg(rgb(0xffffff)),
+            cx,
+            &self.paste.focus_handle
+        )
     }
-}
-
-impl DockWebView {
-    fn on_native_copy(&mut self, _: &NativeCopy, _window: &mut Window, _cx: &mut Context<Self>) {
-        let _ = self.webview.evaluate_script("document.execCommand('copy')");
-    }
-
-    fn on_native_cut(&mut self, _: &NativeCut, _window: &mut Window, _cx: &mut Context<Self>) {
-        let _ = self.webview.evaluate_script("document.execCommand('cut')");
-    }
-
-    fn on_native_paste(
-        &mut self,
-        _: &NativePaste,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
-                // Ensure WKWebView has OS first-responder before injecting the
-                // paste script. Without this, document.activeElement may be
-                // reset to <body> by the time the GPUI deferred action fires.
-                #[cfg(target_os = "macos")]
-                let _ = self.webview.focus();
-
-                let script = dock_paste_script(&text);
-                let _ = self.webview.evaluate_script(&script);
-            }
-        }
-    }
-
-    fn on_native_select_all(
-        &mut self,
-        _: &NativeSelectAll,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        let _ = self
-            .webview
-            .evaluate_script("document.execCommand('selectAll')");
-    }
-}
-
-fn dock_paste_script(text: &str) -> String {
-    let text = serde_json::to_string(text).expect("clipboard text should serialize");
-    format!(
-        r#"(() => {{
-  const text = {text};
-  const active = (document.activeElement && document.activeElement !== document.body)
-    ? document.activeElement
-    : (window.__ato_last_focused || null);
-  const isTextInput = active && (
-    active.tagName === 'TEXTAREA' ||
-    (active.tagName === 'INPUT' && !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes((active.type || '').toLowerCase()))
-  );
-  if (!isTextInput || active.readOnly || active.disabled) {{ return; }}
-  active.focus();
-  const start = active.selectionStart ?? active.value.length;
-  const end = active.selectionEnd ?? start;
-  active.setRangeText(text, start, end, 'end');
-  active.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: text }}));
-}})();"#,
-        text = text,
-    )
 }
 
 pub fn open_external_url(cx: &mut App, url: &str) -> Result<()> {
@@ -673,12 +605,12 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             webview,
             identity_state: identity_state.clone(),
             runtime_state: runtime_state.clone(),
-            focus_handle: cx.focus_handle(),
+            paste: WebViewPasteSupport::new(cx),
         });
         *entity_capture2.borrow_mut() = Some(view.clone());
         // Give GPUI focus to DockWebView so NativePaste/NativeCopy
         // key bindings dispatch here even when WKWebView has OS first-responder.
-        window.focus(&view.read(cx).focus_handle.clone(), cx);
+        window.focus(&view.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(view, window, cx))
     })?;
     cx.set_global(DockWindowSlot(Some(*handle)));

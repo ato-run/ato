@@ -24,16 +24,32 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, px, App, Context, FontWeight, IntoElement, Pixels, Render,
-    SharedString, Size, WeakEntity,
+    div, hsla, px, App, Context, FontWeight, IntoElement, Pixels, Render, SharedString, Size,
+    WeakEntity,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::orchestrator::{GuestLaunchSession, LaunchError};
+use crate::window::content_windows::{
+    CapsuleWindowContext, CapsuleWindowStatus, OpenContentWindows,
+};
 use crate::window::launch_window::{BootWindowSlot, LaunchWindowShell, PendingBootShell};
+use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
+use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 // ── state ──────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub enum CapsuleBootInput {
+    Start {
+        handle: String,
+        configs: Vec<(String, String)>,
+    },
+    Ready {
+        session: GuestLaunchSession,
+    },
+}
 
 enum CapsuleBootState {
     Booting,
@@ -47,6 +63,7 @@ pub struct AppCapsuleShell {
     handle: String,
     boot_state: CapsuleBootState,
     webview: Option<WebView>,
+    content_window_id: Option<u64>,
     /// Result delivered from the background launch thread.
     pending_result: Option<Result<GuestLaunchSession, LaunchError>>,
     /// Cached window size, used for WebView bounds and resize detection.
@@ -55,9 +72,29 @@ pub struct AppCapsuleShell {
     /// (AbortBoot or window close) so a late-arriving Ok(session) is
     /// immediately stopped rather than displayed.
     abort_flag: Arc<AtomicBool>,
+    pub paste: WebViewPasteSupport,
+}
+
+impl_focusable_via_paste!(AppCapsuleShell, paste);
+
+impl WebViewPasteShell for AppCapsuleShell {
+    fn active_paste_target(&self) -> Option<&WebView> {
+        self.webview.as_ref()
+    }
 }
 
 impl AppCapsuleShell {
+    pub fn new_with_input(
+        input: CapsuleBootInput,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        match input {
+            CapsuleBootInput::Start { handle, configs } => Self::new(handle, configs, window, cx),
+            CapsuleBootInput::Ready { session } => Self::new_ready(session, window, cx),
+        }
+    }
+
     pub fn new(
         handle: String,
         configs: Vec<(String, String)>,
@@ -201,10 +238,31 @@ impl AppCapsuleShell {
             handle,
             boot_state: CapsuleBootState::Booting,
             webview: None,
+            content_window_id: None,
             pending_result: None,
             window_size: win_size,
             abort_flag,
+            paste: WebViewPasteSupport::new(cx),
         }
+    }
+
+    fn new_ready(session: GuestLaunchSession, window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
+        let win_size = window.bounds().size;
+        let handle = session.handle.clone();
+        Self {
+            handle,
+            boot_state: CapsuleBootState::Booting,
+            webview: None,
+            content_window_id: None,
+            pending_result: Some(Ok(session)),
+            window_size: win_size,
+            abort_flag: Arc::new(AtomicBool::new(false)),
+            paste: WebViewPasteSupport::new(cx),
+        }
+    }
+
+    pub fn set_content_window_id(&mut self, window_id: u64) {
+        self.content_window_id = Some(window_id);
     }
 
     /// Signal the background thread to stop (abort case). The `abort_flag`
@@ -224,11 +282,7 @@ impl AppCapsuleShell {
         };
         match result {
             Ok(session) => {
-                let base = session.local_url.as_deref().unwrap_or("about:blank");
-                let url = match session.frontend_url_path() {
-                    Some(path) => format!("{}{}", base.trim_end_matches('/'), path),
-                    None => base.to_string(),
-                };
+                let url = session_current_url(&session);
                 let win_size = window.bounds().size;
                 let w = f32::from(win_size.width) as u32;
                 let h = f32::from(win_size.height) as u32;
@@ -249,7 +303,9 @@ impl AppCapsuleShell {
                         );
                         self.webview = Some(webview);
                         self.window_size = win_size;
-                        self.boot_state = CapsuleBootState::Ready { session: Box::new(session) };
+                        self.boot_state = CapsuleBootState::Ready {
+                            session: Box::new(session),
+                        };
                     }
                     Err(err) => {
                         // Session started but WebView failed; stop the session.
@@ -300,6 +356,18 @@ impl Drop for AppCapsuleShell {
         // Signal the background thread to not display the session if it
         // arrives after the entity is gone.
         self.abort_flag.store(true, Ordering::Release);
+        if let Some(Ok(session)) = &self.pending_result {
+            let sid = session.session_id.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = crate::orchestrator::stop_guest_session(&sid) {
+                    tracing::warn!(
+                        session_id = %sid,
+                        error = %err,
+                        "AppCapsuleShell drop: pending session stop failed"
+                    );
+                }
+            });
+        }
         // If a session was already running, stop it.
         if let CapsuleBootState::Ready { session } = &self.boot_state {
             let sid = session.session_id.clone();
@@ -322,14 +390,11 @@ impl Drop for AppCapsuleShell {
 }
 
 impl Render for AppCapsuleShell {
-    fn render(
-        &mut self,
-        window: &mut gpui::Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.process_pending_result(window);
         self.sync_webview_bounds(window);
-        match &self.boot_state {
+        publish_content_window_context(window, self, cx);
+        let inner = match &self.boot_state {
             CapsuleBootState::Booting => render_booting(&self.handle),
             CapsuleBootState::Ready { .. } => {
                 // The Wry WebView is positioned as a native OS child window
@@ -338,11 +403,106 @@ impl Render for AppCapsuleShell {
                 div().size_full().bg(hsla(0.0, 0.0, 0.06, 1.0)).into_any()
             }
             CapsuleBootState::Failed { error } => render_error(&self.handle, error),
-        }
+        };
+        paste_render_wrap!(div().size_full().child(inner), cx, &self.paste.focus_handle)
     }
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+fn session_current_url(session: &GuestLaunchSession) -> String {
+    let base = session.local_url.as_deref().unwrap_or("about:blank");
+    match session.frontend_url_path() {
+        Some(path) => format!("{}{}", base.trim_end_matches('/'), path),
+        None => base.to_string(),
+    }
+}
+
+fn publish_content_window_context(
+    _window: &mut gpui::Window,
+    shell: &AppCapsuleShell,
+    cx: &mut Context<AppCapsuleShell>,
+) {
+    let Some(window_id) = shell.content_window_id else {
+        return;
+    };
+    let context = match &shell.boot_state {
+        CapsuleBootState::Booting => Some(CapsuleWindowContext {
+            title: short_title(&shell.handle),
+            handle: shell.handle.clone(),
+            canonical_handle: None,
+            session_id: None,
+            current_url: format!("capsule://{}", shell.handle),
+            local_url: None,
+            snapshot_label: None,
+            trust_state: "pending".to_string(),
+            runtime_label: None,
+            display_strategy: None,
+            capabilities: Vec::new(),
+            log_path: None,
+            status: CapsuleWindowStatus::Starting,
+            restricted: false,
+            error_message: None,
+        }),
+        CapsuleBootState::Ready { session } => Some(CapsuleWindowContext {
+            title: short_title(
+                session
+                    .canonical_handle
+                    .as_deref()
+                    .unwrap_or(session.handle.as_str()),
+            ),
+            handle: session.handle.clone(),
+            canonical_handle: session.canonical_handle.clone(),
+            session_id: Some(session.session_id.clone()),
+            current_url: session_current_url(session),
+            local_url: session.local_url.clone(),
+            snapshot_label: session.snapshot_label.clone(),
+            trust_state: session.trust_state.clone(),
+            runtime_label: Some(if !session.target_label.is_empty() {
+                session.target_label.clone()
+            } else {
+                session.runtime.runtime.clone().unwrap_or_default()
+            }),
+            display_strategy: Some(session.display_strategy.as_str().to_string()),
+            capabilities: session.capabilities.clone(),
+            log_path: session
+                .log_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            status: CapsuleWindowStatus::Ready,
+            restricted: session.restricted,
+            error_message: None,
+        }),
+        CapsuleBootState::Failed { error } => Some(CapsuleWindowContext {
+            title: short_title(&shell.handle),
+            handle: shell.handle.clone(),
+            canonical_handle: None,
+            session_id: None,
+            current_url: format!("capsule://{}", shell.handle),
+            local_url: None,
+            snapshot_label: None,
+            trust_state: "error".to_string(),
+            runtime_label: None,
+            display_strategy: None,
+            capabilities: Vec::new(),
+            log_path: None,
+            status: CapsuleWindowStatus::Failed,
+            restricted: false,
+            error_message: Some(error.clone()),
+        }),
+    };
+    cx.global_mut::<OpenContentWindows>()
+        .set_capsule_context(window_id, context);
+}
+
+fn short_title(handle: &str) -> String {
+    handle
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(handle)
+        .to_string()
+}
 
 fn close_boot_window(cx: &mut App) {
     let slot = cx
@@ -357,9 +517,13 @@ fn close_boot_window(cx: &mut App) {
     }
 }
 
-fn describe_launch_error(err: &LaunchError) -> String {
+pub(crate) fn describe_launch_error(err: &LaunchError) -> String {
     match err {
-        LaunchError::PreflightAggregate { handle, requirements, .. } => {
+        LaunchError::PreflightAggregate {
+            handle,
+            requirements,
+            ..
+        } => {
             let consent_count = requirements
                 .iter()
                 .filter(|e| {
