@@ -89,6 +89,7 @@ pub enum ContentWindowKind {
     /// of the system-capsule refactor.
     Settings,
     Dock,
+    Onboarding,
 }
 
 #[derive(Clone, Debug)]
