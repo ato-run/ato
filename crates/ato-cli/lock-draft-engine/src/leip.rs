@@ -403,7 +403,9 @@ fn detect_unsupported_runtimes(input: &LeipInput) -> Vec<(&'static str, &'static
     }
     // PHP: composer.json or any root .php file
     let has_php = file_present(&file_set, "composer.json")
-        || file_set.iter().any(|f| f.ends_with(".php") && !f.contains('/'));
+        || file_set
+            .iter()
+            .any(|f| f.ends_with(".php") && !f.contains('/'));
     if has_php && !has_node && !has_python {
         found.push((
             "php",
@@ -413,7 +415,9 @@ fn detect_unsupported_runtimes(input: &LeipInput) -> Vec<(&'static str, &'static
         ));
     }
     // C#: any .sln or .csproj file in the repository
-    let has_csharp = file_set.iter().any(|f| f.ends_with(".sln") || f.ends_with(".csproj"));
+    let has_csharp = file_set
+        .iter()
+        .any(|f| f.ends_with(".sln") || f.ends_with(".csproj"));
     if has_csharp && !has_node && !has_python {
         found.push((
             "csharp",
@@ -475,7 +479,12 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
 
     let required_coverage = beam
         .first()
-        .and_then(|c| c.graph.nodes.iter().find(|n| n.id == c.graph.primary_node_id))
+        .and_then(|c| {
+            c.graph
+                .nodes
+                .iter()
+                .find(|n| n.id == c.graph.primary_node_id)
+        })
         .and_then(|n| n.envelope.as_ref())
         .and_then(|e| e.driver.as_deref())
         .map(required_coverage_for)
@@ -515,9 +524,9 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
     // a batch CLI tool (yargs/commander/etc.) with no server framework, warn the user — the
     // process may exit immediately instead of serving HTTP.
     if matches!(&decision, LeipDecision::AutoAccept { .. }) {
-        let has_cli_marker = all_evidence.iter().any(|e| {
-            e.kind == EvidenceKind::FrameworkMarker && e.normalized_value == "cli-tool"
-        });
+        let has_cli_marker = all_evidence
+            .iter()
+            .any(|e| e.kind == EvidenceKind::FrameworkMarker && e.normalized_value == "cli-tool");
         let has_server_framework = all_evidence.iter().any(|e| {
             e.kind == EvidenceKind::FrameworkMarker
                 && !matches!(e.normalized_value.as_str(), "cli-tool")
@@ -534,9 +543,17 @@ pub fn evaluate_launch_graphs(input: &LeipInput) -> LeipResult {
     }
 
     // Env var and network diagnostics from top accepted candidate's primary node envelope.
-    if matches!(&decision, LeipDecision::AutoAccept { .. } | LeipDecision::NeedsSelection { .. }) {
+    if matches!(
+        &decision,
+        LeipDecision::AutoAccept { .. } | LeipDecision::NeedsSelection { .. }
+    ) {
         if let Some(top) = beam.first() {
-            if let Some(primary_node) = top.graph.nodes.iter().find(|n| n.id == top.graph.primary_node_id) {
+            if let Some(primary_node) = top
+                .graph
+                .nodes
+                .iter()
+                .find(|n| n.id == top.graph.primary_node_id)
+            {
                 if let Some(envelope) = &primary_node.envelope {
                     if !envelope.required_env.is_empty() {
                         diagnostics.push(LeipDiagnostic {
@@ -650,9 +667,7 @@ pub fn redact_log_excerpt(raw: &str) -> String {
 
     // Base64-like strings ≥ 32 chars (token-like)
     let b64 = regex::Regex::new(r"[A-Za-z0-9+/=_-]{32,}").unwrap();
-    s = b64
-        .replace_all(&s, REDACTION_PLACEHOLDER)
-        .into_owned();
+    s = b64.replace_all(&s, REDACTION_PLACEHOLDER).into_owned();
 
     s
 }
@@ -684,12 +699,7 @@ fn make_evidence(
     }
 }
 
-fn evidence_id_hash(
-    kind: &EvidenceKind,
-    path: &str,
-    key: &str,
-    normalized_value: &str,
-) -> String {
+fn evidence_id_hash(kind: &EvidenceKind, path: &str, key: &str, normalized_value: &str) -> String {
     let kind_str = serde_json::to_string(kind)
         .unwrap_or_default()
         .trim_matches('"')
@@ -762,10 +772,7 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
         .collect();
 
     // Runtime marker files
-    for (filename, runtime) in [
-        ("package.json", "node"),
-        ("pyproject.toml", "python"),
-    ] {
+    for (filename, runtime) in [("package.json", "node"), ("pyproject.toml", "python")] {
         if file_present(&file_set, filename) {
             ev.push(make_evidence(
                 EvidenceKind::RuntimeMarkerFile,
@@ -802,8 +809,12 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
         && !file_present(&file_set, "go.mod")
         && !file_present(&file_set, "Cargo.toml")
         && !file_present(&file_set, "composer.json")
-        && !file_set.iter().any(|f| f.ends_with(".php") && !f.contains('/'))
-        && !file_set.iter().any(|f| f.ends_with(".sln") || f.ends_with(".csproj"))
+        && !file_set
+            .iter()
+            .any(|f| f.ends_with(".php") && !f.contains('/'))
+        && !file_set
+            .iter()
+            .any(|f| f.ends_with(".sln") || f.ends_with(".csproj"))
     {
         ev.push(make_evidence(
             EvidenceKind::RuntimeMarkerFile,
@@ -824,13 +835,13 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
 
     // Package manager lockfiles
     for lockfile in [
-            "package-lock.json",
-            "yarn.lock",
-            "pnpm-lock.yaml",
-            "bun.lockb",
-            "bun.lock",
-            "poetry.lock",
-            "Pipfile.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+        "bun.lock",
+        "poetry.lock",
+        "Pipfile.lock",
     ] {
         if file_present(&file_set, lockfile) {
             ev.push(make_evidence(
@@ -968,8 +979,7 @@ fn extract_evidence(input: &LeipInput) -> Vec<Evidence> {
 }
 
 fn file_present(file_set: &std::collections::BTreeSet<String>, name: &str) -> bool {
-    file_set.contains(name)
-        || file_set.iter().any(|p| p.ends_with(&format!("/{}", name)))
+    file_set.contains(name) || file_set.iter().any(|p| p.ends_with(&format!("/{}", name)))
 }
 
 fn find_file_text<'a>(
@@ -1238,7 +1248,10 @@ fn extract_readme_commands(text: &str, path: &str, ev: &mut Vec<Evidence>) {
 
 // ── Candidate generators ──────────────────────────────────────────────────────
 
-fn generate_node_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<LaunchGraphCandidate> {
+fn generate_node_candidate(
+    input: &LeipInput,
+    evidence: &[Evidence],
+) -> Option<LaunchGraphCandidate> {
     // Require explicit Node runtime evidence
     let has_node_runtime = evidence.iter().any(|e| {
         e.kind == EvidenceKind::RuntimeMarkerFile
@@ -1287,20 +1300,25 @@ fn generate_node_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<L
     }
 
     // Determine best launch command
-    let (cmd, used_evidence, script_cmd_str) = select_node_launch_cmd(input, evidence, &mut launch_score);
+    let (cmd, used_evidence, script_cmd_str) =
+        select_node_launch_cmd(input, evidence, &mut launch_score);
     evidence_refs.extend(used_evidence);
 
     // Node entrypoint files (not already counted via launch cmd)
-    for e in evidence.iter().filter(|e| {
-        e.kind == EvidenceKind::EntrypointFile && e.normalized_value == "node"
-    }) {
+    for e in evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::EntrypointFile && e.normalized_value == "node")
+    {
         if !evidence_refs.contains(&e.id) {
             evidence_refs.push(e.id.clone());
         }
     }
 
     // ReadmeRawShellCommand risk
-    for e in evidence.iter().filter(|e| e.kind == EvidenceKind::ReadmeRawShellCommand) {
+    for e in evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::ReadmeRawShellCommand)
+    {
         evidence_refs.push(e.id.clone());
         launch_score += W_README_CMD;
         risk_penalty += RISK_README_CMD;
@@ -1311,7 +1329,10 @@ fn generate_node_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<L
     }
 
     // ManifestHint
-    for e in evidence.iter().filter(|e| e.kind == EvidenceKind::ManifestHint) {
+    for e in evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::ManifestHint)
+    {
         if !evidence_refs.contains(&e.id) {
             evidence_refs.push(e.id.clone());
         }
@@ -1336,7 +1357,13 @@ fn generate_node_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<L
     evidence_refs.sort();
     evidence_refs.dedup();
 
-    let graph = single_node_graph("node-app", LeipNodeKind::AppTarget, "Node.js application", envelope, evidence_refs.clone());
+    let graph = single_node_graph(
+        "node-app",
+        LeipNodeKind::AppTarget,
+        "Node.js application",
+        envelope,
+        evidence_refs.clone(),
+    );
 
     Some(LaunchGraphCandidate {
         id: String::new(), // filled in by caller
@@ -1411,17 +1438,10 @@ fn select_node_launch_cmd(
     // 3. Other package scripts
     if let Some(e) = evidence.iter().find(|e| {
         e.kind == EvidenceKind::PackageScriptCommand
-            && !["start", "serve", "dev", "preview", "build", "test"].contains(
-                &e.key
-                    .strip_prefix("scripts.")
-                    .unwrap_or(""),
-            )
+            && !["start", "serve", "dev", "preview", "build", "test"]
+                .contains(&e.key.strip_prefix("scripts.").unwrap_or(""))
     }) {
-        let script_name = e
-            .key
-            .strip_prefix("scripts.")
-            .unwrap_or(&e.key)
-            .to_string();
+        let script_name = e.key.strip_prefix("scripts.").unwrap_or(&e.key).to_string();
         let script_content = e.normalized_value.clone();
         used.push(e.id.clone());
         *launch_score = (*launch_score).max(W_PKG_SCRIPT_OTHER);
@@ -1432,16 +1452,20 @@ fn select_node_launch_cmd(
 
     // 4. Entrypoint file
     let ep_priority = [
-        "server.js", "server.ts", "app.js", "app.ts",
-        "src/server.js", "src/server.ts",
-        "index.js", "index.ts",
-        "src/index.js", "src/index.ts",
+        "server.js",
+        "server.ts",
+        "app.js",
+        "app.ts",
+        "src/server.js",
+        "src/server.ts",
+        "index.js",
+        "index.ts",
+        "src/index.js",
+        "src/index.ts",
     ];
     for ep in &ep_priority {
         if let Some(e) = evidence.iter().find(|e| {
-            e.kind == EvidenceKind::EntrypointFile
-                && e.normalized_value == "node"
-                && e.path == *ep
+            e.kind == EvidenceKind::EntrypointFile && e.normalized_value == "node" && e.path == *ep
         }) {
             used.push(e.id.clone());
             *launch_score = (*launch_score).max(W_ENTRYPOINT_FILE);
@@ -1494,9 +1518,21 @@ fn is_placeholder_value(value: &str) -> bool {
         return true;
     }
     // Well-known placeholder phrases
-    for phrase in &["changeme", "change_me", "replaceme", "replace_me", "placeholder",
-                    "insert_here", "add_here", "put_here", "fill_in", "fill_here",
-                    "example_key", "example_secret", "example_token"] {
+    for phrase in &[
+        "changeme",
+        "change_me",
+        "replaceme",
+        "replace_me",
+        "placeholder",
+        "insert_here",
+        "add_here",
+        "put_here",
+        "fill_in",
+        "fill_here",
+        "example_key",
+        "example_secret",
+        "example_token",
+    ] {
         if lower.contains(phrase) {
             return true;
         }
@@ -1534,10 +1570,7 @@ fn parse_dot_env_example(content: &str) -> Vec<(String, Option<String>)> {
             result.push((name, None));
         } else {
             // Strip surrounding quotes from value
-            let value = raw_value
-                .trim_matches('"')
-                .trim_matches('\'')
-                .to_string();
+            let value = raw_value.trim_matches('"').trim_matches('\'').to_string();
             result.push((name, Some(value)));
         }
     }
@@ -1570,8 +1603,12 @@ fn extract_env_from_files(
                 continue;
             }
             match default {
-                Some(val) => { env_defaults.insert(name, val); }
-                None => { required.push(name); }
+                Some(val) => {
+                    env_defaults.insert(name, val);
+                }
+                None => {
+                    required.push(name);
+                }
             }
         }
         // Use only the first matching file
@@ -1618,7 +1655,9 @@ fn python_dep_hints(
             }
             // Extract package name: strip version specifiers
             let name = line
-                .split(|c: char| c == '>' || c == '<' || c == '=' || c == '!' || c == '[' || c == ';')
+                .split(|c: char| {
+                    c == '>' || c == '<' || c == '=' || c == '!' || c == '[' || c == ';'
+                })
                 .next()
                 .unwrap_or(line)
                 .trim()
@@ -1631,13 +1670,19 @@ fn python_dep_hints(
     if let Some(text) = pyproject_text {
         if let Ok(v) = toml::from_str::<toml::Value>(text) {
             // [project].dependencies = ["openai>=1.0", ...]
-            let project_deps = v.get("project")
+            let project_deps = v
+                .get("project")
                 .and_then(|p| p.get("dependencies"))
                 .and_then(|d| d.as_array())
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|i| i.as_str())
-                        .map(|s| s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').next().unwrap_or("").to_lowercase())
+                        .map(|s| {
+                            s.split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                                .next()
+                                .unwrap_or("")
+                                .to_lowercase()
+                        })
                         .filter(|n| !n.is_empty())
                         .collect::<Vec<_>>()
                 })
@@ -1658,21 +1703,37 @@ fn dep_hints_for_names(deps: &[String]) -> (Vec<String>, Vec<String>) {
     // (package-name-pattern, env-key, egress-host)
     // Using exact or prefix matches to avoid false positives.
     const HINTS: &[(&str, &str, &str)] = &[
-        ("openai",              "OPENAI_API_KEY",          "api.openai.com"),
-        ("@anthropic-ai/sdk",   "ANTHROPIC_API_KEY",       "api.anthropic.com"),
-        ("anthropic",           "ANTHROPIC_API_KEY",       "api.anthropic.com"),
-        ("@google/genai",       "GOOGLE_API_KEY",          "generativelanguage.googleapis.com"),
-        ("google-generativeai", "GOOGLE_API_KEY",          "generativelanguage.googleapis.com"),
-        ("stripe",              "STRIPE_SECRET_KEY",       "api.stripe.com"),
-        ("@sendgrid/mail",      "SENDGRID_API_KEY",        "api.sendgrid.com"),
-        ("sendgrid",            "SENDGRID_API_KEY",        "api.sendgrid.com"),
-        ("@mailchimp/mailchimp_marketing", "MAILCHIMP_API_KEY", "api.mailchimp.com"),
-        ("resend",              "RESEND_API_KEY",          "api.resend.com"),
-        ("twilio",              "TWILIO_AUTH_TOKEN",       "api.twilio.com"),
+        ("openai", "OPENAI_API_KEY", "api.openai.com"),
+        (
+            "@anthropic-ai/sdk",
+            "ANTHROPIC_API_KEY",
+            "api.anthropic.com",
+        ),
+        ("anthropic", "ANTHROPIC_API_KEY", "api.anthropic.com"),
+        (
+            "@google/genai",
+            "GOOGLE_API_KEY",
+            "generativelanguage.googleapis.com",
+        ),
+        (
+            "google-generativeai",
+            "GOOGLE_API_KEY",
+            "generativelanguage.googleapis.com",
+        ),
+        ("stripe", "STRIPE_SECRET_KEY", "api.stripe.com"),
+        ("@sendgrid/mail", "SENDGRID_API_KEY", "api.sendgrid.com"),
+        ("sendgrid", "SENDGRID_API_KEY", "api.sendgrid.com"),
+        (
+            "@mailchimp/mailchimp_marketing",
+            "MAILCHIMP_API_KEY",
+            "api.mailchimp.com",
+        ),
+        ("resend", "RESEND_API_KEY", "api.resend.com"),
+        ("twilio", "TWILIO_AUTH_TOKEN", "api.twilio.com"),
         // Auth frameworks: env key only, no external egress (they use internal secrets)
-        ("better-auth",         "BETTER_AUTH_SECRET",      ""),
-        ("next-auth",           "NEXTAUTH_SECRET",         ""),
-        ("@auth/core",          "AUTH_SECRET",             ""),
+        ("better-auth", "BETTER_AUTH_SECRET", ""),
+        ("next-auth", "NEXTAUTH_SECRET", ""),
+        ("@auth/core", "AUTH_SECRET", ""),
     ];
 
     let dep_set: std::collections::BTreeSet<&str> = deps.iter().map(|s| s.as_str()).collect();
@@ -1693,7 +1754,11 @@ fn dep_hints_for_names(deps: &[String]) -> (Vec<String>, Vec<String>) {
     (env_keys, egress)
 }
 
-fn build_node_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<String>) -> LaunchEnvelopeDraft {
+fn build_node_envelope(
+    input: &LeipInput,
+    evidence: &[Evidence],
+    cmd: Vec<String>,
+) -> LaunchEnvelopeDraft {
     let runtime_version = input
         .target_hint
         .as_ref()
@@ -1745,7 +1810,10 @@ fn build_node_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<String
     }
 }
 
-fn generate_python_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<LaunchGraphCandidate> {
+fn generate_python_candidate(
+    input: &LeipInput,
+    evidence: &[Evidence],
+) -> Option<LaunchGraphCandidate> {
     // Require explicit Python runtime evidence
     let has_python_runtime = evidence.iter().any(|e| {
         e.kind == EvidenceKind::RuntimeMarkerFile
@@ -1806,16 +1874,20 @@ fn generate_python_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option
     launch_score += (fw_count as i32 * W_FRAMEWORK_MARKER).min(W_PKG_SCRIPT_OTHER);
 
     // Python entrypoint files
-    for e in evidence.iter().filter(|e| {
-        e.kind == EvidenceKind::EntrypointFile && e.normalized_value == "python"
-    }) {
+    for e in evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::EntrypointFile && e.normalized_value == "python")
+    {
         if !evidence_refs.contains(&e.id) {
             evidence_refs.push(e.id.clone());
         }
     }
 
     // ReadmeRawShellCommand risk
-    for e in evidence.iter().filter(|e| e.kind == EvidenceKind::ReadmeRawShellCommand) {
+    for e in evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::ReadmeRawShellCommand)
+    {
         evidence_refs.push(e.id.clone());
         launch_score += W_README_CMD;
         risk_penalty += RISK_README_CMD;
@@ -1826,7 +1898,10 @@ fn generate_python_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option
     }
 
     // ManifestHint
-    for e in evidence.iter().filter(|e| e.kind == EvidenceKind::ManifestHint) {
+    for e in evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::ManifestHint)
+    {
         if !evidence_refs.contains(&e.id) {
             evidence_refs.push(e.id.clone());
         }
@@ -1850,7 +1925,13 @@ fn generate_python_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option
     evidence_refs.sort();
     evidence_refs.dedup();
 
-    let graph = single_node_graph("python-app", LeipNodeKind::AppTarget, "Python application", envelope, evidence_refs.clone());
+    let graph = single_node_graph(
+        "python-app",
+        LeipNodeKind::AppTarget,
+        "Python application",
+        envelope,
+        evidence_refs.clone(),
+    );
 
     Some(LaunchGraphCandidate {
         id: String::new(),
@@ -1872,7 +1953,10 @@ fn generate_python_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option
 /// runtime marker (Node, Python, Go, Rust) overrides it.  The static candidate has an empty
 /// `cmd` and `driver="static"` / `entrypoint="."` so that `source_inference` can project it
 /// to a `runtime=web, driver=static` resolved target without requiring a process contract.
-fn generate_static_site_candidate(input: &LeipInput, evidence: &[Evidence]) -> Option<LaunchGraphCandidate> {
+fn generate_static_site_candidate(
+    input: &LeipInput,
+    evidence: &[Evidence],
+) -> Option<LaunchGraphCandidate> {
     let file_set: std::collections::BTreeSet<String> = input
         .repo_file_index
         .iter()
@@ -1893,8 +1977,12 @@ fn generate_static_site_candidate(input: &LeipInput, evidence: &[Evidence]) -> O
         || file_present(&file_set, "go.mod")
         || file_present(&file_set, "Cargo.toml")
         || file_present(&file_set, "composer.json")
-        || file_set.iter().any(|f| f.ends_with(".php") && !f.contains('/'))
-        || file_set.iter().any(|f| f.ends_with(".sln") || f.ends_with(".csproj"))
+        || file_set
+            .iter()
+            .any(|f| f.ends_with(".php") && !f.contains('/'))
+        || file_set
+            .iter()
+            .any(|f| f.ends_with(".sln") || f.ends_with(".csproj"))
     {
         return None;
     }
@@ -1978,14 +2066,11 @@ fn select_python_launch_cmd(
     }
 
     // 2. pyproject.toml scripts
-    if let Some(e) = evidence.iter().find(|e| {
-        e.kind == EvidenceKind::PackageScriptCommand && e.path == "pyproject.toml"
-    }) {
-        let script_name = e
-            .key
-            .strip_prefix("scripts.")
-            .unwrap_or(&e.key)
-            .to_string();
+    if let Some(e) = evidence
+        .iter()
+        .find(|e| e.kind == EvidenceKind::PackageScriptCommand && e.path == "pyproject.toml")
+    {
+        let script_name = e.key.strip_prefix("scripts.").unwrap_or(&e.key).to_string();
         used.push(e.id.clone());
         *launch_score = (*launch_score).max(W_PKG_SCRIPT_RUN);
         return (vec![script_name], used);
@@ -2000,14 +2085,15 @@ fn select_python_launch_cmd(
 
     // Helper: add entrypoint evidence to `used` and credit W_ENTRYPOINT_FILE if found.
     // Falls back to W_DIRECT_SHELL_CMD when no entrypoint file is in evidence.
-    let add_ep_evidence = |ep_e: Option<&Evidence>, used: &mut Vec<String>, launch_score: &mut i32| {
-        if let Some(e) = ep_e {
-            used.push(e.id.clone());
-            *launch_score = (*launch_score).max(W_ENTRYPOINT_FILE);
-        } else {
-            *launch_score = (*launch_score).max(W_DIRECT_SHELL_CMD);
-        }
-    };
+    let add_ep_evidence =
+        |ep_e: Option<&Evidence>, used: &mut Vec<String>, launch_score: &mut i32| {
+            if let Some(e) = ep_e {
+                used.push(e.id.clone());
+                *launch_score = (*launch_score).max(W_ENTRYPOINT_FILE);
+            } else {
+                *launch_score = (*launch_score).max(W_DIRECT_SHELL_CMD);
+            }
+        };
 
     if frameworks.contains(&"fastapi") || frameworks.contains(&"uvicorn") {
         let ep_e = find_python_entrypoint_evidence(evidence);
@@ -2037,10 +2123,7 @@ fn select_python_launch_cmd(
         let ep = ep_e.map(|e| e.path.as_str()).unwrap_or("app");
         let module = python_module_from_path(ep);
         add_ep_evidence(ep_e, &mut used, launch_score);
-        let cmd = vec![
-            "gunicorn".to_string(),
-            format!("{}:app", module),
-        ];
+        let cmd = vec!["gunicorn".to_string(), format!("{}:app", module)];
         return (cmd, used);
     }
 
@@ -2048,11 +2131,7 @@ fn select_python_launch_cmd(
         let ep_e = find_python_entrypoint_evidence(evidence);
         let ep = ep_e.map(|e| e.path.as_str()).unwrap_or("app.py");
         add_ep_evidence(ep_e, &mut used, launch_score);
-        let cmd = vec![
-            "streamlit".to_string(),
-            "run".to_string(),
-            ep.to_string(),
-        ];
+        let cmd = vec!["streamlit".to_string(), "run".to_string(), ep.to_string()];
         return (cmd, used);
     }
 
@@ -2077,8 +2156,13 @@ fn select_python_launch_cmd(
 
     // 4. Entrypoint file
     let ep_priority = [
-        "__main__.py", "main.py", "app.py", "server.py",
-        "src/main.py", "src/app.py", "src/server.py",
+        "__main__.py",
+        "main.py",
+        "app.py",
+        "server.py",
+        "src/main.py",
+        "src/app.py",
+        "src/server.py",
     ];
     for ep in &ep_priority {
         if let Some(e) = evidence.iter().find(|e| {
@@ -2096,7 +2180,13 @@ fn select_python_launch_cmd(
 }
 
 fn find_python_entrypoint_evidence<'a>(evidence: &'a [Evidence]) -> Option<&'a Evidence> {
-    let priority = ["main.py", "app.py", "server.py", "src/main.py", "src/app.py"];
+    let priority = [
+        "main.py",
+        "app.py",
+        "server.py",
+        "src/main.py",
+        "src/app.py",
+    ];
     for ep in &priority {
         if let Some(e) = evidence.iter().find(|e| {
             e.kind == EvidenceKind::EntrypointFile
@@ -2126,7 +2216,11 @@ fn python_module_from_path(path: &str) -> &str {
     name
 }
 
-fn build_python_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<String>) -> LaunchEnvelopeDraft {
+fn build_python_envelope(
+    input: &LeipInput,
+    evidence: &[Evidence],
+    cmd: Vec<String>,
+) -> LaunchEnvelopeDraft {
     let runtime_version = input
         .target_hint
         .as_ref()
@@ -2141,8 +2235,14 @@ fn build_python_envelope(input: &LeipInput, evidence: &[Evidence], cmd: Vec<Stri
 
     let (env_defaults, required_env_from_files) = extract_env_from_files(&input.file_text_map);
     let (dep_suggested_env, dep_egress) = python_dep_hints(
-        input.file_text_map.get("requirements.txt").map(|s| s.as_str()),
-        input.file_text_map.get("pyproject.toml").map(|s| s.as_str()),
+        input
+            .file_text_map
+            .get("requirements.txt")
+            .map(|s| s.as_str()),
+        input
+            .file_text_map
+            .get("pyproject.toml")
+            .map(|s| s.as_str()),
     );
 
     let mut required_env = required_env_from_files;
@@ -2207,7 +2307,16 @@ fn single_node_graph(
 // shell operators inside a package.json script value (we run `npm run X`,
 // not the script content directly).
 
-const SHELL_LAUNCHERS: &[&str] = &["sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh"];
+const SHELL_LAUNCHERS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "pwsh",
+];
 const SHELL_OPERATORS: &[&str] = &["&&", "||", ";;", "|&", " | ", ">", "<", "$(", "`", " ; "];
 
 fn check_cmd_hard_constraints(cmd: &[String], script_content: Option<&str>) -> Vec<String> {
@@ -2255,7 +2364,8 @@ fn check_cmd_hard_constraints(cmd: &[String], script_content: Option<&str>) -> V
     // the script content directly.
     if let Some(content) = script_content {
         for op in SHELL_OPERATORS {
-            if content.contains(op) && cmd.get(0).map(|s| s.as_str()) != Some("npm")
+            if content.contains(op)
+                && cmd.get(0).map(|s| s.as_str()) != Some("npm")
                 && cmd.get(0).map(|s| s.as_str()) != Some("yarn")
                 && cmd.get(0).map(|s| s.as_str()) != Some("pnpm")
                 && cmd.get(0).map(|s| s.as_str()) != Some("bun")
@@ -2296,7 +2406,9 @@ fn make_decision(
 
     // Must have launch evidence (package script, entrypoint, or direct command)
     // README-only commands do not count for AutoAccept.
-    if !has_launch_evidence(evidence, &top.evidence_refs) || top.launch_score < MIN_LAUNCH_SCORE_FOR_AUTO_ACCEPT {
+    if !has_launch_evidence(evidence, &top.evidence_refs)
+        || top.launch_score < MIN_LAUNCH_SCORE_FOR_AUTO_ACCEPT
+    {
         return LeipDecision::Unresolved {
             reason: "insufficient launch evidence: no entrypoint, package script, or explicit command found"
                 .to_string(),
@@ -2425,7 +2537,15 @@ mod tests {
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        assert_eq!(result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().driver.as_deref(), Some("node"));
+        assert_eq!(
+            result.candidates[0].graph.nodes[0]
+                .envelope
+                .as_ref()
+                .unwrap()
+                .driver
+                .as_deref(),
+            Some("node")
+        );
     }
 
     #[test]
@@ -2452,7 +2572,11 @@ mod tests {
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd, &["pnpm", "run", "dev"]);
     }
 
@@ -2464,10 +2588,7 @@ mod tests {
             "dependencies": { "next": "14.0.0", "react": "18.0.0" }
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("package.json"),
-                file("package-lock.json"),
-            ],
+            repo_file_index: vec![file("package.json"), file("package-lock.json")],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -2480,7 +2601,11 @@ mod tests {
             result.decision
         );
         // dev should be preferred over start
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd, &["npm", "run", "dev"]);
     }
 
@@ -2542,10 +2667,7 @@ name = "my-api"
 dependencies = ["fastapi>=0.100", "uvicorn"]
 "#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("pyproject.toml"),
-                file("main.py"),
-            ],
+            repo_file_index: vec![file("pyproject.toml"), file("main.py")],
             file_text_map: [("pyproject.toml".to_string(), pyproject.to_string())]
                 .into_iter()
                 .collect(),
@@ -2557,17 +2679,18 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd[0], "uvicorn");
     }
 
     #[test]
     fn python_streamlit_auto_accepts() {
         let input = LeipInput {
-            repo_file_index: vec![
-                file("requirements.txt"),
-                file("app.py"),
-            ],
+            repo_file_index: vec![file("requirements.txt"), file("app.py")],
             file_text_map: [(
                 "requirements.txt".to_string(),
                 "streamlit>=1.0\n".to_string(),
@@ -2582,7 +2705,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd[0], "streamlit");
     }
 
@@ -2642,8 +2769,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
 
         assert!(!result_a.candidates.is_empty());
         assert_eq!(
-            result_a.candidates[0].id,
-            result_b.candidates[0].id,
+            result_a.candidates[0].id, result_b.candidates[0].id,
             "candidate IDs must be independent of input order"
         );
     }
@@ -2687,17 +2813,32 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
 
     #[test]
     fn shell_launcher_in_cmd_is_hard_constraint() {
-        let failures = check_cmd_hard_constraints(&["sh".to_string(), "-c".to_string(), "echo hi".to_string()], None);
-        assert!(!failures.is_empty(), "sh should be a hard constraint failure");
+        let failures = check_cmd_hard_constraints(
+            &["sh".to_string(), "-c".to_string(), "echo hi".to_string()],
+            None,
+        );
+        assert!(
+            !failures.is_empty(),
+            "sh should be a hard constraint failure"
+        );
     }
 
     #[test]
     fn shell_operator_in_cmd_is_hard_constraint() {
         let failures = check_cmd_hard_constraints(
-            &["node".to_string(), "a.js".to_string(), "&&".to_string(), "node".to_string(), "b.js".to_string()],
+            &[
+                "node".to_string(),
+                "a.js".to_string(),
+                "&&".to_string(),
+                "node".to_string(),
+                "b.js".to_string(),
+            ],
             None,
         );
-        assert!(!failures.is_empty(), "&& should be a hard constraint failure");
+        assert!(
+            !failures.is_empty(),
+            "&& should be a hard constraint failure"
+        );
     }
 
     #[test]
@@ -2737,10 +2878,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
                 driver: Some("node".to_string()),
                 ..Default::default()
             }),
-            repo_file_index: vec![
-                file("package.json"),
-                file("index.js"),
-            ],
+            repo_file_index: vec![file("package.json"), file("index.js")],
             file_text_map: [(
                 "package.json".to_string(),
                 r#"{"scripts":{"start":"node index.js"}}"#.to_string(),
@@ -2766,10 +2904,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "dependencies": { "astro": "^4.0.0" }
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("package.json"),
-                file("bun.lock"),
-            ],
+            repo_file_index: vec![file("package.json"), file("bun.lock")],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -2781,7 +2916,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd, &["bun", "run", "dev"]);
     }
 
@@ -2794,10 +2933,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "dependencies": {}
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("package.json"),
-                file("bun.lockb"),
-            ],
+            repo_file_index: vec![file("package.json"), file("bun.lockb")],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -2809,7 +2945,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd, &["bun", "run", "dev"]);
     }
 
@@ -2824,10 +2964,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "devDependencies": { "@vitejs/plugin-vue": "^5.0.0", "vite": "^5.0.0" }
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("package.json"),
-                file("pnpm-lock.yaml"),
-            ],
+            repo_file_index: vec![file("package.json"), file("pnpm-lock.yaml")],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -2839,7 +2976,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(cmd, &["pnpm", "run", "dev"]);
         // Evidence should include a vue framework label
         let has_vue_label = result.candidates[0]
@@ -2860,10 +3001,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "dependencies": { "next": "14.0.0", "react": "18.0.0" }
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("package.json"),
-                file("package-lock.json"),
-            ],
+            repo_file_index: vec![file("package.json"), file("package-lock.json")],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -2875,7 +3013,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(
             cmd,
             &["npm", "run", "dev"],
@@ -2893,10 +3035,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "dependencies": { "express": "^4.18.0" }
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![
-                file("package.json"),
-                file("package-lock.json"),
-            ],
+            repo_file_index: vec![file("package.json"), file("package-lock.json")],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -2908,7 +3047,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "expected AutoAccept, got {:?}",
             result.decision
         );
-        let cmd = &result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap().cmd;
+        let cmd = &result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap()
+            .cmd;
         assert_eq!(
             cmd,
             &["npm", "run", "start"],
@@ -2937,11 +3080,9 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             d => panic!("expected Unresolved, got {:?}", d),
         }
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == LeipDiagnosticSeverity::Warning
-                    && d.message.contains("Rust")),
+            result.diagnostics.iter().any(
+                |d| d.severity == LeipDiagnosticSeverity::Warning && d.message.contains("Rust")
+            ),
             "expected a Warning diagnostic about Rust, got: {:?}",
             result.diagnostics
         );
@@ -2985,7 +3126,11 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             "devDependencies": { "ts-node": "^10.9.2", "typescript": "^5.3.3" }
         }"#;
         let input = LeipInput {
-            repo_file_index: vec![file("package.json"), file("package-lock.json"), file("src/index.ts")],
+            repo_file_index: vec![
+                file("package.json"),
+                file("package-lock.json"),
+                file("src/index.ts"),
+            ],
             file_text_map: [("package.json".to_string(), pkg_json.to_string())]
                 .into_iter()
                 .collect(),
@@ -3044,70 +3189,145 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
     #[test]
     fn dot_env_example_real_defaults_populate_env_map() {
         // .env.example with only real defaults → env map populated, no required_env
-        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let pkg_json =
+            r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
         let env_example = "PORT=3000\nDB_PATH=data/app.db\n# comment\n";
         let input = LeipInput {
-            repo_file_index: vec![file("package.json"), file("package-lock.json"), file(".env.example")],
+            repo_file_index: vec![
+                file("package.json"),
+                file("package-lock.json"),
+                file(".env.example"),
+            ],
             file_text_map: [
                 ("package.json".to_string(), pkg_json.to_string()),
                 (".env.example".to_string(), env_example.to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
         assert!(matches!(result.decision, LeipDecision::AutoAccept { .. }));
-        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
-        assert_eq!(envelope.env.get("PORT"), Some(&"3000".to_string()), "PORT default should be set");
-        assert_eq!(envelope.env.get("DB_PATH"), Some(&"data/app.db".to_string()), "DB_PATH default should be set");
-        assert!(envelope.required_env.is_empty(), "no required vars expected, got {:?}", envelope.required_env);
+        let envelope = result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            envelope.env.get("PORT"),
+            Some(&"3000".to_string()),
+            "PORT default should be set"
+        );
+        assert_eq!(
+            envelope.env.get("DB_PATH"),
+            Some(&"data/app.db".to_string()),
+            "DB_PATH default should be set"
+        );
+        assert!(
+            envelope.required_env.is_empty(),
+            "no required vars expected, got {:?}",
+            envelope.required_env
+        );
         // No required_env diagnostic
-        assert!(!result.diagnostics.iter().any(|d| d.message.contains("Required environment")));
+        assert!(!result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Required environment")));
     }
 
     #[test]
     fn dot_env_example_placeholder_values_become_required_env() {
         // .env.example with placeholder values → required_env, + warning diagnostic
-        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let pkg_json =
+            r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
         let env_example = "VITE_BASE_URL=http://localhost:3000\nBETTER_AUTH_SECRET=your_strong_secret_here\nGOOGLE_CLIENT_ID=your_google_client_id\nGOOGLE_CLIENT_SECRET=\n";
         let input = LeipInput {
-            repo_file_index: vec![file("package.json"), file("package-lock.json"), file(".env.example")],
+            repo_file_index: vec![
+                file("package.json"),
+                file("package-lock.json"),
+                file(".env.example"),
+            ],
             file_text_map: [
                 ("package.json".to_string(), pkg_json.to_string()),
                 (".env.example".to_string(), env_example.to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
         assert!(matches!(result.decision, LeipDecision::AutoAccept { .. }));
-        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
-        assert_eq!(envelope.env.get("VITE_BASE_URL"), Some(&"http://localhost:3000".to_string()), "VITE_BASE_URL is a real default");
-        assert!(envelope.required_env.contains(&"BETTER_AUTH_SECRET".to_string()), "BETTER_AUTH_SECRET should be required");
-        assert!(envelope.required_env.contains(&"GOOGLE_CLIENT_ID".to_string()), "GOOGLE_CLIENT_ID should be required");
-        assert!(envelope.required_env.contains(&"GOOGLE_CLIENT_SECRET".to_string()), "GOOGLE_CLIENT_SECRET should be required");
+        let envelope = result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            envelope.env.get("VITE_BASE_URL"),
+            Some(&"http://localhost:3000".to_string()),
+            "VITE_BASE_URL is a real default"
+        );
+        assert!(
+            envelope
+                .required_env
+                .contains(&"BETTER_AUTH_SECRET".to_string()),
+            "BETTER_AUTH_SECRET should be required"
+        );
+        assert!(
+            envelope
+                .required_env
+                .contains(&"GOOGLE_CLIENT_ID".to_string()),
+            "GOOGLE_CLIENT_ID should be required"
+        );
+        assert!(
+            envelope
+                .required_env
+                .contains(&"GOOGLE_CLIENT_SECRET".to_string()),
+            "GOOGLE_CLIENT_SECRET should be required"
+        );
         // Warning diagnostic must mention the required vars
         let has_warning = result.diagnostics.iter().any(|d| {
-            d.severity == LeipDiagnosticSeverity::Warning && d.message.contains("Required environment")
+            d.severity == LeipDiagnosticSeverity::Warning
+                && d.message.contains("Required environment")
         });
-        assert!(has_warning, "expected required-env warning, got: {:?}", result.diagnostics);
+        assert!(
+            has_warning,
+            "expected required-env warning, got: {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]
     fn dot_env_example_path_your_segment_is_placeholder() {
         // DATABASE_URL="/location/of/your/db" — path contains /your/ — should be required
-        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let pkg_json =
+            r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
         let env_example = "DATABASE_URL=\"/location/of/your/db\"\n";
         let input = LeipInput {
-            repo_file_index: vec![file("package.json"), file("package-lock.json"), file(".env.example")],
+            repo_file_index: vec![
+                file("package.json"),
+                file("package-lock.json"),
+                file(".env.example"),
+            ],
             file_text_map: [
                 ("package.json".to_string(), pkg_json.to_string()),
                 (".env.example".to_string(), env_example.to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
-        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
-        assert!(envelope.required_env.contains(&"DATABASE_URL".to_string()), "DATABASE_URL with /your/ path should be required");
-        assert!(!envelope.env.contains_key("DATABASE_URL"), "DATABASE_URL should not appear as a default");
+        let envelope = result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap();
+        assert!(
+            envelope.required_env.contains(&"DATABASE_URL".to_string()),
+            "DATABASE_URL with /your/ path should be required"
+        );
+        assert!(
+            !envelope.env.contains_key("DATABASE_URL"),
+            "DATABASE_URL should not appear as a default"
+        );
     }
 
     #[test]
@@ -3116,16 +3336,39 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4","openai":"4.0.0"}}"#;
         let input = LeipInput {
             repo_file_index: vec![file("package.json"), file("package-lock.json")],
-            file_text_map: [("package.json".to_string(), pkg_json.to_string())].into_iter().collect(),
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
         assert!(matches!(result.decision, LeipDecision::AutoAccept { .. }));
-        let envelope = result.candidates[0].graph.nodes[0].envelope.as_ref().unwrap();
-        assert!(envelope.egress_hints.contains(&"api.openai.com".to_string()), "expected api.openai.com egress, got {:?}", envelope.egress_hints);
-        assert!(envelope.required_env.contains(&"OPENAI_API_KEY".to_string()), "expected OPENAI_API_KEY required, got {:?}", envelope.required_env);
-        let has_egress_diag = result.diagnostics.iter().any(|d| d.message.contains("api.openai.com"));
-        assert!(has_egress_diag, "expected egress diagnostic for api.openai.com");
+        let envelope = result.candidates[0].graph.nodes[0]
+            .envelope
+            .as_ref()
+            .unwrap();
+        assert!(
+            envelope
+                .egress_hints
+                .contains(&"api.openai.com".to_string()),
+            "expected api.openai.com egress, got {:?}",
+            envelope.egress_hints
+        );
+        assert!(
+            envelope
+                .required_env
+                .contains(&"OPENAI_API_KEY".to_string()),
+            "expected OPENAI_API_KEY required, got {:?}",
+            envelope.required_env
+        );
+        let has_egress_diag = result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("api.openai.com"));
+        assert!(
+            has_egress_diag,
+            "expected egress diagnostic for api.openai.com"
+        );
     }
 
     #[test]
@@ -3139,29 +3382,47 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::Unresolved { .. }),
-            "expected Unresolved for compose-only, got {:?}", result.decision
+            "expected Unresolved for compose-only, got {:?}",
+            result.decision
         );
-        let has_compose_diag = result.diagnostics.iter().any(|d| d.message.contains("Docker Compose"));
-        assert!(has_compose_diag, "expected Docker Compose diagnostic, got {:?}", result.diagnostics);
+        let has_compose_diag = result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Docker Compose"));
+        assert!(
+            has_compose_diag,
+            "expected Docker Compose diagnostic, got {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]
     fn docker_compose_with_package_json_not_compose_diagnostic() {
         // Both docker-compose.yml and package.json at root → NOT a compose-only project
-        let pkg_json = r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
+        let pkg_json =
+            r#"{"name":"app","scripts":{"dev":"node server.js"},"dependencies":{"express":"4"}}"#;
         let input = LeipInput {
-            repo_file_index: vec![file("package.json"), file("package-lock.json"), file("docker-compose.yml")],
-            file_text_map: [("package.json".to_string(), pkg_json.to_string())].into_iter().collect(),
+            repo_file_index: vec![
+                file("package.json"),
+                file("package-lock.json"),
+                file("docker-compose.yml"),
+            ],
+            file_text_map: [("package.json".to_string(), pkg_json.to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::AutoAccept { .. }),
-            "compose+node should AutoAccept node, got {:?}", result.decision
+            "compose+node should AutoAccept node, got {:?}",
+            result.decision
         );
         // Should NOT have docker-compose unsupported diagnostic
         assert!(
-            !result.diagnostics.iter().any(|d| d.message.contains("Docker Compose project detected with no")),
+            !result.diagnostics.iter().any(|d| d
+                .message
+                .contains("Docker Compose project detected with no")),
             "should not have compose-only diagnostic when package.json is present"
         );
     }
@@ -3176,11 +3437,19 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::Unresolved { .. }),
-            "PHP root files should be Unresolved, got {:?}", result.decision
+            "PHP root files should be Unresolved, got {:?}",
+            result.decision
         );
-        let diag_msg = result.diagnostics.iter().find(|d| d.message.contains("PHP")).map(|d| d.message.as_str());
+        let diag_msg = result
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("PHP"))
+            .map(|d| d.message.as_str());
         assert!(diag_msg.is_some(), "should have PHP diagnostic");
-        assert!(diag_msg.unwrap().contains("php -S"), "PHP diagnostic should hint at php -S command");
+        assert!(
+            diag_msg.unwrap().contains("php -S"),
+            "PHP diagnostic should hint at php -S command"
+        );
     }
 
     #[test]
@@ -3193,7 +3462,8 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::Unresolved { .. }),
-            "PHP composer.json should be Unresolved, got {:?}", result.decision
+            "PHP composer.json should be Unresolved, got {:?}",
+            result.decision
         );
         assert!(
             result.diagnostics.iter().any(|d| d.message.contains("PHP")),
@@ -3211,11 +3481,19 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::Unresolved { .. }),
-            "C# .sln should be Unresolved, got {:?}", result.decision
+            "C# .sln should be Unresolved, got {:?}",
+            result.decision
         );
-        let diag_msg = result.diagnostics.iter().find(|d| d.message.contains("dotnet")).map(|d| d.message.as_str());
+        let diag_msg = result
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("dotnet"))
+            .map(|d| d.message.as_str());
         assert!(diag_msg.is_some(), "should have dotnet diagnostic");
-        assert!(diag_msg.unwrap().contains("dotnet run"), "C# diagnostic should hint at dotnet run");
+        assert!(
+            diag_msg.unwrap().contains("dotnet run"),
+            "C# diagnostic should hint at dotnet run"
+        );
     }
 
     #[test]
@@ -3226,8 +3504,16 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
-        let diag = result.diagnostics.iter().find(|d| d.message.contains("Go projects")).expect("should have Go diagnostic");
-        assert!(diag.message.contains("go run ./..."), "Go diagnostic should include `go run ./...`, got: {}", diag.message);
+        let diag = result
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("Go projects"))
+            .expect("should have Go diagnostic");
+        assert!(
+            diag.message.contains("go run ./..."),
+            "Go diagnostic should include `go run ./...`, got: {}",
+            diag.message
+        );
     }
 
     #[test]
@@ -3238,8 +3524,16 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
-        let diag = result.diagnostics.iter().find(|d| d.message.contains("Rust projects")).expect("should have Rust diagnostic");
-        assert!(diag.message.contains("cargo run"), "Rust diagnostic should include `cargo run`, got: {}", diag.message);
+        let diag = result
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("Rust projects"))
+            .expect("should have Rust diagnostic");
+        assert!(
+            diag.message.contains("cargo run"),
+            "Rust diagnostic should include `cargo run`, got: {}",
+            diag.message
+        );
     }
 
     #[test]
@@ -3248,20 +3542,30 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let reqs = "flask>=3.0.0\ngevent>=24.2.1\n";
         let input = LeipInput {
             repo_file_index: vec![file("requirements.txt"), file("run.py"), file("setup.py")],
-            file_text_map: [
-                ("requirements.txt".to_string(), reqs.to_string()),
-            ].into_iter().collect(),
+            file_text_map: [("requirements.txt".to_string(), reqs.to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::AutoAccept { .. }),
-            "flask + run.py should AutoAccept, got {:?}", result.decision
+            "flask + run.py should AutoAccept, got {:?}",
+            result.decision
         );
         let top = &result.candidates[0];
         let node = &top.graph.nodes[0];
-        let cmd = node.envelope.as_ref().map(|e| e.cmd.clone()).unwrap_or_default();
-        assert_eq!(cmd, vec!["flask", "run"], "flask dep + run.py should infer `flask run`, got {:?}", cmd);
+        let cmd = node
+            .envelope
+            .as_ref()
+            .map(|e| e.cmd.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            cmd,
+            vec!["flask", "run"],
+            "flask dep + run.py should infer `flask run`, got {:?}",
+            cmd
+        );
     }
 
     #[test]
@@ -3269,21 +3573,35 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         // Repo with requirements.txt + Django + manage.py at root (like qlinks)
         let reqs = "Django>=4.2,<5\nrequests\n";
         let input = LeipInput {
-            repo_file_index: vec![file("requirements.txt"), file("manage.py"), file("README.md")],
-            file_text_map: [
-                ("requirements.txt".to_string(), reqs.to_string()),
-            ].into_iter().collect(),
+            repo_file_index: vec![
+                file("requirements.txt"),
+                file("manage.py"),
+                file("README.md"),
+            ],
+            file_text_map: [("requirements.txt".to_string(), reqs.to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
         assert!(
             matches!(result.decision, LeipDecision::AutoAccept { .. }),
-            "Django + manage.py should AutoAccept, got {:?}", result.decision
+            "Django + manage.py should AutoAccept, got {:?}",
+            result.decision
         );
         let top = &result.candidates[0];
         let node = &top.graph.nodes[0];
-        let cmd = node.envelope.as_ref().map(|e| e.cmd.clone()).unwrap_or_default();
-        assert_eq!(cmd[..2], ["python", "manage.py"], "Django should infer `python manage.py runserver`, got {:?}", cmd);
+        let cmd = node
+            .envelope
+            .as_ref()
+            .map(|e| e.cmd.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            cmd[..2],
+            ["python", "manage.py"],
+            "Django should infer `python manage.py runserver`, got {:?}",
+            cmd
+        );
     }
 
     // ── Static site candidates ────────────────────────────────────────────────
@@ -3291,11 +3609,7 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
     #[test]
     fn static_site_index_html_only_auto_accepts_with_static_driver() {
         let input = LeipInput {
-            repo_file_index: vec![
-                file("index.html"),
-                file("style.css"),
-                file("script.js"),
-            ],
+            repo_file_index: vec![file("index.html"), file("style.css"), file("script.js")],
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
@@ -3307,22 +3621,29 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let top = &result.candidates[0];
         let node = &top.graph.nodes[0];
         let env = node.envelope.as_ref().expect("envelope must be present");
-        assert_eq!(env.driver.as_deref(), Some("static"), "driver should be static");
+        assert_eq!(
+            env.driver.as_deref(),
+            Some("static"),
+            "driver should be static"
+        );
         assert!(env.cmd.is_empty(), "static site should have empty cmd");
-        assert_eq!(env.entrypoint.as_deref(), Some("."), "entrypoint should be '.'");
+        assert_eq!(
+            env.entrypoint.as_deref(),
+            Some("."),
+            "entrypoint should be '.'"
+        );
     }
 
     #[test]
     fn go_project_is_unresolved_with_actionable_diagnostic() {
         let input = LeipInput {
-            repo_file_index: vec![
-                file("go.mod"),
-                file("cmd/main.go"),
-                file("README.md"),
-            ],
-            file_text_map: [
-                ("go.mod".to_string(), "module example.com/gotodo\n\ngo 1.21\n".to_string()),
-            ].into_iter().collect(),
+            repo_file_index: vec![file("go.mod"), file("cmd/main.go"), file("README.md")],
+            file_text_map: [(
+                "go.mod".to_string(),
+                "module example.com/gotodo\n\ngo 1.21\n".to_string(),
+            )]
+            .into_iter()
+            .collect(),
             ..Default::default()
         };
         let result = evaluate_launch_graphs(&input);
@@ -3332,10 +3653,15 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
             result.decision
         );
         // Must carry an actionable diagnostic mentioning Go
-        let has_go_hint = result.diagnostics.iter().any(|d| {
-            d.message.contains("Go") || d.message.contains("go run")
-        });
-        assert!(has_go_hint, "diagnostics should mention Go, got {:?}", result.diagnostics);
+        let has_go_hint = result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("Go") || d.message.contains("go run"));
+        assert!(
+            has_go_hint,
+            "diagnostics should mention Go, got {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]
@@ -3366,7 +3692,10 @@ dependencies = ["fastapi>=0.100", "uvicorn"]
         let top = &result.candidates[0];
         let node = &top.graph.nodes[0];
         let env = node.envelope.as_ref().expect("envelope must be present");
-        assert_eq!(env.driver.as_deref(), Some("node"), "Node package should prefer node driver over static");
+        assert_eq!(
+            env.driver.as_deref(),
+            Some("node"),
+            "Node package should prefer node driver over static"
+        );
     }
 }
-

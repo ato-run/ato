@@ -583,9 +583,7 @@ mod tests {
             .as_ref()
             .expect("non-TTY consent error must populate details");
         assert_eq!(
-            details
-                .get("reason")
-                .and_then(|value| value.as_str()),
+            details.get("reason").and_then(|value| value.as_str()),
             Some("execution_plan_consent_required"),
             "details.reason must be the consent discriminator; got: {details}"
         );
@@ -593,7 +591,10 @@ mod tests {
             ("scoped_id", plan.consent.key.scoped_id.as_str()),
             ("version", plan.consent.key.version.as_str()),
             ("target_label", plan.consent.key.target_label.as_str()),
-            ("policy_segment_hash", plan.consent.policy_segment_hash.as_str()),
+            (
+                "policy_segment_hash",
+                plan.consent.policy_segment_hash.as_str(),
+            ),
             (
                 "provisioning_policy_hash",
                 plan.consent.provisioning_policy_hash.as_str(),

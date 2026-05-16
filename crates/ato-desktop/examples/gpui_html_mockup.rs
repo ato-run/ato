@@ -213,11 +213,7 @@ fn render_header(omnibar_value: &SharedString) -> impl IntoElement {
                 .child(nav_button("hdr-settings", IconName::Settings.path()))
                 .child(
                     // Vertical divider.
-                    div()
-                        .w_px()
-                        .h_4()
-                        .bg(rgb(BORDER))
-                        .mx_1(),
+                    div().w_px().h_4().bg(rgb(BORDER)).mx_1(),
                 )
                 .child(
                     // Avatar.
@@ -270,16 +266,12 @@ fn render_omnibar(value: &SharedString) -> impl IntoElement {
         .items_center()
         .child(
             // Leading lock icon, absolutely positioned.
-            div()
-                .absolute()
-                .left_3()
-                .text_color(rgb(MUTED))
-                .child(
-                    svg()
-                        .path(SharedString::new_static("icons/lock.svg"))
-                        .size(px(14.0))
-                        .text_color(rgb(MUTED)),
-                ),
+            div().absolute().left_3().text_color(rgb(MUTED)).child(
+                svg()
+                    .path(SharedString::new_static("icons/lock.svg"))
+                    .size(px(14.0))
+                    .text_color(rgb(MUTED)),
+            ),
         )
         .child(
             div()
@@ -436,10 +428,13 @@ fn render_sidebar_header(collapsed: bool, cx: &mut Context<Mockup>) -> impl Into
                     .path(SharedString::new_static("icons/panel-toggle.svg"))
                     .size_4(),
             )
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.sidebar_collapsed = !this.sidebar_collapsed;
-                cx.notify();
-            })),
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.sidebar_collapsed = !this.sidebar_collapsed;
+                    cx.notify();
+                }),
+            ),
     )
 }
 
@@ -460,12 +455,7 @@ fn sidebar_header_button(
         .cursor_pointer()
         .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(SECONDARY)))
         .child(svg().path(icon_path).size_4())
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .child(label),
-        )
+        .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(label))
 }
 
 fn render_tab(tab: TabSpec, collapsed: bool) -> impl IntoElement {
@@ -524,19 +514,20 @@ fn render_tab(tab: TabSpec, collapsed: bool) -> impl IntoElement {
     );
 
     if !collapsed {
-        let label_color = if tab.active { rgb(ACCENT) } else { rgb(SECONDARY) };
+        let label_color = if tab.active {
+            rgb(ACCENT)
+        } else {
+            rgb(SECONDARY)
+        };
         item = item.child(
-            div()
-                .flex_1()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(label_color)
-                        .truncate()
-                        .child(tab.label),
-                ),
+            div().flex_1().overflow_hidden().child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(label_color)
+                    .truncate()
+                    .child(tab.label),
+            ),
         );
 
         // Close button: visible only on hover. We use group hover so

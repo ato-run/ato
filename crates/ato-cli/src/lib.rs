@@ -234,8 +234,7 @@ pub fn main_entry() {
         // the human diagnostic when stdin or stdout is not a TTY. This is
         // additive: TTY callers and `--json` callers see no behaviour
         // change.
-        let non_tty_caller = !std::io::stdin().is_terminal()
-            || !std::io::stdout().is_terminal();
+        let non_tty_caller = !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal();
         if !json_mode && non_tty_caller {
             ato_error_jsonl::try_emit_interactive_resolution_envelope(&err);
         }

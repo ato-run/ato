@@ -67,9 +67,7 @@ pub fn new_queue() -> BridgeQueue {
 /// It parses each JSON message into a `BridgeAction` and pushes it
 /// onto the shared queue. Unparseable messages are logged at WARN
 /// and dropped — never propagate beyond the bridge surface.
-pub fn make_ipc_handler(
-    queue: BridgeQueue,
-) -> impl Fn(wry::http::Request<String>) + 'static {
+pub fn make_ipc_handler(queue: BridgeQueue) -> impl Fn(wry::http::Request<String>) + 'static {
     move |request: wry::http::Request<String>| {
         let body = request.body();
         match serde_json::from_str::<BridgeAction>(body) {
@@ -125,8 +123,7 @@ pub fn spawn_drain_loop<F>(
                 // update` returns the closure's value directly;
                 // `AnyWindowHandle::update` returns `Result` which is
                 // `Err` when the window is closed.
-                let host_alive: bool =
-                    aa.update(|cx| host.update(cx, |_, _, _| ()).is_ok());
+                let host_alive: bool = aa.update(|cx| host.update(cx, |_, _, _| ()).is_ok());
                 if !host_alive {
                     return;
                 }

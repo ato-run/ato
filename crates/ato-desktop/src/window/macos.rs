@@ -14,9 +14,7 @@
 
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
-use objc2_app_kit::{
-    NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode,
-};
+use objc2_app_kit::{NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
@@ -42,8 +40,7 @@ pub fn ns_window_for(cx: &mut App, handle: AnyWindowHandle) -> Option<Retained<N
                     // window for the window's lifetime. We hold the
                     // gpui WindowHandle here, which keeps the window
                     // alive across this closure, so the view is live.
-                    let view: &NSView =
-                        unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
+                    let view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
                     view.window()
                 }
                 other => {
@@ -74,9 +71,7 @@ pub fn round_window_corners(cx: &mut App, handle: AnyWindowHandle, radius: f64) 
             }
         };
         let view: &NSView = match rwh.as_raw() {
-            RawWindowHandle::AppKit(h) => unsafe {
-                &*(h.ns_view.as_ptr() as *const NSView)
-            },
+            RawWindowHandle::AppKit(h) => unsafe { &*(h.ns_view.as_ptr() as *const NSView) },
             other => {
                 warn!(handle = ?other, "round_window_corners: not AppKit");
                 return;
@@ -172,9 +167,7 @@ pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
         }
     };
     let view: &NSView = match rwh.as_raw() {
-        RawWindowHandle::AppKit(h) => unsafe {
-            &*(h.ns_view.as_ptr() as *const NSView)
-        },
+        RawWindowHandle::AppKit(h) => unsafe { &*(h.ns_view.as_ptr() as *const NSView) },
         other => {
             warn!(handle = ?other, "resize_window_in_handler: not AppKit");
             return;
@@ -223,12 +216,10 @@ pub fn attach_as_child(
     parent: AnyWindowHandle,
     child: AnyWindowHandle,
 ) -> Result<(), String> {
-    let parent_win = ns_window_for(cx, parent).ok_or_else(|| {
-        "parent NSWindow unavailable (window not realised yet?)".to_string()
-    })?;
-    let child_win = ns_window_for(cx, child).ok_or_else(|| {
-        "child NSWindow unavailable (window not realised yet?)".to_string()
-    })?;
+    let parent_win = ns_window_for(cx, parent)
+        .ok_or_else(|| "parent NSWindow unavailable (window not realised yet?)".to_string())?;
+    let child_win = ns_window_for(cx, child)
+        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
     // SAFETY: both windows are retained for the duration of this call.
     // `addChildWindow:ordered:` is the documented AppKit API for
     // parent-child window relationships; objc2-app-kit marks it

@@ -38,6 +38,4 @@ pub mod broker;
 pub mod ipc;
 pub mod manifest;
 
-pub use broker::{
-    BrokerError, Capability, CapabilityBroker, SystemCapsuleId, SystemCommand,
-};
+pub use broker::{BrokerError, Capability, CapabilityBroker, SystemCapsuleId, SystemCommand};

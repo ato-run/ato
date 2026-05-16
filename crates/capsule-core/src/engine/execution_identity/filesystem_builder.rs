@@ -178,7 +178,10 @@ mod tests {
         });
 
         let built = FilesystemIdentityBuilder::build_with_graph(&input, Some(&graph));
-        assert_eq!(built.view_hash, Tracked::known("blake3:graph-sourced".to_string()));
+        assert_eq!(
+            built.view_hash,
+            Tracked::known("blake3:graph-sourced".to_string())
+        );
         // Other fields fall through unchanged — proves the wiring is
         // additive, not a wholesale replacement.
         assert_eq!(built.source_root, input.filesystem.source_root);

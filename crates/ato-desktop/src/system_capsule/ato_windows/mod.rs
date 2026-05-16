@@ -111,10 +111,7 @@ pub fn dispatch(
                 .map(|e| e.handle);
             if let Some(target) = target {
                 let _ = target.update(cx, |_, window, _| window.remove_window());
-                tracing::info!(
-                    window_id,
-                    "ato_windows: close_window dispatched"
-                );
+                tracing::info!(window_id, "ato_windows: close_window dispatched");
             } else {
                 tracing::debug!(
                     window_id,

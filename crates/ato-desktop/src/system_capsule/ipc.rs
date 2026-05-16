@@ -59,9 +59,7 @@ pub fn new_queue() -> SystemBridgeQueue {
 /// Runs on whatever thread Wry chooses; only touches the queue.
 /// Errors are logged at WARN and dropped so a malformed message
 /// never propagates beyond the bridge boundary.
-pub fn make_ipc_handler(
-    queue: SystemBridgeQueue,
-) -> impl Fn(wry::http::Request<String>) + 'static {
+pub fn make_ipc_handler(queue: SystemBridgeQueue) -> impl Fn(wry::http::Request<String>) + 'static {
     move |request: wry::http::Request<String>| {
         let body = request.body();
         let envelope: Envelope = match serde_json::from_str(body) {
@@ -86,8 +84,10 @@ pub fn make_ipc_handler(
             }
         };
         let command_result = match capsule {
-            SystemCapsuleId::AtoWindows => serde_json::from_value::<WindowsCommand>(envelope.command)
-                .map(SystemCommand::AtoWindows),
+            SystemCapsuleId::AtoWindows => {
+                serde_json::from_value::<WindowsCommand>(envelope.command)
+                    .map(SystemCommand::AtoWindows)
+            }
             SystemCapsuleId::AtoStore => serde_json::from_value::<StoreCommand>(envelope.command)
                 .map(SystemCommand::AtoStore),
             SystemCapsuleId::AtoSettings => {
@@ -109,8 +109,7 @@ pub fn make_ipc_handler(
                     .map(SystemCommand::AtoStart)
             }
             SystemCapsuleId::AtoDock => {
-                serde_json::from_value::<DockCommand>(envelope.command)
-                    .map(SystemCommand::AtoDock)
+                serde_json::from_value::<DockCommand>(envelope.command).map(SystemCommand::AtoDock)
             }
         };
         match command_result {
@@ -131,11 +130,7 @@ pub fn make_ipc_handler(
 /// `CapabilityBroker::dispatch`. Trampolines onto the GPUI main
 /// thread so the broker has full `&mut App` access. Terminates when
 /// the host window closes (probe via `host.update`).
-pub fn spawn_drain_loop(
-    cx: &mut App,
-    queue: SystemBridgeQueue,
-    host: AnyWindowHandle,
-) {
+pub fn spawn_drain_loop(cx: &mut App, queue: SystemBridgeQueue, host: AnyWindowHandle) {
     let async_app = cx.to_async();
     let fe = async_app.foreground_executor().clone();
     let be = async_app.background_executor().clone();
@@ -148,8 +143,7 @@ pub fn spawn_drain_loop(
                 Err(_) => continue,
             };
             if drained.is_empty() {
-                let host_alive: bool =
-                    aa.update(|cx| host.update(cx, |_, _, _| ()).is_ok());
+                let host_alive: bool = aa.update(|cx| host.update(cx, |_, _, _| ()).is_ok());
                 if !host_alive {
                     return;
                 }
@@ -158,7 +152,11 @@ pub fn spawn_drain_loop(
             for (capsule, command) in drained {
                 aa.update(|cx| {
                     if let Err(err) = CapabilityBroker::dispatch(cx, host, capsule, command) {
-                        tracing::warn!(?err, ?capsule, "system_capsule::ipc: broker dispatch failed");
+                        tracing::warn!(
+                            ?err,
+                            ?capsule,
+                            "system_capsule::ipc: broker dispatch failed"
+                        );
                     }
                 });
             }

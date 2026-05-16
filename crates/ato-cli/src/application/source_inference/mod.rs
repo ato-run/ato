@@ -1094,8 +1094,12 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .unwrap_or(input.project_root.as_path()),
             input.single_script_language,
         );
-        lock.contract.entries.insert("metadata".to_string(), metadata);
-        lock.contract.entries.insert("workloads".to_string(), Value::Array(Vec::new()));
+        lock.contract
+            .entries
+            .insert("metadata".to_string(), metadata);
+        lock.contract
+            .entries
+            .insert("workloads".to_string(), Value::Array(Vec::new()));
         lock.contract.unresolved.push(UnresolvedValue {
             field: Some("contract.process".to_string()),
             reason: UnresolvedReason::InsufficientEvidence,
@@ -1103,7 +1107,11 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             candidates: Vec::new(),
         });
         // materialize.rs requires unresolved markers for all resolution fields when not set.
-        for field in &["resolution.runtime", "resolution.resolved_targets", "resolution.closure"] {
+        for field in &[
+            "resolution.runtime",
+            "resolution.resolved_targets",
+            "resolution.closure",
+        ] {
             lock.resolution.unresolved.push(UnresolvedValue {
                 field: Some(field.to_string()),
                 reason: UnresolvedReason::InsufficientEvidence,
@@ -1187,22 +1195,16 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                 .and_then(Value::as_str)
         })
         // LEIP AutoAccept driver overrides the legacy detect_project heuristic.
-        .or_else(|| {
-            leip_projection
-                .as_ref()
-                .and_then(|p| p.driver.as_deref())
-        })
+        .or_else(|| leip_projection.as_ref().and_then(|p| p.driver.as_deref()))
         .unwrap_or_else(|| runtime_kind_from_project(&detected));
-    let process_candidates = if desktop_execution.is_some()
-        || leip_projection.is_some()
-        || !leip_hints.is_empty()
-    {
-        // Desktop execution override, LEIP AutoAccept, and LEIP Unresolved-with-hint all
-        // skip legacy candidate generation to avoid a spurious unsupported-driver error.
-        Vec::new()
-    } else {
-        process_candidates_for_source(&detected, &info)
-    };
+    let process_candidates =
+        if desktop_execution.is_some() || leip_projection.is_some() || !leip_hints.is_empty() {
+            // Desktop execution override, LEIP AutoAccept, and LEIP Unresolved-with-hint all
+            // skip legacy candidate generation to avoid a spurious unsupported-driver error.
+            Vec::new()
+        } else {
+            process_candidates_for_source(&detected, &info)
+        };
     let runtime_kind = if inferred_runtime_kind == "source" {
         runtime_kind_from_process_candidates(&process_candidates).unwrap_or(inferred_runtime_kind)
     } else {
@@ -1261,7 +1263,11 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                     let mut target = serde_json::Map::new();
                     target.insert("label".to_string(), Value::String("default".to_string()));
                     // Static sites are web-served content, not source-executed processes.
-                    let runtime = if p.driver.as_deref() == Some("static") { "web" } else { "source" };
+                    let runtime = if p.driver.as_deref() == Some("static") {
+                        "web"
+                    } else {
+                        "source"
+                    };
                     target.insert("runtime".to_string(), Value::String(runtime.to_string()));
                     if let Some(driver) = &p.driver {
                         target.insert("driver".to_string(), Value::String(driver.clone()));
@@ -1270,17 +1276,18 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
                         // Static site: serve from the project root directory on a default port.
                         // runtime=web requires a port so the web runner can notify the endpoint.
                         target.insert("entrypoint".to_string(), Value::String(".".to_string()));
-                        target.insert("port".to_string(), Value::Number(serde_json::Number::from(8080u16)));
+                        target.insert(
+                            "port".to_string(),
+                            Value::Number(serde_json::Number::from(8080u16)),
+                        );
                     } else if !p.cmd.is_empty() {
                         target.insert("entrypoint".to_string(), Value::String(p.cmd[0].clone()));
                         if p.cmd.len() > 1 {
                             // Multi-token cmd: encode as run_command so the compat bridge
                             // routes it through sh -c rather than treating the first token
                             // (e.g. "npm", "uvicorn") as a bare language entrypoint.
-                            target.insert(
-                                "run_command".to_string(),
-                                Value::String(p.cmd.join(" ")),
-                            );
+                            target
+                                .insert("run_command".to_string(), Value::String(p.cmd.join(" ")));
                         }
                     }
                     target.insert("compatible".to_string(), Value::Bool(true));
@@ -1463,30 +1470,27 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .insert("workloads".to_string(), Value::Array(Vec::new()));
         // Detect workspace monorepo root to provide actionable context.
         let workspace_packages = detect_workspace_packages(&input.project_root);
-        let (unresolved_reason, unresolved_detail, unresolved_candidates) =
-            if let Some(packages) = workspace_packages {
-                (
-                    UnresolvedReason::ExplicitSelectionRequired,
-                    format!(
-                        "workspace monorepo root detected: run ato from a sub-package directory ({})",
-                        packages.join(", ")
-                    ),
-                    packages,
-                )
+        let (unresolved_reason, unresolved_detail, unresolved_candidates) = if let Some(packages) =
+            workspace_packages
+        {
+            (
+                UnresolvedReason::ExplicitSelectionRequired,
+                format!(
+                    "workspace monorepo root detected: run ato from a sub-package directory ({})",
+                    packages.join(", ")
+                ),
+                packages,
+            )
+        } else {
+            // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
+            // leip_hints was computed earlier and is empty only when LEIP had no opinion.
+            let detail = if !leip_hints.is_empty() {
+                leip_hints.join("; ")
             } else {
-                // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
-                // leip_hints was computed earlier and is empty only when LEIP had no opinion.
-                let detail = if !leip_hints.is_empty() {
-                    leip_hints.join("; ")
-                } else {
-                    "could not infer a primary process from source evidence".to_string()
-                };
-                (
-                    UnresolvedReason::InsufficientEvidence,
-                    detail,
-                    Vec::new(),
-                )
+                "could not infer a primary process from source evidence".to_string()
             };
+            (UnresolvedReason::InsufficientEvidence, detail, Vec::new())
+        };
         lock.contract.unresolved.push(UnresolvedValue {
             field: Some("contract.process".to_string()),
             reason: unresolved_reason,
@@ -2619,14 +2623,16 @@ fn infer_desktop_execution_override(
 ) -> Result<Option<DesktopOverrideResult>> {
     if let Some(explicit_artifact) = explicit_native_artifact {
         if let Some(artifact_type) = imported_native_artifact_type(explicit_artifact) {
-            return Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_artifact(
-                project_root,
-                explicit_artifact,
-                artifact_type,
-                "explicit-native-artifact".to_string(),
-                "explicit native artifact input fixed the desktop execution path before run"
-                    .to_string(),
-            )?)));
+            return Ok(Some(DesktopOverrideResult::Execute(
+                desktop_execution_from_artifact(
+                    project_root,
+                    explicit_artifact,
+                    artifact_type,
+                    "explicit-native-artifact".to_string(),
+                    "explicit native artifact input fixed the desktop execution path before run"
+                        .to_string(),
+                )?,
+            )));
         }
     }
 
@@ -2674,14 +2680,16 @@ fn infer_desktop_execution_override(
     }
 
     match infer_imported_native_artifact_candidate(project_root)? {
-        ImportedArtifactProbe::Single(candidate) => Ok(Some(DesktopOverrideResult::Execute(desktop_execution_from_artifact(
-            project_root,
-            &candidate.artifact_path,
-            candidate.artifact_type,
-            format!("artifact-import:{}", candidate.artifact_type),
-            "desktop artifact-import execution selected the single observed native artifact"
-                .to_string(),
-        )?))),
+        ImportedArtifactProbe::Single(candidate) => Ok(Some(DesktopOverrideResult::Execute(
+            desktop_execution_from_artifact(
+                project_root,
+                &candidate.artifact_path,
+                candidate.artifact_type,
+                format!("artifact-import:{}", candidate.artifact_type),
+                "desktop artifact-import execution selected the single observed native artifact"
+                    .to_string(),
+            )?,
+        ))),
         ImportedArtifactProbe::Ambiguous(_) | ImportedArtifactProbe::None => Ok(None),
     }
 }
@@ -2748,8 +2756,7 @@ fn infer_source_native_run_process(
         // The `dev` script is usually just the Vite frontend; `tauri dev`
         // starts both the Rust backend and the Vite frontend.
         if framework == "tauri" && node.scripts.has_tauri {
-            let (entrypoint, cmd) =
-                node_script_command(node.package_manager, "tauri", &["dev"]);
+            let (entrypoint, cmd) = node_script_command(node.package_manager, "tauri", &["dev"]);
             return Some(json!({ "entrypoint": entrypoint, "cmd": cmd }));
         }
 
@@ -4202,9 +4209,7 @@ fn detect_workspace_packages(root: &Path) -> Option<Vec<String>> {
 
     None
 }
-fn build_leip_input_from_root(
-    root: &Path,
-) -> lock_draft_engine::leip::LeipInput {
+fn build_leip_input_from_root(root: &Path) -> lock_draft_engine::leip::LeipInput {
     use lock_draft_engine::{RepoFileEntry, RepoFileKind};
 
     // Walk up to 4 levels deep; skip hidden directories.
@@ -4234,7 +4239,11 @@ fn build_leip_input_from_root(
                 RepoFileKind::File
             };
             let size = entry.metadata().ok().map(|m| m.len());
-            Some(RepoFileEntry { path: rel_str, kind, size })
+            Some(RepoFileEntry {
+                path: rel_str,
+                kind,
+                size,
+            })
         })
         .collect();
 
@@ -4291,11 +4300,7 @@ fn leip_projection_from_root(root: &Path) -> Option<LeipProjection> {
     let top = result.candidates.first()?;
     // Primary node is the one whose id matches the graph's primary_node_id.
     let primary_node_id = &top.graph.primary_node_id;
-    let primary_node = top
-        .graph
-        .nodes
-        .iter()
-        .find(|n| &n.id == primary_node_id)?;
+    let primary_node = top.graph.nodes.iter().find(|n| &n.id == primary_node_id)?;
     let envelope = primary_node.envelope.as_ref()?;
 
     // Static-site candidates have an empty cmd — allow them through so the projection
@@ -5872,10 +5877,15 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         );
 
         // An unresolved marker for contract.process should be present.
-        let process_unresolved = lock.contract.unresolved.iter().any(|u| {
-            u.field.as_deref() == Some("contract.process")
-        });
-        assert!(process_unresolved, "Expected contract.process unresolved marker for unbuilt Electron app");
+        let process_unresolved = lock
+            .contract
+            .unresolved
+            .iter()
+            .any(|u| u.field.as_deref() == Some("contract.process"));
+        assert!(
+            process_unresolved,
+            "Expected contract.process unresolved marker for unbuilt Electron app"
+        );
     }
 
     #[test]
@@ -6741,8 +6751,14 @@ target = "worker"
             msg.contains("workspace monorepo root detected"),
             "expected workspace hint, got: {msg}"
         );
-        assert!(msg.contains("apps/web"), "expected sub-package in error: {msg}");
-        assert!(msg.contains("apps/api"), "expected sub-package in error: {msg}");
+        assert!(
+            msg.contains("apps/web"),
+            "expected sub-package in error: {msg}"
+        );
+        assert!(
+            msg.contains("apps/api"),
+            "expected sub-package in error: {msg}"
+        );
     }
 
     #[test]
@@ -6787,8 +6803,7 @@ target = "worker"
             "<html><body><h1>Hello</h1></body></html>",
         )
         .expect("write index.html");
-        fs::write(dir.path().join("style.css"), "body { margin: 0; }")
-            .expect("write style.css");
+        fs::write(dir.path().join("style.css"), "body { margin: 0; }").expect("write style.css");
 
         let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
             .expect("materialize static workspace");
@@ -6850,5 +6865,4 @@ target = "worker"
             "Go project error should contain Go hint, got: {msg}"
         );
     }
-
 }

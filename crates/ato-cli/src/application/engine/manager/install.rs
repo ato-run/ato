@@ -92,10 +92,9 @@ impl EngineManager {
         let output_path = self.engine_path(name, version);
 
         if output_path.exists() {
-            drive_sync_async(reporter.notify(format!(
-                "✅ Engine {} {} already installed",
-                name, version
-            )))?;
+            drive_sync_async(
+                reporter.notify(format!("✅ Engine {} {} already installed", name, version)),
+            )?;
             return Ok(output_path);
         }
 

@@ -17,7 +17,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::{load_config, load_secrets, save_config, save_secrets, SecretStore};
-use crate::settings::{patch_config_for_capsule, secrets_snapshot_from_store, settings_snapshot_from_config};
+use crate::settings::{
+    patch_config_for_capsule, secrets_snapshot_from_store, settings_snapshot_from_config,
+};
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::settings_window::ActiveSettingsShell;
 
@@ -94,17 +96,43 @@ impl std::fmt::Debug for SettingsCommand {
             Self::NavigateTab { tab } => write!(f, "NavigateTab {{ tab: {:?} }}", tab),
             Self::Close => write!(f, "Close"),
             Self::LoadSecretsSnapshot { .. } => write!(f, "LoadSecretsSnapshot"),
-            Self::PutSecret { request_id, key, .. } => {
-                write!(f, "PutSecret {{ request_id: {:?}, key: {:?}, value: [REDACTED] }}", request_id, key)
+            Self::PutSecret {
+                request_id, key, ..
+            } => {
+                write!(
+                    f,
+                    "PutSecret {{ request_id: {:?}, key: {:?}, value: [REDACTED] }}",
+                    request_id, key
+                )
             }
             Self::DeleteSecret { request_id, key } => {
-                write!(f, "DeleteSecret {{ request_id: {:?}, key: {:?} }}", request_id, key)
+                write!(
+                    f,
+                    "DeleteSecret {{ request_id: {:?}, key: {:?} }}",
+                    request_id, key
+                )
             }
-            Self::GrantSecret { request_id, handle, key } => {
-                write!(f, "GrantSecret {{ request_id: {:?}, handle: {:?}, key: {:?} }}", request_id, handle, key)
+            Self::GrantSecret {
+                request_id,
+                handle,
+                key,
+            } => {
+                write!(
+                    f,
+                    "GrantSecret {{ request_id: {:?}, handle: {:?}, key: {:?} }}",
+                    request_id, handle, key
+                )
             }
-            Self::RevokeSecret { request_id, handle, key } => {
-                write!(f, "RevokeSecret {{ request_id: {:?}, handle: {:?}, key: {:?} }}", request_id, handle, key)
+            Self::RevokeSecret {
+                request_id,
+                handle,
+                key,
+            } => {
+                write!(
+                    f,
+                    "RevokeSecret {{ request_id: {:?}, handle: {:?}, key: {:?} }}",
+                    request_id, handle, key
+                )
             }
         }
     }
@@ -184,7 +212,11 @@ pub fn dispatch(
             });
             push_to_settings_webview(cx, &response.to_string());
         }
-        SettingsCommand::PutSecret { request_id, key, value } => {
+        SettingsCommand::PutSecret {
+            request_id,
+            key,
+            value,
+        } => {
             let trimmed_key = key.trim().to_string();
             let trimmed_value = value.trim().to_string();
             if let Some(err) = validate_secret_key(&trimmed_key) {
@@ -223,7 +255,11 @@ pub fn dispatch(
             }
             push_secrets_ok(cx, request_id.as_deref(), &store);
         }
-        SettingsCommand::GrantSecret { request_id, handle, key } => {
+        SettingsCommand::GrantSecret {
+            request_id,
+            handle,
+            key,
+        } => {
             let trimmed_handle = handle.trim().to_string();
             let trimmed_key = key.trim().to_string();
             if trimmed_handle.is_empty() {
@@ -247,7 +283,11 @@ pub fn dispatch(
             }
             push_secrets_ok(cx, request_id.as_deref(), &store);
         }
-        SettingsCommand::RevokeSecret { request_id, handle, key } => {
+        SettingsCommand::RevokeSecret {
+            request_id,
+            handle,
+            key,
+        } => {
             let trimmed_handle = handle.trim().to_string();
             let trimmed_key = key.trim().to_string();
             if trimmed_handle.is_empty() {

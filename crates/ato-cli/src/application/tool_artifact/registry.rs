@@ -10,9 +10,7 @@
 //! been validated against the upstream artifact (see #120 Phase 1).
 //! Adding or bumping an entry is a deliberate code change.
 
-use super::manifest::{
-    host_platform, ArchiveFormat, ArtifactLayout, ToolArtifactManifest,
-};
+use super::manifest::{host_platform, ArchiveFormat, ArtifactLayout, ToolArtifactManifest};
 
 /// Look up a pinned manifest by stable tool ID + the current host
 /// platform. Returns `None` when:
@@ -86,7 +84,8 @@ mod tests {
     #[test]
     fn postgresql_pin_validates_against_manifest_invariants() {
         let m = postgresql_darwin_aarch64();
-        m.validate().expect("postgresql pin must satisfy invariants");
+        m.validate()
+            .expect("postgresql pin must satisfy invariants");
         // Sanity-check the most likely human-error fields.
         assert_eq!(m.name, "postgresql");
         assert_eq!(m.platform, "darwin-aarch64");

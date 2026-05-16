@@ -100,6 +100,114 @@
   .step-label { flex: 1; }
   .step-time  { font-size: 11px; color: var(--soft); font-family: "SF Mono", ui-monospace, monospace; }
 
+  /* DETAILS / LOGS */
+  .details-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+  }
+  .toggle-btn {
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fafafd;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .toggle-btn.on {
+    border-color: #c7c9ff;
+    background: #eef2ff;
+    color: #4f46e5;
+  }
+  .detail-panel {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fbfbfe;
+    padding: 10px;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .detail-panel.open { display: flex; }
+  .detail-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .detail-panel-title {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .detail-copy-btn {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .detail-copy-btn:hover { color: var(--text); }
+  .detail-log {
+    margin: 0;
+    border: 1px solid #e7e7ef;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 9px 10px;
+    height: 170px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: #444456;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .copy-note {
+    margin: 0;
+    font-size: 11px;
+    color: var(--soft);
+  }
+
+  .error-banner {
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    background: #fff1f2;
+    padding: 10px 12px;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .error-banner.on { display: flex; }
+  .error-banner-title {
+    margin: 0;
+    color: #b91c1c;
+    font-size: 12.5px;
+    font-weight: 700;
+  }
+  .error-banner-message {
+    margin: 0;
+    max-height: 140px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #7f1d1d;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
   /* FOOTER */
   .footer {
     display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -122,8 +230,18 @@
   // After the DOM is ready the real implementation overwrites this and
   // replays the latest buffered step.
   (function () {
-    var pending = null;
-    window.__atoStep = function (n) { pending = n; };
+    var pending = {
+      step: null,
+      details: [],
+      failure: null
+    };
+    window.__atoStep = function (n) { pending.step = n; };
+    window.__atoDetail = function (line) {
+      if (typeof line === 'string' && line.length > 0) pending.details.push(line);
+    };
+    window.__atoFail = function (message) {
+      pending.failure = typeof message === 'string' ? message : 'Launch failed';
+    };
     window.__atoPending = function () { return pending; };
   })();
 </script>
@@ -164,6 +282,27 @@
     </div>
   </div>
 
+  <div id="error-banner" class="error-banner">
+    <p class="error-banner-title">起動に失敗しました</p>
+    <p id="error-banner-message" class="error-banner-message"></p>
+    <div class="details-actions" style="justify-content:flex-start">
+      <button id="copy-error" class="detail-copy-btn" type="button">Copy error</button>
+    </div>
+  </div>
+
+  <div class="details-actions">
+    <button id="toggle-logs" class="toggle-btn" type="button">View logs</button>
+  </div>
+
+  <div id="detail-panel" class="detail-panel">
+    <div class="detail-panel-head">
+      <p id="detail-title" class="detail-panel-title">Launch logs</p>
+      <button id="copy-details" class="detail-copy-btn" type="button">Copy</button>
+    </div>
+    <pre id="detail-log" class="detail-log"></pre>
+    <p class="copy-note">ログ領域は選択してコピーできます。</p>
+  </div>
+
   <div class="footer">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 2l8 4v6c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-4z"/>
@@ -181,6 +320,10 @@
   const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
 
   const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  const detailEntries = [];
+  const MAX_DETAIL_ENTRIES = 400;
+  let panelOpen = false;
+  let failedMessage = '';
 
   // Inject real capsule identity when the host provides __ATO_BOOT.
   const boot = (window.__ATO_BOOT && typeof window.__ATO_BOOT === 'object')
@@ -191,6 +334,56 @@
   }
 
   const stepNodes = [0, 1, 2, 3].map(i => document.getElementById('step-' + i));
+  const stepLabels = ['検証中', '解決中', '起動中', '接続中'];
+
+  function nowLabel() {
+    const d = new Date();
+    const p2 = n => String(n).padStart(2, '0');
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  }
+
+  function appendDetail(line, kind) {
+    if (!line) return;
+    const level = kind || 'detail';
+    detailEntries.push(`[${nowLabel()}] [${level}] ${line}`);
+    if (detailEntries.length > MAX_DETAIL_ENTRIES) detailEntries.shift();
+    if (panelOpen) renderDetailPanel();
+  }
+
+  function renderDetailPanel() {
+    const titleEl = document.getElementById('detail-title');
+    const logEl = document.getElementById('detail-log');
+    if (!titleEl || !logEl) return;
+    titleEl.textContent = 'Launch logs';
+    logEl.textContent = detailEntries.join('\n');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function copyText(text) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+  }
+
+  function toggleLogsPanel() {
+    panelOpen = !panelOpen;
+    const panel = document.getElementById('detail-panel');
+    const logsBtn = document.getElementById('toggle-logs');
+    if (!panel || !logsBtn) return;
+    panel.classList.toggle('open', panelOpen);
+    logsBtn.classList.toggle('on', panelOpen);
+    renderDetailPanel();
+  }
 
   function markDone(node) {
     node.classList.remove('active', 'pending');
@@ -214,11 +407,49 @@
       else if (i === n) { markActive(node); }
       // else: leave pending
     });
+    const safe = Number.isFinite(n) ? Math.max(0, Math.min(3, n)) : 0;
+    appendDetail(`${stepLabels[safe]} フェーズに入りました`, 'step');
   };
 
-  // Replay any step buffered before the DOM was ready.
+  window.__atoDetail = function (line) {
+    if (typeof line === 'string' && line.length > 0) {
+      appendDetail(line, 'detail');
+    }
+  };
+
+  window.__atoFail = function (message) {
+    failedMessage = (typeof message === 'string' && message.length > 0) ? message : 'Launch failed';
+    appendDetail(`Failure: ${failedMessage}`, 'error');
+    const banner = document.getElementById('error-banner');
+    const msg = document.getElementById('error-banner-message');
+    if (banner && msg) {
+      msg.textContent = failedMessage;
+      banner.classList.add('on');
+    }
+    if (!panelOpen) toggleLogsPanel();
+  };
+
+  // Replay any events buffered before the DOM was ready.
   var pending = window.__atoPending ? window.__atoPending() : null;
-  if (pending !== null) { window.__atoStep(pending); }
+  if (pending && typeof pending === 'object') {
+    if (Array.isArray(pending.details)) {
+      pending.details.forEach(line => window.__atoDetail(line));
+    }
+    if (pending.step !== null) window.__atoStep(pending.step);
+    if (pending.failure) window.__atoFail(pending.failure);
+  } else if (pending !== null) {
+    window.__atoStep(pending);
+  }
+
+  document.getElementById('toggle-logs').addEventListener('click', () => toggleLogsPanel());
+  document.getElementById('copy-details').addEventListener('click', () => {
+    copyText(detailEntries.join('\n'));
+  });
+  document.getElementById('copy-error').addEventListener('click', () => {
+    copyText(failedMessage || detailEntries.join('\n'));
+  });
+
+  appendDetail('Launching capsule securely', 'detail');
 
   document.getElementById('abort').addEventListener('click', () => {
     BRIDGE({ kind: 'abort_boot' });
@@ -230,4 +461,3 @@
 
 </body>
 </html>
-

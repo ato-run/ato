@@ -173,8 +173,7 @@ pub enum OrphanProviderKillOutcome {
 /// Each poll sleeps [`KILL_ORPHAN_POLL_INTERVAL`]; total grace ≈
 /// `count * interval` (3 s by default).
 const KILL_ORPHAN_GRACE_POLLS: u32 = 30;
-const KILL_ORPHAN_POLL_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(100);
+const KILL_ORPHAN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// SIGTERM the orphan provider's process group recorded in a stale
 /// sentinel, escalate to SIGKILL after a 3 s grace, and confirm the
@@ -286,7 +285,12 @@ enum SignalOutcome {
 #[cfg(unix)]
 impl SignalOutcome {
     fn pgroup_signaled(&self) -> bool {
-        matches!(self, SignalOutcome::Delivered { pgroup_signaled: true })
+        matches!(
+            self,
+            SignalOutcome::Delivered {
+                pgroup_signaled: true
+            }
+        )
     }
 }
 

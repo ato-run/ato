@@ -144,15 +144,13 @@ pub fn execute_host(
         .args
         .extend(launch_ctx.command_args().iter().cloned());
     let desktop_open_bundle = desktop_native_open_bundle_path(plan, authoritative_lock);
-    let force_python_server_tool =
-        is_python_server_tool(&launch_spec.command)
-            && plan
-                .execution_driver()
-                .map(|d| d.trim().eq_ignore_ascii_case("python"))
-                .unwrap_or(false);
-    let force_python_no_bytecode =
-        !force_python_server_tool
-            && is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
+    let force_python_server_tool = is_python_server_tool(&launch_spec.command)
+        && plan
+            .execution_driver()
+            .map(|d| d.trim().eq_ignore_ascii_case("python"))
+            .unwrap_or(false);
+    let force_python_no_bytecode = !force_python_server_tool
+        && is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let force_node_runtime =
         is_node_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let injected_port =
@@ -215,7 +213,10 @@ pub fn execute_host(
             launch_spec.port,
             launch_ctx,
         )?;
-        apply_python_runtime_hardening(&mut cmd, force_python_no_bytecode || force_python_server_tool);
+        apply_python_runtime_hardening(
+            &mut cmd,
+            force_python_no_bytecode || force_python_server_tool,
+        );
 
         if let Some(port) = injected_port {
             cmd.env("PORT", port);

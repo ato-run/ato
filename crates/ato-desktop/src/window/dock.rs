@@ -408,14 +408,11 @@ pub fn submit_publish(cx: &mut App, request_id: String, visibility: Option<Strin
                     let token = read_session_token_from_credentials();
                     if !scoped_id.is_empty() {
                         if let Some(tok) = token {
-                            match apply_visibility_after_publish(&scoped_id, vis_str, &api_base, &tok)
-                            {
+                            match apply_visibility_after_publish(
+                                &scoped_id, vis_str, &api_base, &tok,
+                            ) {
                                 Ok(()) => {
-                                    tracing::info!(
-                                        scoped_id,
-                                        vis_str,
-                                        "dock: visibility updated"
-                                    );
+                                    tracing::info!(scoped_id, vis_str, "dock: visibility updated");
                                     json!({ "ok": true, "visibility": vis_str })
                                 }
                                 Err(err) => {
@@ -428,7 +425,9 @@ pub fn submit_publish(cx: &mut App, request_id: String, visibility: Option<Strin
                             json!({ "ok": false, "error": "no session token" })
                         }
                     } else {
-                        tracing::warn!("dock: no scoped_id in publish payload; skipping visibility update");
+                        tracing::warn!(
+                            "dock: no scoped_id in publish payload; skipping visibility update"
+                        );
                         json!({ "ok": false, "error": "no scoped_id in publish payload" })
                     }
                 } else {
@@ -1408,9 +1407,8 @@ fn apply_visibility_after_publish(
         .get("capsules")
         .and_then(Value::as_array)
         .and_then(|arr| {
-            arr.iter().find(|c| {
-                c.get("slug").and_then(Value::as_str) == Some(slug)
-            })
+            arr.iter()
+                .find(|c| c.get("slug").and_then(Value::as_str) == Some(slug))
         })
         .and_then(|c| c.get("id"))
         .and_then(Value::as_str)

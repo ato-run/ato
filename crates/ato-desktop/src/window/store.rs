@@ -56,7 +56,11 @@ impl WebViewPasteShell for StoreWebView {
 
 impl Render for StoreWebView {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        paste_render_wrap!(div().size_full().bg(rgb(0xffffff)), cx, &self.paste.focus_handle)
+        paste_render_wrap!(
+            div().size_full().bg(rgb(0xffffff)),
+            cx,
+            &self.paste.focus_handle
+        )
     }
 }
 
@@ -158,7 +162,10 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Store WebView");
-        let store = cx.new(|cx| StoreWebView { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        let store = cx.new(|cx| StoreWebView {
+            _webview: webview,
+            paste: WebViewPasteSupport::new(cx),
+        });
         window.focus(&store.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(store, window, cx))
     })?;

@@ -30,11 +30,7 @@ use super::manifest::ToolArtifactManifest;
 /// transport without spinning up a real HTTP server. The production
 /// impl is [`ReqwestDownloader`].
 pub trait Downloader {
-    fn fetch_to(
-        &self,
-        url: &str,
-        dest: &Path,
-    ) -> Result<DownloadOutcome, anyhow::Error>;
+    fn fetch_to(&self, url: &str, dest: &Path) -> Result<DownloadOutcome, anyhow::Error>;
 }
 
 #[derive(Debug, Clone)]
@@ -102,17 +98,14 @@ impl ReqwestDownloader {
         let mut stream = response.bytes_stream();
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .with_context(|| format!("read body chunk from {url}"))?;
+            let chunk = chunk.with_context(|| format!("read body chunk from {url}"))?;
             file.write_all(&chunk)
                 .await
                 .with_context(|| format!("write body to {}", dest.display()))?;
             hasher.update(&chunk);
             bytes_written += chunk.len() as u64;
         }
-        file.flush()
-            .await
-            .context("flush downloaded file")?;
+        file.flush().await.context("flush downloaded file")?;
         Ok(DownloadOutcome {
             bytes_written,
             sha256_hex: hex::encode(hasher.finalize()),
@@ -121,11 +114,7 @@ impl ReqwestDownloader {
 }
 
 impl Downloader for ReqwestDownloader {
-    fn fetch_to(
-        &self,
-        url: &str,
-        dest: &Path,
-    ) -> Result<DownloadOutcome, anyhow::Error> {
+    fn fetch_to(&self, url: &str, dest: &Path) -> Result<DownloadOutcome, anyhow::Error> {
         let url = url.to_string();
         let dest = dest.to_path_buf();
         let client = self.clone();
@@ -153,9 +142,7 @@ impl Downloader for ReqwestDownloader {
                 // tasks on the outer runtime can keep making progress
                 // on sibling worker threads while this caller blocks
                 // on .join().
-                tokio::runtime::RuntimeFlavor::MultiThread => {
-                    tokio::task::block_in_place(do_fetch)
-                }
+                tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(do_fetch),
                 // current_thread: don't wrap. block_in_place panics
                 // on that flavor; running join() directly stalls the
                 // single worker for the duration of the download —
@@ -233,19 +220,13 @@ pub(crate) mod test_support {
     pub struct LocalFileDownloader;
 
     impl Downloader for LocalFileDownloader {
-        fn fetch_to(
-            &self,
-            url: &str,
-            dest: &Path,
-        ) -> Result<DownloadOutcome, anyhow::Error> {
+        fn fetch_to(&self, url: &str, dest: &Path) -> Result<DownloadOutcome, anyhow::Error> {
             // url shape: "test-local://<absolute path>"
             let path = url
                 .strip_prefix("test-local://")
                 .ok_or_else(|| anyhow!("LocalFileDownloader needs test-local:// url, got {url}"))?;
-            let bytes = fs::read(path)
-                .with_context(|| format!("read source {}", path))?;
-            fs::write(dest, &bytes)
-                .with_context(|| format!("write dest {}", dest.display()))?;
+            let bytes = fs::read(path).with_context(|| format!("read source {}", path))?;
+            fs::write(dest, &bytes).with_context(|| format!("write dest {}", dest.display()))?;
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             Ok(DownloadOutcome {

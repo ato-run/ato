@@ -18,8 +18,8 @@ use std::process::{Child, Command, Stdio};
 use anyhow::{Context, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context as GpuiContext, IntoElement,
-    Render, WindowBounds, WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context as GpuiContext, IntoElement, Render,
+    WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Deserialize;
@@ -105,13 +105,18 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
     reader
         .read_line(&mut first_line)
         .context("failed to read start event from ato login")?;
-    tracing::debug!(first_line = first_line.trim(), "open_auth_login_window: got first line from CLI");
+    tracing::debug!(
+        first_line = first_line.trim(),
+        "open_auth_login_window: got first line from CLI"
+    );
 
     let event: DesktopLoginEvent = serde_json::from_str(first_line.trim())
         .context("invalid NDJSON start event from ato login")?;
 
     if event.kind != "desktop_login_started" {
-        let msg = event.message.unwrap_or_else(|| first_line.trim().to_string());
+        let msg = event
+            .message
+            .unwrap_or_else(|| first_line.trim().to_string());
         anyhow::bail!("ato login --desktop-webview: {}", msg);
     }
 
@@ -126,7 +131,10 @@ pub fn open_auth_login_window(cx: &mut App) -> Result<()> {
             let db = d.bounds();
             let left = db.origin.x + (db.size.width - win_size.width) / 2.0;
             let top = db.origin.y + px(80.0);
-            Bounds { origin: gpui::point(left, top), size: win_size }
+            Bounds {
+                origin: gpui::point(left, top),
+                size: win_size,
+            }
         }
         None => Bounds::centered(None, win_size, cx),
     };
