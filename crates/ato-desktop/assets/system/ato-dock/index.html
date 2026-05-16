@@ -747,9 +747,6 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
                     <h4>Limited</h4>
                     <p>Accessible via direct link only. Not listed in the public store.</p>
                   </div>
-                  <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
-                    Visibility selection is UI-only in this version and does not affect the publish payload.
-                  </div>
                 </div>
               </div>
             </div>
@@ -1499,6 +1496,8 @@ function handleDockEvent(event) {
     const payload = event.payload || {};
     const scopedId = (payload.install && payload.install.scoped_id) || payload.scoped_id || inferListingName();
     const installCmd = scopedId ? `ato run ${scopedId}` : null;
+    const visUpdate = event.visibility_update || {};
+    const resolvedVisibility = visUpdate.ok ? (event.visibility || visUpdate.visibility || "public") : (state.wizard.visibility || "public");
     state.wizard.submitResult = {
       registry: payload.registry || "https://api.ato.run",
       route: payload.route || "personal_dock_direct",
@@ -1512,7 +1511,7 @@ function handleDockEvent(event) {
       description: state.wizard.sourceValue || "Submitted from Dock",
       route: payload.route || "personal_dock_direct",
       registry: payload.registry || "https://api.ato.run",
-      visibility: state.wizard.visibility || "public",
+      visibility: resolvedVisibility,
       listing: "not_listed",
       review: "not_required",
       updated: "Just now",

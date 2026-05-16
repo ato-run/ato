@@ -89,7 +89,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 unicode-width = "0.2"
-ureq = "2.12.1"
+ureq = { version = "2.12.1", features = ["json"] }
 url = "2.5.4"
 wry = { version = "0.55.0", features = ["protocol", "devtools"] }
 
