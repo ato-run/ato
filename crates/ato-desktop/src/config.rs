@@ -202,8 +202,8 @@ pub struct ControlBarSettings {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlBarMode {
-    Floating,
     #[default]
+    Floating,
     AutoHide,
     CompactPill,
     Hidden,
@@ -301,11 +301,11 @@ impl Default for DesktopSettings {
 impl Default for ControlBarSettings {
     fn default() -> Self {
         Self {
-            mode: ControlBarMode::AutoHide,
+            mode: ControlBarMode::Floating,
             always_on_top: default_control_bar_always_on_top(),
             visible_on_startup: default_control_bar_visible_on_startup(),
             position: ControlBarPosition::Top,
-            auto_hide: true,
+            auto_hide: false,
         }
     }
 }
@@ -1234,10 +1234,10 @@ mod tests {
         );
         assert!(!d.restore_window_frames);
         assert!(d.control_bar.always_on_top);
-        assert_eq!(d.control_bar.mode, ControlBarMode::AutoHide);
+        assert_eq!(d.control_bar.mode, ControlBarMode::Floating);
         assert!(d.control_bar.visible_on_startup);
         assert_eq!(d.control_bar.position, ControlBarPosition::Top);
-        assert!(d.control_bar.auto_hide);
+        assert!(!d.control_bar.auto_hide);
         assert!(!d.onboarding.completed);
         assert!(!d.onboarding.skipped);
         assert_eq!(d.onboarding.version, 0);
@@ -1249,7 +1249,7 @@ mod tests {
         config.desktop.startup_surface = StartupSurface::RestoreLast;
         config.desktop.content_window_default_presentation = ContentWindowPresentation::Fullscreen;
         config.desktop.control_bar.position = ControlBarPosition::Bottom;
-        config.desktop.control_bar.auto_hide = true;
+        config.desktop.control_bar.auto_hide = false;
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
@@ -1258,12 +1258,12 @@ mod tests {
             parsed.desktop.content_window_default_presentation,
             ContentWindowPresentation::Fullscreen
         );
-        assert_eq!(parsed.desktop.control_bar.mode, ControlBarMode::AutoHide);
+        assert_eq!(parsed.desktop.control_bar.mode, ControlBarMode::Floating);
         assert_eq!(
             parsed.desktop.control_bar.position,
             ControlBarPosition::Bottom
         );
-        assert!(parsed.desktop.control_bar.auto_hide);
+        assert!(!parsed.desktop.control_bar.auto_hide);
     }
 
     #[test]
