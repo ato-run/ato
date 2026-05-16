@@ -1470,27 +1470,26 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
             .insert("workloads".to_string(), Value::Array(Vec::new()));
         // Detect workspace monorepo root to provide actionable context.
         let workspace_packages = detect_workspace_packages(&input.project_root);
-        let (unresolved_reason, unresolved_detail, unresolved_candidates) = if let Some(packages) =
-            workspace_packages
-        {
-            (
-                UnresolvedReason::ExplicitSelectionRequired,
-                format!(
+        let (unresolved_reason, unresolved_detail, unresolved_candidates) =
+            if let Some(packages) = workspace_packages {
+                (
+                    UnresolvedReason::ExplicitSelectionRequired,
+                    format!(
                     "workspace monorepo root detected: run ato from a sub-package directory ({})",
                     packages.join(", ")
                 ),
-                packages,
-            )
-        } else {
-            // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
-            // leip_hints was computed earlier and is empty only when LEIP had no opinion.
-            let detail = if !leip_hints.is_empty() {
-                leip_hints.join("; ")
+                    packages,
+                )
             } else {
-                "could not infer a primary process from source evidence".to_string()
+                // Use the pre-computed LEIP Unresolved hints (e.g. Go, Rust unsupported messages).
+                // leip_hints was computed earlier and is empty only when LEIP had no opinion.
+                let detail = if !leip_hints.is_empty() {
+                    leip_hints.join("; ")
+                } else {
+                    "could not infer a primary process from source evidence".to_string()
+                };
+                (UnresolvedReason::InsufficientEvidence, detail, Vec::new())
             };
-            (UnresolvedReason::InsufficientEvidence, detail, Vec::new())
-        };
         lock.contract.unresolved.push(UnresolvedValue {
             field: Some("contract.process".to_string()),
             reason: unresolved_reason,
