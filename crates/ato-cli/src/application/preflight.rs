@@ -44,10 +44,12 @@ use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::interactive_resolution::{
     InteractiveResolutionEnvelope, InteractiveResolutionKind, ResolutionDisplay,
 };
+use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ExecutionProfile;
 use capsule_core::types::{ConfigField, ConfigKind};
 
 use crate::application::auth::consent_store::{consent_summary, has_consent};
+use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
 
 /// Top-level result emitted by the collector.
 ///
@@ -140,6 +142,25 @@ pub fn collect_aggregate_requirements(
 
     let mut requirements: Vec<InteractiveResolutionEnvelope> = Vec::new();
 
+    // PR-3c: build a declared-only LaunchGraphBundle from the manifest
+    // facts the preflight collector needs (dependency aliases for the
+    // per-target walk, top-level required_env for the global block).
+    // PreflightView::from_bundle is the source-of-truth surface for
+    // those facts — the legacy direct manifest reads
+    // (collect_global_required_env / manifest.services) are kept for
+    // debug-mode parity guards so drift surfaces immediately.
+    let manifest_dependencies = manifest_external_capsule_dependencies(
+        &toml::Value::try_from(manifest).unwrap_or(toml::Value::Table(Default::default())),
+    )
+    .unwrap_or_default();
+    let preflight_bundle = build_declared_only_bundle(
+        &manifest_dependencies,
+        Some(manifest_path.display().to_string()),
+        None,
+        collect_global_required_env(manifest),
+    );
+    let preflight_view = PreflightView::from_bundle(&preflight_bundle);
+
     // 2. Top-level required_env is the dep-contract resolution scope
     //    (per the manifest's own RFC §5.2 comment). For WasedaP2P this
     //    is where `PG_PASSWORD` lives — it feeds the postgres
@@ -149,7 +170,14 @@ pub fn collect_aggregate_requirements(
     //    "global" header rather than misattribute it to a single
     //    target.
     let mut global_env_seen: BTreeSet<String> = BTreeSet::new();
-    let global_required_env = collect_global_required_env(manifest);
+    // PR-3c: bundle-derived view is the primary; debug-mode parity
+    // pins it against the legacy direct manifest read.
+    let global_required_env = preflight_view.required_env.clone();
+    debug_assert_eq!(
+        sorted_dedup(global_required_env.clone()),
+        sorted_dedup(collect_global_required_env(manifest)),
+        "PR-3c: bundle-derived required_env drifted from manifest.required_env"
+    );
     if !global_required_env.is_empty() {
         let fields: Vec<ConfigField> = global_required_env
             .iter()
@@ -435,6 +463,13 @@ fn derive_target_labels(
 
 fn collect_global_required_env(manifest: &capsule_core::types::CapsuleManifest) -> Vec<String> {
     manifest.required_env.clone()
+}
+
+/// Stable-order helper for the PR-3c parity guards.
+fn sorted_dedup(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn collect_target_required_env(
