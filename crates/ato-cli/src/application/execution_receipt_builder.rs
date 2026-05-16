@@ -1,11 +1,15 @@
 use anyhow::{Context, Result};
+#[cfg(test)]
+use capsule_core::engine::execution_graph::ExecutionGraph;
 use capsule_core::engine::execution_graph::{
-    CanonicalGraphDomain, ExecutionGraph, ExecutionGraphBuilder, GraphHostInput, GraphPolicyInput,
+    ExecutionGraphBuilder, GraphHostInput, GraphMaterializationSeedInput, GraphPolicyInput,
+    GraphPreflightInput, GraphReceiptSeedInput, LaunchGraphBundle, LaunchGraphBundleInput,
 };
 use capsule_core::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
-    ExecutionReceiptV2, FilesystemIdentityBuilder, FilesystemIdentityV2, LaunchIdentity,
-    PolicyIdentity, PolicyIdentityBuilder, PolicyIdentityV2, Tracked,
+    ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
+    GraphCompleteness, GraphReceipt, LaunchIdentity, PolicyIdentity, PolicyIdentityBuilder,
+    PolicyIdentityV2, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
@@ -186,20 +190,21 @@ pub(crate) fn build_prelaunch_receipt_v2(
     // domains produce different digests by construction.
     //
     // Spec: docs/execution-identity.md §"Graph-based execution identity".
-    let declared_graph =
-        build_declared_graph(plan, &filesystem_observed, &policy_observed)?;
-    let resolved_graph =
-        extend_to_resolved_graph(&declared_graph, &filesystem_observed, &policy_observed);
-
+    let launch_graph_bundle =
+        build_launch_graph_bundle(plan, &filesystem_observed, &policy_observed)?;
     let declared_execution_id = Some(
-        declared_graph
-            .canonical_form(CanonicalGraphDomain::Declared)
-            .digest_hex(),
+        launch_graph_bundle
+            .derived
+            .execution_ids
+            .declared_execution_id
+            .clone(),
     );
     let resolved_execution_id = Some(
-        resolved_graph
-            .canonical_form(CanonicalGraphDomain::Resolved)
-            .digest_hex(),
+        launch_graph_bundle
+            .derived
+            .execution_ids
+            .resolved_execution_id
+            .clone(),
     );
 
     // Build the input once with the observed facets, then route the
@@ -210,11 +215,10 @@ pub(crate) fn build_prelaunch_receipt_v2(
     // wiring is what pins the entry point future waves will use to
     // source these facets from the graph instead of the V2 observer
     // pipeline.
-    let placeholder_reproducibility =
-        capsule_core::execution_identity::ReproducibilityIdentity {
-            class: capsule_core::execution_identity::ReproducibilityClass::BestEffort,
-            causes: Vec::new(),
-        };
+    let placeholder_reproducibility = capsule_core::execution_identity::ReproducibilityIdentity {
+        class: capsule_core::execution_identity::ReproducibilityClass::BestEffort,
+        causes: Vec::new(),
+    };
     let mut identity_input = ExecutionIdentityInputV2::new(
         source,
         provenance,
@@ -227,10 +231,14 @@ pub(crate) fn build_prelaunch_receipt_v2(
         local,
         placeholder_reproducibility,
     );
-    identity_input.filesystem =
-        FilesystemIdentityBuilder::build_with_graph(&identity_input, Some(&resolved_graph));
-    identity_input.policy =
-        PolicyIdentityBuilder::build_with_graph(&identity_input, Some(&resolved_graph));
+    identity_input.filesystem = FilesystemIdentityBuilder::build_with_graph(
+        &identity_input,
+        Some(&launch_graph_bundle.resolved_graph),
+    );
+    identity_input.policy = PolicyIdentityBuilder::build_with_graph(
+        &identity_input,
+        Some(&launch_graph_bundle.resolved_graph),
+    );
 
     // For classification, derive v1-compatible Tracked fields from the v2
     // observations and reuse the existing classifier so v1 and v2 receipts
@@ -251,15 +259,30 @@ pub(crate) fn build_prelaunch_receipt_v2(
         );
 
     let identity_input = identity_input
-        .with_declared_execution_id(declared_execution_id)
-        .with_resolved_execution_id(resolved_execution_id);
+        .with_declared_execution_id(declared_execution_id.clone())
+        .with_resolved_execution_id(resolved_execution_id.clone());
     // observed_execution_id stays None per v0.6.0 contract (no
     // observation hooks). Setter exists for forward-compat only.
 
-    Ok(ExecutionReceiptV2::from_input(
-        identity_input,
-        chrono::Utc::now().to_rfc3339(),
-    )?)
+    let receipt = ExecutionReceiptV2::from_input(identity_input, chrono::Utc::now().to_rfc3339())?
+        .with_runner(ExecutionRunnerIdentity::new(
+            "ato-cli",
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        ))
+        .with_host_fingerprint(format!(
+            "{}:{}:{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "unknown-libc"
+        ))
+        .with_graph_completeness(GraphCompleteness::Partial)
+        .with_graph_receipt(GraphReceipt::launch_passed(
+            declared_execution_id,
+            resolved_execution_id,
+            None,
+        ));
+
+    Ok(receipt)
 }
 
 /// Build the declared-domain `ExecutionGraph` for the receipt path.
@@ -274,34 +297,79 @@ pub(crate) fn build_prelaunch_receipt_v2(
 /// The `filesystem_observed` and `policy_observed` arguments are
 /// scanned for their declared-domain components only — `view_hash` and
 /// `sandbox_policy_hash` are intentionally excluded.
+#[cfg(test)]
 fn build_declared_graph(
     plan: &ManifestData,
     filesystem_observed: &FilesystemIdentityV2,
     policy_observed: &PolicyIdentityV2,
 ) -> Result<ExecutionGraph> {
+    Ok(build_launch_graph_bundle(plan, filesystem_observed, policy_observed)?.declared_graph)
+}
+
+fn build_launch_graph_bundle(
+    plan: &ManifestData,
+    filesystem_observed: &FilesystemIdentityV2,
+    policy_observed: &PolicyIdentityV2,
+) -> Result<LaunchGraphBundle> {
     let dependencies = manifest_external_capsule_dependencies(&plan.manifest)
-        .with_context(|| "failed to derive external dependencies for declared graph")?;
-    let mut input = build_input_from_external_dependencies(
+        .with_context(|| "failed to derive external dependencies for launch graph bundle")?;
+    let base = build_input_from_external_dependencies(
         &dependencies,
         Some(plan.manifest_path.display().to_string()),
     );
 
-    let host = GraphHostInput {
+    let declared_host = GraphHostInput {
         filesystem_source_root: filesystem_observed.source_root.value.clone(),
         filesystem_working_directory: filesystem_observed.working_directory.value.clone(),
         filesystem_view_hash: None, // resolved-domain only
         ..GraphHostInput::default()
     };
-    let policy = GraphPolicyInput {
+    let resolved_host = GraphHostInput {
+        filesystem_view_hash: filesystem_observed.view_hash.value.clone(),
+        ..GraphHostInput::default()
+    };
+    let declared_policy = GraphPolicyInput {
         network_policy_hash: policy_observed.network_policy_hash.value.clone(),
         capability_policy_hash: policy_observed.capability_policy_hash.value.clone(),
         sandbox_policy_hash: None, // resolved-domain only (depends on mount-set algo + allow_hosts_count)
         ..GraphPolicyInput::default()
     };
-    input.host = Some(host);
-    input.policy = Some(policy);
+    let resolved_policy = GraphPolicyInput {
+        sandbox_policy_hash: policy_observed.sandbox_policy_hash.value.clone(),
+        ..GraphPolicyInput::default()
+    };
 
-    Ok(ExecutionGraphBuilder::build(input))
+    Ok(ExecutionGraphBuilder::build_launch_bundle(
+        LaunchGraphBundleInput {
+            source: base.source,
+            targets: base.targets,
+            dependencies: base.dependencies,
+            declared_host: Some(declared_host),
+            resolved_host: Some(resolved_host),
+            declared_policy: Some(declared_policy),
+            resolved_policy: Some(resolved_policy),
+            materialized: GraphMaterializationSeedInput::default(),
+            preflight: GraphPreflightInput {
+                dependency_aliases: dependencies
+                    .iter()
+                    .map(|dependency| dependency.alias.clone())
+                    .collect(),
+                network_policy_hash: policy_observed.network_policy_hash.value.clone(),
+                capability_policy_hash: policy_observed.capability_policy_hash.value.clone(),
+                ..GraphPreflightInput::default()
+            },
+            receipt: GraphReceiptSeedInput {
+                runner: Some("ato-cli".to_string()),
+                host_fingerprint: Some(format!(
+                    "{}:{}:{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                    "unknown-libc"
+                )),
+                redaction_policy_version: Some("execution-receipt-v2".to_string()),
+            },
+        },
+    ))
 }
 
 /// Extend a declared graph with host-resolution outputs to produce the
@@ -315,6 +383,7 @@ fn build_declared_graph(
 /// Future waves will add: artifact-selector → concrete-artifact
 /// resolution, runtime store path, dep-handle output hash, capability
 /// grant → host capability id (per docs/execution-identity.md).
+#[cfg(test)]
 fn extend_to_resolved_graph(
     declared_graph: &ExecutionGraph,
     filesystem_observed: &FilesystemIdentityV2,
@@ -475,10 +544,10 @@ contract = "service@1"
         let fs = synthetic_filesystem("blake3:fs");
         let policy = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox");
 
-        let declared_one = build_declared_graph(&plan_one, &fs, &policy)
-            .expect("build declared graph one");
-        let declared_two = build_declared_graph(&plan_two, &fs, &policy)
-            .expect("build declared graph two");
+        let declared_one =
+            build_declared_graph(&plan_one, &fs, &policy).expect("build declared graph one");
+        let declared_two =
+            build_declared_graph(&plan_two, &fs, &policy).expect("build declared graph two");
 
         assert_ne!(
             declared_id(&declared_one),
@@ -582,7 +651,10 @@ contract = "service@1"
         // Resolved adds at least the FS_VIEW_HASH and POLICY_SANDBOX_HASH
         // labels.
         assert_eq!(
-            resolved.labels.get(identity_labels::FS_VIEW_HASH).map(String::as_str),
+            resolved
+                .labels
+                .get(identity_labels::FS_VIEW_HASH)
+                .map(String::as_str),
             Some("blake3:fs"),
         );
         assert_eq!(
