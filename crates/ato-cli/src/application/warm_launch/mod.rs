@@ -23,7 +23,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use blake3::Hasher;
+use capsule_core::handle::{normalize_capsule_handle, CanonicalHandle};
 use fs2::FileExt;
+
+use crate::app_control::{resolve_local_plan_for_session, StoredSessionInfo};
+use crate::application::build_materialization as bm;
+use crate::application::launch_materialization as lm;
+use crate::runtime::tree as runtime_tree;
 
 /// Content/identity-addressed key for a projection root.
 ///
@@ -52,11 +58,7 @@ impl ProjectionKey {
         update_field(&mut hasher, "resolver_version", Self::RESOLVER_VERSION);
         update_field(&mut hasher, "install_identity", install_identity);
         update_field(&mut hasher, "manifest_digest", manifest_digest);
-        update_field(
-            &mut hasher,
-            "lock_digest",
-            lock_digest.unwrap_or("none"),
-        );
+        update_field(&mut hasher, "lock_digest", lock_digest.unwrap_or("none"));
         update_field(&mut hasher, "target_label", target_label);
         update_field(&mut hasher, "platform", platform);
         update_field(&mut hasher, "toolchain_fingerprint", toolchain_fingerprint);
@@ -113,6 +115,110 @@ pub(crate) enum LifecycleStepKind {
     ProviderStartup,
     /// Start the capsule's main process.
     AppStartup,
+}
+
+/// Result of the pre-resolution live-session reuse fast path.
+pub(crate) struct LiveReuseHit {
+    pub(crate) record: Box<StoredSessionInfo>,
+    pub(crate) pre_projection_spec: lm::LaunchSpec,
+    pub(crate) launch_lock: Option<lm::LaunchLock>,
+}
+
+/// Best-effort fast path for registry capsules that are already installed.
+///
+/// This path avoids `resolve_run_target_or_install` and full launch-plan
+/// resolution by reading install metadata from the local runtime cache,
+/// deriving the launch identity, and running the standard
+/// `prepare_reuse_decision` check immediately.
+pub(crate) fn try_registry_live_reuse_fast_path(
+    handle: &str,
+    target_label: Option<&str>,
+) -> Result<Option<LiveReuseHit>> {
+    let canonical = match normalize_capsule_handle(handle) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let CanonicalHandle::RegistryCapsule {
+        publisher,
+        slug,
+        version,
+        ..
+    } = canonical
+    else {
+        return Ok(None);
+    };
+
+    let runtime_cache = match capsule_core::common::paths::runtime_cache_dir() {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let store_root = runtime_cache.join(&publisher);
+    let Some(capsule_path) =
+        crate::application::engine::install::support::resolve_installed_capsule_archive_in_store(
+            &store_root,
+            &slug,
+            version.as_deref(),
+        )?
+    else {
+        return Ok(None);
+    };
+
+    let manifest_path = match runtime_tree::prepare_store_runtime_for_capsule(&capsule_path)? {
+        Some(path) => path,
+        None => capsule_path,
+    };
+    let (plan, _notes) = match resolve_local_plan_for_session(&manifest_path, target_label) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let launch = match capsule_core::launch_spec::derive_launch_spec(&plan) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+
+    let install_workspace = plan.workspace_root.clone();
+    let workdir_relative = launch
+        .working_dir
+        .strip_prefix(&install_workspace)
+        .map(|r| r.to_path_buf())
+        .unwrap_or_default();
+    let manifest_digest =
+        compute_file_digest(&manifest_path).unwrap_or_else(|_| "unknown".to_string());
+    let lock_digest = compute_lock_digest(&install_workspace);
+    let toolchain = bm::toolchain_fingerprint_for_plan(&plan);
+    let platform = current_platform();
+    let target_label = target_label
+        .unwrap_or_else(|| plan.selected_target_label())
+        .to_string();
+    let projection_key = ProjectionKey::compute(
+        &install_workspace.to_string_lossy(),
+        &manifest_digest,
+        lock_digest.as_deref(),
+        &target_label,
+        &platform,
+        &toolchain,
+    );
+    let logical_cwd = make_logical_cwd(&projection_key, &workdir_relative);
+    let pre_projection_spec = lm::canonicalize_launch_spec(
+        handle,
+        &target_label,
+        &plan,
+        &launch,
+        &manifest_path,
+        Some(logical_cwd),
+    )?;
+    let launch_digest = lm::compute_launch_digest(&pre_projection_spec);
+    let launch_key = lm::compute_launch_key(&pre_projection_spec);
+    let launch_lock = lm::acquire_launch_lock(&launch_key).ok();
+
+    match lm::prepare_reuse_decision(&pre_projection_spec, &launch_digest)? {
+        lm::ReuseDecision::Reuse { record } => Ok(Some(LiveReuseHit {
+            record,
+            pre_projection_spec,
+            launch_lock,
+        })),
+        lm::ReuseDecision::Spawn { .. } => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,11 +289,7 @@ pub(crate) fn resolve_identity_projection(
 
     // Project into a temp dir first, then atomic-rename to final path so
     // there is never a moment where the final path exists without .complete.
-    let temp_root = version_dir.join(format!(
-        ".tmp-{}-{}",
-        key.full_key(),
-        std::process::id()
-    ));
+    let temp_root = version_dir.join(format!(".tmp-{}-{}", key.full_key(), std::process::id()));
     let temp_source = temp_root.join("source");
 
     // Clean up any leftover temp dir from a previous crashed process.
@@ -214,9 +316,8 @@ pub(crate) fn resolve_identity_projection(
         })?;
 
     // Ensure build dir exists within the temp dir before renaming.
-    fs::create_dir_all(temp_root.join("build")).with_context(|| {
-        format!("failed to create build dir in {}", temp_root.display())
-    })?;
+    fs::create_dir_all(temp_root.join("build"))
+        .with_context(|| format!("failed to create build dir in {}", temp_root.display()))?;
 
     // Write .complete marker inside the temp dir *before* the rename so the
     // marker is either fully present or absent — never partially written.
@@ -277,8 +378,8 @@ fn update_field(hasher: &mut Hasher, key: &str, value: &str) {
 
 /// Compute a blake3 hex digest of a file's contents.
 pub(crate) fn compute_file_digest(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
@@ -407,29 +508,85 @@ mod tests {
 
     #[test]
     fn projection_key_differs_with_manifest_digest() {
-        let a = ProjectionKey::compute("install/dir", "aabbcc", None, "app", "linux-x86_64", "node:20");
-        let b = ProjectionKey::compute("install/dir", "ddeeff", None, "app", "linux-x86_64", "node:20");
+        let a = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            None,
+            "app",
+            "linux-x86_64",
+            "node:20",
+        );
+        let b = ProjectionKey::compute(
+            "install/dir",
+            "ddeeff",
+            None,
+            "app",
+            "linux-x86_64",
+            "node:20",
+        );
         assert_ne!(a.full_hex, b.full_hex);
     }
 
     #[test]
     fn projection_key_differs_with_lock_digest() {
-        let a = ProjectionKey::compute("install/dir", "aabbcc", Some("lock1"), "app", "linux-x86_64", "node:20");
-        let b = ProjectionKey::compute("install/dir", "aabbcc", Some("lock2"), "app", "linux-x86_64", "node:20");
+        let a = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            Some("lock1"),
+            "app",
+            "linux-x86_64",
+            "node:20",
+        );
+        let b = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            Some("lock2"),
+            "app",
+            "linux-x86_64",
+            "node:20",
+        );
         assert_ne!(a.full_hex, b.full_hex);
     }
 
     #[test]
     fn projection_key_differs_with_platform() {
-        let a = ProjectionKey::compute("install/dir", "aabbcc", None, "app", "darwin-arm64", "node:20");
-        let b = ProjectionKey::compute("install/dir", "aabbcc", None, "app", "linux-x86_64", "node:20");
+        let a = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            None,
+            "app",
+            "darwin-arm64",
+            "node:20",
+        );
+        let b = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            None,
+            "app",
+            "linux-x86_64",
+            "node:20",
+        );
         assert_ne!(a.full_hex, b.full_hex);
     }
 
     #[test]
     fn projection_key_differs_with_toolchain() {
-        let a = ProjectionKey::compute("install/dir", "aabbcc", None, "app", "darwin-arm64", "node:20");
-        let b = ProjectionKey::compute("install/dir", "aabbcc", None, "app", "darwin-arm64", "node:22");
+        let a = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            None,
+            "app",
+            "darwin-arm64",
+            "node:20",
+        );
+        let b = ProjectionKey::compute(
+            "install/dir",
+            "aabbcc",
+            None,
+            "app",
+            "darwin-arm64",
+            "node:22",
+        );
         assert_ne!(a.full_hex, b.full_hex);
     }
 
@@ -447,6 +604,10 @@ mod tests {
         let identity = "~/.ato/runtimes/publisher/capsule/2.0.0";
         let a = ProjectionKey::compute(identity, "mfst", None, "api", "darwin-arm64", "node:20");
         let b = ProjectionKey::compute(identity, "mfst", None, "worker", "darwin-arm64", "node:20");
-        assert_ne!(a.full_key(), b.full_key(), "different targets must not collide");
+        assert_ne!(
+            a.full_key(),
+            b.full_key(),
+            "different targets must not collide"
+        );
     }
 }
