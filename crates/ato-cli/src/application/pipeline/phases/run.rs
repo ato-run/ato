@@ -1334,7 +1334,33 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
         &ProcessHostEnv,
         preflight_action,
     )?;
-    verify_lockfile_external_dependencies(&plan.manifest, &compatibility_legacy_lock.lock)?;
+    // PR-4a: bundle-derived `DependencyContracts` is the primary
+    // pre-spawn gate. Legacy
+    // `verify_lockfile_external_dependencies(manifest, lock)` stays
+    // as a debug parity guard.
+    {
+        let external_dependencies =
+            manifest_external_capsule_dependencies(&plan.manifest)?;
+        let bundle = crate::application::graph_views::build_declared_only_bundle(
+            &external_dependencies,
+            Some(plan.manifest_path.display().to_string()),
+            None,
+            Vec::new(),
+        );
+        capsule_core::lockfile::verify_lockfile_against_contracts(
+            &bundle.derived.dependency_contracts,
+            &compatibility_legacy_lock.lock,
+        )?;
+        debug_assert!(
+            verify_lockfile_external_dependencies(
+                &plan.manifest,
+                &compatibility_legacy_lock.lock,
+            )
+            .is_ok(),
+            "PR-4a parity: legacy verifier disagrees with bundle-derived verifier \
+             at run.rs pre-spawn gate (compatibility branch)"
+        );
+    }
 
     let guard =
         start_dependency_contracts_for_run(prepared, plan, &compatibility_legacy_lock.lock).await?;
@@ -1770,10 +1796,30 @@ where
                     Some(CAPSULE_LOCK_FILE_NAME),
                 )
             })?;
-        verify_lockfile_external_dependencies(
-            &decision.plan.manifest,
-            &compatibility_legacy_lock.lock,
-        )?;
+        // PR-4a: bundle-derived primary, legacy parity in debug.
+        {
+            let external_dependencies =
+                manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+            let bundle = crate::application::graph_views::build_declared_only_bundle(
+                &external_dependencies,
+                Some(decision.plan.manifest_path.display().to_string()),
+                None,
+                Vec::new(),
+            );
+            capsule_core::lockfile::verify_lockfile_against_contracts(
+                &bundle.derived.dependency_contracts,
+                &compatibility_legacy_lock.lock,
+            )?;
+            debug_assert!(
+                verify_lockfile_external_dependencies(
+                    &decision.plan.manifest,
+                    &compatibility_legacy_lock.lock,
+                )
+                .is_ok(),
+                "PR-4a parity: legacy verifier disagrees with bundle-derived verifier \
+                 at run.rs pre-spawn gate (external-capsules branch)"
+            );
+        }
         external_capsules = Some(
             crate::external_capsule::start_external_capsules(
                 &decision.plan,
