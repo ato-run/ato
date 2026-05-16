@@ -117,6 +117,16 @@ pub(super) struct SessionStartPhaseRunner<'a> {
 
     // Set by Execute phase. Read by `start_session` after `pipeline.run`.
     pub(super) session_info: Option<SessionInfo>,
+
+    /// PR-3b: shared LaunchGraphBundle for this launch.
+    ///
+    /// Populated by `emit_execution_receipt` (via
+    /// `build_prelaunch_receipt_document_with_graph`) so downstream
+    /// steps in this runner share the same bundle the receipt was
+    /// derived from instead of re-deriving and risking drift. None
+    /// before receipt emission, or for V1-schema launches.
+    pub(super) launch_graph:
+        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
 }
 
 impl<'a> SessionStartPhaseRunner<'a> {
@@ -141,6 +151,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             execute_reused: false,
             execute_prior_kind: None,
             session_info: None,
+            launch_graph: None,
         }
     }
 
@@ -513,7 +524,14 @@ impl<'a> SessionStartPhaseRunner<'a> {
         // re-emits here so its computed_at refreshes against the same clean
         // workspace state.
         let prelaunch_receipt = match self.emit_execution_receipt() {
-            Ok(pair) => Some(pair),
+            Ok((metadata, bundle)) => {
+                // PR-3b: capture the bundle onto self so subsequent
+                // steps in this runner (and any future PR-3c / PR-3d
+                // reader) consult the same instance the receipt was
+                // derived from. Bundle is None on V1-schema launches.
+                self.launch_graph = bundle;
+                Some(metadata)
+            }
             Err(err) => {
                 eprintln!(
                     "ATO-WARN session start failed to emit execution receipt: {}",
@@ -610,7 +628,16 @@ impl<'a> SessionStartPhaseRunner<'a> {
         Ok(())
     }
 
-    fn emit_execution_receipt(&self) -> Result<super::session::ExecutionReceiptSessionMetadata> {
+    /// Returns the receipt metadata and (for V2 schema launches) the
+    /// `LaunchGraphBundle` that produced the receipt's
+    /// declared/resolved execution ids. PR-3b: callers stash the bundle
+    /// onto the runner so downstream steps share the same instance.
+    fn emit_execution_receipt(
+        &self,
+    ) -> Result<(
+        super::session::ExecutionReceiptSessionMetadata,
+        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
+    )> {
         use capsule_core::engine::execution_plan::derive::compile_execution_plan;
         use capsule_core::execution_identity::ExecutionReceiptDocument;
         use capsule_core::router::ExecutionProfile;
@@ -628,12 +655,19 @@ impl<'a> SessionStartPhaseRunner<'a> {
             compile_execution_plan(manifest_path, ExecutionProfile::Dev, self.target_label)
                 .map_err(|err| anyhow::anyhow!("failed to compile execution plan: {err}"))?;
 
-        let document = execution_receipt_builder::build_prelaunch_receipt_document(
-            plan,
-            &compiled.execution_plan,
-            &self.launch_ctx,
-            self.build_observation.as_ref(),
-        )?;
+        let receipt_output =
+            execution_receipt_builder::build_prelaunch_receipt_document_with_graph(
+                plan,
+                &compiled.execution_plan,
+                &self.launch_ctx,
+                self.build_observation.as_ref(),
+            )?;
+        // PR-3b: emit_execution_receipt returns the bundle alongside
+        // the metadata so the caller can stash it onto self without
+        // requiring a `&mut self` borrow here (which would conflict
+        // with the immutable borrows of `self.{resolution, plan, ...}`
+        // held by run_execute across the call site).
+        let document = receipt_output.document;
         let _path = execution_receipts::write_receipt_document_atomic(&document)?;
         let metadata = match document {
             ExecutionReceiptDocument::V1(receipt) => {
@@ -662,7 +696,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 }
             }
         };
-        Ok(metadata)
+        Ok((metadata, receipt_output.launch_graph))
     }
 
     // Note: `maybe_project_to_session` is a free function below the impl

@@ -599,6 +599,15 @@ pub(crate) struct RunPipelineState {
     /// PHASE-TIMING. None until run_build_phase populates it.
     pub(crate) build_decision_kind:
         Option<crate::application::build_materialization::BuildResultKind>,
+    /// PR-3b: shared LaunchGraphBundle for this launch.
+    ///
+    /// Populated by `build_prelaunch_receipt_document_with_graph` at
+    /// receipt-emit time so subsequent steps (session record enrichment,
+    /// readiness update, partial receipt boundary) read declared/resolved
+    /// execution ids from the SAME bundle the receipt was derived from
+    /// instead of re-running the bundle builder and risking drift.
+    pub(crate) launch_graph:
+        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
 }
 
 #[derive(Debug)]
@@ -1928,6 +1937,7 @@ where
         native_nacelle: None,
         build_observation: None,
         build_decision_kind: None,
+        launch_graph: None,
     })
 }
 
@@ -2687,7 +2697,12 @@ where
         native_nacelle,
         build_observation,
         build_decision_kind: _,
+        // PR-3b: bundle is owned by `RunPipelineState` until receipt
+        // emission below; we'll replace the carrier when the receipt
+        // builder returns the bundle it derived.
+        launch_graph: _,
     } = state;
+    let mut launch_graph: Option<capsule_core::engine::execution_graph::LaunchGraphBundle> = None;
 
     if decision.plan.is_orchestration_mode() {
         if request.background {
@@ -2821,13 +2836,19 @@ where
             .await?;
     }
 
-    let execution_receipt_document =
-        crate::application::execution_receipt_builder::build_prelaunch_receipt_document(
+    let receipt_output =
+        crate::application::execution_receipt_builder::build_prelaunch_receipt_document_with_graph(
             &decision.plan,
             &execution_plan,
             &launch_ctx,
             build_observation.as_ref(),
         )?;
+    // PR-3b: stash the bundle on the local carrier so subsequent steps in
+    // this launch (and downstream consumers reading from
+    // `RunPipelineState`) share the same instance the receipt was
+    // derived from.
+    launch_graph = receipt_output.launch_graph;
+    let execution_receipt_document = receipt_output.document;
     let execution_receipt_path =
         crate::application::execution_receipts::write_receipt_document_atomic(
             &execution_receipt_document,
