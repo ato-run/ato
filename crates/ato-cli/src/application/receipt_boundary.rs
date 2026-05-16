@@ -35,6 +35,7 @@
 //! diagnostic surface.
 
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use capsule_core::execution_identity::{
@@ -55,17 +56,134 @@ use crate::application::execution_receipts::write_receipt_document_atomic_at;
 /// struct exists so the boundary signature is stable when future waves
 /// add fields (e.g. a writable handle for declared/resolved ids
 /// populated mid-pipeline).
+/// PR-3b carrier: declared/resolved execution ids stamped onto a
+/// partial receipt when the launch failed AFTER the
+/// `LaunchGraphBundle` was built.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GraphIds {
+    pub(crate) declared_execution_id: Option<String>,
+    pub(crate) resolved_execution_id: Option<String>,
+}
+
+/// PR-3b sink for graph IDs published by the inner pipeline mid-launch.
+///
+/// `Clone` (cheap, `Arc`-shared) so the boundary wrapper and the inner
+/// pipeline both hold a handle to the same cell. The inner pipeline
+/// calls `set(...)` immediately after `LaunchGraphBundle` construction;
+/// the wrapper calls `drain()` on the failure path so the partial
+/// receipt carries the same declared/resolved ids the would-be
+/// success receipt would have.
+///
+/// Empty cell -> no bundle was built before the failure -> partial
+/// receipt's declared/resolved ids remain `None` (the pre-PR-3b shape).
 #[derive(Debug, Clone, Default)]
+pub(crate) struct ReceiptGraphIdSink {
+    inner: Arc<Mutex<Option<GraphIds>>>,
+}
+
+impl ReceiptGraphIdSink {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Publish graph ids from the inner pipeline.
+    ///
+    /// Idempotent / last-write-wins: a launch that builds the bundle
+    /// once writes once; a hypothetical caller that rebuilds the
+    /// bundle (not a production path today) would overwrite. Errors
+    /// on a poisoned lock are swallowed — a poisoned sink is a
+    /// best-effort observability surface, not a correctness path.
+    pub(crate) fn set(&self, ids: GraphIds) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some(ids);
+        }
+    }
+
+    /// Snapshot the current ids. Read by the boundary wrapper on the
+    /// failure path to enrich the partial receipt.
+    pub(crate) fn snapshot(&self) -> GraphIds {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ReceiptEmissionContext {
     /// Human-readable label for the boundary (e.g. `"ato run"`,
     /// `"ato app session start"`). Surfaces only in the
     /// `ATO-WARN` diagnostic when receipt write fails — never serialized.
     pub(crate) boundary: &'static str,
+    /// Graph IDs known up-front, before the future runs. Used by
+    /// tests / call sites that already hold a bundle. Production
+    /// pipelines pass `None` here and write to `graph_id_sink`
+    /// mid-launch instead — the sink handle is shared with the
+    /// inner future via the closure-based [`emit_receipt_on_result`]
+    /// signature.
+    pub(crate) declared_execution_id: Option<String>,
+    /// Resolved-domain execution id. See `declared_execution_id`.
+    pub(crate) resolved_execution_id: Option<String>,
+    /// Shared sink the inner pipeline writes ids into mid-launch
+    /// (after `LaunchGraphBundle` construction). Default-initialized
+    /// to an empty cell; the boundary wrapper hands a clone to the
+    /// inner future and reads the cell on the failure path so a
+    /// partial receipt carries the same declared/resolved ids the
+    /// success receipt would have.
+    pub(crate) graph_id_sink: ReceiptGraphIdSink,
+}
+
+impl Default for ReceiptEmissionContext {
+    fn default() -> Self {
+        Self {
+            boundary: "",
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            graph_id_sink: ReceiptGraphIdSink::new(),
+        }
+    }
 }
 
 impl ReceiptEmissionContext {
     pub(crate) fn for_boundary(boundary: &'static str) -> Self {
-        Self { boundary }
+        Self {
+            boundary,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            graph_id_sink: ReceiptGraphIdSink::new(),
+        }
+    }
+
+    /// Test helper: stamp graph-derived execution ids directly on the
+    /// context without going through the sink. Production paths use
+    /// the sink so the inner pipeline can publish ids mid-launch.
+    #[cfg(test)]
+    pub(crate) fn with_graph_ids(
+        mut self,
+        declared: Option<String>,
+        resolved: Option<String>,
+    ) -> Self {
+        self.declared_execution_id = declared;
+        self.resolved_execution_id = resolved;
+        self
+    }
+
+    /// Effective ids used to stamp a partial receipt. Prefers the
+    /// sink (set by the inner pipeline) over up-front ids — the sink
+    /// is the mid-launch signal that survived the boundary, so it
+    /// reflects the most recent bundle the pipeline built before
+    /// failing.
+    pub(crate) fn effective_graph_ids(&self) -> GraphIds {
+        let snapshot = self.graph_id_sink.snapshot();
+        if snapshot.declared_execution_id.is_some() || snapshot.resolved_execution_id.is_some() {
+            snapshot
+        } else {
+            GraphIds {
+                declared_execution_id: self.declared_execution_id.clone(),
+                resolved_execution_id: self.resolved_execution_id.clone(),
+            }
+        }
     }
 }
 
@@ -78,13 +196,18 @@ impl ReceiptEmissionContext {
 /// diagnostic is emitted on stderr but the original error from the
 /// inner future is always returned. Hiding the failure under a write
 /// error would mask the actual user-visible problem.
-pub(crate) async fn emit_receipt_on_result<F, T>(ctx: ReceiptEmissionContext, inner: F) -> Result<T>
+pub(crate) async fn emit_receipt_on_result<F, Fut, T>(
+    ctx: ReceiptEmissionContext,
+    inner: F,
+) -> Result<T>
 where
-    F: Future<Output = Result<T>>,
+    F: FnOnce(ReceiptGraphIdSink) -> Fut,
+    Fut: Future<Output = Result<T>>,
 {
-    let outcome = inner.await;
+    let sink_for_future = ctx.graph_id_sink.clone();
+    let outcome = inner(sink_for_future).await;
     if let Err(error) = outcome.as_ref() {
-        if let Some(receipt) = partial_receipt_for_error(error) {
+        if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
             match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
                 Ok(path) => eprintln!(
                     "Execution receipt (v2-experimental, {}): {} ({})",
@@ -116,17 +239,19 @@ where
 /// crate's own tests to verify the write side without touching the
 /// developer's real receipt store.
 #[cfg(test)]
-pub(crate) async fn emit_receipt_on_result_at<F, T>(
+pub(crate) async fn emit_receipt_on_result_at<F, Fut, T>(
     ctx: ReceiptEmissionContext,
     root: &std::path::Path,
     inner: F,
 ) -> Result<T>
 where
-    F: Future<Output = Result<T>>,
+    F: FnOnce(ReceiptGraphIdSink) -> Fut,
+    Fut: Future<Output = Result<T>>,
 {
-    let outcome = inner.await;
+    let sink_for_future = ctx.graph_id_sink.clone();
+    let outcome = inner(sink_for_future).await;
     if let Err(error) = outcome.as_ref() {
-        if let Some(receipt) = partial_receipt_for_error(error) {
+        if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
             if let Err(write_err) =
                 write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V2(receipt))
             {
@@ -144,19 +269,37 @@ where
 /// error chain has no recognizable typed envelope. Pure function — no
 /// I/O — so callers and tests can compose it freely with the write
 /// step.
+///
+/// Convenience wrapper over [`partial_receipt_for_error_with_ctx`] for
+/// callers that don't have access to a `ReceiptEmissionContext` (e.g.
+/// crate-internal tests). Production paths should use the with_ctx
+/// variant so graph-derived declared/resolved ids flow through.
 pub(crate) fn partial_receipt_for_error(error: &anyhow::Error) -> Option<ExecutionReceiptV2> {
+    partial_receipt_for_error_with_ctx(error, &ReceiptEmissionContext::default())
+}
+
+/// PR-3b: variant of [`partial_receipt_for_error`] that stamps the
+/// declared/resolved execution ids from the `ReceiptEmissionContext`
+/// onto the partial receipt. Used by the boundary wrapper so a
+/// partial receipt agrees with the (would-be) success receipt's id
+/// space whenever the bundle was built before the failure.
+pub(crate) fn partial_receipt_for_error_with_ctx(
+    error: &anyhow::Error,
+    ctx: &ReceiptEmissionContext,
+) -> Option<ExecutionReceiptV2> {
     let envelope = build_failure_envelope(error)?;
     let result_class = match envelope.kind {
         ReceiptFailureKind::Recoverable => ReceiptResultClass::RecoverableFailure,
         ReceiptFailureKind::Aborted => ReceiptResultClass::Aborted,
     };
+    let ids = ctx.effective_graph_ids();
     Some(
         ExecutionReceiptV2::partial_failure(
             chrono::Utc::now().to_rfc3339(),
             result_class,
             envelope,
-            None, // declared_execution_id — see ReceiptEmissionContext docs
-            None, // resolved_execution_id — see ReceiptEmissionContext docs
+            ids.declared_execution_id,
+            ids.resolved_execution_id,
             None, // local locator — partial receipts don't surface paths
         )
         .with_runner(ExecutionRunnerIdentity::new(
@@ -360,7 +503,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = ReceiptEmissionContext::for_boundary("test boundary");
 
-        let outcome: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), async {
+        let outcome: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |_sink| async {
             Err::<(), _>(anyhow::Error::new(execution_error(
                 AtoErrorCode::AtoErrMissingRequiredEnv,
             )))
@@ -430,7 +573,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = ReceiptEmissionContext::for_boundary("test boundary");
 
-        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), async {
+        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |_sink| async {
             Err::<(), _>(anyhow::Error::new(execution_error(
                 AtoErrorCode::AtoErrInternal,
             )))
@@ -466,7 +609,7 @@ mod tests {
         let ctx = ReceiptEmissionContext::for_boundary("test boundary");
 
         let outcome: Result<u32> =
-            emit_receipt_on_result_at(ctx, temp.path(), async { Ok(42) }).await;
+            emit_receipt_on_result_at(ctx, temp.path(), |_sink| async { Ok(42) }).await;
         assert_eq!(outcome.expect("ok"), 42);
 
         let entries: Vec<_> = std::fs::read_dir(temp.path())
@@ -487,7 +630,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = ReceiptEmissionContext::for_boundary("test boundary");
 
-        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), async {
+        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |_sink| async {
             Err::<(), _>(anyhow::anyhow!("untyped failure"))
         })
         .await;
@@ -499,6 +642,136 @@ mod tests {
         assert!(
             entries.is_empty(),
             "wrapper must not write a receipt for untyped errors"
+        );
+    }
+
+    /// PR-3b core contract: ids published into the sink mid-launch
+    /// (before the failure) MUST end up on the partial receipt.
+    ///
+    /// This pins the new sink-based design: `with_graph_ids` is no
+    /// longer required for the partial receipt to carry graph ids —
+    /// the inner future writes to the sink shared via the closure,
+    /// and the wrapper reads that sink on the failure path.
+    #[tokio::test]
+    async fn wrapper_partial_receipt_carries_sink_published_graph_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = ReceiptEmissionContext::for_boundary("test boundary");
+
+        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |sink| async move {
+            // Simulate the receipt builder publishing ids on the
+            // happy path BEFORE the failure point: the LaunchGraphBundle
+            // was built, the receipt was emitted, then the workload
+            // failed mid-spawn.
+            sink.set(GraphIds {
+                declared_execution_id: Some("blake3:declared-fixture".to_string()),
+                resolved_execution_id: Some("blake3:resolved-fixture".to_string()),
+            });
+            Err::<(), _>(anyhow::Error::new(execution_error(
+                AtoErrorCode::AtoErrRuntimeNotResolved,
+            )))
+        })
+        .await;
+
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "wrapper must write exactly one partial receipt for the failure"
+        );
+
+        let receipt_path = temp.path().join(&entries[0]).join("receipt.json");
+        let raw = std::fs::read_to_string(&receipt_path).expect("read receipt");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse receipt");
+        assert_eq!(
+            value
+                .get("declared_execution_id")
+                .and_then(serde_json::Value::as_str),
+            Some("blake3:declared-fixture"),
+            "PR-3b: partial receipt must carry the sink-published declared_execution_id"
+        );
+        assert_eq!(
+            value
+                .get("resolved_execution_id")
+                .and_then(serde_json::Value::as_str),
+            Some("blake3:resolved-fixture"),
+            "PR-3b: partial receipt must carry the sink-published resolved_execution_id"
+        );
+    }
+
+    /// PR-3b: sink-published ids must override the ctx-level
+    /// `with_graph_ids` fallback. The sink is the mid-launch signal,
+    /// the ctx-level ids are static input — the wrapper prefers the
+    /// fresher source.
+    #[tokio::test]
+    async fn wrapper_prefers_sink_published_ids_over_ctx_with_graph_ids_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = ReceiptEmissionContext::for_boundary("test boundary").with_graph_ids(
+            Some("blake3:declared-from-ctx".to_string()),
+            Some("blake3:resolved-from-ctx".to_string()),
+        );
+
+        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |sink| async move {
+            sink.set(GraphIds {
+                declared_execution_id: Some("blake3:declared-from-sink".to_string()),
+                resolved_execution_id: Some("blake3:resolved-from-sink".to_string()),
+            });
+            Err::<(), _>(anyhow::Error::new(execution_error(
+                AtoErrorCode::AtoErrRuntimeNotResolved,
+            )))
+        })
+        .await;
+
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let receipt_path = temp.path().join(&entries[0]).join("receipt.json");
+        let raw = std::fs::read_to_string(&receipt_path).expect("read receipt");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse receipt");
+        assert_eq!(
+            value
+                .get("declared_execution_id")
+                .and_then(serde_json::Value::as_str),
+            Some("blake3:declared-from-sink"),
+            "PR-3b: sink published mid-launch must win over ctx-level fallback"
+        );
+    }
+
+    /// When the inner future never publishes to the sink (e.g. it
+    /// fails before reaching the bundle build), the partial receipt
+    /// falls back to ctx-level ids if any are set.
+    #[tokio::test]
+    async fn wrapper_falls_back_to_ctx_ids_when_sink_unused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = ReceiptEmissionContext::for_boundary("test boundary")
+            .with_graph_ids(Some("blake3:declared-fallback".to_string()), None);
+
+        let _: Result<()> = emit_receipt_on_result_at(ctx, temp.path(), |_sink| async {
+            Err::<(), _>(anyhow::Error::new(execution_error(
+                AtoErrorCode::AtoErrMissingRequiredEnv,
+            )))
+        })
+        .await;
+
+        let entries: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("read tempdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let receipt_path = temp.path().join(&entries[0]).join("receipt.json");
+        let raw = std::fs::read_to_string(&receipt_path).expect("read receipt");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse receipt");
+        assert_eq!(
+            value
+                .get("declared_execution_id")
+                .and_then(serde_json::Value::as_str),
+            Some("blake3:declared-fallback"),
+            "PR-3b: empty sink must fall back to ctx-level declared_execution_id"
         );
     }
 }

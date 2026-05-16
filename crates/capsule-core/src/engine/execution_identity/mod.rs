@@ -330,6 +330,36 @@ pub struct ExecutionReceiptV2 {
     /// only, never feeds `execution_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_envelope: Option<ReceiptFailureEnvelope>,
+    /// Identifier of the runtime that emitted this receipt. Added in
+    /// PR-3a; `None` for receipts written before the field existed.
+    /// Diagnostic only — excluded from the JCS projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<ExecutionRunnerIdentity>,
+    /// Host fingerprint string of the form `<os>:<arch>:<libc>` captured
+    /// at receipt-emit time. Diagnostic; the structured platform facts
+    /// are still recorded under `runtime.platform`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_fingerprint: Option<String>,
+    /// Whether `graph_receipt` / `node_receipts` / `edge_receipts`
+    /// describe the full launch graph or a partial slice. See
+    /// [`GraphCompleteness`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_completeness: Option<GraphCompleteness>,
+    /// Lifecycle-pass record for the launch graph attached to this
+    /// receipt. Distinguishes launch-passed receipts (envelope
+    /// resolved) from readiness-passed receipts (workload reached
+    /// readiness gate). See [`GraphReceipt`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_receipt: Option<GraphReceipt>,
+    /// Per-node observations for the launch graph. Reserved — emitted
+    /// as `[]` today so future waves can populate it without a schema
+    /// bump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_receipts: Vec<NodeReceipt>,
+    /// Per-edge observations for the launch graph. Reserved — see
+    /// `node_receipts`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_receipts: Vec<EdgeReceipt>,
 }
 
 impl ExecutionReceiptV2 {
@@ -359,6 +389,12 @@ impl ExecutionReceiptV2 {
             observed_execution_id: input.observed_execution_id,
             result: ReceiptResultClass::Passed,
             failure_envelope: None,
+            runner: None,
+            host_fingerprint: None,
+            graph_completeness: None,
+            graph_receipt: None,
+            node_receipts: Vec::new(),
+            edge_receipts: Vec::new(),
         })
     }
 
@@ -373,6 +409,35 @@ impl ExecutionReceiptV2 {
     ) -> Self {
         self.result = result;
         self.failure_envelope = failure_envelope;
+        self
+    }
+
+    /// Stamp the runtime identity (binary name + version) that produced
+    /// this receipt. Diagnostic only; never feeds `execution_id`.
+    pub fn with_runner(mut self, runner: ExecutionRunnerIdentity) -> Self {
+        self.runner = Some(runner);
+        self
+    }
+
+    /// Stamp a host fingerprint string (`os:arch:libc`). Diagnostic only;
+    /// the structured platform facts still live under `runtime.platform`.
+    pub fn with_host_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.host_fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    /// Stamp the graph completeness label. `Partial` means the attached
+    /// `graph_receipt` / `node_receipts` / `edge_receipts` describe a
+    /// subset of the launch graph; `Complete` means they cover the full
+    /// graph (no production caller emits `Complete` yet).
+    pub fn with_graph_completeness(mut self, completeness: GraphCompleteness) -> Self {
+        self.graph_completeness = Some(completeness);
+        self
+    }
+
+    /// Attach a [`GraphReceipt`] lifecycle-pass record.
+    pub fn with_graph_receipt(mut self, receipt: GraphReceipt) -> Self {
+        self.graph_receipt = Some(receipt);
         self
     }
 
@@ -504,8 +569,131 @@ impl ExecutionReceiptV2 {
             observed_execution_id: None,
             result,
             failure_envelope: Some(failure_envelope),
+            runner: None,
+            host_fingerprint: None,
+            graph_completeness: None,
+            graph_receipt: None,
+            node_receipts: Vec::new(),
+            edge_receipts: Vec::new(),
         }
     }
+}
+
+/// Runner identity (who emitted the receipt). Surfaces the producing
+/// binary's name and version so downstream consumers can route on
+/// "emitted by ato-cli vs ato-desktop" without parsing the receipt's
+/// host_fingerprint.
+///
+/// Stored optionally on `ExecutionReceiptV2.runner` with serde default
+/// to keep v2 receipt back-compat for pre-PR-3a payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionRunnerIdentity {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl ExecutionRunnerIdentity {
+    pub fn new(name: impl Into<String>, version: Option<String>) -> Self {
+        Self {
+            name: name.into(),
+            version,
+        }
+    }
+}
+
+/// Whether the graph attached to this receipt is the full launch graph
+/// (`Complete`) or a subset captured before the launch was fully resolved
+/// (`Partial`). Today only `Partial` is emitted — receipts include the
+/// declared / resolved / preflight projection, not the observed
+/// post-spawn extension — but the variant exists so future waves can
+/// upgrade to `Complete` without a schema bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphCompleteness {
+    Partial,
+    Complete,
+}
+
+impl GraphCompleteness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GraphCompleteness::Partial => "partial",
+            GraphCompleteness::Complete => "complete",
+        }
+    }
+}
+
+/// Lifecycle-pass record for the launch graph attached to a receipt.
+///
+/// Replaces the earlier "ready=true on receipt readiness" sentinel by
+/// recording WHICH gate (launch / readiness) passed and stamping the
+/// declared / resolved / observed execution-id facets at that gate.
+/// Receipt readers can therefore tell a launch-passed receipt from a
+/// readiness-passed receipt without re-running the gating pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphReceipt {
+    /// Which gate produced this record. `"launch-passed"` is stamped
+    /// when the launch envelope was resolved (post-preflight, pre-spawn);
+    /// `"readiness-passed"` is stamped when the workload reached its
+    /// readiness gate (HTTP healthcheck OK, terminal ready, etc.).
+    pub gate: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_execution_id: Option<String>,
+}
+
+impl GraphReceipt {
+    pub fn launch_passed(
+        declared_execution_id: Option<String>,
+        resolved_execution_id: Option<String>,
+        observed_execution_id: Option<String>,
+    ) -> Self {
+        Self {
+            gate: "launch-passed".to_string(),
+            declared_execution_id,
+            resolved_execution_id,
+            observed_execution_id,
+        }
+    }
+
+    pub fn readiness_passed(
+        declared_execution_id: Option<String>,
+        resolved_execution_id: Option<String>,
+        observed_execution_id: Option<String>,
+    ) -> Self {
+        Self {
+            gate: "readiness-passed".to_string(),
+            declared_execution_id,
+            resolved_execution_id,
+            observed_execution_id,
+        }
+    }
+}
+
+/// Per-node receipt entry. Reserved for future waves that attach
+/// per-node lifecycle pass/fail observations. Today emitted as an empty
+/// list so the schema is forward-compatible: downstream consumers can
+/// already iterate `node_receipts` without a schema bump.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeReceipt {
+    pub node_identifier: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// Per-edge receipt entry. Reserved for future waves; see `NodeReceipt`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeReceipt {
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Outcome class for an execution receipt (refs #74, #99).
@@ -2048,6 +2236,147 @@ pub(in crate::engine::execution_identity) mod tests {
         assert_ne!(
             first.computed_at, second.computed_at,
             "fixture sanity: the two receipts should have different computed_at timestamps"
+        );
+    }
+
+    /// PR-3a back-compat pin: a v2 receipt JSON written before PR-3a
+    /// (no `runner` / `host_fingerprint` / `graph_completeness` /
+    /// `graph_receipt` / `node_receipts` / `edge_receipts` fields) must
+    /// round-trip through the post-PR-3a `ExecutionReceiptV2` shape
+    /// without a serde error. The new fields default to `None` / empty
+    /// when absent on disk.
+    #[test]
+    fn pre_pr3a_v2_receipt_round_trips_after_schema_extension() {
+        let pre_pr3a_json = serde_json::json!({
+            "schema_version": EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+            "execution_id": "blake3:fixture-execution",
+            "computed_at": "2026-05-03T00:00:00Z",
+            "identity": {
+                "canonicalization": EXECUTION_IDENTITY_CANONICALIZATION,
+                "hash_algorithm": EXECUTION_IDENTITY_HASH_ALGORITHM,
+                "input_hash": "blake3:fixture-input"
+            },
+            "source": {
+                "source_tree_hash": { "status": "known", "value": "blake3:src" },
+                "manifest_path_role": { "status": "known", "value": "manifest:role" }
+            },
+            "source_provenance": { "kind": "unknown" },
+            "dependencies": {
+                "derivation_hash": { "status": "known", "value": "blake3:deps" },
+                "output_hash": { "status": "known", "value": "blake3:out" }
+            },
+            "runtime": {
+                "resolved_ref": { "status": "known", "value": "node@20.10.0" },
+                "binary_hash": { "status": "untracked", "reason": "fixture" },
+                "dynamic_linkage": { "status": "untracked", "reason": "fixture" },
+                "completeness": "declared-only",
+                "platform": { "os": "macos", "arch": "aarch64", "libc": "unknown" }
+            },
+            "environment": {
+                "entries": [],
+                "fd_layout": { "status": "untracked", "reason": "fixture" },
+                "umask": { "status": "untracked", "reason": "fixture" },
+                "ulimits": { "status": "untracked", "reason": "fixture" },
+                "mode": "untracked",
+                "ambient_untracked_keys": []
+            },
+            "filesystem": {
+                "view_hash": { "status": "known", "value": "blake3:fs" },
+                "source_root": { "status": "known", "value": "src-role" },
+                "working_directory": { "status": "known", "value": "wd-role" },
+                "readonly_layers": [],
+                "writable_dirs": [],
+                "persistent_state": [],
+                "semantics": {
+                    "case_sensitivity": { "status": "untracked", "reason": "fixture" },
+                    "symlink_policy": { "status": "untracked", "reason": "fixture" },
+                    "tmp_policy": { "status": "untracked", "reason": "fixture" }
+                }
+            },
+            "policy": {
+                "network_policy_hash": { "status": "known", "value": "blake3:net" },
+                "capability_policy_hash": { "status": "known", "value": "blake3:cap" },
+                "sandbox_policy_hash": { "status": "known", "value": "blake3:sbx" }
+            },
+            "launch": {
+                "entry_point": { "kind": "command", "name": "fixture" },
+                "argv": [],
+                "working_directory": { "status": "known", "value": "wd-role" }
+            },
+            "reproducibility": { "class": "best-effort", "causes": [] }
+        });
+
+        let receipt: ExecutionReceiptV2 = serde_json::from_value(pre_pr3a_json)
+            .expect("pre-PR-3a v2 receipt must re-deserialize after schema extension");
+
+        // PR-3a additive fields default to None / empty when absent.
+        assert!(receipt.runner.is_none());
+        assert!(receipt.host_fingerprint.is_none());
+        assert!(receipt.graph_completeness.is_none());
+        assert!(receipt.graph_receipt.is_none());
+        assert!(receipt.node_receipts.is_empty());
+        assert!(receipt.edge_receipts.is_empty());
+    }
+
+    /// PR-3a builder methods produce the expected fields on the receipt.
+    #[test]
+    fn pr3a_builder_methods_set_expected_fields() {
+        let receipt = ExecutionReceiptV2::partial_failure(
+            "2026-05-03T00:00:00Z".to_string(),
+            ReceiptResultClass::RecoverableFailure,
+            ReceiptFailureEnvelope {
+                kind: ReceiptFailureKind::Recoverable,
+                code: "E001".to_string(),
+                name: "fixture".to_string(),
+                phase: "manifest".to_string(),
+                message: "fixture".to_string(),
+                hint: None,
+                resource: None,
+                target: None,
+                retryable: false,
+                interactive_resolution_required: None,
+                classification: None,
+                cleanup_status: None,
+                cleanup_actions: Vec::new(),
+                manifest_suggestion: None,
+                details: None,
+            },
+            Some("blake3:declared".to_string()),
+            Some("blake3:resolved".to_string()),
+            None,
+        )
+        .with_runner(ExecutionRunnerIdentity::new(
+            "ato-cli",
+            Some("0.6.0".to_string()),
+        ))
+        .with_host_fingerprint("macos:aarch64:unknown-libc")
+        .with_graph_completeness(GraphCompleteness::Partial)
+        .with_graph_receipt(GraphReceipt::launch_passed(
+            Some("blake3:declared".to_string()),
+            Some("blake3:resolved".to_string()),
+            None,
+        ));
+
+        let runner = receipt.runner.as_ref().expect("runner set");
+        assert_eq!(runner.name, "ato-cli");
+        assert_eq!(runner.version.as_deref(), Some("0.6.0"));
+        assert_eq!(
+            receipt.host_fingerprint.as_deref(),
+            Some("macos:aarch64:unknown-libc")
+        );
+        assert_eq!(
+            receipt.graph_completeness,
+            Some(GraphCompleteness::Partial)
+        );
+        let graph_receipt = receipt.graph_receipt.as_ref().expect("graph_receipt set");
+        assert_eq!(graph_receipt.gate, "launch-passed");
+        assert_eq!(
+            graph_receipt.declared_execution_id.as_deref(),
+            Some("blake3:declared")
+        );
+        assert_eq!(
+            graph_receipt.resolved_execution_id.as_deref(),
+            Some("blake3:resolved")
         );
     }
 }
