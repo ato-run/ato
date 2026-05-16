@@ -23,8 +23,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Render, Window,
-    WindowBounds, WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, IntoElement, Pixels, Render, Size,
+    Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Deserialize;
@@ -102,6 +102,7 @@ impl DockRuntimeState {
 /// the page.
 pub struct DockWebView {
     pub(crate) webview: WebView,
+    window_size: Size<Pixels>,
     identity_state: Arc<Mutex<Value>>,
     runtime_state: Arc<Mutex<DockRuntimeState>>,
     paste: WebViewPasteSupport,
@@ -123,10 +124,27 @@ impl DockWebView {
             tracing::warn!(?error, "dock: evaluate_script event dispatch failed");
         }
     }
+
+    fn sync_webview_bounds(&mut self, window: &mut Window) {
+        let current = window.bounds().size;
+        if current == self.window_size {
+            return;
+        }
+        let _ = self.webview.set_bounds(Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(current.width) as u32,
+                f32::from(current.height) as u32,
+            )
+            .into(),
+        });
+        self.window_size = current;
+    }
 }
 
 impl Render for DockWebView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_webview_bounds(window);
         paste_render_wrap!(
             div().size_full().bg(rgb(0xffffff)),
             cx,
@@ -678,6 +696,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .expect("build_as_child must succeed for the Dock WebView");
         let view = cx.new(|cx| DockWebView {
             webview,
+            window_size: win_size,
             identity_state: identity_state.clone(),
             runtime_state: runtime_state.clone(),
             paste: WebViewPasteSupport::new(cx),

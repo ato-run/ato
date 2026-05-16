@@ -188,6 +188,23 @@ impl WebLinkViewShell {
             let _ = tab.webview.set_visible(tab.id == self.active_tab_id);
         }
     }
+
+    fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
+        let current = window.bounds().size;
+        if current == self.window_size {
+            return;
+        }
+        let top = TOTAL_TOP as i32;
+        let w = f32::from(current.width) as u32;
+        let h = (f32::from(current.height) as u32).saturating_sub(top as u32);
+        for tab in &self.tabs {
+            let _ = tab.webview.set_bounds(Rect {
+                position: LogicalPosition::new(0i32, top).into(),
+                size: LogicalSize::new(w, h).into(),
+            });
+        }
+        self.window_size = current;
+    }
 }
 
 fn build_tab(
@@ -324,7 +341,8 @@ fn handle_capsule_url(cx: &mut gpui::App, url: String) {
 }
 
 impl Render for WebLinkViewShell {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_webview_bounds(window);
         let entity = cx.entity();
 
         let tab_snapshots: Vec<(usize, SharedString, bool)> = self
