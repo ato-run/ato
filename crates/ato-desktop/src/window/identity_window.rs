@@ -23,8 +23,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, App, Bounds, Context, IntoElement, Render, WindowBounds, WindowDecorations,
-    WindowOptions,
+    div, px, rgb, size, App, Bounds, Context, IntoElement, Pixels, Render, Size, WindowBounds,
+    WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde_json::{json, Value};
@@ -129,6 +129,7 @@ fn fetch_whoami_identity() -> Value {
 
 pub struct IdentityWindowShell {
     _webview: WebView,
+    window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
 
@@ -141,12 +142,31 @@ impl WebViewPasteShell for IdentityWindowShell {
 }
 
 impl Render for IdentityWindowShell {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_webview_bounds(window);
         paste_render_wrap!(
             div().size_full().bg(rgb(0xffffff)),
             cx,
             &self.paste.focus_handle
         )
+    }
+}
+
+impl IdentityWindowShell {
+    fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
+        let current = window.bounds().size;
+        if current == self.window_size {
+            return;
+        }
+        let _ = self._webview.set_bounds(Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(current.width) as u32,
+                f32::from(current.height) as u32,
+            )
+            .into(),
+        });
+        self.window_size = current;
     }
 }
 
@@ -190,6 +210,7 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
             .expect("build_as_child must succeed for the Identity WebView");
         let shell = cx.new(|cx| IdentityWindowShell {
             _webview: webview,
+            window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
