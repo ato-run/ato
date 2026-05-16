@@ -940,6 +940,7 @@ fn map_tool_to_command(
             // gets an immediate error instead of a silent no-op.
             const KNOWN_ACTIONS: &[&str] = &[
                 "OpenAppWindowExperiment",
+                "CompleteOnboarding",
                 "OpenCardSwitcher",
                 "OpenDockWindow",
                 "OpenIdentityMenu",
@@ -949,6 +950,7 @@ fn map_tool_to_command(
                 "OpenCapsuleSettingsDemo",
                 "OpenStartWindow",
                 "OpenStoreWindow",
+                "SkipOnboarding",
                 "ScrollLaunchConsentConfigPanelBottom",
                 "ShowSettings",
             ];

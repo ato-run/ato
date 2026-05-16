@@ -118,6 +118,12 @@ const TABLE: &[SystemCapsuleManifest] = &[
             Capability::LaunchSystemCapsule,
         ],
     },
+    SystemCapsuleManifest {
+        id: SystemCapsuleId::AtoOnboarding,
+        slug: "onboarding",
+        display_name: "Onboarding",
+        allowed_capabilities: &[Capability::OnboardingComplete],
+    },
 ];
 
 /// Canonical handle URL for a system capsule slug. Mirrors the value
@@ -135,4 +141,18 @@ pub fn lookup(id: SystemCapsuleId) -> &'static SystemCapsuleManifest {
         // being the only manifest source; a missing entry is a
         // build-time bug we want to surface loudly.
         .expect("system capsule manifest table missing an entry")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onboarding_manifest_grants_onboarding_complete_capability() {
+        let manifest = lookup(SystemCapsuleId::AtoOnboarding);
+        assert_eq!(manifest.slug, "onboarding");
+        assert!(manifest
+            .allowed_capabilities
+            .contains(&Capability::OnboardingComplete));
+    }
 }

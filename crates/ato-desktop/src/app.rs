@@ -880,7 +880,10 @@ pub fn run() {
             // inline JavaScript is silently blocked. Defer store window
             // creation by one event-loop tick so the RunLoop is fully
             // live before WKWebView initializes.
-            let startup_surface = crate::config::load_config().desktop.startup_surface;
+            let startup_config = crate::config::load_config();
+            let startup_surface = startup_config.desktop.startup_surface;
+            let show_onboarding =
+                crate::system_capsule::ato_onboarding::should_show_onboarding(&startup_config);
             let async_cx = cx.to_async();
             cx.foreground_executor()
                 .spawn(async move {
@@ -891,34 +894,19 @@ pub fn run() {
                         .timer(std::time::Duration::from_millis(32))
                         .await;
                     let _ = async_cx.update(|cx| {
-                        match startup_surface {
-                            crate::config::StartupSurface::Start => {
-                                match crate::window::start_window::open_start_window(cx) {
-                                    Ok(_) => tracing::info!("Start window opened at startup"),
-                                    Err(err) => tracing::error!(error = %err, "Start window failed at startup"),
+                        if show_onboarding {
+                            match crate::window::onboarding_window::open_onboarding_window(cx) {
+                                Ok(_) => tracing::info!("Onboarding window opened at startup"),
+                                Err(err) => {
+                                    tracing::error!(error = %err, "Onboarding window failed at startup")
                                 }
                             }
-                            crate::config::StartupSurface::Blank => {
-                                // No initial window; user opens manually.
-                                tracing::info!("Blank startup surface — no window opened");
-                            }
-                            crate::config::StartupSurface::RestoreLast => {
-                                // TODO: window restore not yet implemented; fall through to Store.
-                                tracing::info!("RestoreLast not yet implemented — falling back to Store");
-                                match crate::window::store::open_store_window(cx) {
-                                    Ok(_) => tracing::info!("Focus View Store window opened at startup"),
-                                    Err(err) => tracing::error!(error = %err, "Focus View Store window failed"),
-                                }
-                            }
-                            crate::config::StartupSurface::Store => {
-                                match crate::window::store::open_store_window(cx) {
-                                    Ok(_) => {
-                                        tracing::info!("Focus View Store window opened at startup");
-                                    }
-                                    Err(err) => {
-                                        tracing::error!(error = %err, "Focus View Store window failed");
-                                    }
-                                }
+                            return;
+                        }
+                        match crate::window::open_configured_startup_surface(cx, startup_surface) {
+                            Ok(_) => tracing::info!(?startup_surface, "Startup surface opened"),
+                            Err(err) => {
+                                tracing::error!(error = %err, ?startup_surface, "Startup surface failed")
                             }
                         }
                     });
