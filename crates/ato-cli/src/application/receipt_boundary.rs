@@ -61,11 +61,36 @@ pub(crate) struct ReceiptEmissionContext {
     /// `"ato app session start"`). Surfaces only in the
     /// `ATO-WARN` diagnostic when receipt write fails — never serialized.
     pub(crate) boundary: &'static str,
+    /// PR-3b: declared-domain execution id stamped on the partial
+    /// receipt when the launch failed AFTER the `LaunchGraphBundle`
+    /// was built (i.e. after the receipt builder ran). Pulled from the
+    /// pipeline state's bundle so the partial receipt agrees with the
+    /// (would-be) success receipt's id space.
+    pub(crate) declared_execution_id: Option<String>,
+    /// PR-3b: resolved-domain execution id. See `declared_execution_id`.
+    pub(crate) resolved_execution_id: Option<String>,
 }
 
 impl ReceiptEmissionContext {
     pub(crate) fn for_boundary(boundary: &'static str) -> Self {
-        Self { boundary }
+        Self {
+            boundary,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+        }
+    }
+
+    /// PR-3b: stamp graph-derived execution ids on the context so a
+    /// partial receipt emitted after bundle construction carries the
+    /// same declared/resolved ids the success receipt would have.
+    pub(crate) fn with_graph_ids(
+        mut self,
+        declared: Option<String>,
+        resolved: Option<String>,
+    ) -> Self {
+        self.declared_execution_id = declared;
+        self.resolved_execution_id = resolved;
+        self
     }
 }
 
@@ -84,7 +109,7 @@ where
 {
     let outcome = inner.await;
     if let Err(error) = outcome.as_ref() {
-        if let Some(receipt) = partial_receipt_for_error(error) {
+        if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
             match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
                 Ok(path) => eprintln!(
                     "Execution receipt (v2-experimental, {}): {} ({})",
@@ -126,7 +151,7 @@ where
 {
     let outcome = inner.await;
     if let Err(error) = outcome.as_ref() {
-        if let Some(receipt) = partial_receipt_for_error(error) {
+        if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
             if let Err(write_err) =
                 write_receipt_document_atomic_at(root, &ExecutionReceiptDocument::V2(receipt))
             {
@@ -144,7 +169,24 @@ where
 /// error chain has no recognizable typed envelope. Pure function — no
 /// I/O — so callers and tests can compose it freely with the write
 /// step.
+///
+/// Convenience wrapper over [`partial_receipt_for_error_with_ctx`] for
+/// callers that don't have access to a `ReceiptEmissionContext` (e.g.
+/// crate-internal tests). Production paths should use the with_ctx
+/// variant so graph-derived declared/resolved ids flow through.
 pub(crate) fn partial_receipt_for_error(error: &anyhow::Error) -> Option<ExecutionReceiptV2> {
+    partial_receipt_for_error_with_ctx(error, &ReceiptEmissionContext::default())
+}
+
+/// PR-3b: variant of [`partial_receipt_for_error`] that stamps the
+/// declared/resolved execution ids from the `ReceiptEmissionContext`
+/// onto the partial receipt. Used by the boundary wrapper so a
+/// partial receipt agrees with the (would-be) success receipt's id
+/// space whenever the bundle was built before the failure.
+pub(crate) fn partial_receipt_for_error_with_ctx(
+    error: &anyhow::Error,
+    ctx: &ReceiptEmissionContext,
+) -> Option<ExecutionReceiptV2> {
     let envelope = build_failure_envelope(error)?;
     let result_class = match envelope.kind {
         ReceiptFailureKind::Recoverable => ReceiptResultClass::RecoverableFailure,
@@ -155,8 +197,8 @@ pub(crate) fn partial_receipt_for_error(error: &anyhow::Error) -> Option<Executi
             chrono::Utc::now().to_rfc3339(),
             result_class,
             envelope,
-            None, // declared_execution_id — see ReceiptEmissionContext docs
-            None, // resolved_execution_id — see ReceiptEmissionContext docs
+            ctx.declared_execution_id.clone(),
+            ctx.resolved_execution_id.clone(),
             None, // local locator — partial receipts don't surface paths
         )
         .with_runner(ExecutionRunnerIdentity::new(
