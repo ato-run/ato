@@ -34,8 +34,8 @@ use anyhow::Result;
 use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Render,
-    WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Pixels, Render,
+    Size, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
@@ -186,6 +186,7 @@ impl gpui::Global for ActiveConsentShell {}
 
 pub struct LaunchWindowShell {
     _webview: WebView,
+    window_size: Size<Pixels>,
     paste: WebViewPasteSupport,
 }
 
@@ -198,7 +199,8 @@ impl WebViewPasteShell for LaunchWindowShell {
 }
 
 impl Render for LaunchWindowShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_webview_bounds(window);
         // White backdrop in case the HTML is still painting.
         // track_focus is required so GPUI routes NativePaste actions here
         // even when the WKWebView child has OS first-responder.
@@ -211,6 +213,22 @@ impl Render for LaunchWindowShell {
 }
 
 impl LaunchWindowShell {
+    fn sync_webview_bounds(&mut self, window: &mut Window) {
+        let current = window.bounds().size;
+        if current == self.window_size {
+            return;
+        }
+        let _ = self._webview.set_bounds(Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(current.width) as u32,
+                f32::from(current.height) as u32,
+            )
+            .into(),
+        });
+        self.window_size = current;
+    }
+
     /// Advance the boot wizard UI to step `n`. Called from the foreground
     /// polling task inside `AppCapsuleShell` as the orchestrator emits
     /// progress. The JS guards with `typeof window.__atoStep === 'function'`
@@ -312,6 +330,7 @@ fn open_wizard(
             .expect("build_as_child must succeed for the Launch wizard WebView");
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
+            window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
         // Give GPUI focus to LaunchWindowShell so NativePaste/NativeCopy
@@ -723,6 +742,7 @@ fn open_consent_wizard_inner(
             .expect("build_as_child must succeed for the consent WebView");
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
+            window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
         if let Ok(mut slot) = shell_slot_inner.lock() {
@@ -1100,6 +1120,7 @@ fn open_boot_wizard_inner(
             .expect("build_as_child must succeed for the boot WebView");
         let shell = cx.new(|cx| LaunchWindowShell {
             _webview: webview,
+            window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
         if let Ok(mut slot) = shell_slot_inner.lock() {
