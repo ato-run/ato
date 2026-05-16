@@ -154,8 +154,31 @@ pub struct DesktopSettings {
     /// Whether to restore the last window frames (position/size) on launch.
     #[serde(default)]
     pub restore_window_frames: bool,
+    /// One-time onboarding flow completion state.
+    #[serde(default)]
+    pub onboarding: OnboardingSettings,
     #[serde(default)]
     pub control_bar: ControlBarSettings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OnboardingSettings {
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default)]
+    pub skipped: bool,
+    #[serde(default)]
+    pub version: u16,
+}
+
+impl Default for OnboardingSettings {
+    fn default() -> Self {
+        Self {
+            completed: false,
+            skipped: false,
+            version: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -269,6 +292,7 @@ impl Default for DesktopSettings {
             startup_surface: StartupSurface::Start,
             content_window_default_presentation: ContentWindowPresentation::Windowed,
             restore_window_frames: false,
+            onboarding: OnboardingSettings::default(),
             control_bar: ControlBarSettings::default(),
         }
     }
@@ -1214,6 +1238,9 @@ mod tests {
         assert!(d.control_bar.visible_on_startup);
         assert_eq!(d.control_bar.position, ControlBarPosition::Top);
         assert!(d.control_bar.auto_hide);
+        assert!(!d.onboarding.completed);
+        assert!(!d.onboarding.skipped);
+        assert_eq!(d.onboarding.version, 0);
     }
 
     #[test]
@@ -1273,5 +1300,23 @@ mod tests {
         );
         assert_eq!(parsed.desktop.startup_surface, StartupSurface::Start);
         assert!(parsed.desktop.control_bar.always_on_top);
+        assert!(!parsed.desktop.onboarding.completed);
+        assert!(!parsed.desktop.onboarding.skipped);
+        assert_eq!(parsed.desktop.onboarding.version, 0);
+    }
+
+    #[test]
+    fn desktop_section_without_onboarding_migrates_with_defaults() {
+        let json = r#"{
+            "desktop": {
+                "startup_surface": "store",
+                "focus_view_enabled": true
+            }
+        }"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Store);
+        assert!(!parsed.desktop.onboarding.completed);
+        assert!(!parsed.desktop.onboarding.skipped);
+        assert_eq!(parsed.desktop.onboarding.version, 0);
     }
 }
