@@ -101,7 +101,7 @@ impl DockRuntimeState {
 /// alive for the lifetime of its window and evaluate host events into
 /// the page.
 pub struct DockWebView {
-    webview: WebView,
+    pub(crate) webview: WebView,
     identity_state: Arc<Mutex<Value>>,
     runtime_state: Arc<Mutex<DockRuntimeState>>,
     paste: WebViewPasteSupport,
@@ -561,7 +561,13 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
         .map(|state| state.event_queue.clone())
         .map_err(|_| anyhow::anyhow!("Dock runtime lock poisoned"))?;
 
-    let init_script = compose_init_script(locale, None);
+    // Compose the init script: i18n strings first, then the automation
+    // agent so `window.__atoAgent` is available for MCP automation.
+    let init_script = format!(
+        "{}\n{}",
+        compose_init_script(locale, None),
+        include_str!("../../assets/automation/agent.js"),
+    );
     let win_size = size(px(1100.0), px(760.0));
     let bounds = match cx.primary_display() {
         Some(display) => {
@@ -601,6 +607,13 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .into(),
         };
         let url = format!("{DOCK_SCHEME}://localhost/");
+
+        // Clone the automation host so the page-load closure can call
+        // mark_page_loaded without capturing a non-Send type.
+        let automation_for_load = cx
+            .try_global::<crate::automation::AutomationHost>()
+            .cloned();
+
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 DOCK_SCHEME.to_string(),
@@ -644,6 +657,22 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             )
             .with_url(&url)
             .with_initialization_script(&init_script)
+            .with_on_page_load_handler(move |event, _url| {
+                use wry::PageLoadEvent;
+                if matches!(event, PageLoadEvent::Finished) {
+                    if let Some(automation) = &automation_for_load {
+                        automation.mark_page_loaded(
+                            crate::webview::DOCK_AUTOMATION_PANE_ID,
+                        );
+                    }
+                } else if matches!(event, PageLoadEvent::Started) {
+                    if let Some(automation) = &automation_for_load {
+                        automation.mark_page_unloaded(
+                            crate::webview::DOCK_AUTOMATION_PANE_ID,
+                        );
+                    }
+                }
+            })
             .with_ipc_handler(system_ipc::make_ipc_handler(bridge_queue.clone()))
             .with_bounds(webview_rect)
             .build_as_child(window)
