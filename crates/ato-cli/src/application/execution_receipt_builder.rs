@@ -390,6 +390,11 @@ fn build_launch_graph_bundle(
                 )),
                 redaction_policy_version: Some("execution-receipt-v2".to_string()),
             },
+            // PR-4b: the receipt builder's internal bundle isn't
+            // consent-bearing — consent identity flows on the
+            // separate `ExecutionConsentView` path inside
+            // preflight / run.rs.
+            consent: None,
         },
     ))
 }
