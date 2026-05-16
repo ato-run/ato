@@ -639,10 +639,7 @@ fn is_valid_region(spec: &str) -> bool {
 
 /// `host_activate_app` — bring `process_name` to the foreground so
 /// subsequent `host_press_key` calls land in the right app.
-fn handle_host_activate_app(
-    id: serde_json::Value,
-    args: &serde_json::Value,
-) -> serde_json::Value {
+fn handle_host_activate_app(id: serde_json::Value, args: &serde_json::Value) -> serde_json::Value {
     let process_name = args
         .get("process_name")
         .and_then(|v| v.as_str())
@@ -686,10 +683,7 @@ fn handle_host_activate_app(
 
 /// `host_press_key` — synthesise a keystroke to the foreground app.
 /// Pair with `host_activate_app` first.
-fn handle_host_press_key(
-    id: serde_json::Value,
-    args: &serde_json::Value,
-) -> serde_json::Value {
+fn handle_host_press_key(id: serde_json::Value, args: &serde_json::Value) -> serde_json::Value {
     let key = match args.get("key").and_then(|v| v.as_str()) {
         Some(k) if !k.is_empty() => k,
         _ => return mcp_error(id, "missing required argument 'key'"),
@@ -697,7 +691,11 @@ fn handle_host_press_key(
     let modifiers: Vec<String> = args
         .get("modifiers")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|m| m.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let modifier_clause = match build_modifier_clause(&modifiers) {
@@ -730,7 +728,10 @@ fn handle_host_press_key(
             let stderr = String::from_utf8_lossy(&out.stderr);
             mcp_error(
                 id,
-                &format!("osascript keystroke failed (status {}): {}", out.status, stderr),
+                &format!(
+                    "osascript keystroke failed (status {}): {}",
+                    out.status, stderr
+                ),
             )
         }
         Err(e) => mcp_error(id, &format!("failed to spawn osascript: {e}")),
@@ -800,7 +801,10 @@ fn is_safe_applescript_literal(s: &str) -> bool {
     !s.chars().any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
 }
 
-fn automation_client_response_timeout(method: &str, params: &serde_json::Value) -> std::time::Duration {
+fn automation_client_response_timeout(
+    method: &str,
+    params: &serde_json::Value,
+) -> std::time::Duration {
     use std::cmp::max;
     use std::time::Duration;
 
@@ -932,7 +936,32 @@ fn map_tool_to_command(
         "stop_active_session" => ("stop_active_session", serde_json::json!({})),
         "host_dispatch_action" => {
             let action = s("action")?;
-            ("host_dispatch_action", serde_json::json!({ "action": action }))
+            // Validate against all known host actions so the MCP caller
+            // gets an immediate error instead of a silent no-op.
+            const KNOWN_ACTIONS: &[&str] = &[
+                "OpenAppWindowExperiment",
+                "OpenCardSwitcher",
+                "OpenDockWindow",
+                "OpenIdentityMenu",
+                "OpenLaunchBoot",
+                "OpenLaunchConsent",
+                "OpenLaunchConsentConfigPanel",
+                "OpenCapsuleSettingsDemo",
+                "OpenStartWindow",
+                "OpenStoreWindow",
+                "ScrollLaunchConsentConfigPanelBottom",
+                "ShowSettings",
+            ];
+            if !KNOWN_ACTIONS.contains(&action.as_str()) {
+                return Err(format!(
+                    "unknown action '{}'; valid actions: {:?}",
+                    action, KNOWN_ACTIONS,
+                ));
+            }
+            (
+                "host_dispatch_action",
+                serde_json::json!({ "action": action }),
+            )
         }
         other => return Err(format!("unknown tool: {other}")),
     };
@@ -975,9 +1004,7 @@ fn send_automation_command(
             socket_path.display()
         ),
     })?;
-    stream
-        .set_read_timeout(Some(response_timeout))
-        .ok();
+    stream.set_read_timeout(Some(response_timeout)).ok();
     stream
         .set_write_timeout(Some(policy::AUTOMATION_CLIENT_WRITE_TIMEOUT))
         .ok();
