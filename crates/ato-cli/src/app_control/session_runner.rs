@@ -161,6 +161,17 @@ impl<'a> SessionStartPhaseRunner<'a> {
     }
 
     async fn run_install(&mut self) -> Result<()> {
+        if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
+            self.handle,
+            self.target_label,
+        )? {
+            self.install_reused = true;
+            self.pre_projection_spec = Some(hit.pre_projection_spec);
+            self._launch_lock = hit.launch_lock;
+            self.session_info = Some(super::session::session_info_from_stored(*hit.record));
+            return Ok(());
+        }
+
         let resolution = build_resolution(self.handle, self.target_label, None)?;
         let (manifest_path, mut plan, mut launch, mut notes) =
             resolve_session_launch_plan(self.handle, self.target_label)?;
@@ -274,21 +285,21 @@ impl<'a> SessionStartPhaseRunner<'a> {
             }
 
             // Miss: resolve (or reuse) the identity-addressed projection root.
-            let proj_resolution = warm_launch::resolve_identity_projection(
-                &proj_key,
-                &install_workspace,
-            )
-            .unwrap_or_else(|err| {
-                // Projection failure: fall back to a fresh random projection
-                // via the old path below.  This preserves availability at the
-                // cost of skipping warm-launch optimisations.
-                eprintln!("ATO-WARN warm-launch projection failed: {err}; using legacy path");
-                // Return a dummy that makes the caller drop to the legacy path.
-                // We signal this by returning Err from an outer block, but since
-                // we are in a non-error arm here we return a "created" resolution
-                // pointing at a temp dir that the legacy code will overwrite.
-                warm_launch::ProjectionResolution::fallback(&install_workspace)
-            });
+            let proj_resolution =
+                warm_launch::resolve_identity_projection(&proj_key, &install_workspace)
+                    .unwrap_or_else(|err| {
+                        // Projection failure: fall back to a fresh random projection
+                        // via the old path below.  This preserves availability at the
+                        // cost of skipping warm-launch optimisations.
+                        eprintln!(
+                            "ATO-WARN warm-launch projection failed: {err}; using legacy path"
+                        );
+                        // Return a dummy that makes the caller drop to the legacy path.
+                        // We signal this by returning Err from an outer block, but since
+                        // we are in a non-error arm here we return a "created" resolution
+                        // pointing at a temp dir that the legacy code will overwrite.
+                        warm_launch::ProjectionResolution::fallback(&install_workspace)
+                    });
 
             // Update plan and launch to point at the content-addressed root.
             let source_root = proj_resolution.source_root.clone();
@@ -359,7 +370,6 @@ impl<'a> SessionStartPhaseRunner<'a> {
         self.notes = notes;
         Ok(())
     }
-
 
     async fn run_build(&mut self) -> Result<()> {
         // Fast-path: if Install already returned a live session via reuse,
@@ -567,7 +577,12 @@ impl<'a> SessionStartPhaseRunner<'a> {
         if fresh_spawn {
             let pid = info.pid() as u32;
             let process_start_time = lm::process_start_time_unix_ms(pid);
-            if let Err(err) = lm::persist_after_spawn(pid, &launch_digest, process_start_time) {
+            if let Err(err) = lm::persist_after_spawn(
+                pid,
+                &launch_digest,
+                process_start_time,
+                prelaunch_receipt.as_ref(),
+            ) {
                 eprintln!(
                     "ATO-WARN failed to enrich session record with reuse metadata: {}",
                     err
@@ -579,15 +594,23 @@ impl<'a> SessionStartPhaseRunner<'a> {
         //    the JSON envelope returned to the desktop carries it. The
         //    receipt itself was already emitted in step 1b above (before
         //    spawn) so observers see a clean workspace.
-        if let Some((execution_id, schema_version)) = prelaunch_receipt {
-            info.attach_execution_receipt(execution_id, schema_version);
+        if let Some(metadata) = prelaunch_receipt.as_ref() {
+            info.attach_execution_receipt_metadata(metadata);
+            if let Err(err) =
+                execution_receipts::mark_v2_receipt_readiness_passed(&metadata.execution_id)
+            {
+                eprintln!(
+                    "ATO-WARN failed to mark session execution receipt readiness-passed: {}",
+                    err
+                );
+            }
         }
 
         self.session_info = Some(info);
         Ok(())
     }
 
-    fn emit_execution_receipt(&self) -> Result<(String, u32)> {
+    fn emit_execution_receipt(&self) -> Result<super::session::ExecutionReceiptSessionMetadata> {
         use capsule_core::engine::execution_plan::derive::compile_execution_plan;
         use capsule_core::execution_identity::ExecutionReceiptDocument;
         use capsule_core::router::ExecutionProfile;
@@ -612,11 +635,34 @@ impl<'a> SessionStartPhaseRunner<'a> {
             self.build_observation.as_ref(),
         )?;
         let _path = execution_receipts::write_receipt_document_atomic(&document)?;
-        let (execution_id, schema_version) = match document {
-            ExecutionReceiptDocument::V1(receipt) => (receipt.execution_id, receipt.schema_version),
-            ExecutionReceiptDocument::V2(receipt) => (receipt.execution_id, receipt.schema_version),
+        let metadata = match document {
+            ExecutionReceiptDocument::V1(receipt) => {
+                super::session::ExecutionReceiptSessionMetadata {
+                    execution_id: receipt.execution_id,
+                    schema_version: receipt.schema_version,
+                    declared_execution_id: None,
+                    resolved_execution_id: None,
+                    observed_execution_id: None,
+                    graph_completeness: None,
+                    reproducibility_class: Some(format!("{:?}", receipt.reproducibility.class)),
+                }
+            }
+            ExecutionReceiptDocument::V2(receipt) => {
+                super::session::ExecutionReceiptSessionMetadata {
+                    execution_id: receipt.execution_id,
+                    schema_version: receipt.schema_version,
+                    declared_execution_id: receipt.declared_execution_id,
+                    resolved_execution_id: receipt.resolved_execution_id,
+                    observed_execution_id: receipt.observed_execution_id,
+                    graph_completeness: receipt
+                        .graph_completeness
+                        .as_ref()
+                        .map(|completeness| completeness.as_str().to_string()),
+                    reproducibility_class: Some(format!("{:?}", receipt.reproducibility.class)),
+                }
+            }
         };
-        Ok((execution_id, schema_version))
+        Ok(metadata)
     }
 
     // Note: `maybe_project_to_session` is a free function below the impl
