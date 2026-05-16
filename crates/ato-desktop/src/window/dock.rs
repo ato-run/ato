@@ -39,6 +39,7 @@ use crate::orchestrator::resolve_ato_binary;
 use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
 use crate::system_capsule::ipc as system_ipc;
+use crate::system_capsule::manifest::system_capsule_url;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
@@ -391,6 +392,49 @@ pub fn submit_publish(cx: &mut App, request_id: String, visibility: Option<Strin
                     guard.latest_publish_json = Some(payload.clone());
                 }
                 enqueue_publish_phase_events(&runtime, &request_id, "submit", &payload);
+
+                // Apply visibility via the store API when the user chose public or limited.
+                let vis_str = visibility.as_deref().unwrap_or("public");
+                let visibility_update = if vis_str != "unlisted" {
+                    let scoped_id = payload
+                        .get("install")
+                        .and_then(|i| i.get("scoped_id"))
+                        .and_then(Value::as_str)
+                        .or_else(|| payload.get("scoped_id").and_then(Value::as_str))
+                        .unwrap_or_default()
+                        .to_string();
+                    let api_base = std::env::var("ATO_STORE_API_URL")
+                        .unwrap_or_else(|_| "https://api.ato.run".to_string());
+                    let token = read_session_token_from_credentials();
+                    if !scoped_id.is_empty() {
+                        if let Some(tok) = token {
+                            match apply_visibility_after_publish(&scoped_id, vis_str, &api_base, &tok)
+                            {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        scoped_id,
+                                        vis_str,
+                                        "dock: visibility updated"
+                                    );
+                                    json!({ "ok": true, "visibility": vis_str })
+                                }
+                                Err(err) => {
+                                    tracing::warn!(?err, "dock: visibility update failed");
+                                    json!({ "ok": false, "error": err.to_string() })
+                                }
+                            }
+                        } else {
+                            tracing::warn!("dock: no session token; skipping visibility update");
+                            json!({ "ok": false, "error": "no session token" })
+                        }
+                    } else {
+                        tracing::warn!("dock: no scoped_id in publish payload; skipping visibility update");
+                        json!({ "ok": false, "error": "no scoped_id in publish payload" })
+                    }
+                } else {
+                    json!({ "ok": true, "visibility": "unlisted" })
+                };
+
                 queue_runtime_event(
                     &runtime,
                     json!({
@@ -400,6 +444,7 @@ pub fn submit_publish(cx: &mut App, request_id: String, visibility: Option<Strin
                         "message": payload.get("message").and_then(Value::as_str).unwrap_or("Publish completed"),
                         "payload": payload,
                         "visibility": visibility,
+                        "visibility_update": visibility_update,
                     }),
                 );
             }
@@ -628,7 +673,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             kind: ContentWindowKind::Dock,
             title: gpui::SharedString::from(tr(locale, "dock.title")),
             subtitle: gpui::SharedString::from(tr(locale, "dock.subtitle")),
-            url: gpui::SharedString::from("capsule://run.ato.desktop/dock"),
+            url: gpui::SharedString::from(system_capsule_url("dock")),
             capsule: None,
             last_focused_at: std::time::Instant::now(),
         },
@@ -1270,6 +1315,88 @@ fn normalize_public_github_url(raw_url: &str) -> Result<String> {
 fn parse_publish_json_output(stdout: &str) -> Result<Value> {
     serde_json::from_str(stdout.trim())
         .with_context(|| "Failed to parse `ato publish --json` output".to_string())
+}
+
+/// Read the session token stored in `~/.config/ato/credentials.toml`
+/// (or `$XDG_CONFIG_HOME/ato/credentials.toml`).
+/// Falls back to `~/.ato/credentials.toml` for legacy installs.
+fn read_session_token_from_credentials() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Creds {
+        session_token: Option<String>,
+    }
+
+    let xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
+    let home = dirs::home_dir()?;
+
+    let canonical = xdg_config
+        .map(|d| PathBuf::from(d).join("ato").join("credentials.toml"))
+        .unwrap_or_else(|| home.join(".config").join("ato").join("credentials.toml"));
+    let legacy = home.join(".ato").join("credentials.toml");
+
+    for path in &[canonical, legacy] {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(creds) = toml::from_str::<Creds>(&text) {
+                if let Some(tok) = creds.session_token.filter(|s| !s.is_empty()) {
+                    return Some(tok);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// After a successful `ato publish --deploy`, update the capsule's visibility
+/// via `PATCH /v1/docks/:handle/capsules/:id`.
+///
+/// Returns `Ok(())` on success or a descriptive error on failure. A failure
+/// here is non-fatal for the publish itself; callers log the error and include
+/// it in the submit_completed event.
+fn apply_visibility_after_publish(
+    scoped_id: &str,
+    visibility: &str,
+    api_base: &str,
+    session_token: &str,
+) -> Result<()> {
+    let parts: Vec<&str> = scoped_id.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("invalid scoped_id format: {scoped_id}");
+    }
+    let (handle, slug) = (parts[0], parts[1]);
+
+    // 1. Find the internal capsule ID by slug.
+    let list_url = format!("{api_base}/v1/docks/{handle}/capsules");
+    let resp = ureq::get(&list_url)
+        .set("Authorization", &format!("Bearer {session_token}"))
+        .call()
+        .with_context(|| format!("GET {list_url} failed"))?;
+
+    let body: Value = resp
+        .into_json()
+        .with_context(|| "Failed to parse capsule list response")?;
+
+    let capsule_id = body
+        .get("capsules")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter().find(|c| {
+                c.get("slug").and_then(Value::as_str) == Some(slug)
+            })
+        })
+        .and_then(|c| c.get("id"))
+        .and_then(Value::as_str)
+        .with_context(|| format!("Capsule '{slug}' not found in dock for '{handle}'"))?
+        .to_string();
+
+    // 2. Apply visibility.
+    let patch_url = format!("{api_base}/v1/docks/{handle}/capsules/{capsule_id}");
+    ureq::patch(&patch_url)
+        .set("Authorization", &format!("Bearer {session_token}"))
+        .set("Content-Type", "application/json")
+        .send_json(json!({ "visibility": visibility }))
+        .with_context(|| format!("PATCH {patch_url} failed"))?;
+
+    Ok(())
 }
 
 fn detect_preview_url(line: &str) -> Option<String> {
