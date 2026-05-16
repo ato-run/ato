@@ -4764,7 +4764,7 @@ pub(crate) fn apply_capsule_secrets(
 
 /// Execute a single automation command against a live WebView.
 /// Called from `WebViewManager::dispatch_automation_requests` on the GPUI main thread.
-fn dispatch_automation_command(
+pub(crate) fn dispatch_automation_command(
     req: PendingAutomationRequest,
     webview: &WebView,
     pane_id: usize,
