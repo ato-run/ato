@@ -56,7 +56,11 @@ impl SettingsWindowShell {
 
 impl Render for SettingsWindowShell {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        paste_render_wrap!(div().size_full().bg(rgb(0xf5f3ff)), cx, &self.paste.focus_handle)
+        paste_render_wrap!(
+            div().size_full().bg(rgb(0xf5f3ff)),
+            cx,
+            &self.paste.focus_handle
+        )
     }
 }
 
@@ -142,7 +146,10 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Settings WebView");
-        let shell = cx.new(|cx| SettingsWindowShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        let shell = cx.new(|cx| SettingsWindowShell {
+            _webview: webview,
+            paste: WebViewPasteSupport::new(cx),
+        });
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         if let Ok(mut slot) = shell_slot_inner.lock() {
             *slot = Some(shell.downgrade());

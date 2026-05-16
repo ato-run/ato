@@ -173,14 +173,20 @@ mod tests {
 
     #[test]
     fn tr_params_substitution() {
-        let val = tr_params(LocaleCode::En, "store.search.results", &[("query", "hello")]);
+        let val = tr_params(
+            LocaleCode::En,
+            "store.search.results",
+            &[("query", "hello")],
+        );
         assert!(val.contains("hello"), "should substitute {{query}}");
     }
 
     #[test]
     fn en_ja_key_parity() {
-        let en_keys: std::collections::HashSet<&str> = MESSAGES_EN.keys().map(|s| s.as_str()).collect();
-        let ja_keys: std::collections::HashSet<&str> = MESSAGES_JA.keys().map(|s| s.as_str()).collect();
+        let en_keys: std::collections::HashSet<&str> =
+            MESSAGES_EN.keys().map(|s| s.as_str()).collect();
+        let ja_keys: std::collections::HashSet<&str> =
+            MESSAGES_JA.keys().map(|s| s.as_str()).collect();
         let only_en: Vec<&str> = en_keys.difference(&ja_keys).copied().collect();
         let only_ja: Vec<&str> = ja_keys.difference(&en_keys).copied().collect();
         assert!(

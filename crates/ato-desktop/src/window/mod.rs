@@ -15,7 +15,6 @@
 
 pub mod app_capsule_shell;
 pub mod auth_login_window;
-pub mod webview_paste;
 pub mod capsule_panel;
 pub mod card_switcher;
 pub mod content_windows;
@@ -25,6 +24,7 @@ pub mod focus_dispatcher;
 pub mod gestures;
 pub mod identity_window;
 pub mod launch_window;
+pub mod webview_paste;
 // `pub mod launcher;` was removed in Stage D — the legacy Launcher
 // window is retired. Settings lives in `settings_window` as the
 // `ato-settings` system capsule.

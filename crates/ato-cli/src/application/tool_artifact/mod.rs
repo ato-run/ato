@@ -112,14 +112,13 @@ pub fn resolve_tool_artifact(
 
     // Stage download + unpack inside the store dir so the final
     // rename is same-filesystem and atomic.
-    let staging =
-        tempfile::Builder::new()
-            .prefix(".staging-")
-            .tempdir_in(&store_parent)
-            .map_err(|e| ToolArtifactError::StoreError {
-                name: manifest.name.clone(),
-                reason: format!("create staging dir: {e}"),
-            })?;
+    let staging = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(&store_parent)
+        .map_err(|e| ToolArtifactError::StoreError {
+            name: manifest.name.clone(),
+            reason: format!("create staging dir: {e}"),
+        })?;
     let download_path = staging.path().join("download.bin");
     let unpack_dir = staging.path().join("unpack");
     fs::create_dir_all(&unpack_dir).map_err(|e| ToolArtifactError::StoreError {
@@ -366,9 +365,8 @@ mod tests {
 
         let ato_home = tempfile::tempdir().unwrap();
 
-        let resolved =
-            resolve_tool_artifact(&manifest, ato_home.path(), &LocalFileDownloader)
-                .expect("first resolve must succeed");
+        let resolved = resolve_tool_artifact(&manifest, ato_home.path(), &LocalFileDownloader)
+            .expect("first resolve must succeed");
         assert!(!resolved.from_cache, "first resolve is a fresh install");
         assert_eq!(resolved.name, "demo");
         assert!(
@@ -393,9 +391,8 @@ mod tests {
         );
 
         // Second call hits the cache and skips download.
-        let again =
-            resolve_tool_artifact(&manifest, ato_home.path(), &FailingDownloader)
-                .expect("cache hit must avoid downloader");
+        let again = resolve_tool_artifact(&manifest, ato_home.path(), &FailingDownloader)
+            .expect("cache hit must avoid downloader");
         assert!(again.from_cache);
         assert_eq!(again.root, resolved.root);
         assert_eq!(again.provides.get("demo"), Some(&demo));
@@ -511,10 +508,22 @@ mod tests {
             .expect("resolve");
         let mut env = std::collections::BTreeMap::new();
         merge_resolved_into_env(&resolved, &mut env);
-        assert_eq!(env.get("ATO_TOOL_DEMO_ROOT"), Some(&resolved.root.display().to_string()));
-        assert_eq!(env.get("ATO_TOOL_DEMO_BIN_DIR"), Some(&resolved.bin_dir.display().to_string()));
-        assert_eq!(env.get("ATO_TOOL_DEMO_LIB_DIR"), Some(&resolved.lib_dir.display().to_string()));
-        assert_eq!(env.get("ATO_TOOL_DEMO_SHARE_DIR"), Some(&resolved.share_dir.display().to_string()));
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_ROOT"),
+            Some(&resolved.root.display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_BIN_DIR"),
+            Some(&resolved.bin_dir.display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_LIB_DIR"),
+            Some(&resolved.lib_dir.display().to_string())
+        );
+        assert_eq!(
+            env.get("ATO_TOOL_DEMO_SHARE_DIR"),
+            Some(&resolved.share_dir.display().to_string())
+        );
         assert!(env.contains_key("ATO_TOOL_DEMO"));
         // No DYLD_LIBRARY_PATH / LD_LIBRARY_PATH leaks from this layer.
         assert!(!env.contains_key("DYLD_LIBRARY_PATH"));
@@ -559,7 +568,10 @@ mod tests {
             platform: host_platform().unwrap_or("unknown").into(),
             url: "test-local://demo".into(),
             sha256: "deadbeef".into(),
-            root: root.strip_prefix(&current_dir).expect("root under cwd").to_path_buf(),
+            root: root
+                .strip_prefix(&current_dir)
+                .expect("root under cwd")
+                .to_path_buf(),
             bin_dir: bin_dir
                 .strip_prefix(&current_dir)
                 .expect("bin under cwd")
@@ -586,23 +598,48 @@ mod tests {
 
         assert_eq!(
             env.get("ATO_TOOL_DEMO_ROOT"),
-            Some(&std::fs::canonicalize(&root).expect("canonical root").display().to_string())
+            Some(
+                &std::fs::canonicalize(&root)
+                    .expect("canonical root")
+                    .display()
+                    .to_string()
+            )
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO_BIN_DIR"),
-            Some(&std::fs::canonicalize(&bin_dir).expect("canonical bin").display().to_string())
+            Some(
+                &std::fs::canonicalize(&bin_dir)
+                    .expect("canonical bin")
+                    .display()
+                    .to_string()
+            )
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO_LIB_DIR"),
-            Some(&std::fs::canonicalize(&lib_dir).expect("canonical lib").display().to_string())
+            Some(
+                &std::fs::canonicalize(&lib_dir)
+                    .expect("canonical lib")
+                    .display()
+                    .to_string()
+            )
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO_SHARE_DIR"),
-            Some(&std::fs::canonicalize(&share_dir).expect("canonical share").display().to_string())
+            Some(
+                &std::fs::canonicalize(&share_dir)
+                    .expect("canonical share")
+                    .display()
+                    .to_string()
+            )
         );
         assert_eq!(
             env.get("ATO_TOOL_DEMO"),
-            Some(&std::fs::canonicalize(&demo).expect("canonical demo").display().to_string())
+            Some(
+                &std::fs::canonicalize(&demo)
+                    .expect("canonical demo")
+                    .display()
+                    .to_string()
+            )
         );
     }
 
@@ -660,8 +697,9 @@ mod tests {
             provides: vec!["initdb".into(), "postgres".into(), "pg_ctl".into()],
         };
         let ato_home = tempfile::tempdir().expect("ato_home");
-        let resolved = resolve_tool_artifact(&manifest, ato_home.path(), &ReqwestDownloader::default())
-            .expect("resolve must succeed against real upstream");
+        let resolved =
+            resolve_tool_artifact(&manifest, ato_home.path(), &ReqwestDownloader::default())
+                .expect("resolve must succeed against real upstream");
         assert_eq!(resolved.name, "postgresql");
         assert_eq!(resolved.version, "16.9.0");
         assert!(!resolved.from_cache);

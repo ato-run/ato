@@ -117,9 +117,39 @@
   .approval-text span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 
   /* ── PREFLIGHT ERROR ── */
-  .preflight-err { padding: 12px 14px; border: 1px solid #fca5a5; border-radius: var(--radius-md); background: #fff5f5; }
+  .preflight-err { padding: 12px 14px; border: 1px solid #fca5a5; border-radius: var(--radius-md); background: #fff5f5; display: flex; flex-direction: column; gap: 8px; }
   .preflight-err strong { color: #c53030; font-size: 13px; }
-  .preflight-err p { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  .preflight-err p { margin: 0; font-size: 12px; color: var(--muted); }
+  .preflight-err-detail {
+    margin: 0;
+    border: 1px solid #fecaca;
+    border-radius: 8px;
+    background: #fff;
+    padding: 9px 10px;
+    max-height: 170px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: #7f1d1d;
+    font-family: "SF Mono", ui-monospace, monospace;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .preflight-err-actions { display: flex; justify-content: flex-end; }
+  .preflight-copy-btn {
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid #fca5a5;
+    border-radius: 7px;
+    background: #fff;
+    color: #b91c1c;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .preflight-copy-btn:hover { background: #fff1f2; }
 
   /* ── FOOTER ── */
   .footer { padding: 12px 28px 18px; display: flex; gap: 10px; justify-content: flex-end; border-top: 1px solid var(--border); flex-shrink: 0; }
@@ -222,6 +252,10 @@
       <div id="preflight-err" class="preflight-err" style="display:none">
         <strong>⚠ Capsule verification failed</strong>
         <p>Could not retrieve launch information. Please cancel and try again.</p>
+        <pre id="preflight-err-detail" class="preflight-err-detail" style="display:none"></pre>
+        <div id="preflight-err-actions" class="preflight-err-actions" style="display:none">
+          <button id="preflight-copy-btn" class="preflight-copy-btn" type="button">Copy error</button>
+        </div>
       </div>
 
       <!-- APP INFO -->
@@ -571,10 +605,12 @@
 
     if (p.preflight_failed) {
       document.getElementById('preflight-err').style.display = '';
+      renderPreflightErrorDetail(p.preflight_error || '');
       updateApproveBtn();
       return;
     }
     document.getElementById('preflight-err').style.display = 'none';
+    renderPreflightErrorDetail('');
 
     // App info
     const ai = document.getElementById('app-info');
@@ -876,6 +912,37 @@
     if (hint) hint.style.display = (approved && !allFilled) ? '' : 'none';
   }
 
+  function copyText(text) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+  }
+
+  function renderPreflightErrorDetail(detail) {
+    const pre = document.getElementById('preflight-err-detail');
+    const actions = document.getElementById('preflight-err-actions');
+    if (!pre || !actions) return;
+    if (detail && detail.trim()) {
+      pre.style.display = '';
+      actions.style.display = '';
+      pre.textContent = detail;
+    } else {
+      pre.style.display = 'none';
+      actions.style.display = 'none';
+      pre.textContent = '';
+    }
+  }
+
   // ── IPC ─────────────────────────────────────────────────────────────────────
   window.__ato_hydrate_preview = function(p) { renderPreview(p); };
 
@@ -910,6 +977,10 @@
   });
 
   document.getElementById('cancel').addEventListener('click', () => BRIDGE({ kind:'cancel' }));
+  document.getElementById('preflight-copy-btn').addEventListener('click', () => {
+    const pre = document.getElementById('preflight-err-detail');
+    copyText((pre && pre.textContent) ? pre.textContent : '');
+  });
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {

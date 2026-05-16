@@ -148,8 +148,14 @@ fn derive_run_command_launch_spec(
                 )
             } else if matches!(
                 first,
-                "flask" | "uvicorn" | "gunicorn" | "streamlit"
-                    | "celery" | "hypercorn" | "daphne" | "waitress-serve"
+                "flask"
+                    | "uvicorn"
+                    | "gunicorn"
+                    | "streamlit"
+                    | "celery"
+                    | "hypercorn"
+                    | "daphne"
+                    | "waitress-serve"
             ) {
                 // Python-managed WSGI/ASGI server tools are venv-installed binaries;
                 // treat them as direct commands (same as `npm` for Node).
@@ -549,7 +555,10 @@ run_command = "bun run dev"
 
         let spec = derive_launch_spec(&plan).expect("derive launch spec");
 
-        assert_eq!(spec.command, "bun", "command should be bun from run_command");
+        assert_eq!(
+            spec.command, "bun",
+            "command should be bun from run_command"
+        );
         assert_eq!(
             spec.args,
             vec!["run", "dev"],

@@ -175,7 +175,17 @@ impl AppCapsuleShell {
                                 if let Some(weak) = &boot_shell_weak {
                                     if let Some(shell) = weak.upgrade() {
                                         for step in steps {
-                                            let _ = shell.update(cx, |s, _cx| s.push_step(step));
+                                            let _ = shell.update(cx, |s, _cx| {
+                                                s.push_step(step);
+                                                let msg = match step {
+                                                    0 => "Validating launch plan",
+                                                    1 => "Resolving capsule targets",
+                                                    2 => "Starting capsule session",
+                                                    3 => "Connecting to capsule endpoint",
+                                                    _ => "Processing launch step",
+                                                };
+                                                s.push_detail(msg);
+                                            });
                                         }
                                     }
                                 }
@@ -190,6 +200,21 @@ impl AppCapsuleShell {
 
                                     match entity.upgrade() {
                                         Some(entity) => {
+                                            if let Some(weak) = &boot_shell_weak {
+                                                if let Some(shell) = weak.upgrade() {
+                                                    let _ = shell.update(cx, |s, _cx| {
+                                                        match &result {
+                                                            Ok(_) => s.push_detail(
+                                                                "Capsule session started successfully",
+                                                            ),
+                                                            Err(err) => s.push_detail(&format!(
+                                                                "Launch failed: {}",
+                                                                describe_launch_error(err)
+                                                            )),
+                                                        }
+                                                    });
+                                                }
+                                            }
                                             entity.update(cx, |shell, cx| {
                                                 shell.pending_result = Some(result);
                                                 cx.notify();
@@ -246,7 +271,11 @@ impl AppCapsuleShell {
         }
     }
 
-    fn new_ready(session: GuestLaunchSession, window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
+    fn new_ready(
+        session: GuestLaunchSession,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let win_size = window.bounds().size;
         let handle = session.handle.clone();
         Self {

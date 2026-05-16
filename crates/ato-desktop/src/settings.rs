@@ -4,9 +4,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{
-    CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode, ControlBarPosition, DesktopConfig,
-    EgressPolicyMode, LanguageConfig, LogLevel, SecretStore, StartupSurface, ThemeConfig,
-    UpdateChannel,
+    CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode, ControlBarPosition,
+    DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore, StartupSurface,
+    ThemeConfig, UpdateChannel,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -974,7 +974,10 @@ fn apply_desktop_patch_immediate(
             changed.push("startupSurface".to_string());
         }
     }
-    if let Some(v) = patch.get("contentWindowDefaultPresentation").and_then(Value::as_str) {
+    if let Some(v) = patch
+        .get("contentWindowDefaultPresentation")
+        .and_then(Value::as_str)
+    {
         if let Some(p) = parse_content_window_presentation(v) {
             config.desktop.content_window_default_presentation = p;
             changed.push("contentWindowDefaultPresentation".to_string());
@@ -996,7 +999,10 @@ fn apply_desktop_patch_immediate(
             changed.push("controlBarMode".to_string());
         }
     }
-    if let Some(v) = patch.get("controlBarVisibleOnStartup").and_then(Value::as_bool) {
+    if let Some(v) = patch
+        .get("controlBarVisibleOnStartup")
+        .and_then(Value::as_bool)
+    {
         config.desktop.control_bar.visible_on_startup = v;
         if !v {
             config.desktop.control_bar.mode = ControlBarMode::Hidden;
@@ -1178,11 +1184,7 @@ pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
             .filter(|(_, keys)| !keys.is_empty())
             .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
             .collect();
-        g.sort_by(|a, b| {
-            a["handle"]
-                .as_str()
-                .cmp(&b["handle"].as_str())
-        });
+        g.sort_by(|a, b| a["handle"].as_str().cmp(&b["handle"].as_str()));
         g
     };
 
@@ -1252,7 +1254,10 @@ mod tests {
         let mut config = default_config();
         let patch = serde_json::json!({"controlBarPosition": "bottom"});
         let resp = patch_config_for_capsule(&mut config, &patch, None);
-        assert_eq!(config.desktop.control_bar.position, ControlBarPosition::Bottom);
+        assert_eq!(
+            config.desktop.control_bar.position,
+            ControlBarPosition::Bottom
+        );
         // controlBarPosition is NOT in NEXT_LAUNCH_KEYS
         assert_eq!(resp["appliesOnNextLaunch"], false);
     }
@@ -1273,7 +1278,10 @@ mod tests {
         let resp = patch_config_for_capsule(&mut config, &patch, None);
         assert_eq!(resp["ok"], true);
         let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
-        assert!(changed.is_empty(), "unknown key must not appear in changedKeys");
+        assert!(
+            changed.is_empty(),
+            "unknown key must not appear in changedKeys"
+        );
     }
 
     #[test]

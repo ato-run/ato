@@ -164,10 +164,8 @@ contract = "service@1"
             .collect();
         graph_provider_aliases.sort();
 
-        let graph_provider_aliases_str: Vec<&str> = graph_provider_aliases
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let graph_provider_aliases_str: Vec<&str> =
+            graph_provider_aliases.iter().map(String::as_str).collect();
 
         assert_eq!(graph_provider_aliases_str, legacy_aliases);
         assert_eq!(graph_provider_aliases.len(), legacy_dependencies.len());

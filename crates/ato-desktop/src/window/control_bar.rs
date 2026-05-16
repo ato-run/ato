@@ -24,10 +24,7 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
-use crate::app::{
-    NavigateToUrl, OpenCardSwitcher, OpenDockWindow, OpenStoreWindow,
-    ShowSettings,
-};
+use crate::app::{NavigateToUrl, OpenCardSwitcher, OpenDockWindow, OpenStoreWindow, ShowSettings};
 use crate::config::ControlBarMode;
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
@@ -80,11 +77,7 @@ impl ControlBarController {
         self.handle.is_some() && !matches!(self.mode, ControlBarMode::Hidden)
     }
 
-    fn set_window(
-        &mut self,
-        handle: AnyWindowHandle,
-        shell: Entity<ControlBarShellPlaceholder>,
-    ) {
+    fn set_window(&mut self, handle: AnyWindowHandle, shell: Entity<ControlBarShellPlaceholder>) {
         self.handle = Some(handle);
         self.shell = Some(shell);
     }
@@ -123,7 +116,10 @@ impl ControlBarController {
     }
 
     fn collapse(&mut self) {
-        if matches!(self.mode, ControlBarMode::AutoHide | ControlBarMode::CompactPill) {
+        if matches!(
+            self.mode,
+            ControlBarMode::AutoHide | ControlBarMode::CompactPill
+        ) {
             self.expanded = false;
         }
     }
@@ -164,7 +160,10 @@ pub fn set_control_bar_mode(cx: &mut App, mode: ControlBarMode) -> Result<Option
 pub fn show_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
     let existing = cx.global::<ControlBarController>().handle;
     if let Some(handle) = existing {
-        if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
+        if handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
             cx.global_mut::<ControlBarController>().expand();
             resize_bar_window(cx, true);
             return Ok(handle);
@@ -173,7 +172,10 @@ pub fn show_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.set_global(ControlBarController::new(mode));
     }
 
-    if matches!(cx.global::<ControlBarController>().mode(), ControlBarMode::Hidden) {
+    if matches!(
+        cx.global::<ControlBarController>().mode(),
+        ControlBarMode::Hidden
+    ) {
         let restore = cx.global::<ControlBarController>().previous_mode;
         cx.global_mut::<ControlBarController>().set_mode(restore);
     }
@@ -269,11 +271,7 @@ pub struct ControlBarShellPlaceholder {
 }
 
 impl ControlBarShellPlaceholder {
-    pub fn new(
-        route: &GuestRoute,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(route: &GuestRoute, window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
         let initial = display_url_from_route(route);
         let locale = resolve_locale(crate::config::load_config().general.language);
         let placeholder = tr(locale, "control_bar.omnibar_placeholder");
@@ -347,11 +345,7 @@ fn display_url_from_route(route: &GuestRoute) -> String {
 }
 
 impl Render for ControlBarShellPlaceholder {
-    fn render(
-        &mut self,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_count = cx.global::<OpenContentWindows>().len();
 
         // Mirror the MRU-front window's URL into the omnibar while
@@ -366,8 +360,7 @@ impl Render for ControlBarShellPlaceholder {
                 .next()
                 .map(|e| e.url.clone());
             if let Some(target) = target {
-                let current: SharedString =
-                    self.omnibar.read(cx).value().to_string().into();
+                let current: SharedString = self.omnibar.read(cx).value().to_string().into();
                 if current != target {
                     self.omnibar.update(cx, |state, cx| {
                         state.set_value(target.clone(), window, cx);
@@ -445,47 +438,32 @@ impl Render for ControlBarShellPlaceholder {
             // (on_hover(false) is driven by MouseMoveEvent which stops firing
             // once the cursor exits the window, so it cannot handle this case.)
             .child(
-                canvas(
-                    |_, _, _| {},
-                    {
-                        move |_, _, window, cx| {
-                            window.on_mouse_event(
-                                move |_: &MouseExitEvent, phase, window, cx| {
-                                    if phase != DispatchPhase::Bubble {
-                                        return;
-                                    }
-                                    if omnibar_focused {
-                                        return;
-                                    }
-                                    let was_expanded =
-                                        cx.global::<ControlBarController>().expanded;
-                                    cx.global_mut::<ControlBarController>().collapse();
-                                    if was_expanded
-                                        && !cx.global::<ControlBarController>().expanded
-                                    {
-                                        resize_bar_window_in_handler(window, false);
-                                    }
-                                    if let Some(shell) =
-                                        cx.global::<ControlBarController>().shell.clone()
-                                    {
-                                        shell.update(cx, |_shell, cx| cx.notify());
-                                    }
-                                },
-                            );
-                        }
-                    },
-                )
+                canvas(|_, _, _| {}, {
+                    move |_, _, window, cx| {
+                        window.on_mouse_event(move |_: &MouseExitEvent, phase, window, cx| {
+                            if phase != DispatchPhase::Bubble {
+                                return;
+                            }
+                            if omnibar_focused {
+                                return;
+                            }
+                            let was_expanded = cx.global::<ControlBarController>().expanded;
+                            cx.global_mut::<ControlBarController>().collapse();
+                            if was_expanded && !cx.global::<ControlBarController>().expanded {
+                                resize_bar_window_in_handler(window, false);
+                            }
+                            if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
+                                shell.update(cx, |_shell, cx| cx.notify());
+                            }
+                        });
+                    }
+                })
                 .absolute()
                 .size(px(0.0)),
             )
             .child(if expanded {
-                bar_pill(
-                    self.omnibar.clone(),
-                    is_capsule,
-                    window_count,
-                    self.locale,
-                )
-                .into_any_element()
+                bar_pill(self.omnibar.clone(), is_capsule, window_count, self.locale)
+                    .into_any_element()
             } else {
                 compact_pill().into_any_element()
             })
@@ -645,11 +623,7 @@ fn pill_button(
         });
     match icon {
         Some(PillIcon::Builtin(name)) => {
-            body = body.child(
-                Icon::new(name)
-                    .size(px(16.0))
-                    .text_color(rgb(0x3f3f46)),
-            );
+            body = body.child(Icon::new(name).size(px(16.0)).text_color(rgb(0x3f3f46)));
         }
         Some(PillIcon::Custom(path)) => {
             body = body.child(
@@ -819,7 +793,10 @@ pub fn open_control_bar_window(cx: &mut App) -> Result<AnyWindowHandle> {
 /// Open the Focus-mode Control Bar as a process-lifetime singleton.
 pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
     if let Some(existing) = cx.global::<ControlBarController>().handle {
-        if existing.update(cx, |_, window, _| window.activate_window()).is_ok() {
+        if existing
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
             return Ok(existing);
         }
         cx.global_mut::<ControlBarController>().handle = None;
@@ -834,8 +811,7 @@ pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
     let bounds = match cx.primary_display() {
         Some(d) => {
             let display_bounds = d.bounds();
-            let left =
-                display_bounds.origin.x + (display_bounds.size.width - win_w) / 2.0;
+            let left = display_bounds.origin.x + (display_bounds.size.width - win_w) / 2.0;
             let top = display_bounds.origin.y + px(36.0);
             Bounds {
                 origin: gpui::point(left, top),

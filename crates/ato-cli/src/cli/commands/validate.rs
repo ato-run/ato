@@ -109,10 +109,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 // graph build is purely a parity observation.
                 let external_dependencies =
                     manifest_external_capsule_dependencies(&decision.plan.manifest)?;
-                debug_assert_provider_aliases_match_lock(
-                    &external_dependencies,
-                    &legacy_lock.lock,
-                );
+                debug_assert_provider_aliases_match_lock(&external_dependencies, &legacy_lock.lock);
 
                 verify_lockfile_external_dependencies(&decision.plan.manifest, &legacy_lock.lock)?;
                 true
@@ -507,10 +504,7 @@ mod tests {
         // Direct count-parity check that mirrors PR-4a's primary equivalence
         // assertion, but for the legacy-lock-present validate branch.
         let manifest_dependencies = vec![dependency("db"), dependency("cache")];
-        let lock = empty_lock_with(vec![
-            locked_dependency("db"),
-            locked_dependency("cache"),
-        ]);
+        let lock = empty_lock_with(vec![locked_dependency("db"), locked_dependency("cache")]);
 
         let input = build_input_from_external_dependencies(&manifest_dependencies, None);
         let graph = ExecutionGraphBuilder::build(input);
