@@ -432,17 +432,15 @@ fn extend_to_resolved_graph(
 
 /// Combined output of [`build_prelaunch_receipt_document_with_graph`].
 ///
-/// Carries both the receipt document AND the `LaunchGraphBundle` used to
-/// derive the receipt's declared/resolved execution ids, so downstream
-/// consumers (session record enrichment, partial receipt boundary,
-/// readiness updates) can share the SAME bundle instance the receipt was
-/// built from.
-///
-/// PR-3b: this is the carrier the umbrella plan calls "shared
-/// LaunchGraphBundle context" — instead of letting every consumer
-/// re-build the bundle from inputs (cheap but lossy: re-derivation can
-/// silently disagree if any input changes shape), we build once at
-/// receipt-emit time and surface the bundle alongside the document.
+/// Carries the receipt document and, for V2, the `LaunchGraphBundle`
+/// used to derive declared/resolved execution ids. Callers may
+/// immediately project the bundle's ids into a boundary sink or
+/// session metadata; the bundle itself is not a long-lived pipeline
+/// carrier — production callers extract `bundle.derived.execution_ids`
+/// at the receipt-emit site and let the bundle drop. The single-source
+/// guarantee the umbrella plan calls "shared LaunchGraphBundle
+/// context" is preserved by the id space, not by keeping the bundle
+/// instance alive past the emit site.
 #[derive(Debug)]
 pub(crate) struct PrelaunchReceiptOutput {
     pub(crate) document: ExecutionReceiptDocument,
