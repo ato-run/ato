@@ -792,7 +792,7 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 Ok(())
             }
             HourglassPhase::Prepare => {
-                let mut state = run_prepare_phase(
+                let state = run_prepare_phase(
                     self.args,
                     self.resolved_target(),
                     self.agent_local_root.clone(),
@@ -808,7 +808,10 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 // PR-3b: hand the boundary's graph-id sink to the
                 // pipeline state so the Execute phase can publish ids
                 // immediately after building the LaunchGraphBundle.
-                state.receipt_graph_id_sink = Some(self.receipt_graph_id_sink.clone());
+                let state = run_phase::attach_receipt_graph_id_sink(
+                    state,
+                    self.receipt_graph_id_sink.clone(),
+                );
                 self.state = Some(state);
                 self.record_phase_annotation(
                     HourglassPhase::Prepare,
@@ -931,7 +934,16 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 Ok(())
             }
             HourglassPhase::Execute => {
-                let input = self.take_state(HourglassPhase::Execute)?;
+                // PR-3b (PR #180 review fix): defensively re-inject the
+                // boundary sink at Execute entry. Prepare already set
+                // it, but a future Build / Verify / DryRun refactor
+                // that reconstructs `RunPipelineState` would silently
+                // drop the field; using the helper here pins the
+                // wire-up at the consumer site.
+                let input = run_phase::attach_receipt_graph_id_sink(
+                    self.take_state(HourglassPhase::Execute)?,
+                    self.receipt_graph_id_sink.clone(),
+                );
                 let result = run_execute_phase(
                     self.args,
                     self.resolved_target(),
