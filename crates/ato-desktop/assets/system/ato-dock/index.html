@@ -741,7 +741,7 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
                 <div class="card-body">
                   <div class="visibility-card active" data-visibility="public">
                     <h4>Public</h4>
-                    <p>Listed publicly in the Ato Store and discoverable by anyone.</p>
+                    <p>Published and installable via <code>ato run &lt;capsule-id&gt;</code>. Not automatically listed in the public store catalog.</p>
                   </div>
                   <div class="visibility-card" data-visibility="limited">
                     <h4>Limited</h4>
@@ -766,6 +766,7 @@ html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Sego
                     <dt>Registry</dt><dd id="submit-registry">—</dd>
                     <dt>Route</dt><dd id="submit-route">—</dd>
                     <dt>Message</dt><dd id="submit-message">—</dd>
+                    <dt>Install</dt><dd id="submit-install-command" style="font-family:monospace;font-size:12px;">—</dd>
                   </dl>
                   <button id="open-registry-button" class="btn btn-secondary btn-sm hidden" style="margin-top:8px;width:100%;justify-content:center;" id="open-registry-button">Open registry</button>
                 </div>
@@ -1070,6 +1071,7 @@ function reviewPill(r) {
 function nextAction(item) {
   if (item.listing === "listed") return `<button class="action-btn" data-action="manage" data-id="${escapeHtml(item.id)}">Manage</button>`;
   if (item.review === "in_review") return `<button class="action-btn" data-action="review" data-id="${escapeHtml(item.id)}">Track</button>`;
+  if (item.install_command) return `<button class="action-btn" data-action="copy-install" data-id="${escapeHtml(item.id)}" data-cmd="${escapeHtml(item.install_command)}">Copy install</button>`;
   if (item.visibility === "limited") return `<button class="action-btn" data-action="copy" data-id="${escapeHtml(item.id)}">Copy Link</button>`;
   if (item.visibility === "draft") return `<button class="action-btn" data-action="continue" data-id="${escapeHtml(item.id)}">Continue</button>`;
   return `<button class="action-btn" data-action="publish" data-id="${escapeHtml(item.id)}">Publish</button>`;
@@ -1131,6 +1133,13 @@ function handleNextAction(btn) {
     if (item.route) {
       navigator.clipboard?.writeText(item.route).catch(() => {});
       setBanner("", "Link copied!", "success");
+    }
+  } else if (action === "copy-install") {
+    const cmd = btn.dataset.cmd || item.install_command;
+    if (cmd) {
+      navigator.clipboard?.writeText(cmd).catch(() => {});
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = "Copy install"; }, 1500);
     }
   } else if (action === "continue") {
     openWizard(0);
@@ -1221,6 +1230,7 @@ function renderDetailPanel() {
       </div>
     </div>
     ${item.detail_message ? `<div class="detail-section"><div class="detail-section-title">Last publish</div><div style="font-size:12px;color:var(--text-muted);">${escapeHtml(item.detail_message)}</div></div>` : ""}
+    ${item.install_command ? `<div class="detail-section"><div class="detail-section-title">Install command</div><div style="display:flex;align-items:center;gap:8px;"><code style="font-size:12px;background:var(--bg-tertiary,#1e1e2e);padding:4px 8px;border-radius:4px;flex:1;">${escapeHtml(item.install_command)}</code><button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${escapeHtml(item.install_command)}').then(()=>this.textContent='Copied!').catch(()=>{})">Copy</button></div></div>` : ""}
   `;
 }
 
@@ -1386,6 +1396,8 @@ function renderSubmitResult() {
   document.getElementById("submit-registry").textContent = result.registry || "—";
   document.getElementById("submit-route").textContent = result.route || "—";
   document.getElementById("submit-message").textContent = result.message || "—";
+  const installEl = document.getElementById("submit-install-command");
+  if (installEl) installEl.textContent = result.install_command || "—";
   document.querySelectorAll(".visibility-card").forEach((card) => {
     card.classList.toggle("active", card.dataset.visibility === state.wizard.visibility);
   });
@@ -1485,25 +1497,30 @@ function handleDockEvent(event) {
   }
   if (event.kind === "dock:submit_completed") {
     const payload = event.payload || {};
+    const scopedId = payload.scoped_id || inferListingName();
+    const installCmd = scopedId ? `ato run ${scopedId}` : null;
     state.wizard.submitResult = {
       registry: payload.registry || "https://api.ato.run",
       route: payload.route || "personal_dock_direct",
       message: payload.message || "Publish completed.",
+      scoped_id: scopedId,
+      install_command: installCmd,
     };
     const listing = {
-      id: payload.scoped_id || `listing-${Date.now()}`,
-      name: payload.scoped_id || inferListingName(),
+      id: scopedId || `listing-${Date.now()}`,
+      name: scopedId || inferListingName(),
       description: state.wizard.sourceValue || "Submitted from Dock",
       route: payload.route || "personal_dock_direct",
       registry: payload.registry || "https://api.ato.run",
-      visibility: "public",
-      listing: "listed",
-      review: "approved",
+      visibility: state.wizard.visibility || "public",
+      listing: "not_listed",
+      review: "not_required",
       updated: "Just now",
       source_kind: state.wizard.sourceKind,
       source_value: state.wizard.sourceValue,
       detail_message: payload.message || "Publish completed.",
       preview_url: state.wizard.previewUrl,
+      install_command: installCmd,
     };
     upsertListing(listing);
     state.selectedListingId = listing.id;
