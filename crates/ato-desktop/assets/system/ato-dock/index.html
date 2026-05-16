@@ -1497,7 +1497,7 @@ function handleDockEvent(event) {
   }
   if (event.kind === "dock:submit_completed") {
     const payload = event.payload || {};
-    const scopedId = payload.scoped_id || inferListingName();
+    const scopedId = (payload.install && payload.install.scoped_id) || payload.scoped_id || inferListingName();
     const installCmd = scopedId ? `ato run ${scopedId}` : null;
     state.wizard.submitResult = {
       registry: payload.registry || "https://api.ato.run",
@@ -1535,7 +1535,13 @@ function handleDockEvent(event) {
 }
 
 function upsertListing(listing) {
-  const index = state.listings.findIndex((item) => item.id === listing.id);
+  // Match by id first; fall back to matching by source_value (same GitHub URL = same capsule).
+  let index = state.listings.findIndex((item) => item.id === listing.id);
+  if (index < 0 && listing.source_value) {
+    index = state.listings.findIndex(
+      (item) => item.source_value && item.source_value === listing.source_value
+    );
+  }
   if (index >= 0) {
     state.listings[index] = { ...state.listings[index], ...listing };
   } else {
