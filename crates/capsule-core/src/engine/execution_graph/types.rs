@@ -25,6 +25,9 @@ pub enum ExecutionGraphNode {
     Network { identifier: String },
     State { identifier: String },
     Entrypoint { identifier: String },
+    Process { identifier: String },
+    RuntimeInstance { identifier: String },
+    BridgeCapability { identifier: String },
 }
 
 impl ExecutionGraphNode {
@@ -46,6 +49,9 @@ impl ExecutionGraphNode {
             Self::Network { .. } => 9,
             Self::State { .. } => 10,
             Self::Entrypoint { .. } => 11,
+            Self::Process { .. } => 12,
+            Self::RuntimeInstance { .. } => 13,
+            Self::BridgeCapability { .. } => 14,
         }
     }
 
@@ -62,7 +68,10 @@ impl ExecutionGraphNode {
             | Self::Filesystem { identifier }
             | Self::Network { identifier }
             | Self::State { identifier }
-            | Self::Entrypoint { identifier } => identifier,
+            | Self::Entrypoint { identifier }
+            | Self::Process { identifier }
+            | Self::RuntimeInstance { identifier }
+            | Self::BridgeCapability { identifier } => identifier,
         }
     }
 }
