@@ -932,3 +932,48 @@ impl HourglassPhaseRunner for SessionStartPhaseRunner<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::receipt_boundary::{GraphIds, ReceiptGraphIdSink};
+
+    /// PR-3b (PR #180 review fix): the wrapper in
+    /// `app_control::session::start_session_for_capsule` writes its
+    /// boundary sink onto the runner before the pipeline runs, so
+    /// `emit_execution_receipt` can publish declared/resolved ids
+    /// the moment the LaunchGraphBundle is built. The smoke test
+    /// here pins the wire-up: after assignment, the runner's
+    /// `receipt_graph_id_sink` shares the same Arc cell as the
+    /// input sink — so a publish on the input side is observable
+    /// from the runner side.
+    #[test]
+    fn assigning_receipt_graph_id_sink_shares_arc_with_input_sink() {
+        let mut runner = SessionStartPhaseRunner::new("publisher/slug", None, false);
+        assert!(
+            runner.receipt_graph_id_sink.is_none(),
+            "fixture sanity: a freshly built runner has no sink"
+        );
+
+        let sink = ReceiptGraphIdSink::new();
+        runner.receipt_graph_id_sink = Some(sink.clone());
+
+        // Publish from the boundary side; the runner side must observe
+        // the same ids because both handles are Arc-clones of one cell.
+        sink.set(GraphIds {
+            declared_execution_id: Some("blake3:session-declared".to_string()),
+            resolved_execution_id: Some("blake3:session-resolved".to_string()),
+        });
+
+        let snapshot = runner.receipt_graph_id_sink.as_ref().unwrap().snapshot();
+        assert_eq!(
+            snapshot.declared_execution_id.as_deref(),
+            Some("blake3:session-declared"),
+            "PR-3b: runner-side sink must share the Arc with the boundary's input sink"
+        );
+        assert_eq!(
+            snapshot.resolved_execution_id.as_deref(),
+            Some("blake3:session-resolved")
+        );
+    }
+}
