@@ -225,6 +225,11 @@ verification_run:
     - "E302 consent modal not surfaced in dock preview (required CLI pre-approval workaround)"
     - "Port conflict not detected by dock wizard (had to manually free port 9191)"
     - "Reload button in Step 2 editor reloads from internal wizard state, not from disk"
+    - "Visibility selector in Step 5 is UI-only — selecting 'Public' does NOT call PATCH /v1/docks/:handle/capsules/:id to set visibility=public. Publisher must make a separate API call after submit to appear in the store."
+  store_listing_verification:
+    action: "Called PATCH /v1/docks/koh0920/capsules/01KKKTHMTQJNKRRY02XP7RF1DV with {\"visibility\":\"public\"}"
+    result: "visibility updated to 'public'"
+    store_page: "https://ato.run/store/koh0920/hello-capsule — appears in 'New Apps' section"
   evidence:
     - /tmp/aodd-dock-final/step2_savedraft.png     # Step 2 Save draft → Step 3 auto-advance
     - /tmp/aodd-dock-final/step3_verification.png  # Verification passed + Step 4 auto-advance
