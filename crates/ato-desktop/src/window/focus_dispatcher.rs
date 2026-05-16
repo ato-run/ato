@@ -16,12 +16,14 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
-    FocusControlBarInput, HideControlBar, NavigateToUrl, OpenAppWindowExperiment,
-    OpenCardSwitcher, OpenDockWindow, OpenStartWindow, OpenStoreWindow,
-    ShowControlBar, ShowSettings, ToggleControlBar,
+    FocusControlBarInput, HideControlBar, NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher,
+    OpenDockWindow, OpenStartWindow, OpenStoreWindow, ShowControlBar, ShowSettings,
+    ToggleControlBar,
 };
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
+use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
+use crate::window::dock::DockEntitySlot;
 
 /// Start the Focus-mode automation dispatcher. Spawns the socket
 /// listener (`AutomationHost::start`) plus a foreground polling task
@@ -36,6 +38,11 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
         );
         return;
     }
+
+    // Register as GPUI global so the dock's page-load handler can find
+    // it via `cx.try_global::<AutomationHost>()` and call
+    // `mark_page_loaded(DOCK_AUTOMATION_PANE_ID)`.
+    cx.set_global(host.clone());
 
     let async_app = cx.to_async();
     let pending = host.pending.clone();
@@ -63,7 +70,71 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                     req.send(Err("automation command timed out".into()));
                     continue;
                 }
+
+                // Dock-pane commands: route browser_* to the DockWebView.
+                if req.pane_id == DOCK_AUTOMATION_PANE_ID {
+                    // Page-load guard: most JS commands require the page to
+                    // be ready.  Navigate/Screenshot are exempt.
+                    let needs_loaded = !matches!(
+                        &req.command,
+                        AutomationCommand::Navigate { .. }
+                            | AutomationCommand::NavigateBack
+                            | AutomationCommand::NavigateForward
+                            | AutomationCommand::Screenshot
+                    );
+                    if needs_loaded && !host.is_page_loaded(DOCK_AUTOMATION_PANE_ID) {
+                        if req.is_expired() {
+                            req.send(Err("dock page not loaded; timed out".into()));
+                        } else {
+                            // Re-enqueue for the next 50 ms tick.
+                            if let Ok(mut q) = pending.lock() {
+                                q.push(req);
+                                has_pending.store(true, Ordering::Relaxed);
+                            }
+                        }
+                        continue;
+                    }
+                    let host_clone = host.clone();
+                    let _ = async_app_for_loop.update(|cx| {
+                        let entity_opt = cx
+                            .try_global::<DockEntitySlot>()
+                            .and_then(|s| s.0.clone());
+                        if let Some(entity) = entity_opt {
+                            let dock = entity.read(cx);
+                            dispatch_automation_command(
+                                req,
+                                &dock.webview,
+                                DOCK_AUTOMATION_PANE_ID,
+                                &host_clone,
+                            );
+                        } else {
+                            req.send(Err("dock is not open".into()));
+                        }
+                    });
+                    continue;
+                }
+
                 match &req.command {
+                    AutomationCommand::ListPanes => {
+                        // In Focus mode the only WebView pane is the dock
+                        // (when open). Report it if `DockEntitySlot` is set.
+                        let dock_open = async_app_for_loop
+                            .update(|cx| {
+                                cx.try_global::<DockEntitySlot>()
+                                    .and_then(|s| s.0.as_ref())
+                                    .is_some()
+                            });
+                        let panes = if dock_open {
+                            serde_json::json!([{
+                                "pane_id": DOCK_AUTOMATION_PANE_ID,
+                                "kind": "dock",
+                                "url": "ato://dock",
+                            }])
+                        } else {
+                            serde_json::json!([])
+                        };
+                        req.send(Ok(serde_json::json!({ "panes": panes })));
+                    }
                     AutomationCommand::HostDispatchAction { action } => {
                         let action_name = action.clone();
                         let dispatch_result: Result<(), String> = async_app_for_loop
@@ -212,11 +283,31 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 }
                                                 Ok(())
                                             }
+                                            "OpenLaunchConsentConfigPanel" => {
+                                                if let Err(err) = crate::window::launch_window::open_active_consent_config_panel(cx) {
+                                                    tracing::error!(?err, "open_active_consent_config_panel failed");
+                                                }
+                                                Ok(())
+                                            }
+                                            "ScrollLaunchConsentConfigPanelBottom" => {
+                                                if let Err(err) = crate::window::launch_window::scroll_active_consent_config_panel_to_bottom(cx) {
+                                                    tracing::error!(?err, "scroll_active_consent_config_panel_to_bottom failed");
+                                                }
+                                                Ok(())
+                                            }
                                             "OpenLaunchBoot" => {
                                                 if let Err(err) =
                                                     crate::window::launch_window::open_boot_window(cx, None)
                                                 {
                                                     tracing::error!(?err, "open_boot_window failed");
+                                                }
+                                                Ok(())
+                                            }
+                                            "OpenCapsuleSettingsDemo" => {
+                                                if let Err(err) =
+                                                    crate::window::capsule_panel::open_demo_capsule_settings_window(cx)
+                                                {
+                                                    tracing::error!(?err, "open_demo_capsule_settings_window failed");
                                                 }
                                                 Ok(())
                                             }
@@ -245,17 +336,18 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                             ?route,
                                                             "ForceApprovePending: consuming pending target"
                                                         );
-                                                        // Open boot window FIRST so PendingBootShell
-                                                        // is set before AppCapsuleShell::new reads it.
-                                                        if let Err(err) =
-                                                            crate::window::launch_window::open_boot_window(cx, Some(&route))
-                                                        {
-                                                            tracing::error!(?err, "open_boot_window failed");
-                                                        }
-                                                        if let Err(err) =
-                                                            crate::window::open_app_window(cx, route.clone())
-                                                        {
-                                                            tracing::error!(?err, "open_app_window failed");
+                                                        match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
+                                                            Ok(boot_handle) => {
+                                                                crate::window::launch_window::start_boot_launch(
+                                                                    cx,
+                                                                    route.clone(),
+                                                                    Vec::new(),
+                                                                    boot_handle,
+                                                                );
+                                                            }
+                                                            Err(err) => {
+                                                                tracing::error!(?err, "open_boot_window failed");
+                                                            }
                                                         }
                                                     }
                                                     None => tracing::warn!(
@@ -315,10 +407,9 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                         }
                     }
                     other => {
-                        // browser_* and other WebView-bound commands
-                        // have no consumer in Focus mode. Returning an
-                        // explicit error is honest: receipt R3-style
-                        // "lying UI" would be claiming success.
+                        // Non-dock browser_* and other commands with no
+                        // consumer in Focus mode. Returning an explicit
+                        // error is honest: lying UI would claim success.
                         req.send(Err(format!(
                             "automation command {:?} is not supported in Focus mode (no WebView pane)",
                             std::mem::discriminant(other)
