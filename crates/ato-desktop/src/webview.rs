@@ -195,7 +195,15 @@ pub struct WebViewManager {
     /// `drain_pending_launches`'s success arm; consumed (cleared) in
     /// `stop_active_session` after a successful stop.
     handle_to_session: HashMap<String, GuestLaunchSession>,
+    /// Whether the dock window is currently open. Used by `ListPanes`
+    /// to expose the dock pane to automation callers.
+    dock_is_open: bool,
 }
+
+/// Reserved pane ID for the dock window's WebView.
+/// Never collides with real pane IDs (which start at 1 and are
+/// assigned sequentially by `generate_pane_id`).
+pub const DOCK_AUTOMATION_PANE_ID: usize = 999_000;
 
 struct ManagedWebView {
     pane_id: usize,
@@ -366,6 +374,7 @@ impl WebViewManager {
             capsule_update_tx: None,
             retention: crate::retention::RetentionTable::with_defaults(),
             handle_to_session: HashMap::new(),
+            dock_is_open: false,
         }
     }
 
@@ -379,6 +388,17 @@ impl WebViewManager {
         tx: std::sync::mpsc::Sender<(usize, crate::state::CapsuleUpdate)>,
     ) {
         self.capsule_update_tx = Some(tx);
+    }
+
+    /// Mark the dock window as open (`true`) or closed (`false`).
+    /// Affects `ListPanes` output and dock automation dispatch.
+    pub fn set_dock_open(&mut self, open: bool) {
+        self.dock_is_open = open;
+    }
+
+    /// Clone the automation host (cheap — all state is behind `Arc`).
+    pub fn automation_host(&self) -> crate::automation::AutomationHost {
+        self.automation.clone()
     }
 
     /// Build a 1×1 throwaway WebView pointed at about:blank so the
@@ -859,11 +879,18 @@ impl WebViewManager {
             // Commands that don't require a live WebView.
             match &req.command {
                 ListPanes => {
-                    let panes: Vec<serde_json::Value> = self
+                    let mut panes: Vec<serde_json::Value> = self
                         .views
                         .keys()
                         .map(|id| serde_json::json!({ "pane_id": id }))
                         .collect();
+                    if self.dock_is_open {
+                        panes.push(serde_json::json!({
+                            "pane_id": DOCK_AUTOMATION_PANE_ID,
+                            "kind": "dock",
+                            "url": "ato://dock",
+                        }));
+                    }
                     req.send(Ok(serde_json::json!({ "panes": panes })));
                     continue;
                 }
@@ -960,6 +987,13 @@ impl WebViewManager {
                 req.pane_id
             };
 
+            // Dock pane requests are routed to `dispatch_dock_automation_requests`
+            // which is called from DesktopShell::render() after this method returns.
+            if pane_id == DOCK_AUTOMATION_PANE_ID {
+                requeue.push(req);
+                continue;
+            }
+
             // Navigation commands don't need a loaded page; all JS commands do.
             let needs_loaded = !matches!(
                 &req.command,
@@ -984,6 +1018,74 @@ impl WebViewManager {
         }
 
         self.automation.requeue(requeue);
+    }
+
+    /// Dispatch automation requests targeting the dock pane (`DOCK_AUTOMATION_PANE_ID`).
+    ///
+    /// Called from `DesktopShell::render()` after `sync_from_state` so we have
+    /// access to the dock `WebView` via the GPUI entity.  `dock_view` is `None`
+    /// when the dock window is not currently open.
+    pub fn dispatch_dock_automation_requests(
+        &mut self,
+        state: &mut AppState,
+        dock_view: Option<&WebView>,
+    ) {
+        use std::time::Instant;
+        use AutomationCommand::*;
+
+        // Separate dock-targeted requests from everything else.
+        let all = self.automation.drain_requests();
+        if all.is_empty() {
+            return;
+        }
+
+        let mut non_dock: Vec<PendingAutomationRequest> = Vec::new();
+
+        for req in all {
+            if req.pane_id != DOCK_AUTOMATION_PANE_ID {
+                non_dock.push(req);
+                continue;
+            }
+
+            if req.is_expired() {
+                req.send(Err("automation command timed out".into()));
+                continue;
+            }
+
+            let needs_loaded = !matches!(
+                &req.command,
+                Navigate { .. } | NavigateBack | NavigateForward | Screenshot
+            );
+
+            if needs_loaded && !self.automation.is_page_loaded(DOCK_AUTOMATION_PANE_ID) {
+                // Give the dock HTML page time to finish loading before failing.
+                // Re-enqueue; the 50 ms polling loop will retry on the next frame.
+                if !req.is_expired() {
+                    non_dock.push(req); // will be requeued below
+                } else {
+                    req.send(Err("dock page not loaded".into()));
+                }
+                continue;
+            }
+
+            match dock_view {
+                Some(webview) => {
+                    dispatch_automation_command(
+                        req,
+                        webview,
+                        DOCK_AUTOMATION_PANE_ID,
+                        &self.automation,
+                    );
+                }
+                None => {
+                    req.send(Err("dock is not open".into()));
+                }
+            }
+        }
+
+        // Return non-dock requests (and any dock retries mixed in) to the queue.
+        self.automation.requeue(non_dock);
+        let _ = state; // may be used for diagnostics in future
     }
 
     pub fn open_devtools_for_active_pane(&mut self, state: &mut AppState) {
@@ -1422,10 +1524,8 @@ impl WebViewManager {
                                     // where the WebView is built but
                                     // the drain success arm took a
                                     // different branch.
-                                    self.handle_to_session.insert(
-                                        session.handle.clone(),
-                                        session.clone(),
-                                    );
+                                    self.handle_to_session
+                                        .insert(session.handle.clone(), session.clone());
                                     match resolve_share_icon(session) {
                                         Some(ShareIconSource::Direct(icon)) => {
                                             info!(
@@ -1752,8 +1852,8 @@ impl WebViewManager {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
                 handle: handle.clone(),
-                session: resolve_and_start_guest(&handle, &secrets, &plain_configs, None).inspect_err(
-                    |err| {
+                session: resolve_and_start_guest(&handle, &secrets, &plain_configs, None)
+                    .inspect_err(|err| {
                         // #117 — interactive-resolution errors
                         // (preflight aggregate, missing config,
                         // missing consent) are expected states, not
@@ -1782,8 +1882,7 @@ impl WebViewManager {
                                 );
                             }
                         }
-                    },
-                ),
+                    }),
             };
             if result.session.is_ok() {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");
@@ -2725,7 +2824,6 @@ impl WebViewManager {
 
         stopped
     }
-
 
     /// Drain every retained session and graceful-stop each in a
     /// background thread. Active panes (`self.views`) are
@@ -4175,12 +4273,20 @@ fn page_not_loaded_message(state: &AppState, pane_id: PaneId) -> String {
 fn pending_prelaunch_requirement_message(state: &AppState, handle: &str) -> Option<String> {
     let mut labels = Vec::new();
 
-    if let Some(request) = state.pending_resolution.as_ref().filter(|request| request.handle == handle)
+    if let Some(request) = state
+        .pending_resolution
+        .as_ref()
+        .filter(|request| request.handle == handle)
     {
-        labels.extend(request.secrets.iter().map(|item| match item.target.as_deref() {
-            Some(target) if !target.is_empty() => format!("config:{target}"),
-            _ => "config".to_string(),
-        }));
+        labels.extend(
+            request
+                .secrets
+                .iter()
+                .map(|item| match item.target.as_deref() {
+                    Some(target) if !target.is_empty() => format!("config:{target}"),
+                    _ => "config".to_string(),
+                }),
+        );
         labels.extend(request.consents.iter().map(|item| {
             if item.target_label.is_empty() {
                 "consent".to_string()
@@ -4189,14 +4295,20 @@ fn pending_prelaunch_requirement_message(state: &AppState, handle: &str) -> Opti
             }
         }));
     } else {
-        if let Some(request) = state.pending_config.as_ref().filter(|request| request.handle == handle)
+        if let Some(request) = state
+            .pending_config
+            .as_ref()
+            .filter(|request| request.handle == handle)
         {
             labels.push(match request.target.as_deref() {
                 Some(target) if !target.is_empty() => format!("config:{target}"),
                 _ => "config".to_string(),
             });
         }
-        if let Some(request) = state.pending_consent.as_ref().filter(|request| request.handle == handle)
+        if let Some(request) = state
+            .pending_consent
+            .as_ref()
+            .filter(|request| request.handle == handle)
         {
             labels.push(if request.target_label.is_empty() {
                 "consent".to_string()
@@ -4355,9 +4467,9 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
         GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
-        GuestRoute::Capsule { .. }
-        | GuestRoute::ExternalUrl(_)
-        | GuestRoute::Terminal { .. } => None,
+        GuestRoute::Capsule { .. } | GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
+            None
+        }
     }
 }
 
@@ -4592,9 +4704,7 @@ fn clear_matching_pending_resolution_secrets(
 
     request.secrets.retain(|item| {
         item.fields.iter().any(|field| match &field.kind {
-            capsule_wire::config::ConfigKind::Secret => {
-                !resolved_secret_keys.contains(&field.name)
-            }
+            capsule_wire::config::ConfigKind::Secret => !resolved_secret_keys.contains(&field.name),
             _ => true,
         })
     });
@@ -4910,8 +5020,9 @@ fn dispatch_automation_command(
 
 fn decode_js_callback_value(result: &str) -> Value {
     match serde_json::from_str::<Value>(result) {
-        Ok(Value::String(inner)) => serde_json::from_str::<Value>(&inner)
-            .unwrap_or_else(|_| Value::String(inner)),
+        Ok(Value::String(inner)) => {
+            serde_json::from_str::<Value>(&inner).unwrap_or_else(|_| Value::String(inner))
+        }
         Ok(value) => value,
         Err(_) => Value::String(result.to_string()),
     }
@@ -5729,11 +5840,17 @@ mod tests {
                 consents: vec![consent_item("app"), consent_item("web")],
             });
 
-            let handled = apply_pending_resolution_consents(&mut state, handle, |_| Ok(()))
-                .expect("approve");
+            let handled =
+                apply_pending_resolution_consents(&mut state, handle, |_| Ok(())).expect("approve");
 
-            assert!(handled, "matching pending_resolution consents must be handled");
-            assert!(state.pending_resolution.is_none(), "all consents resolved -> clear");
+            assert!(
+                handled,
+                "matching pending_resolution consents must be handled"
+            );
+            assert!(
+                state.pending_resolution.is_none(),
+                "all consents resolved -> clear"
+            );
             assert!(state.consent_retry_already_consumed(handle, "app"));
             assert!(state.consent_retry_already_consumed(handle, "web"));
         }
@@ -5765,7 +5882,10 @@ mod tests {
 
     mod pending_prelaunch_requirement_message {
         use super::*;
-        use crate::state::{PendingConfigRequest, PendingConsentRequest, PendingConsentItem, PendingResolutionRequest, PendingSecretsItem};
+        use crate::state::{
+            PendingConfigRequest, PendingConsentItem, PendingConsentRequest,
+            PendingResolutionRequest, PendingSecretsItem,
+        };
 
         fn pending_config(handle: &str, target: Option<&str>) -> PendingConfigRequest {
             PendingConfigRequest {

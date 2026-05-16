@@ -323,6 +323,9 @@ impl DesktopShell {
         }
 
         let mut webviews = WebViewManager::new(window.window_handle(), cx.to_async());
+        // Expose the AutomationHost as a GPUI global so that other windows
+        // (e.g. the dock) can clone it to register page-load handlers.
+        cx.set_global(webviews.automation_host());
         // Channel for the per-pane capsule update check. The Sender goes
         // into the webview manager (cloned per worker thread); the
         // Receiver lives on this shell and is drained by
@@ -1226,7 +1229,10 @@ impl DesktopShell {
     /// already-shown secret fields), and only rebuild wholesale when
     /// the handle changes or a previously-shown field disappears.
     fn sync_resolution_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match (&self.state.pending_resolution, self.resolution_modal.as_mut()) {
+        match (
+            &self.state.pending_resolution,
+            self.resolution_modal.as_mut(),
+        ) {
             (None, None) => {}
             (None, Some(_)) => {
                 self.resolution_modal = None;
@@ -1500,9 +1506,7 @@ impl DesktopShell {
         let mut secret_writes: Vec<PendingSecretWrite> = Vec::new();
         for item in &request.secrets {
             for field in &item.fields {
-                let Some(value) =
-                    modal.read_input(item.target.as_deref(), &field.name, cx)
-                else {
+                let Some(value) = modal.read_input(item.target.as_deref(), &field.name, cx) else {
                     continue;
                 };
                 if value.is_empty() {
@@ -1543,15 +1547,11 @@ impl DesktopShell {
         for write in secret_writes {
             match write.kind {
                 ConfigKind::Secret => {
-                    if let Err(error) =
-                        self.state.add_secret(write.field_name.clone(), write.value)
+                    if let Err(error) = self.state.add_secret(write.field_name.clone(), write.value)
                     {
                         self.state.push_activity(
                             ActivityTone::Error,
-                            format!(
-                                "Failed to save secret '{}': {error}",
-                                write.field_name
-                            ),
+                            format!("Failed to save secret '{}': {error}", write.field_name),
                         );
                         return;
                     }
@@ -1852,10 +1852,7 @@ impl DesktopShell {
             tracing::info!(action = %name, "host action dispatched via automation socket");
             match name.as_str() {
                 "OpenAppWindowExperiment" => {
-                    window.dispatch_action(
-                        Box::new(crate::app::OpenAppWindowExperiment),
-                        cx,
-                    );
+                    window.dispatch_action(Box::new(crate::app::OpenAppWindowExperiment), cx);
                 }
                 // "OpenLauncherWindow" was retired in Stage D of the
                 // system-capsule refactor — ShowSettings now reaches
@@ -1894,7 +1891,26 @@ impl Render for DesktopShell {
         let stage_bounds =
             compute_stage_bounds(&self.state, f32::from(size.width), f32::from(size.height));
         self.state.set_active_bounds(stage_bounds);
+
+        // Update dock_is_open flag *before* sync_from_state so that
+        // ListPanes automation commands return the correct pane list.
+        let dock_entity = cx
+            .try_global::<crate::window::dock::DockEntitySlot>()
+            .and_then(|s| s.0.clone());
+        self.webviews.set_dock_open(dock_entity.is_some());
+
         self.webviews.sync_from_state(window, &mut self.state);
+
+        // Dispatch automation commands targeting the dock WebView.
+        if let Some(entity) = dock_entity {
+            let dock_ref = entity.read(cx);
+            self.webviews
+                .dispatch_dock_automation_requests(&mut self.state, Some(&dock_ref.webview));
+        } else {
+            self.webviews
+                .dispatch_dock_automation_requests(&mut self.state, None);
+        }
+
         self.sync_omnibar_with_state(window, cx, false);
         if handled_open_urls {
             self.sync_focus_target(window, cx);
@@ -3320,8 +3336,8 @@ fn render_capsule_detail_body(
         .collect();
 
     div()
-        .flex_1()
         .overflow_y_scrollbar()
+        .flex_1()
         .px(px(20.0))
         .pb(px(20.0))
         .child(match state.route_metadata_active_tab {
