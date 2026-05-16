@@ -1535,17 +1535,38 @@ function handleDockEvent(event) {
 }
 
 function upsertListing(listing) {
-  // Match by id first; fall back to matching by source_value (same GitHub URL = same capsule).
+  // 1. Match by exact id.
   let index = state.listings.findIndex((item) => item.id === listing.id);
+  // 2. Fallback: match by source_value (same GitHub URL = same capsule, possibly different id).
   if (index < 0 && listing.source_value) {
     index = state.listings.findIndex(
       (item) => item.source_value && item.source_value === listing.source_value
     );
   }
+  // 3. Fallback: match by base capsule name (last segment of scoped id).
+  //    Handles legacy bare-name entries (e.g. "hello-capsule") that were created before
+  //    owner-qualified ids (e.g. "koh0920/hello-capsule") were introduced.
+  if (index < 0 && listing.id && listing.id.includes("/")) {
+    const baseName = listing.id.split("/").pop();
+    index = state.listings.findIndex((item) => item.id === baseName);
+  }
   if (index >= 0) {
     state.listings[index] = { ...state.listings[index], ...listing };
   } else {
     state.listings.unshift(listing);
+  }
+  // Remove any OTHER stale entries with the same source_value (but different id),
+  // which can accumulate when the same capsule is published under different ids.
+  if (listing.source_value) {
+    state.listings = state.listings.filter(
+      (item) => !item.source_value || item.source_value !== listing.source_value || item.id === listing.id
+    );
+  }
+  // Clean up legacy bare-name entries (without owner prefix) when an owner-qualified
+  // listing exists. E.g. remove "hello-capsule" when we have "koh0920/hello-capsule".
+  if (listing.id && listing.id.includes("/")) {
+    const baseName = listing.id.split("/").pop();
+    state.listings = state.listings.filter((item) => item.id !== baseName);
   }
 }
 
