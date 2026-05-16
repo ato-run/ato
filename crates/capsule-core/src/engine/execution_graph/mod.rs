@@ -28,6 +28,7 @@
 
 mod builder;
 pub mod canonical;
+mod launch_bundle;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -38,6 +39,12 @@ pub use builder::{
 };
 pub use canonical::{
     CanonicalGraphDomain, CanonicalizableGraph, GraphCanonicalForm, CANONICAL_FORM_VERSION,
+};
+pub use launch_bundle::{
+    DerivedDependencyContracts, DerivedDependencyProvider, DerivedExecutionIds,
+    DerivedPreflightView, DerivedReceiptSeed, GraphMaterializationSeedInput, GraphPreflightInput,
+    GraphReceiptSeedInput, GraphRuntimeNodeInput, GraphRuntimeNodeKind, LaunchGraphBundle,
+    LaunchGraphBundleInput, LaunchGraphDerivedViews,
 };
 pub use types::{
     ExecutionGraph, ExecutionGraphConstraint, ExecutionGraphEdge, ExecutionGraphEdgeKind,
