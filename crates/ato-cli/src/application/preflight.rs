@@ -104,6 +104,19 @@ pub enum PreflightError {
 
     #[error("consent store lookup failed: {source}")]
     ConsentStore { source: AtoExecutionError },
+
+    /// PR-3c (PR #180 review fix): the raw manifest TOML could not be
+    /// projected into the bundle's dependency list. Surfaces as a hard
+    /// error instead of being silently swallowed — the bundle-derived
+    /// preflight view is now load-bearing for the global required_env
+    /// block, so a parse failure here would otherwise produce an empty
+    /// `[dependencies.*]` projection and silently skip dep-driven
+    /// envelopes.
+    #[error("failed to derive external dependencies from raw manifest at {path}: {source}")]
+    ManifestParse {
+        path: PathBuf,
+        source: capsule_core::error::CapsuleError,
+    },
 }
 
 /// Walk a local capsule path and collect every pending pre-launch
@@ -149,10 +162,22 @@ pub fn collect_aggregate_requirements(
     // those facts — the legacy direct manifest reads
     // (collect_global_required_env / manifest.services) are kept for
     // debug-mode parity guards so drift surfaces immediately.
-    let manifest_dependencies = manifest_external_capsule_dependencies(
-        &toml::Value::try_from(manifest).unwrap_or(toml::Value::Table(Default::default())),
-    )
-    .unwrap_or_default();
+    //
+    // PR #180 review fix: feed `loaded.raw` (the unmodified TOML
+    // value) into `manifest_external_capsule_dependencies`, NOT a
+    // re-serialization of `loaded.model`. The typed model may not
+    // fully round-trip every `[dependencies.<alias>]` shape (custom
+    // parameters tables, contract variants), so a manifest with deps
+    // could otherwise project to an empty alias list and silently
+    // skip dep-driven preflight envelopes. Errors are surfaced as
+    // `PreflightError::ManifestParse` instead of `unwrap_or_default`
+    // so the failure is visible.
+    let manifest_dependencies = manifest_external_capsule_dependencies(&loaded.raw).map_err(
+        |source| PreflightError::ManifestParse {
+            path: manifest_path.clone(),
+            source,
+        },
+    )?;
     let preflight_bundle = build_declared_only_bundle(
         &manifest_dependencies,
         Some(manifest_path.display().to_string()),
@@ -693,6 +718,85 @@ run = "python -m app"
 
         assert_eq!(result.visited_targets.len(), 1);
         assert_eq!(result.visited_targets[0], "cli");
+    }
+
+    /// PR #180 review fix: a capsule manifest carrying
+    /// `[dependencies.<alias>]` blocks must produce a bundle whose
+    /// `derived.preflight.dependency_aliases` contains EVERY declared
+    /// alias. This pins the raw-TOML input path:
+    /// `manifest_external_capsule_dependencies(&loaded.raw)` reads
+    /// the unmodified TOML, not a re-serialization of the typed model
+    /// (which historically silently dropped aliases when typed-model
+    /// round-trip was imperfect).
+    #[test]
+    #[serial_test::serial]
+    fn bundle_dependency_aliases_carry_raw_manifest_dependencies() {
+        use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
+        use capsule_core::lockfile::manifest_external_capsule_dependencies;
+
+        let home = TempDir::new().expect("home");
+        let ato_home = TempDir::new().expect("ato_home");
+        let _home_guard = scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
+        let _ato_home_guard =
+            scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let manifest_dir = TempDir::new().expect("manifest_dir");
+        let manifest_path = manifest_dir.path().join("capsule.toml");
+        let manifest = r#"
+schema_version = "0.3"
+name           = "deps-fixture"
+version        = "0.1.0"
+type           = "app"
+
+runtime = "source/python"
+run = "main.py"
+
+required_env = ["DB_PASSWORD"]
+
+[dependencies.db]
+capsule = "capsule://ato/acme-postgres@16"
+contract = "service@1"
+
+  [dependencies.db.parameters]
+  database = "appdb"
+
+[dependencies.cache]
+capsule = "capsule://ato/acme-redis@7"
+contract = "service@1"
+"#;
+        fs::write(&manifest_path, manifest).expect("write");
+
+        // Mirror the path the collector takes: load the manifest,
+        // feed `loaded.raw` (NOT `toml::Value::try_from(&loaded.model)`)
+        // into the dependency derivation.
+        let loaded =
+            capsule_core::contract::manifest::load_manifest(&manifest_path).expect("load");
+        let manifest_dependencies =
+            manifest_external_capsule_dependencies(&loaded.raw).expect("derive deps");
+        assert_eq!(
+            manifest_dependencies.len(),
+            2,
+            "raw-TOML derivation must see both `db` and `cache`; \
+             got {} aliases",
+            manifest_dependencies.len()
+        );
+
+        let bundle = build_declared_only_bundle(
+            &manifest_dependencies,
+            Some(manifest_path.display().to_string()),
+            None,
+            loaded.model.required_env.clone(),
+        );
+        let view = PreflightView::from_bundle(&bundle);
+
+        let mut aliases = view.dependency_aliases.clone();
+        aliases.sort_unstable();
+        assert_eq!(
+            aliases,
+            vec!["cache".to_string(), "db".to_string()],
+            "PR-3c: bundle-derived dependency_aliases must contain every \
+             raw-TOML [dependencies.<alias>] declaration"
+        );
     }
 
     /// RAII env-var scope guard. The `std::env` API is process-global
