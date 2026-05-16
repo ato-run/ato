@@ -195,10 +195,12 @@ pub(crate) fn resolve_identity_projection(
         let _ = fs::remove_dir_all(&temp_root);
     }
 
-    fs::create_dir_all(&temp_source).with_context(|| {
+    // Create temp_root (parent) only; project_install_source creates temp_source itself.
+    // If we pre-create temp_source, project_install_source will refuse ("target already exists").
+    fs::create_dir_all(&temp_root).with_context(|| {
         format!(
-            "failed to create temp projection dir {}",
-            temp_source.display()
+            "failed to create temp projection root {}",
+            temp_root.display()
         )
     })?;
 
@@ -210,6 +212,11 @@ pub(crate) fn resolve_identity_projection(
                 temp_source.display()
             )
         })?;
+
+    // Ensure build dir exists within the temp dir before renaming.
+    fs::create_dir_all(temp_root.join("build")).with_context(|| {
+        format!("failed to create build dir in {}", temp_root.display())
+    })?;
 
     // Write .complete marker inside the temp dir *before* the rename so the
     // marker is either fully present or absent — never partially written.
