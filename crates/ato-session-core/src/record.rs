@@ -13,6 +13,7 @@ use capsule_wire::handle::{
     CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot, TrustState,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Minimum schema version that supports session reuse. Records below
@@ -52,6 +53,35 @@ pub struct StoredSessionInfo {
     /// field stays `None` until the Phase 3 implementation lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<StoredExecutionGraph>,
+
+    /// JCS execution receipt id for the launch that materialized this
+    /// session. Additive: v0.5.x records leave this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+
+    /// Receipt schema version for `execution_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_receipt_schema_version: Option<u32>,
+
+    /// Graph-derived declared/resolved/observed execution identities.
+    /// `observed_execution_id` is reserved for the runtime observation
+    /// hook and remains `None` in v0.6.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_execution_id: Option<String>,
+
+    /// Coarse graph materialization/completeness marker written from
+    /// receipts. Kept as strings in `ato-session-core` so this storage
+    /// crate does not depend on the execution-identity crate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_completeness: Option<String>,
+
+    /// Reproducibility class copied from the launch receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reproducibility_class: Option<String>,
 
     /// Embedded `[services]` orchestration snapshot for crash recovery
     /// (#73 PR-D, closes #28 phase 2). For orchestration capsules, the
@@ -199,13 +229,25 @@ pub struct StoredExecutionGraph {
 }
 
 impl StoredExecutionGraph {
-    pub const SCHEMA_VERSION: u32 = 1;
+    pub const SCHEMA_VERSION: u32 = 2;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredGraphNode {
     pub kind: String,
     pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,6 +255,8 @@ pub struct StoredGraphEdge {
     pub source: String,
     pub target: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -328,6 +372,13 @@ mod tests {
                 }],
             }),
             graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("a".repeat(64)),
@@ -386,6 +437,13 @@ mod tests {
             service: None,
             dependency_contracts: None,
             graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: 7777,
                 services: vec![
@@ -471,7 +529,10 @@ mod tests {
         }"#;
         let parsed: StoredSessionInfo =
             serde_json::from_str(json_without_graph).expect("parse pre-Phase-3 record");
-        assert!(parsed.graph.is_none(), "missing graph field must default to None");
+        assert!(
+            parsed.graph.is_none(),
+            "missing graph field must default to None"
+        );
     }
 
     /// `graph: None` round-trips byte-stable — the field is skipped on
@@ -502,6 +563,13 @@ mod tests {
             service: None,
             dependency_contracts: None,
             graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: None,
             launch_digest: None,
@@ -546,6 +614,13 @@ mod tests {
                 nodes: vec![],
                 edges: vec![],
             }),
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: None,
             launch_digest: None,
@@ -554,9 +629,15 @@ mod tests {
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
         let second = serde_json::to_string(&parsed).expect("reserialize");
-        assert_eq!(first, second, "graph: Some(empty) must round-trip byte-stable");
+        assert_eq!(
+            first, second,
+            "graph: Some(empty) must round-trip byte-stable"
+        );
         let parsed_graph = parsed.graph.expect("graph field present");
-        assert_eq!(parsed_graph.schema_version, StoredExecutionGraph::SCHEMA_VERSION);
+        assert_eq!(
+            parsed_graph.schema_version,
+            StoredExecutionGraph::SCHEMA_VERSION
+        );
         assert!(parsed_graph.nodes.is_empty());
         assert!(parsed_graph.edges.is_empty());
     }

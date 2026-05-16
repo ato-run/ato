@@ -38,8 +38,8 @@ use std::future::Future;
 
 use anyhow::Result;
 use capsule_core::execution_identity::{
-    ExecutionReceiptDocument, ExecutionReceiptV2, ReceiptFailureEnvelope, ReceiptFailureKind,
-    ReceiptResultClass,
+    ExecutionReceiptDocument, ExecutionReceiptV2, ExecutionRunnerIdentity, ReceiptFailureEnvelope,
+    ReceiptFailureKind, ReceiptResultClass,
 };
 use capsule_core::execution_plan::error::AtoExecutionError;
 
@@ -150,14 +150,20 @@ pub(crate) fn partial_receipt_for_error(error: &anyhow::Error) -> Option<Executi
         ReceiptFailureKind::Recoverable => ReceiptResultClass::RecoverableFailure,
         ReceiptFailureKind::Aborted => ReceiptResultClass::Aborted,
     };
-    Some(ExecutionReceiptV2::partial_failure(
-        chrono::Utc::now().to_rfc3339(),
-        result_class,
-        envelope,
-        None, // declared_execution_id — see ReceiptEmissionContext docs
-        None, // resolved_execution_id — see ReceiptEmissionContext docs
-        None, // local locator — partial receipts don't surface paths
-    ))
+    Some(
+        ExecutionReceiptV2::partial_failure(
+            chrono::Utc::now().to_rfc3339(),
+            result_class,
+            envelope,
+            None, // declared_execution_id — see ReceiptEmissionContext docs
+            None, // resolved_execution_id — see ReceiptEmissionContext docs
+            None, // local locator — partial receipts don't surface paths
+        )
+        .with_runner(ExecutionRunnerIdentity::new(
+            "ato-cli",
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )),
+    )
 }
 
 /// Build a typed [`ReceiptFailureEnvelope`] from an `anyhow::Error` by

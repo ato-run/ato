@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use capsule_core::common::paths::ato_executions_dir;
 use capsule_core::execution_identity::{
-    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2,
+    ExecutionReceipt, ExecutionReceiptDocument, ExecutionReceiptV2, GraphReceipt,
     EXECUTION_IDENTITY_SCHEMA_VERSION, EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
 };
 
@@ -108,6 +108,20 @@ pub(crate) fn read_receipt_at(root: &Path, execution_id: &str) -> Result<Executi
 
 pub(crate) fn read_receipt_document(execution_id: &str) -> Result<ExecutionReceiptDocument> {
     read_receipt_document_at(&default_receipt_root(), execution_id)
+}
+
+pub(crate) fn mark_v2_receipt_readiness_passed(execution_id: &str) -> Result<()> {
+    let mut document = read_receipt_document(execution_id)?;
+    let ExecutionReceiptDocument::V2(receipt) = &mut document else {
+        return Ok(());
+    };
+    receipt.graph_receipt = Some(GraphReceipt::readiness_passed(
+        receipt.declared_execution_id.clone(),
+        receipt.resolved_execution_id.clone(),
+        receipt.observed_execution_id.clone(),
+    ));
+    write_receipt_document_atomic(&document)?;
+    Ok(())
 }
 
 pub(crate) fn read_receipt_document_at(
