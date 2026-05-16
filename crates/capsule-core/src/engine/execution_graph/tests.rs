@@ -22,10 +22,12 @@ fn sample_input() -> ExecutionGraphBuildInput {
             GraphDependencyInput {
                 provider: "provider://npm".into(),
                 output: "output://lodash".into(),
+                ..Default::default()
             },
             GraphDependencyInput {
                 provider: "provider://cargo".into(),
                 output: "output://serde".into(),
+                ..Default::default()
             },
         ],
         host: None,
@@ -68,10 +70,12 @@ fn each_dependency_input_emits_a_provider_node_in_stable_order() {
             GraphDependencyInput {
                 provider: "provider://zeta".into(),
                 output: "output://zeta-out".into(),
+                ..Default::default()
             },
             GraphDependencyInput {
                 provider: "provider://alpha".into(),
                 output: "output://alpha-out".into(),
+                ..Default::default()
             },
         ],
         host: None,

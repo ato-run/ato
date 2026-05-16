@@ -1429,6 +1429,81 @@ pub fn verify_lockfile_external_dependencies(
     Ok(())
 }
 
+/// PR-4a: graph-derived equivalent of
+/// [`verify_lockfile_external_dependencies`]. Takes a bundle-projected
+/// [`DerivedDependencyContracts`] view as input instead of re-parsing
+/// the manifest TOML. The 6-field equality check
+/// (source / source_type / contract / injection_bindings / parameters
+/// / credentials) is byte-for-byte identical to the legacy verifier,
+/// because the bundle-derived view re-uses the same `ParamValue` /
+/// `TemplatedString` types the manifest grammar uses.
+///
+/// Empty `contracts.providers` is treated as a no-op (matches the
+/// legacy verifier's short-circuit on manifests without external
+/// dependencies).
+///
+/// **Credential safety:** `DerivedDependencyContracts` carries
+/// `TemplatedString` credential templates only, never resolved env
+/// values. See `GraphDependencyInput`'s safety rule docstring.
+pub fn verify_lockfile_against_contracts(
+    contracts: &crate::engine::execution_graph::DerivedDependencyContracts,
+    lockfile: &CapsuleLock,
+) -> Result<()> {
+    if contracts.providers.is_empty() {
+        return Ok(());
+    }
+
+    for provider in &contracts.providers {
+        let Some(locked) = lockfile
+            .capsule_dependencies
+            .iter()
+            .find(|item| item.name == provider.alias)
+        else {
+            return Err(CapsuleError::Config(format!(
+                "{} is missing capsule dependency '{}'",
+                CAPSULE_LOCK_FILE_NAME, provider.alias
+            )));
+        };
+        // The bundle-derived view stores `source` / `source_type` /
+        // `contract` as `Option<String>` (defaulted to `None` for
+        // back-compat callers that haven't migrated). The legacy
+        // verifier compares against `String` / `Option<String>`
+        // shape. Treat `None` on the contract side as "manifest
+        // didn't declare the field" — match the empty / absent value
+        // accordingly.
+        let source_match = provider
+            .source
+            .as_deref()
+            .map(|s| s == locked.source.as_str())
+            .unwrap_or(false);
+        let source_type_match = provider
+            .source_type
+            .as_deref()
+            .map(|t| t == locked.source_type.as_str())
+            .unwrap_or(false);
+        let contract_match = provider.contract == locked.contract;
+        let bindings_match = provider.injection_bindings == locked.injection_bindings;
+        let parameters_match = provider.parameters == locked.parameters;
+        let credentials_match = provider.credentials == locked.credentials;
+        if !source_match
+            || !source_type_match
+            || !contract_match
+            || !bindings_match
+            || !parameters_match
+            || !credentials_match
+        {
+            return Err(CapsuleError::Config(format!(
+                "{} capsule dependency '{}' does not match manifest source '{}'",
+                CAPSULE_LOCK_FILE_NAME,
+                provider.alias,
+                provider.source.as_deref().unwrap_or("")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn infer_contract_dependency_source_type(source: &str) -> Option<String> {
     let raw = source.trim();
     if raw.starts_with("capsule://store/")

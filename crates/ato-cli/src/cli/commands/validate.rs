@@ -103,17 +103,15 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                         }
                     })?;
 
-                // PR-3c: bundle-derived `DependencyContracts` is the
-                // source-of-truth surface for "which providers does this
-                // manifest declare". The legacy
-                // `manifest_external_capsule_dependencies` derivation is
-                // kept for the lockfile-side gating
-                // (`verify_lockfile_external_dependencies`, which still
-                // takes the manifest + lock directly), but the parity
-                // guard below pins that the legacy alias set matches the
-                // bundle's. If this debug_assert fires in a real run,
-                // the receipt path and the validate path are reading
-                // different worlds.
+                // PR-4a: bundle-derived `DependencyContracts` is now
+                // the source-of-truth gating input for the lockfile
+                // consistency check too. We call
+                // `verify_lockfile_against_contracts(bundle.derived,
+                // lock)` as the primary; the legacy
+                // `verify_lockfile_external_dependencies(manifest,
+                // lock)` becomes a `debug_assert!` parity guard so any
+                // drift between the manifest-direct and the
+                // bundle-derived paths fails tests before it ships.
                 let external_dependencies =
                     manifest_external_capsule_dependencies(&decision.plan.manifest)?;
                 let bundle = build_declared_only_bundle(
@@ -126,7 +124,22 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 debug_assert_bundle_contracts_match_legacy(&contracts, &external_dependencies);
                 debug_assert_provider_aliases_match_lock(&external_dependencies, &legacy_lock.lock);
 
-                verify_lockfile_external_dependencies(&decision.plan.manifest, &legacy_lock.lock)?;
+                // PRIMARY: bundle-derived view → lockfile verifier.
+                capsule_core::lockfile::verify_lockfile_against_contracts(
+                    &bundle.derived.dependency_contracts,
+                    &legacy_lock.lock,
+                )?;
+
+                // PARITY (debug only): legacy must agree.
+                debug_assert!(
+                    verify_lockfile_external_dependencies(
+                        &decision.plan.manifest,
+                        &legacy_lock.lock,
+                    )
+                    .is_ok(),
+                    "PR-4a parity: legacy verify_lockfile_external_dependencies disagrees \
+                     with bundle-derived verify_lockfile_against_contracts"
+                );
                 true
             } else {
                 let external_dependencies =
