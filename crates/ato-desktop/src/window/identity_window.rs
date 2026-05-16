@@ -142,7 +142,11 @@ impl WebViewPasteShell for IdentityWindowShell {
 
 impl Render for IdentityWindowShell {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        paste_render_wrap!(div().size_full().bg(rgb(0xffffff)), cx, &self.paste.focus_handle)
+        paste_render_wrap!(
+            div().size_full().bg(rgb(0xffffff)),
+            cx,
+            &self.paste.focus_handle
+        )
     }
 }
 
@@ -184,7 +188,10 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Identity WebView");
-        let shell = cx.new(|cx| IdentityWindowShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        let shell = cx.new(|cx| IdentityWindowShell {
+            _webview: webview,
+            paste: WebViewPasteSupport::new(cx),
+        });
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;

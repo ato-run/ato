@@ -36,6 +36,6 @@ pub(crate) mod source_inference;
 pub(crate) mod source_inventory;
 pub(crate) mod source_projection;
 pub(crate) mod tool_artifact;
-pub(crate) mod warm_launch;
 pub(crate) mod types;
+pub(crate) mod warm_launch;
 pub(crate) mod workspace;

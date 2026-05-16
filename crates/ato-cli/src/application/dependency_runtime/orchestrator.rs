@@ -475,10 +475,11 @@ fn start_one(
         alias: alias.to_string(),
         detail: format!("create_dir_all {}: {}", state_dir.display(), err),
     })?;
-    let state_dir = std::fs::canonicalize(&state_dir).map_err(|err| OrchestratorError::StateDirSetup {
-        alias: alias.to_string(),
-        detail: format!("canonicalize {}: {}", state_dir.display(), err),
-    })?;
+    let state_dir =
+        std::fs::canonicalize(&state_dir).map_err(|err| OrchestratorError::StateDirSetup {
+            alias: alias.to_string(),
+            detail: format!("canonicalize {}: {}", state_dir.display(), err),
+        })?;
 
     // §10.4 orphan detection (warn-only, with abort for AliveOtherSession).
     let orphan = detect_orphan_state(&state_dir, input.session_pid).map_err(|err| {
@@ -684,8 +685,7 @@ fn start_one(
     // host-binary-missing case for legacy probe specs; this layer
     // handles the new artifact-driven path.
     if !target_block.tool_artifacts.is_empty() {
-        let downloader =
-            crate::application::tool_artifact::ReqwestDownloader::default();
+        let downloader = crate::application::tool_artifact::ReqwestDownloader::default();
         let env_map = crate::application::tool_artifact::resolve_target_tool_env(
             &target_block.tool_artifacts,
             &input.ato_home,

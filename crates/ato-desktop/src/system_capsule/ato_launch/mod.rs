@@ -155,54 +155,46 @@ pub fn dispatch(
             // Store non-secret config so AppCapsuleShell passes it to
             // resolve_and_start_guest.
             let plain_configs: Vec<(String, String)> = config.into_iter().collect();
-            cx.set_global(crate::window::launch_window::PendingLaunchConfigs(plain_configs));
+            cx.set_global(crate::window::launch_window::PendingLaunchConfigs(
+                plain_configs.clone(),
+            ));
 
             if let Some(route) = pending {
-                let boot_handle =
-                    match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
-                        Ok(h) => Some(h),
-                        Err(err) => {
-                            tracing::error!(
-                                error = %err,
-                                "ato_launch: open_boot_window failed after approve"
-                            );
-                            None
-                        }
-                    };
+                match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
+                    Ok(boot_handle) => {
+                        // start_boot_launch owns the background launch
+                        // task: it stores the boot handle + abort flag
+                        // in BootWindowSlot, drives orchestrator progress
+                        // events into the wizard, and on success calls
+                        // `open_ready_capsule_window` itself. We must NOT
+                        // also call `open_app_window` here — that would
+                        // create two concurrent capsule sessions.
+                        crate::window::launch_window::start_boot_launch(
+                            cx,
+                            route.clone(),
+                            plain_configs,
+                            boot_handle,
+                        );
 
-                let app_handle = match crate::window::open_app_window(cx, route.clone()) {
-                    Ok(h) => Some(h),
+                        // Record launch in the start-page history so the
+                        // next time the start page opens, this capsule
+                        // appears in the "recent capsules" row.
+                        if let GuestRoute::CapsuleHandle { handle, label }
+                        | GuestRoute::CapsuleUrl { handle, label, .. } = &route
+                        {
+                            let mut store =
+                                crate::system_capsule::ato_start::StartPageHistoryStore::load();
+                            store.record_open(handle, label);
+                            if let Err(err) = store.save() {
+                                tracing::warn!(error = %err, "ato_launch: failed to save start history");
+                            }
+                        }
+                    }
                     Err(err) => {
                         tracing::error!(
                             error = %err,
-                            ?route,
-                            "ato_launch: open_app_window failed after approve"
+                            "ato_launch: open_boot_window failed after approve"
                         );
-                        if let Some(bh) = boot_handle {
-                            let _ = bh.update(cx, |_, window, _| window.remove_window());
-                        }
-                        return Ok(());
-                    }
-                };
-
-                if let Some(bh) = boot_handle {
-                    let _ = bh.update(cx, |_, window, _| window.activate_window());
-                    tracing::debug!("ato_launch: boot wizard re-activated after app window opened");
-                }
-
-                cx.set_global(crate::window::launch_window::BootWindowSlot {
-                    boot_window: boot_handle,
-                    app_window: app_handle,
-                });
-
-                // Record launch in the start-page history so the next
-                // time the start page opens, this capsule appears in
-                // the "recent capsules" row.
-                if let GuestRoute::CapsuleHandle { handle, label } | GuestRoute::CapsuleUrl { handle, label, .. } = &route {
-                    let mut store = crate::system_capsule::ato_start::StartPageHistoryStore::load();
-                    store.record_open(handle, label);
-                    if let Err(err) = store.save() {
-                        tracing::warn!(error = %err, "ato_launch: failed to save start history");
                     }
                 }
             } else {
@@ -218,7 +210,7 @@ pub fn dispatch(
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
         LaunchCommand::AbortBoot => {
-            tracing::info!("ato_launch: user aborted boot — closing both windows");
+            tracing::info!("ato_launch: user aborted boot — signalling background task");
 
             let slot = cx
                 .try_global::<crate::window::launch_window::BootWindowSlot>()
@@ -226,11 +218,14 @@ pub fn dispatch(
                 .unwrap_or_default();
             cx.set_global(crate::window::launch_window::BootWindowSlot::default());
 
+            // Tell the background launch worker to suppress its
+            // successful session — otherwise a late success would
+            // spawn the AppWindow even after the user cancelled.
+            if let Some(flag) = slot.abort_flag.as_ref() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
             if let Some(boot) = slot.boot_window {
                 let _ = boot.update(cx, |_, window, _| window.remove_window());
-            }
-            if let Some(app) = slot.app_window {
-                let _ = app.update(cx, |_, window, _| window.remove_window());
             }
         }
     }

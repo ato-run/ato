@@ -1199,7 +1199,10 @@ mod tests {
     fn desktop_settings_default_values() {
         let config = DesktopConfig::default();
         let d = &config.desktop;
-        assert!(d.focus_view_enabled, "focus_view_enabled default must be true");
+        assert!(
+            d.focus_view_enabled,
+            "focus_view_enabled default must be true"
+        );
         assert_eq!(d.startup_surface, StartupSurface::Start);
         assert_eq!(
             d.content_window_default_presentation,
@@ -1229,7 +1232,10 @@ mod tests {
             ContentWindowPresentation::Fullscreen
         );
         assert_eq!(parsed.desktop.control_bar.mode, ControlBarMode::AutoHide);
-        assert_eq!(parsed.desktop.control_bar.position, ControlBarPosition::Bottom);
+        assert_eq!(
+            parsed.desktop.control_bar.position,
+            ControlBarPosition::Bottom
+        );
         assert!(parsed.desktop.control_bar.auto_hide);
     }
 

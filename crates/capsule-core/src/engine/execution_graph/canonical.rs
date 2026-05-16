@@ -184,11 +184,16 @@ fn encode_canonical(graph: &ExecutionGraph, domain: CanonicalGraphDomain) -> Vec
 /// Estimate output size to keep the encoder allocation-light. The numbers
 /// are heuristics; correctness does not depend on them.
 fn estimate_size(graph: &ExecutionGraph) -> usize {
-    16 + 4 + 1
-        + 8 + graph.nodes.len() * 64
-        + 8 + graph.edges.len() * 96
-        + 8 + graph.labels.len() * 64
-        + 8 + graph.constraints.len() * 64
+    16 + 4
+        + 1
+        + 8
+        + graph.nodes.len() * 64
+        + 8
+        + graph.edges.len() * 96
+        + 8
+        + graph.labels.len() * 64
+        + 8
+        + graph.constraints.len() * 64
 }
 
 /// Write a section tag and a u32 LE count. The tag is purely informational
@@ -237,7 +242,10 @@ fn write_node_payload(out: &mut Vec<u8>, node: &ExecutionGraphNode) {
         | ExecutionGraphNode::Filesystem { identifier }
         | ExecutionGraphNode::Network { identifier }
         | ExecutionGraphNode::State { identifier }
-        | ExecutionGraphNode::Entrypoint { identifier } => {
+        | ExecutionGraphNode::Entrypoint { identifier }
+        | ExecutionGraphNode::Process { identifier }
+        | ExecutionGraphNode::RuntimeInstance { identifier }
+        | ExecutionGraphNode::BridgeCapability { identifier } => {
             write_lp_str(out, identifier);
         }
     }
@@ -326,10 +334,7 @@ mod tests {
             f.bytes, r.bytes,
             "canonical bytes must be order-independent",
         );
-        assert_eq!(
-            f.digest, r.digest,
-            "digest must be order-independent",
-        );
+        assert_eq!(f.digest, r.digest, "digest must be order-independent",);
     }
 
     #[test]
@@ -500,7 +505,9 @@ mod tests {
         let hex = form.digest_hex();
         assert!(hex.starts_with("sha256:"));
         assert_eq!(hex.len(), "sha256:".len() + 64);
-        assert!(hex[7..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(hex[7..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     /// Declared-domain sensitivity (refs #98, #99): changing a

@@ -383,7 +383,10 @@ fn classify_first_message(msg: &BackendFirstMessage) -> Result<(), String> {
         BackendFirstMessage::AuthenticationOther(t) => {
             // The server reached auth — accepting connections. Record
             // the type so an operator can diagnose unusual configs.
-            tracing::debug!(auth_type = *t, "postgres probe: unusual auth type, treating as ready");
+            tracing::debug!(
+                auth_type = *t,
+                "postgres probe: unusual auth type, treating as ready"
+            );
             Ok(())
         }
         BackendFirstMessage::ErrorResponse { sqlstate, message } => {

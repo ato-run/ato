@@ -10,6 +10,15 @@ use serde::Deserialize;
 
 use super::broker::Capability;
 
+/// Source-of-truth shape for a developer-imported capsule project.
+/// Drives both the cloning/validation step and how the inferred
+/// manifest's `name` slug seed is derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockSourceKind {
+    GithubRepo,
+    LocalPath,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DockCommand {

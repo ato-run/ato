@@ -11,6 +11,7 @@ mod logging;
 mod orchestrator;
 mod retention;
 mod settings;
+mod stable_origin_proxy;
 mod state;
 mod surface_timing;
 mod system_capsule;

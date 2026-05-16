@@ -34,8 +34,8 @@ use anyhow::Result;
 use capsule_wire::config::ConfigKind;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity,
-    IntoElement, Render, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
+    div, px, rgb, size, AnyWindowHandle, App, Bounds, Context, Entity, IntoElement, Render,
+    WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
 use serde::Serialize;
@@ -157,6 +157,8 @@ pub(crate) struct LaunchConsentPreview {
     /// error/retry prompt when this flag is set.
     #[serde(default)]
     pub preflight_failed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preflight_error: Option<String>,
     pub name: String,
     pub handle: String,
     pub capsule_id: String,
@@ -218,6 +220,16 @@ impl LaunchWindowShell {
         let script = format!(
             "typeof window.__atoStep==='function'&&window.__atoStep({})",
             step
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
+
+    /// Push a textual launch event line into the boot wizard detail/log view.
+    pub fn push_detail(&self, detail: &str) {
+        let detail_json = serde_json::to_string(detail).unwrap_or_else(|_| "\"\"".to_string());
+        let script = format!(
+            "typeof window.__atoDetail==='function'&&window.__atoDetail({})",
+            detail_json
         );
         let _ = self._webview.evaluate_script(&script);
     }
@@ -456,6 +468,7 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
         preview_id: preview_id.clone(),
         loading: true,
         preflight_failed: false,
+        preflight_error: None,
         name: display_name.clone(),
         handle: display_handle.clone(),
         capsule_id: String::new(),
@@ -600,6 +613,7 @@ fn build_consent_preview(
                 preview_id: preview_id.to_string(),
                 loading: false,
                 preflight_failed: false,
+                preflight_error: None,
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: data.capsule_id,
@@ -626,6 +640,7 @@ fn build_consent_preview(
                 preview_id: preview_id.to_string(),
                 loading: false,
                 preflight_failed,
+                preflight_error: preflight_failed.then(|| format!("{err:#}")),
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: String::new(),
@@ -803,6 +818,12 @@ pub fn start_boot_launch(
         boot_window: Some(boot_handle),
         abort_flag: Some(Arc::clone(&abort_flag)),
     });
+    if let Some(shell) = boot_shell_weak.as_ref().and_then(|weak| weak.upgrade()) {
+        let _ = shell.update(cx, |shell, _cx| {
+            shell.push_detail("Launching capsule");
+            shell.push_detail("Preparing secure runtime and dependency resolution");
+        });
+    }
 
     let Some(handle) = launch_handle_for_route(&route) else {
         show_boot_failure(
@@ -859,7 +880,17 @@ pub fn start_boot_launch(
                     aa.update(move |cx: &mut App| {
                         if let Some(shell) = shell_for_steps.and_then(|weak| weak.upgrade()) {
                             for step in steps {
-                                let _ = shell.update(cx, |shell, _cx| shell.push_step(step));
+                                let _ = shell.update(cx, |shell, _cx| {
+                                    shell.push_step(step);
+                                    let msg = match step {
+                                        0 => "Validating launch plan",
+                                        1 => "Resolving capsule targets",
+                                        2 => "Starting capsule session",
+                                        3 => "Connecting to capsule endpoint",
+                                        _ => "Processing launch step",
+                                    };
+                                    shell.push_detail(msg);
+                                });
                             }
                         }
                     });
@@ -882,6 +913,15 @@ pub fn start_boot_launch(
                             match result {
                                 Ok(session) => {
                                     let session_id = session.session_id.clone();
+                                    if let Some(shell) =
+                                        shell_for_result.as_ref().and_then(|weak| weak.upgrade())
+                                    {
+                                        let _ = shell.update(cx, |shell, _cx| {
+                                            shell.push_detail(
+                                                "Capsule session started successfully",
+                                            );
+                                        });
+                                    }
                                     match crate::window::orchestrator::open_ready_capsule_window(
                                         cx,
                                         route_for_open.clone(),
@@ -896,6 +936,16 @@ pub fn start_boot_launch(
                                         }
                                         Err(err) => {
                                             stop_session_async(session_id);
+                                            if let Some(shell) = shell_for_result
+                                                .as_ref()
+                                                .and_then(|weak| weak.upgrade())
+                                            {
+                                                let _ = shell.update(cx, |shell, _cx| {
+                                                    shell.push_detail(
+                                                        "Failed to create app window from session",
+                                                    );
+                                                });
+                                            }
                                             show_boot_failure(
                                                 cx,
                                                 &shell_for_result,
@@ -909,6 +959,13 @@ pub fn start_boot_launch(
                                         crate::window::app_capsule_shell::describe_launch_error(
                                             &err,
                                         );
+                                    if let Some(shell) =
+                                        shell_for_result.as_ref().and_then(|weak| weak.upgrade())
+                                    {
+                                        let _ = shell.update(cx, |shell, _cx| {
+                                            shell.push_detail("Capsule launch returned an error");
+                                        });
+                                    }
                                     show_boot_failure(cx, &shell_for_result, &message);
                                 }
                             }
@@ -919,6 +976,15 @@ pub fn start_boot_launch(
                         if !abort_flag.load(Ordering::Acquire) {
                             let shell_for_result = boot_shell_weak.clone();
                             aa.update(move |cx: &mut App| {
+                                if let Some(shell) =
+                                    shell_for_result.as_ref().and_then(|weak| weak.upgrade())
+                                {
+                                    let _ = shell.update(cx, |shell, _cx| {
+                                        shell.push_detail(
+                                            "Launch worker disconnected before returning a result",
+                                        );
+                                    });
+                                }
                                 show_boot_failure(
                                     cx,
                                     &shell_for_result,

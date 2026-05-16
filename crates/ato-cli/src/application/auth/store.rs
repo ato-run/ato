@@ -549,8 +549,8 @@ pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
 /// - Exits with a non-zero code on failure.
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow_desktop() -> Result<()> {
-    use capsule_core::common::paths::nacelle_home_dir;
     use crate::application::credential::AgeFileBackend;
+    use capsule_core::common::paths::nacelle_home_dir;
 
     // ── Age identity bootstrap (non-interactive) ──────────────────────────────
     let ato_home = nacelle_home_dir().context("failed to resolve ato home")?;
@@ -677,12 +677,13 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
             .with_context(|| "Failed to poll bridge authentication state")?;
 
         if poll_response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let body = poll_response
-                .json::<RetryAfterResponse>()
-                .await
-                .unwrap_or(RetryAfterResponse {
-                    retry_after: Some(poll_interval_secs),
-                });
+            let body =
+                poll_response
+                    .json::<RetryAfterResponse>()
+                    .await
+                    .unwrap_or(RetryAfterResponse {
+                        retry_after: Some(poll_interval_secs),
+                    });
             let retry_after = body.retry_after.unwrap_or(poll_interval_secs).max(1);
             tokio::time::sleep(Duration::from_secs(retry_after)).await;
             continue;
@@ -793,10 +794,8 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                         creds.publisher_handle = Some(onboarding.publisher_handle);
                         creds.publisher_did = Some(onboarding.publisher_did);
                         if let Some(installation) = onboarding.installation {
-                            creds.github_app_installation_id =
-                                Some(installation.installation_id);
-                            creds.github_app_account_login =
-                                Some(installation.account_login);
+                            creds.github_app_installation_id = Some(installation.installation_id);
+                            creds.github_app_account_login = Some(installation.account_login);
                         }
                         let _ = manager.save(&creds);
                     }
@@ -828,7 +827,6 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
         }
     }
 }
-
 
 #[allow(clippy::needless_return)]
 pub fn logout() -> Result<()> {

@@ -414,7 +414,9 @@ pub(super) async fn run_publisher_onboarding_flow(
         let existing = fetch_github_app_installations(&client, &api_base, session_token)
             .await
             .unwrap_or_default();
-        existing.into_iter().find(|i| i.status.eq_ignore_ascii_case("active"))
+        existing
+            .into_iter()
+            .find(|i| i.status.eq_ignore_ascii_case("active"))
     } else {
         Some(ensure_github_app_installation_with_tui(&client, &api_base, session_token).await?)
     };

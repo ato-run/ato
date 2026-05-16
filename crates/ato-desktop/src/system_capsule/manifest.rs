@@ -44,10 +44,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
         id: SystemCapsuleId::AtoStore,
         slug: "store",
         display_name: "Store",
-        allowed_capabilities: &[
-            Capability::WebviewCreate,
-            Capability::LaunchSystemCapsule,
-        ],
+        allowed_capabilities: &[Capability::WebviewCreate, Capability::LaunchSystemCapsule],
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoSettings,
@@ -93,10 +90,7 @@ const TABLE: &[SystemCapsuleManifest] = &[
         // avatar button. Phase 1 menu items either close their own
         // window (WindowsClose) or hand off to ato-store /
         // ato-settings (LaunchSystemCapsule).
-        allowed_capabilities: &[
-            Capability::WindowsClose,
-            Capability::LaunchSystemCapsule,
-        ],
+        allowed_capabilities: &[Capability::WindowsClose, Capability::LaunchSystemCapsule],
     },
     SystemCapsuleManifest {
         id: SystemCapsuleId::AtoStart,
@@ -125,6 +119,13 @@ const TABLE: &[SystemCapsuleManifest] = &[
         ],
     },
 ];
+
+/// Canonical handle URL for a system capsule slug. Mirrors the value
+/// that AppWindow registry / content_windows record for system capsule
+/// content windows (`capsule://desktop.ato.run/<slug>`).
+pub fn system_capsule_url(slug: &str) -> String {
+    format!("capsule://desktop.ato.run/{slug}")
+}
 
 pub fn lookup(id: SystemCapsuleId) -> &'static SystemCapsuleManifest {
     TABLE

@@ -38,7 +38,11 @@ impl WebViewPasteShell for StartWindowShell {
 
 impl Render for StartWindowShell {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        paste_render_wrap!(div().size_full().bg(rgb(0x111111)), cx, &self.paste.focus_handle)
+        paste_render_wrap!(
+            div().size_full().bg(rgb(0x111111)),
+            cx,
+            &self.paste.focus_handle
+        )
     }
 }
 
@@ -98,7 +102,10 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Start WebView");
-        let shell = cx.new(|cx| StartWindowShell { _webview: webview, paste: WebViewPasteSupport::new(cx) });
+        let shell = cx.new(|cx| StartWindowShell {
+            _webview: webview,
+            paste: WebViewPasteSupport::new(cx),
+        });
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;

@@ -292,8 +292,7 @@ mod tests {
             cleanup_actions: &exec_err.cleanup_actions,
             manifest_suggestion: exec_err.manifest_suggestion.as_ref(),
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&payload).expect("serialize event");
+        let json: serde_json::Value = serde_json::to_value(&payload).expect("serialize event");
 
         // Legacy details path stays intact (desktop's
         // `ConsentRequiredDetailsDto` still consumes this).
@@ -313,7 +312,10 @@ mod tests {
         );
         assert_eq!(env["kind"]["scoped_id"].as_str(), Some("publisher/app"));
         assert_eq!(env["kind"]["target_label"].as_str(), Some("cli"));
-        assert_eq!(env["kind"]["policy_segment_hash"].as_str(), Some("blake3:aaa"));
+        assert_eq!(
+            env["kind"]["policy_segment_hash"].as_str(),
+            Some("blake3:aaa")
+        );
         assert_eq!(env["display"]["message"].as_str(), Some("consent required"));
     }
 
@@ -343,8 +345,7 @@ mod tests {
             cleanup_actions: &exec_err.cleanup_actions,
             manifest_suggestion: exec_err.manifest_suggestion.as_ref(),
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&payload).expect("serialize event");
+        let json: serde_json::Value = serde_json::to_value(&payload).expect("serialize event");
 
         assert!(
             json.get("interactive_resolution_required").is_none(),

@@ -796,10 +796,9 @@ pub async fn fetch_github_install_draft(repository: &str) -> Result<GitHubInstal
         let response = match result {
             Ok(r) => r,
             Err(err) if err.is_timeout() || err.is_connect() => {
-                last_err =
-                    anyhow::Error::new(err).context(format!(
-                        "Failed to fetch GitHub install draft: {normalized}"
-                    ));
+                last_err = anyhow::Error::new(err).context(format!(
+                    "Failed to fetch GitHub install draft: {normalized}"
+                ));
                 continue;
             }
             Err(err) => {
