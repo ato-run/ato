@@ -138,6 +138,32 @@ pub fn execute(
     Ok(status.code().unwrap_or(1))
 }
 
+/// Variant of [`spawn`] that pins the runtime port to `selected_port`
+/// when `Some`. Used by the warm-launch fast path in
+/// `app_control::session` so the child runtime exposes the same port the
+/// desktop has already locked. The port is wired through the same env
+/// channel cold-launch uses (`ATO_UI_OVERRIDE_PORT`), so executors that
+/// honour `override_port` pick it up without further changes.
+///
+/// `None` falls through to [`spawn`] without installing the override.
+pub fn spawn_with_selected_port(
+    plan: &ManifestData,
+    authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    dangerously_skip_permissions: bool,
+    selected_port: Option<u16>,
+) -> Result<Child> {
+    let _port_guard = selected_port.map(runtime_overrides::scoped_override_port);
+    spawn(
+        plan,
+        authoritative_lock,
+        execution_plan,
+        launch_ctx,
+        dangerously_skip_permissions,
+    )
+}
+
 pub fn spawn(
     plan: &ManifestData,
     authoritative_lock: Option<&capsule_core::ato_lock::AtoLock>,

@@ -23,6 +23,36 @@ pub fn override_port(default: Option<u16>) -> Option<u16> {
     trimmed.parse::<u16>().ok().or(default)
 }
 
+/// RAII guard that installs `ATO_UI_OVERRIDE_PORT=<port>` for its scope,
+/// then restores the previous environment value on drop. Used by the
+/// warm-launch fast path in `app_control::session` to make the freshly
+/// chosen port visible to the child runtime through the same env channel
+/// the cold-launch path uses (`override_port`).
+///
+/// The previous value is captured at construction time and restored
+/// verbatim — empty / missing / non-numeric strings all round-trip.
+#[must_use = "PortOverrideGuard restores the env var when dropped; bind it to keep the override active"]
+pub struct PortOverrideGuard {
+    previous: Option<String>,
+}
+
+impl Drop for PortOverrideGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(ENV_OVERRIDE_PORT, value),
+            None => std::env::remove_var(ENV_OVERRIDE_PORT),
+        }
+    }
+}
+
+/// Install a scoped `ATO_UI_OVERRIDE_PORT` override. The current value
+/// (if any) is captured and restored when the returned guard is dropped.
+pub fn scoped_override_port(port: u16) -> PortOverrideGuard {
+    let previous = std::env::var(ENV_OVERRIDE_PORT).ok();
+    std::env::set_var(ENV_OVERRIDE_PORT, port.to_string());
+    PortOverrideGuard { previous }
+}
+
 pub fn override_env() -> HashMap<String, String> {
     let Some(raw) = std::env::var(ENV_OVERRIDE_ENV_JSON).ok() else {
         return HashMap::new();
