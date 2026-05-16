@@ -30,6 +30,7 @@ pub mod webview_paste;
 // `ato-settings` system capsule.
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod onboarding_window;
 pub mod orchestrator;
 pub mod settings_window;
 pub mod start_window;
@@ -51,6 +52,28 @@ pub use control_bar::{
     toggle_control_bar, ControlBarController, ControlBarShellPlaceholder,
 };
 pub use orchestrator::{open_app_window, AppWindowShell};
+
+pub fn open_configured_startup_surface(
+    cx: &mut gpui::App,
+    startup_surface: crate::config::StartupSurface,
+) -> anyhow::Result<()> {
+    match startup_surface {
+        crate::config::StartupSurface::Start => {
+            start_window::open_start_window(cx)?;
+            Ok(())
+        }
+        crate::config::StartupSurface::Blank => Ok(()),
+        crate::config::StartupSurface::RestoreLast => {
+            tracing::info!("RestoreLast not yet implemented — falling back to Store");
+            store::open_store_window(cx)?;
+            Ok(())
+        }
+        crate::config::StartupSurface::Store => {
+            store::open_store_window(cx)?;
+            Ok(())
+        }
+    }
+}
 
 /// Returns true if Focus View (multi-window) mode is active.
 /// Checks the `ATO_DESKTOP_MULTI_WINDOW` env var first (developer override),

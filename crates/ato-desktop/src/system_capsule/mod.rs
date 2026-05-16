@@ -29,6 +29,7 @@
 pub mod ato_dock;
 pub mod ato_identity;
 pub mod ato_launch;
+pub mod ato_onboarding;
 pub mod ato_settings;
 pub mod ato_start;
 pub mod ato_store;

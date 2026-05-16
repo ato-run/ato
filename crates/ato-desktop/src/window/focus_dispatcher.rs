@@ -22,7 +22,9 @@ use crate::app::{
 };
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
+use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
 use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
+use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
 
 /// Start the Focus-mode automation dispatcher. Spawns the socket
@@ -288,6 +290,32 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                     tracing::error!(?err, "open_active_consent_config_panel failed");
                                                 }
                                                 Ok(())
+                                            }
+                                            "CompleteOnboarding" | "SkipOnboarding" => {
+                                                let skipped = name == "SkipOnboarding";
+                                                let onboarding_handle = cx
+                                                    .global::<OpenContentWindows>()
+                                                    .mru_order()
+                                                    .into_iter()
+                                                    .find(|entry| {
+                                                        matches!(
+                                                            entry.kind,
+                                                            ContentWindowKind::Onboarding
+                                                        )
+                                                    })
+                                                    .map(|entry| entry.handle);
+                                                let Some(host) = onboarding_handle else {
+                                                    return Err("onboarding window is not open".into());
+                                                };
+                                                crate::system_capsule::ato_onboarding::dispatch(
+                                                    cx,
+                                                    host,
+                                                    OnboardingCommand::Complete {
+                                                        version: ONBOARDING_VERSION,
+                                                        skipped,
+                                                    },
+                                                )
+                                                .map_err(|err| err.to_string())
                                             }
                                             "ScrollLaunchConsentConfigPanelBottom" => {
                                                 if let Err(err) = crate::window::launch_window::scroll_active_consent_config_panel_to_bottom(cx) {
