@@ -109,11 +109,30 @@ pub struct DerivedDependencyContracts {
     pub providers: Vec<DerivedDependencyProvider>,
 }
 
+/// Projection of a single declared dependency onto the bundle's
+/// derived view. PR-4a (refs umbrella v0.6.0 graph-first migration)
+/// extends this with the 6 lockfile-comparison facets so
+/// `verify_lockfile_against_contracts` can read the projection
+/// directly without re-parsing the manifest TOML.
+///
+/// The 6 facets (source, source_type, contract, injection_bindings,
+/// parameters, credentials) mirror `LockedCapsuleDependency`'s
+/// shape 1:1, and re-use the manifest's own types
+/// (`ParamValue`, `TemplatedString`) so equality is byte-stable.
+/// See `GraphDependencyInput` for the credential safety rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedDependencyProvider {
     pub alias: String,
     pub provider_identifier: String,
     pub output_identifier: String,
+    /// PR-4a additions. All optional / defaulted so receipts written
+    /// before this PR still round-trip when re-read after upgrade.
+    pub source: Option<String>,
+    pub source_type: Option<String>,
+    pub contract: Option<String>,
+    pub injection_bindings: std::collections::BTreeMap<String, String>,
+    pub parameters: std::collections::BTreeMap<String, crate::types::ParamValue>,
+    pub credentials: std::collections::BTreeMap<String, crate::types::TemplatedString>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -125,6 +144,11 @@ pub struct DerivedReceiptSeed {
 
 impl ExecutionGraphBuilder {
     pub fn build_launch_bundle(input: LaunchGraphBundleInput) -> LaunchGraphBundle {
+        // PR-4a: capture the typed dependency inputs before they're
+        // consumed by the graph builder. The derived view reads from
+        // these (not from the resolved graph's provider nodes) so the
+        // 6 lockfile facets survive the projection.
+        let dependency_inputs = input.dependencies.clone();
         let declared_graph = Self::build(ExecutionGraphBuildInput {
             source: input.source.clone(),
             targets: input.targets.clone(),
@@ -159,7 +183,17 @@ impl ExecutionGraphBuilder {
                 network_policy_hash: input.preflight.network_policy_hash,
                 capability_policy_hash: input.preflight.capability_policy_hash,
             },
-            dependency_contracts: derive_dependency_contracts(&resolved_graph),
+            // PR-4a: project the provider list from the typed
+            // dependency inputs (which carry the 6 lockfile facets)
+            // rather than the resolved graph nodes (which only carry
+            // the provider identifier). This lets the lockfile
+            // verifier consume the bundle-derived view without
+            // re-parsing the manifest. Provider order is alias-sorted
+            // for canonical comparison.
+            dependency_contracts: derive_dependency_contracts_from_inputs(
+                &dependency_inputs,
+                &resolved_graph,
+            ),
             receipt_seed: DerivedReceiptSeed {
                 runner: input.receipt.runner,
                 host_fingerprint: input.receipt.host_fingerprint,
@@ -271,25 +305,81 @@ fn materialized_graph_seed(
     graph
 }
 
-fn derive_dependency_contracts(graph: &ExecutionGraph) -> DerivedDependencyContracts {
-    let mut providers = graph
-        .nodes
-        .iter()
-        .filter_map(|node| match node {
-            ExecutionGraphNode::Provider { identifier } => {
-                let alias = identifier
+/// PR-4a projection: build the derived dependency contract view from
+/// the typed `GraphDependencyInput` list AND the resolved graph's
+/// provider nodes. The graph nodes carry the canonical
+/// `provider_identifier` shape; the input list carries the 6 lockfile
+/// facets. We join on alias.
+///
+/// If the input list is empty (e.g. legacy call sites that haven't
+/// migrated yet), fall back to the pre-PR-4a behavior of synthesizing
+/// providers from graph nodes alone — the 6 new fields will be empty
+/// defaults. This keeps the function back-compat for any caller that
+/// hasn't started populating dependency facts.
+fn derive_dependency_contracts_from_inputs(
+    inputs: &[GraphDependencyInput],
+    graph: &ExecutionGraph,
+) -> DerivedDependencyContracts {
+    // Index the resolved graph's provider identifiers by alias so we
+    // can attach them to inputs without trusting the input's
+    // `provider` field (which may differ in encoding).
+    let mut provider_ids: std::collections::BTreeMap<String, String> = Default::default();
+    for node in &graph.nodes {
+        if let ExecutionGraphNode::Provider { identifier } = node {
+            let alias = identifier
+                .strip_prefix("provider://")
+                .unwrap_or(identifier.as_str())
+                .to_string();
+            provider_ids.insert(alias, identifier.clone());
+        }
+    }
+
+    let mut providers: Vec<DerivedDependencyProvider> = if inputs.is_empty() {
+        // Back-compat path: synthesize from graph nodes only.
+        provider_ids
+            .into_iter()
+            .map(|(alias, identifier)| DerivedDependencyProvider {
+                output_identifier: format!("output://{alias}"),
+                provider_identifier: identifier,
+                alias,
+                source: None,
+                source_type: None,
+                contract: None,
+                injection_bindings: Default::default(),
+                parameters: Default::default(),
+                credentials: Default::default(),
+            })
+            .collect()
+    } else {
+        inputs
+            .iter()
+            .map(|input| {
+                // The input's `provider` field is typically
+                // `"provider://<alias>"`; derive the alias by
+                // stripping the prefix, falling back to the raw form.
+                let alias = input
+                    .provider
                     .strip_prefix("provider://")
-                    .unwrap_or(identifier.as_str())
+                    .unwrap_or(input.provider.as_str())
                     .to_string();
-                Some(DerivedDependencyProvider {
+                let provider_identifier = provider_ids
+                    .get(&alias)
+                    .cloned()
+                    .unwrap_or_else(|| input.provider.clone());
+                DerivedDependencyProvider {
                     output_identifier: format!("output://{alias}"),
-                    provider_identifier: identifier.clone(),
+                    provider_identifier,
                     alias,
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+                    source: input.source.clone(),
+                    source_type: input.source_type.clone(),
+                    contract: input.contract.clone(),
+                    injection_bindings: input.injection_bindings.clone(),
+                    parameters: input.parameters.clone(),
+                    credentials: input.credentials.clone(),
+                }
+            })
+            .collect()
+    };
     providers.sort_by(|a, b| a.alias.cmp(&b.alias));
     DerivedDependencyContracts { providers }
 }
@@ -317,11 +407,13 @@ mod tests {
                 GraphDependencyInput {
                     provider: "provider://db".to_string(),
                     output: "output://db".to_string(),
-                },
+                ..Default::default()
+            },
                 GraphDependencyInput {
                     provider: "provider://cache".to_string(),
                     output: "output://cache".to_string(),
-                },
+                ..Default::default()
+            },
             ],
             declared_host: Some(GraphHostInput {
                 filesystem_source_root: Some("workspace:.".to_string()),

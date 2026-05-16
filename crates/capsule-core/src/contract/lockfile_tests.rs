@@ -23,7 +23,8 @@ use super::{
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
     required_runtime_version, resolve_external_capsule_dependencies,
     semantic_manifest_hash_from_text, tool_capsule_env_bindings,
-    verify_lockfile_external_dependencies, verify_lockfile_manifest, CapsuleLock, LockMeta,
+    verify_lockfile_against_contracts, verify_lockfile_external_dependencies,
+    verify_lockfile_manifest, CapsuleLock, LockMeta,
     LockedCapsuleDependency, LockedToolCapsule, LockedToolExports, RuntimeArtifact, RuntimeEntry,
     RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
     ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, SUPPORTED_RUNTIME_PLATFORMS, UV_VERSION,
@@ -1425,6 +1426,141 @@ fn tool_capsule_env_bindings_detects_conflicts() {
     assert!(matches!(err.first_alias.as_str(), "alpha" | "beta"));
     assert!(matches!(err.second_alias.as_str(), "alpha" | "beta"));
     assert_ne!(err.first_alias, err.second_alias);
+}
+
+/// PR-4a parity (refs umbrella v0.6.0 graph-first migration):
+/// `verify_lockfile_against_contracts` reading the bundle-derived view
+/// must accept the same lockfile the legacy
+/// `verify_lockfile_external_dependencies(manifest, lock)` accepts.
+#[test]
+fn verify_lockfile_against_contracts_parity_with_legacy_verifier() {
+    use crate::engine::execution_graph::{
+        DerivedDependencyContracts, DerivedDependencyProvider,
+    };
+
+    let manifest: toml::Value = toml::from_str(
+        r#"
+default_target = "web"
+
+[targets.web]
+external_dependencies = [
+    { alias = "auth", source = "capsule://store/acme/auth-svc", source_type = "store", injection_bindings = { MODEL_DIR = "https://data.tld/weights.zip" } }
+]
+"#,
+    )
+    .unwrap();
+
+    let lockfile = CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-01-20T00:00:00Z".to_string(),
+            manifest_hash: "sha256:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: vec![LockedCapsuleDependency {
+            name: "auth".to_string(),
+            source: "capsule://store/acme/auth-svc".to_string(),
+            source_type: "store".to_string(),
+            contract: None,
+            injection_bindings: BTreeMap::from([(
+                "MODEL_DIR".to_string(),
+                "https://data.tld/weights.zip".to_string(),
+            )]),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+            identity_exports: BTreeMap::new(),
+            resolved_version: Some("1.2.3".to_string()),
+            digest: Some("blake3:deadbeef".to_string()),
+            sha256: Some("sha256:beadfeed".to_string()),
+            artifact_url: Some("https://example.test/auth.capsule".to_string()),
+        }],
+        injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
+        tools: None,
+        runtimes: None,
+        targets: HashMap::new(),
+    };
+
+    // Legacy verifier: pass.
+    verify_lockfile_external_dependencies(&manifest, &lockfile).unwrap();
+
+    // Bundle-derived view (constructed inline; production callers
+    // get it from `bundle.derived.dependency_contracts`).
+    let contracts = DerivedDependencyContracts {
+        providers: vec![DerivedDependencyProvider {
+            alias: "auth".to_string(),
+            provider_identifier: "provider://auth".to_string(),
+            output_identifier: "output://auth".to_string(),
+            source: Some("capsule://store/acme/auth-svc".to_string()),
+            source_type: Some("store".to_string()),
+            contract: None,
+            injection_bindings: BTreeMap::from([(
+                "MODEL_DIR".to_string(),
+                "https://data.tld/weights.zip".to_string(),
+            )]),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+        }],
+    };
+
+    // PR-4a verifier: pass on the same lock.
+    verify_lockfile_against_contracts(&contracts, &lockfile).unwrap();
+}
+
+#[test]
+fn verify_lockfile_against_contracts_rejects_tampered_lock() {
+    use crate::engine::execution_graph::{
+        DerivedDependencyContracts, DerivedDependencyProvider,
+    };
+
+    let contracts = DerivedDependencyContracts {
+        providers: vec![DerivedDependencyProvider {
+            alias: "db".to_string(),
+            provider_identifier: "provider://db".to_string(),
+            output_identifier: "output://db".to_string(),
+            source: Some("capsule://store/acme/postgres".to_string()),
+            source_type: Some("store".to_string()),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+        }],
+    };
+    // Lock claims a different source — must be rejected.
+    let mut bad_lockfile = CapsuleLock {
+        version: "1".to_string(),
+        meta: LockMeta {
+            created_at: "2026-01-20T00:00:00Z".to_string(),
+            manifest_hash: "sha256:deadbeef".to_string(),
+        },
+        allowlist: None,
+        capsule_dependencies: vec![LockedCapsuleDependency {
+            name: "db".to_string(),
+            source: "capsule://store/evil/postgres".to_string(),
+            source_type: "store".to_string(),
+            contract: Some("service@1".to_string()),
+            injection_bindings: BTreeMap::new(),
+            parameters: BTreeMap::new(),
+            credentials: BTreeMap::new(),
+            identity_exports: BTreeMap::new(),
+            resolved_version: None,
+            digest: None,
+            sha256: None,
+            artifact_url: None,
+        }],
+        injected_data: HashMap::new(),
+        tool_capsules: Default::default(),
+        tools: None,
+        runtimes: None,
+        targets: HashMap::new(),
+    };
+
+    assert!(verify_lockfile_against_contracts(&contracts, &bad_lockfile).is_err());
+
+    // Fix the source, now passes.
+    bad_lockfile.capsule_dependencies[0].source =
+        "capsule://store/acme/postgres".to_string();
+    verify_lockfile_against_contracts(&contracts, &bad_lockfile).unwrap();
 }
 
 #[test]
