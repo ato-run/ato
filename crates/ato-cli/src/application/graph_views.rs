@@ -150,6 +150,60 @@ pub(crate) fn build_declared_only_bundle(
         materialized: Default::default(),
         preflight,
         receipt: Default::default(),
+        consent: None,
+    })
+}
+
+/// PR-4b: variant of [`build_declared_only_bundle`] that ALSO carries
+/// consent identity onto the bundle. Used by `preflight.rs` and the
+/// run pipeline's pre-launch consent gate so
+/// `ExecutionConsentView::from_bundle` produces a populated view.
+///
+/// `consent` comes from the caller's `ExecutionPlan.consent` — the
+/// only producer of `policy_segment_hash` /
+/// `provisioning_policy_hash` today is `compile_execution_plan` in
+/// capsule-core. Callers project the plan onto `GraphConsentInput`
+/// before calling here.
+pub(crate) fn build_declared_only_bundle_with_consent(
+    dependencies: &[ExternalCapsuleDependency],
+    manifest_source_identifier: Option<String>,
+    declared_policy: Option<GraphPolicyInput>,
+    required_env: Vec<String>,
+    consent: capsule_core::engine::execution_graph::GraphConsentInput,
+) -> LaunchGraphBundle {
+    let base = build_input_from_external_dependencies(dependencies, manifest_source_identifier);
+
+    let preflight = GraphPreflightInput {
+        dependency_aliases: dependencies
+            .iter()
+            .map(|dependency| dependency.alias.clone())
+            .collect(),
+        required_env,
+        network_policy_hash: declared_policy
+            .as_ref()
+            .and_then(|policy| policy.network_policy_hash.clone()),
+        capability_policy_hash: declared_policy
+            .as_ref()
+            .and_then(|policy| policy.capability_policy_hash.clone()),
+        ..GraphPreflightInput::default()
+    };
+
+    ExecutionGraphBuilder::build_launch_bundle(LaunchGraphBundleInput {
+        source: base.source.or_else(|| {
+            Some(GraphSourceInput {
+                identifier: "manifest://declared-only".to_string(),
+            })
+        }),
+        targets: base.targets,
+        dependencies: base.dependencies,
+        declared_host: None,
+        resolved_host: None,
+        declared_policy,
+        resolved_policy: None,
+        materialized: Default::default(),
+        preflight,
+        receipt: Default::default(),
+        consent: Some(consent),
     })
 }
 
@@ -201,20 +255,18 @@ impl LaunchMaterializationInput {
     }
 }
 
-/// PR-3d: bundle-projected consent view.
+/// Bundle-projected consent view (PR-3d staging, PR-4b primary).
 ///
-/// `application::auth::consent_store` keys on
-/// `plan.consent.{key.scoped_id, key.version, key.target_label,
-/// policy_segment_hash, provisioning_policy_hash}`. The bundle's
-/// `derived.preflight` exposes `network_policy_hash` and
-/// `capability_policy_hash` — a related but distinct projection.
-/// `ExecutionConsentView::from_bundle` exposes the bundle's subset so
-/// a future commit can fold the consent layer's reads of
-/// `policy_segment_hash` / `provisioning_policy_hash` onto the
-/// bundle's `derived.preflight` once the bundle carries those exact
-/// hashes too. Today the view is informational: the consent key is
-/// still derived from the ExecutionPlan, and a parity test pins where
-/// the two surfaces agree and disagree.
+/// PR-3d staged this with just the policy hashes from
+/// `derived.preflight`; PR-4b extends it with the 5 consent-identity
+/// fields the consent store keys on. Production callers in
+/// `preflight.rs` and the run pipeline pre-launch gate now use
+/// `ExecutionConsentView` as the source-of-truth for consent decisions
+/// (with the legacy plan-direct read kept as `debug_assert!` parity).
+///
+/// Source of truth: `bundle.derived.consent` (a `DerivedConsentView`
+/// in capsule-core) when present; otherwise `None` fields and the
+/// view degrades to its pre-PR-4b shape.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ExecutionConsentView {
     pub network_policy_hash: Option<String>,
@@ -223,14 +275,29 @@ pub(crate) struct ExecutionConsentView {
     /// (per-dependency consent prompts). Sourced from
     /// `bundle.derived.preflight.dependency_aliases`.
     pub dependency_aliases: Vec<String>,
+    /// PR-4b additions — consent identity facets the consent log
+    /// keys on. Populated from `bundle.derived.consent` when the
+    /// caller supplied `LaunchGraphBundleInput.consent`; otherwise
+    /// `None` (callers fall back to plan-direct read).
+    pub scoped_id: Option<String>,
+    pub version: Option<String>,
+    pub target_label: Option<String>,
+    pub policy_segment_hash: Option<String>,
+    pub provisioning_policy_hash: Option<String>,
 }
 
 impl ExecutionConsentView {
     pub(crate) fn from_bundle(bundle: &LaunchGraphBundle) -> Self {
+        let consent = bundle.derived.consent.as_ref();
         Self {
             network_policy_hash: bundle.derived.preflight.network_policy_hash.clone(),
             capability_policy_hash: bundle.derived.preflight.capability_policy_hash.clone(),
             dependency_aliases: bundle.derived.preflight.dependency_aliases.clone(),
+            scoped_id: consent.map(|c| c.scoped_id.clone()),
+            version: consent.map(|c| c.version.clone()),
+            target_label: consent.map(|c| c.target_label.clone()),
+            policy_segment_hash: consent.map(|c| c.policy_segment_hash.clone()),
+            provisioning_policy_hash: consent.map(|c| c.provisioning_policy_hash.clone()),
         }
     }
 }
@@ -397,56 +464,59 @@ contract = "service@1"
         );
     }
 
-    /// PR-3d parity: ExecutionConsentView::from_bundle reads
-    /// network_policy_hash / capability_policy_hash from the bundle.
-    /// When no declared policy is supplied (declared-only bundle for
-    /// validate/preflight), the view's policy fields are None — they
-    /// can't ALREADY agree with the consent layer's
-    /// (policy_segment_hash, provisioning_policy_hash) which come
-    /// from the ExecutionPlan, NOT the bundle. This test pins the
-    /// CURRENT divergence as a documented frozen state so a future
-    /// "merge bundle preflight + plan consent" PR notices the
-    /// migration boundary.
+    /// PR-4b: `build_declared_only_bundle_with_consent` populates
+    /// the bundle's `derived.consent`, and
+    /// `ExecutionConsentView::from_bundle` reads it back out with
+    /// the same field values.
     #[test]
-    fn execution_consent_view_known_divergence_from_plan_consent() {
+    fn execution_consent_view_with_consent_input_carries_all_five_facets() {
+        use capsule_core::engine::execution_graph::GraphConsentInput;
+
         let manifest = manifest_with_two_dependencies();
         let dependencies = manifest_external_capsule_dependencies(&manifest).expect("deps");
-        let bundle = build_declared_only_bundle(
+        let consent_input = GraphConsentInput {
+            scoped_id: "publisher/slug".to_string(),
+            version: "1.2.3".to_string(),
+            target_label: "web".to_string(),
+            policy_segment_hash: "blake3:cap".to_string(),
+            provisioning_policy_hash: "blake3:prov".to_string(),
+        };
+        let bundle = build_declared_only_bundle_with_consent(
             &dependencies,
             Some("manifest://consent-fixture".to_string()),
             None,
             Vec::new(),
+            consent_input,
         );
 
         let view = ExecutionConsentView::from_bundle(&bundle);
-        // Frozen state: declared-only bundles do NOT yet carry the
-        // ExecutionPlan-derived policy_segment_hash /
-        // provisioning_policy_hash that the consent_store keys on.
-        // When the umbrella PR-3d successor wires those hashes onto
-        // the bundle, this test should flip to assert they're Some.
-        // Reason for the freeze: digest compat (the consent key
-        // depends on the plan's consent hashes today; changing that
-        // would break the consent log replay).
-        assert!(
-            view.network_policy_hash.is_none(),
-            "PR-3d frozen state: declared-only bundle has no network_policy_hash yet"
-        );
-        assert!(
-            view.capability_policy_hash.is_none(),
-            "PR-3d frozen state: declared-only bundle has no capability_policy_hash yet"
-        );
-        // What DOES agree today: dependency aliases. The bundle and
-        // the consent layer both enumerate the same `[dependencies.*]`
-        // keys.
+        assert_eq!(view.scoped_id.as_deref(), Some("publisher/slug"));
+        assert_eq!(view.version.as_deref(), Some("1.2.3"));
+        assert_eq!(view.target_label.as_deref(), Some("web"));
+        assert_eq!(view.policy_segment_hash.as_deref(), Some("blake3:cap"));
+        assert_eq!(view.provisioning_policy_hash.as_deref(), Some("blake3:prov"));
+
+        // Dependency aliases still flow through the preflight projection.
         let mut bundle_aliases = view.dependency_aliases.clone();
         bundle_aliases.sort_unstable();
         let mut manifest_aliases: Vec<String> =
             dependencies.iter().map(|d| d.alias.clone()).collect();
         manifest_aliases.sort_unstable();
-        assert_eq!(
-            bundle_aliases, manifest_aliases,
-            "PR-3d: dependency_aliases agree between bundle and manifest today"
-        );
+        assert_eq!(bundle_aliases, manifest_aliases);
+    }
+
+    /// PR-4b: when the legacy `build_declared_only_bundle` (no
+    /// consent variant) is used, the view's consent identity fields
+    /// are `None`. Callers fall back to plan-direct consent reads.
+    #[test]
+    fn execution_consent_view_without_consent_input_is_unpopulated() {
+        let manifest = manifest_with_two_dependencies();
+        let dependencies = manifest_external_capsule_dependencies(&manifest).expect("deps");
+        let bundle = build_declared_only_bundle(&dependencies, None, None, Vec::new());
+
+        let view = ExecutionConsentView::from_bundle(&bundle);
+        assert!(view.scoped_id.is_none());
+        assert!(view.policy_segment_hash.is_none());
     }
 
     /// PR-3d parity: bundle-derived MaterializationInput's
