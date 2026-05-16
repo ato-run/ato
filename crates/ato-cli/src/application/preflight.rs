@@ -120,12 +120,13 @@ pub fn collect_aggregate_requirements(
 ) -> Result<AggregatePreflightResult, PreflightError> {
     let manifest_path = resolve_local_manifest_path(target)?;
 
-    let loaded = capsule_core::contract::manifest::load_manifest(&manifest_path).map_err(
-        |err| PreflightError::ManifestLoad {
-            path: manifest_path.clone(),
-            source: err,
-        },
-    )?;
+    let loaded =
+        capsule_core::contract::manifest::load_manifest(&manifest_path).map_err(|err| {
+            PreflightError::ManifestLoad {
+                path: manifest_path.clone(),
+                source: err,
+            }
+        })?;
     let manifest = &loaded.model;
 
     let capsule_id = manifest.name.clone();
@@ -154,10 +155,7 @@ pub fn collect_aggregate_requirements(
             .iter()
             .map(|name| {
                 global_env_seen.insert(name.clone());
-                config_field_for_env(
-                    name,
-                    "Global dependency contract environment variable",
-                )
+                config_field_for_env(name, "Global dependency contract environment variable")
             })
             .collect();
         requirements.push(InteractiveResolutionEnvelope {
@@ -169,7 +167,11 @@ pub fn collect_aggregate_requirements(
                 message: format!(
                     "Provide {} required environment variable{} before launching {capsule_id}.",
                     global_required_env.len(),
-                    if global_required_env.len() == 1 { "" } else { "s" }
+                    if global_required_env.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 ),
                 hint: Some(
                     "Set these via the launching app's secret form or the shell environment."
@@ -186,12 +188,11 @@ pub fn collect_aggregate_requirements(
     //    and emit a SecretsRequired envelope for any keys not already
     //    surfaced as global.
     for target_label in &target_labels {
-        let compiled =
-            compile_execution_plan(&manifest_path, profile, Some(target_label.as_str()))
-                .map_err(|err| PreflightError::ExecutionPlan {
-                    target: target_label.clone(),
-                    source: err,
-                })?;
+        let compiled = compile_execution_plan(&manifest_path, profile, Some(target_label.as_str()))
+            .map_err(|err| PreflightError::ExecutionPlan {
+                target: target_label.clone(),
+                source: err,
+            })?;
         let plan = compiled.execution_plan;
 
         // 3a. Per-target required_env. Any env keys already covered by
@@ -209,10 +210,7 @@ pub fn collect_aggregate_requirements(
             let fields: Vec<ConfigField> = target_specific
                 .iter()
                 .map(|name| {
-                    config_field_for_env(
-                        name,
-                        &format!("Required by target '{target_label}'"),
-                    )
+                    config_field_for_env(name, &format!("Required by target '{target_label}'"))
                 })
                 .collect();
             requirements.push(InteractiveResolutionEnvelope {
@@ -234,9 +232,8 @@ pub fn collect_aggregate_requirements(
         // 3b. Consent. Skip if already recorded — the launch loop
         //     would skip this target's consent prompt too, so the
         //     aggregate envelope must match.
-        let already_consented = has_consent(&plan).map_err(|err| {
-            PreflightError::ConsentStore { source: err }
-        })?;
+        let already_consented =
+            has_consent(&plan).map_err(|err| PreflightError::ConsentStore { source: err })?;
         if !already_consented {
             requirements.push(InteractiveResolutionEnvelope {
                 kind: InteractiveResolutionKind::ConsentRequired {
@@ -362,17 +359,9 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
     // have the same mtime we deterministically prefer the lexically
     // greater path so repeated runs are reproducible.
     candidates.sort_by(|a, b| {
-        let a_mtime = a
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok();
-        let b_mtime = b
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok();
-        b_mtime
-            .cmp(&a_mtime)
-            .then_with(|| b.cmp(a))
+        let a_mtime = a.metadata().and_then(|m| m.modified()).ok();
+        let b_mtime = b.metadata().and_then(|m| m.modified()).ok();
+        b_mtime.cmp(&a_mtime).then_with(|| b.cmp(a))
     });
 
     for candidate in candidates {
@@ -401,12 +390,14 @@ fn derive_target_labels(
     // ask it for the `[services]` table. This is the same call site
     // the CLI's run pipeline uses for its own orchestration walk; no
     // provisioning side effects.
-    let decision = capsule_core::router::route_manifest(manifest_path, profile, None)
-        .map_err(|err| PreflightError::ExecutionPlan {
-            target: "<resolution>".to_string(),
-            source: AtoExecutionError::policy_violation(format!(
-                "failed to route manifest for preflight: {err}"
-            )),
+    let decision =
+        capsule_core::router::route_manifest(manifest_path, profile, None).map_err(|err| {
+            PreflightError::ExecutionPlan {
+                target: "<resolution>".to_string(),
+                source: AtoExecutionError::policy_violation(format!(
+                    "failed to route manifest for preflight: {err}"
+                )),
+            }
         })?;
     let services = decision.plan.services();
     if services.is_empty() {
@@ -442,9 +433,7 @@ fn derive_target_labels(
     Ok(targets)
 }
 
-fn collect_global_required_env(
-    manifest: &capsule_core::types::CapsuleManifest,
-) -> Vec<String> {
+fn collect_global_required_env(manifest: &capsule_core::types::CapsuleManifest) -> Vec<String> {
     manifest.required_env.clone()
 }
 
@@ -539,8 +528,7 @@ egress_allow = ["smtp.gmail.com"]
     fn aggregates_secrets_and_consents_for_orchestration_capsule() {
         let home = TempDir::new().expect("home");
         let ato_home = TempDir::new().expect("ato_home");
-        let _home_guard =
-            scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
+        let _home_guard = scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
         let _ato_home_guard =
             scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
 
@@ -548,8 +536,8 @@ egress_allow = ["smtp.gmail.com"]
         let manifest_path = write_multi_target_fixture(manifest_dir.path());
         let target_str = manifest_path.to_string_lossy().to_string();
 
-        let result = collect_aggregate_requirements(&target_str, ExecutionProfile::Dev)
-            .expect("collect");
+        let result =
+            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
 
         // Two targets visited in service-name order (main → web).
         assert_eq!(result.visited_targets, vec!["app", "web"]);
@@ -577,10 +565,14 @@ egress_allow = ["smtp.gmail.com"]
             kinds.contains(&"<global-secrets>"),
             "global secret bucket missing; got kinds={kinds:?}"
         );
-        assert!(kinds.iter().filter(|k| **k == "app").count() >= 2,
-            "expected at least two app entries (secrets + consent); got kinds={kinds:?}");
-        assert!(kinds.iter().any(|k| *k == "web"),
-            "expected web consent entry; got kinds={kinds:?}");
+        assert!(
+            kinds.iter().filter(|k| **k == "app").count() >= 2,
+            "expected at least two app entries (secrets + consent); got kinds={kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| *k == "web"),
+            "expected web consent entry; got kinds={kinds:?}"
+        );
     }
 
     /// Target identity tuple round-trips through the envelope so the
@@ -592,8 +584,7 @@ egress_allow = ["smtp.gmail.com"]
     fn consent_envelope_carries_identity_tuple_for_each_target() {
         let home = TempDir::new().expect("home");
         let ato_home = TempDir::new().expect("ato_home");
-        let _home_guard =
-            scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
+        let _home_guard = scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
         let _ato_home_guard =
             scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
 
@@ -601,8 +592,8 @@ egress_allow = ["smtp.gmail.com"]
         let manifest_path = write_multi_target_fixture(manifest_dir.path());
         let target_str = manifest_path.to_string_lossy().to_string();
 
-        let result = collect_aggregate_requirements(&target_str, ExecutionProfile::Dev)
-            .expect("collect");
+        let result =
+            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
 
         for envelope in &result.requirements {
             if let InteractiveResolutionKind::ConsentRequired {
@@ -641,8 +632,7 @@ egress_allow = ["smtp.gmail.com"]
     fn single_target_capsule_degrades_to_one_target_walk() {
         let home = TempDir::new().expect("home");
         let ato_home = TempDir::new().expect("ato_home");
-        let _home_guard =
-            scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
+        let _home_guard = scoped_env("HOME", Some(home.path().to_string_lossy().as_ref()));
         let _ato_home_guard =
             scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
 
@@ -662,11 +652,9 @@ run = "python -m app"
 "#;
         fs::write(&manifest_path, manifest).expect("write");
 
-        let result = collect_aggregate_requirements(
-            &manifest_path.to_string_lossy(),
-            ExecutionProfile::Dev,
-        )
-        .expect("collect");
+        let result =
+            collect_aggregate_requirements(&manifest_path.to_string_lossy(), ExecutionProfile::Dev)
+                .expect("collect");
 
         assert_eq!(result.visited_targets.len(), 1);
         assert_eq!(result.visited_targets[0], "cli");

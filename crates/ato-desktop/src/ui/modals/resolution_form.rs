@@ -384,24 +384,14 @@ fn render_step_indicator(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
         .flex()
         .items_center()
         .gap_2()
-        .child(render_step_pill(
-            1,
-            "Review consents",
-            on_consent,
-            theme,
-        ))
+        .child(render_step_pill(1, "Review consents", on_consent, theme))
         .child(
             div()
                 .text_size(px(12.0))
                 .text_color(theme.text_tertiary)
                 .child("→"),
         )
-        .child(render_step_pill(
-            2,
-            "Provide secrets",
-            !on_consent,
-            theme,
-        ))
+        .child(render_step_pill(2, "Provide secrets", !on_consent, theme))
         .into_any_element()
 }
 
@@ -489,10 +479,7 @@ fn render_step_body(modal: &ResolutionModal, theme: &Theme) -> AnyElement {
         }
         ResolutionStep::Secrets => {
             if modal.request.secrets.is_empty() {
-                return placeholder_text(
-                    "No secrets pending. Approve to launch.",
-                    theme,
-                );
+                return placeholder_text("No secrets pending. Approve to launch.", theme);
             }
             let mut children: Vec<AnyElement> = Vec::new();
             for item in &modal.request.secrets {

@@ -285,7 +285,9 @@ pub fn build_start_snapshot(
             .into_iter()
             .map(|e| {
                 let kind_str = match &e.kind {
-                    crate::window::content_windows::ContentWindowKind::AppWindow { .. } => "AppWindow",
+                    crate::window::content_windows::ContentWindowKind::AppWindow { .. } => {
+                        "AppWindow"
+                    }
                     crate::window::content_windows::ContentWindowKind::Store => "Store",
                     crate::window::content_windows::ContentWindowKind::Start => "Start",
                     crate::window::content_windows::ContentWindowKind::Settings => "Settings",
@@ -399,20 +401,18 @@ pub fn dispatch(
                 }
                 let _ = host.update(cx, |_, window, _| window.remove_window());
             }
-            QueryIntent::ExternalUrl(url_str) => {
-                match url::Url::parse(&url_str) {
-                    Ok(url) => {
-                        let route = GuestRoute::ExternalUrl(url);
-                        if let Err(err) = crate::window::open_app_window(cx, route) {
-                            tracing::error!(error = %err, "ato_start: open_query ExternalUrl failed");
-                        }
-                        let _ = host.update(cx, |_, window, _| window.remove_window());
+            QueryIntent::ExternalUrl(url_str) => match url::Url::parse(&url_str) {
+                Ok(url) => {
+                    let route = GuestRoute::ExternalUrl(url);
+                    if let Err(err) = crate::window::open_app_window(cx, route) {
+                        tracing::error!(error = %err, "ato_start: open_query ExternalUrl failed");
                     }
-                    Err(err) => {
-                        tracing::warn!(url = %url_str, error = %err, "ato_start: open_query URL parse failed");
-                    }
+                    let _ = host.update(cx, |_, window, _| window.remove_window());
                 }
-            }
+                Err(err) => {
+                    tracing::warn!(url = %url_str, error = %err, "ato_start: open_query URL parse failed");
+                }
+            },
             QueryIntent::LocalPath(path) => {
                 let label = Path::new(&path)
                     .file_name()
@@ -443,8 +443,7 @@ pub fn dispatch(
                 handle: handle.clone(),
                 label: handle,
             };
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, "ato_start: open_capsule failed");
             }
@@ -464,9 +463,11 @@ pub fn dispatch(
                 .and_then(|n| n.to_str())
                 .unwrap_or("local")
                 .to_string();
-            let route = GuestRoute::CapsuleHandle { handle: path, label };
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            let route = GuestRoute::CapsuleHandle {
+                handle: path,
+                label,
+            };
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, "ato_start: open_local_path failed");
             }

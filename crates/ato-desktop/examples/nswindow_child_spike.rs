@@ -61,8 +61,7 @@ use objc2_app_kit::{
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
 fn main() {
-    let mtm = MainThreadMarker::new()
-        .expect("NSWindow allocation must run on the main thread");
+    let mtm = MainThreadMarker::new().expect("NSWindow allocation must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
@@ -91,10 +90,7 @@ fn main() {
 }
 
 fn make_parent(mtm: MainThreadMarker) -> Retained<NSWindow> {
-    let rect = NSRect::new(
-        NSPoint::new(120.0, 120.0),
-        NSSize::new(800.0, 600.0),
-    );
+    let rect = NSRect::new(NSPoint::new(120.0, 120.0), NSSize::new(800.0, 600.0));
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Resizable
@@ -126,10 +122,7 @@ fn make_parent(mtm: MainThreadMarker) -> Retained<NSWindow> {
 fn make_child(mtm: MainThreadMarker) -> Retained<NSWindow> {
     // Anchored near the parent's lower-left; the spike script does not
     // try to track parent geometry — `addChildWindow:` does that.
-    let rect = NSRect::new(
-        NSPoint::new(220.0, 140.0),
-        NSSize::new(400.0, 60.0),
-    );
+    let rect = NSRect::new(NSPoint::new(220.0, 140.0), NSSize::new(400.0, 60.0));
     let style = NSWindowStyleMask::Borderless;
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(

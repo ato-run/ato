@@ -105,7 +105,11 @@ pub(crate) fn populate_graph_from_dependency_contracts(
         });
     }
 
-    nodes.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.identifier.cmp(&b.identifier)));
+    nodes.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.identifier.cmp(&b.identifier))
+    });
     edges.sort_by(|a, b| {
         a.source
             .cmp(&b.source)
@@ -144,8 +148,11 @@ fn graph_provider_set_matches(
         .collect();
     graph_aliases.sort_unstable();
 
-    let mut contract_aliases: Vec<&str> =
-        contracts.providers.iter().map(|p| p.alias.as_str()).collect();
+    let mut contract_aliases: Vec<&str> = contracts
+        .providers
+        .iter()
+        .map(|p| p.alias.as_str())
+        .collect();
     contract_aliases.sort_unstable();
 
     graph_aliases.len() == contract_aliases.len() && graph_aliases == contract_aliases
@@ -180,8 +187,8 @@ mod tests {
             consumer_pid: 4242,
             providers: Vec::new(),
         };
-        let graph =
-            populate_graph_from_dependency_contracts(Some(&contracts)).expect("populate returns Some");
+        let graph = populate_graph_from_dependency_contracts(Some(&contracts))
+            .expect("populate returns Some");
         assert_eq!(graph.schema_version, StoredExecutionGraph::SCHEMA_VERSION);
         assert!(graph.nodes.is_empty());
         assert!(graph.edges.is_empty());
@@ -214,8 +221,7 @@ mod tests {
         };
         let graph = populate_graph_from_dependency_contracts(Some(&contracts))
             .expect("populate returns Some");
-        let identifiers: Vec<&str> =
-            graph.nodes.iter().map(|n| n.identifier.as_str()).collect();
+        let identifiers: Vec<&str> = graph.nodes.iter().map(|n| n.identifier.as_str()).collect();
         assert_eq!(identifiers, vec!["a", "b", "c"]);
         // Edges are `Provides` source = provider identifier, sorted by source.
         let sources: Vec<&str> = graph.edges.iter().map(|e| e.source.as_str()).collect();

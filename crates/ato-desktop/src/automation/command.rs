@@ -208,8 +208,7 @@ impl PendingAutomationRequest {
         match &self.command {
             AutomationCommand::WaitFor { timeout_ms, .. } => max(
                 AUTOMATION_DISPATCH_TIMEOUT,
-                Duration::from_millis(*timeout_ms)
-                    .saturating_add(AUTOMATION_CONNECTION_IO_TIMEOUT),
+                Duration::from_millis(*timeout_ms).saturating_add(AUTOMATION_CONNECTION_IO_TIMEOUT),
             ),
             _ => AUTOMATION_DISPATCH_TIMEOUT,
         }

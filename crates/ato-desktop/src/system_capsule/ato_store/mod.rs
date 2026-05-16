@@ -66,8 +66,7 @@ pub fn dispatch(
                 label,
             };
             tracing::info!(handle = %handle, "ato_store: opening capsule from catalog");
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle = %handle, "ato_store: open_consent_window_for_route failed");
             }

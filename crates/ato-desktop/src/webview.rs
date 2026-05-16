@@ -47,12 +47,12 @@ use crate::orchestrator::{
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
     LaunchError, SpawnKind, SpawnSpec,
 };
+use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::state::{
     ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
     BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId, PendingConfigRequest,
     PendingConsentRequest, ShellMode, WebSessionState,
 };
-use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::terminal::{TerminalCore, TryRecvOutput};
 use crate::ui::share::{resolve_share_icon, web_favicon_origin, ShareIconSource};
 use capsule_wire::handle::CapsuleDisplayStrategy;
@@ -3916,13 +3916,14 @@ impl ProtocolRouter {
         let path = request.uri().path().to_string();
 
         if let RouteContent::StableOriginProxy(routes) = &content {
-            let response = handle_stable_origin_proxy_request(request, routes).unwrap_or_else(|error| {
-                Response::builder()
-                    .status(500)
-                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .body(Cow::Owned(error.to_string().into_bytes()))
-                    .expect("stable-origin proxy error response should build")
-            });
+            let response =
+                handle_stable_origin_proxy_request(request, routes).unwrap_or_else(|error| {
+                    Response::builder()
+                        .status(500)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(Cow::Owned(error.to_string().into_bytes()))
+                        .expect("stable-origin proxy error response should build")
+                });
             responder.respond(response);
             return;
         }
@@ -4325,7 +4326,10 @@ fn handle_stable_origin_proxy_request(
         .context("failed to build stable-origin proxy response")
 }
 
-fn stable_origin_proxy_target_url(upstream: &url::Url, request_uri: &http::Uri) -> Result<url::Url> {
+fn stable_origin_proxy_target_url(
+    upstream: &url::Url,
+    request_uri: &http::Uri,
+) -> Result<url::Url> {
     let mut target = upstream.clone();
     target.set_path(request_uri.path());
     target.set_query(request_uri.query());
@@ -5740,8 +5744,9 @@ mod tests {
         .expect("capsule route should be in stable-origin scope");
 
         let parsed = url::Url::parse(&stable_url).expect("stable URL should parse");
-        let expected_host =
-            crate::stable_origin_proxy::stable_host_label_for_key("handle:capsule://org/demo@1.0.0");
+        let expected_host = crate::stable_origin_proxy::stable_host_label_for_key(
+            "handle:capsule://org/demo@1.0.0",
+        );
         assert_eq!(parsed.scheme(), "capsuletest");
         assert_eq!(parsed.path(), "/app");
         assert_eq!(parsed.query(), Some("mode=dev"));
