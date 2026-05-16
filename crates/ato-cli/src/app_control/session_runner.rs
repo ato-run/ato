@@ -84,6 +84,17 @@ pub(super) struct SessionStartPhaseRunner<'a> {
     notes: Vec<String>,
     launch_ctx: RuntimeLaunchContext,
 
+    // Set by Install phase (warm-launch fast path).
+    /// `true` when the Install phase hit a live session reuse and populated
+    /// `session_info` directly. Build and Execute phases are no-ops.
+    install_reused: bool,
+    /// LaunchSpec computed from identity before source projection runs.
+    /// Held here so Execute can use the same spec without recomputing it.
+    pre_projection_spec: Option<lm::LaunchSpec>,
+    /// Advisory per-slot file lock acquired during Install and held until
+    /// the runner drops (i.e. across Build and Execute).
+    _launch_lock: Option<lm::LaunchLock>,
+
     // Set by Build phase
     build_observation: Option<bm::BuildObservation>,
     build_decision_kind: Option<bm::BuildResultKind>,
@@ -122,6 +133,9 @@ impl<'a> SessionStartPhaseRunner<'a> {
             manifest_value: None,
             notes: Vec::new(),
             launch_ctx: RuntimeLaunchContext::empty(),
+            install_reused: false,
+            pre_projection_spec: None,
+            _launch_lock: None,
             build_observation: None,
             build_decision_kind: None,
             execute_reused: false,
@@ -152,47 +166,21 @@ impl<'a> SessionStartPhaseRunner<'a> {
             resolve_session_launch_plan(self.handle, self.target_label)?;
         let is_orchestration = self.target_label.is_none() && plan.is_orchestration_mode();
 
-        // Phase Y option 2: re-anchor the registry-installed capsule onto a
-        // session-local hardlink projection so the launch cannot mutate the
-        // shared install dir at `~/.ato/runtimes/<scoped>/<version>/`.
-        // Local capsules (manifest path outside the runtimes tree) keep
-        // their original workspace_root so user edits stay live.
-        //
-        // Orchestration sessions historically skipped projection because the
-        // nested `ato run` supervisor re-resolved the manifest from the
-        // install dir. After #73 PR-C the in-process path runs in this
-        // process, so projection is applied uniformly except where it would
-        // require a workspace_root rewrite that the orchestration plan
-        // already pinned (kept conservative for v0.5.0).
-        let manifest_path = if is_orchestration {
-            manifest_path
-        } else {
-            match maybe_project_to_session(&manifest_path, &mut plan, &mut launch) {
-                Ok(maybe_path) => maybe_path.unwrap_or(manifest_path),
-                Err(err) => {
-                    eprintln!(
-                        "ATO-WARN source projection failed; falling back to install dir: {err}"
-                    );
-                    manifest_path
-                }
-            }
-        };
-
-        notes.extend(resolution.notes.clone());
-        let raw_manifest = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-        let manifest_value: toml::Value = toml::from_str(&raw_manifest)
-            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-        // Preflight is the only place the run_install branch on
-        // `is_orchestration` survives, because [services] capsules need a
-        // services-aware required_env check and single-target capsules don't.
+        // Env preflight runs BEFORE the live-session reuse check so we never
+        // reuse a session when required environment variables are currently
+        // absent.
         if is_orchestration {
             let orchestration = plan
                 .resolve_services()
                 .context("failed to resolve [services] orchestration plan")?;
+            let manifest_preflight: toml::Value = toml::from_str(
+                &std::fs::read_to_string(&manifest_path)
+                    .with_context(|| format!("failed to read {}", manifest_path.display()))?,
+            )
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
             crate::application::pipeline::phases::run::preflight_orchestration_session_environment(
                 &plan,
-                &manifest_value,
+                &manifest_preflight,
                 &orchestration,
                 &self.launch_ctx,
                 &crate::application::dependency_credentials::ProcessHostEnv,
@@ -200,6 +188,166 @@ impl<'a> SessionStartPhaseRunner<'a> {
             )?;
         } else {
             target_runner::preflight_required_environment_variables(&plan, &self.launch_ctx)?;
+        }
+
+        // --- Warm-launch fast path (non-orchestration registry capsules only) ---
+        //
+        // For registry-installed capsules we can determine a stable
+        // identity-addressed projection key before doing any projection work.
+        // We compute the launch_spec now so the lock is held across all three
+        // phases, matching the session contract; if the 5-condition reuse check
+        // passes we short-circuit and skip projection, build, and execute.
+        let is_registry_capsule = if !is_orchestration {
+            capsule_core::common::paths::runtime_cache_dir()
+                .map(|cache| plan.workspace_root.starts_with(&cache))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        let (manifest_path, logical_cwd) = if is_registry_capsule {
+            use crate::application::warm_launch::{self, ProjectionKey};
+
+            let install_workspace = plan.workspace_root.clone();
+            let workdir_relative = launch
+                .working_dir
+                .strip_prefix(&install_workspace)
+                .map(|r| r.to_path_buf())
+                .unwrap_or_default();
+            let manifest_rel = manifest_path
+                .strip_prefix(&install_workspace)
+                .map(|r| r.to_path_buf())
+                .unwrap_or_else(|_| std::path::PathBuf::from("capsule.toml"));
+
+            let manifest_digest = warm_launch::compute_file_digest(&manifest_path)
+                .unwrap_or_else(|_| "unknown".to_string());
+            let lock_digest = warm_launch::compute_lock_digest(&install_workspace);
+            let toolchain = bm::toolchain_fingerprint_for_plan(&plan);
+            let platform = warm_launch::current_platform();
+            let target_label = self
+                .target_label
+                .unwrap_or_else(|| plan.selected_target_label())
+                .to_string();
+
+            let proj_key = ProjectionKey::compute(
+                &install_workspace.to_string_lossy(),
+                &manifest_digest,
+                lock_digest.as_deref(),
+                &target_label,
+                &platform,
+                &toolchain,
+            );
+
+            let logical_cwd = warm_launch::make_logical_cwd(&proj_key, &workdir_relative);
+
+            // Build the pre-projection LaunchSpec + acquire the advisory lock
+            // so concurrent callers serialise on the same slot.
+            let pre_spec = lm::canonicalize_launch_spec(
+                self.handle,
+                &target_label,
+                &plan,
+                &launch,
+                &manifest_path,
+                Some(logical_cwd.clone()),
+            )?;
+            let launch_digest = lm::compute_launch_digest(&pre_spec);
+            let launch_key = lm::compute_launch_key(&pre_spec);
+            let lock = lm::acquire_launch_lock(&launch_key).ok();
+
+            // Live-session reuse check BEFORE projection and build.
+            let decision = lm::prepare_reuse_decision(&pre_spec, &launch_digest);
+            if let Ok(lm::ReuseDecision::Reuse { record }) = decision {
+                self.install_reused = true;
+                self.pre_projection_spec = Some(pre_spec);
+                self._launch_lock = lock;
+                self.session_info = Some(super::session::session_info_from_stored(*record));
+                // Populate the remaining fields (needed by phase_annotation).
+                notes.extend(resolution.notes.clone());
+                self.resolution = Some(resolution);
+                self.manifest_path = Some(manifest_path);
+                self.plan = Some(plan);
+                self.launch = Some(launch);
+                self.raw_manifest = None;
+                self.manifest_value = None;
+                self.notes = notes;
+                return Ok(());
+            }
+
+            // Miss: resolve (or reuse) the identity-addressed projection root.
+            let proj_resolution = warm_launch::resolve_identity_projection(
+                &proj_key,
+                &install_workspace,
+            )
+            .unwrap_or_else(|err| {
+                // Projection failure: fall back to a fresh random projection
+                // via the old path below.  This preserves availability at the
+                // cost of skipping warm-launch optimisations.
+                eprintln!("ATO-WARN warm-launch projection failed: {err}; using legacy path");
+                // Return a dummy that makes the caller drop to the legacy path.
+                // We signal this by returning Err from an outer block, but since
+                // we are in a non-error arm here we return a "created" resolution
+                // pointing at a temp dir that the legacy code will overwrite.
+                warm_launch::ProjectionResolution::fallback(&install_workspace)
+            });
+
+            // Update plan and launch to point at the content-addressed root.
+            let source_root = proj_resolution.source_root.clone();
+            let new_manifest_path = source_root.join(&manifest_rel);
+            plan.workspace_root = source_root.clone();
+            plan.manifest_dir = new_manifest_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| source_root.clone());
+            plan.manifest_path = new_manifest_path.clone();
+            launch.working_dir = source_root.join(&workdir_relative);
+
+            self.pre_projection_spec = Some(pre_spec);
+            self._launch_lock = lock;
+            (new_manifest_path, Some(logical_cwd))
+        } else {
+            // Local capsule or orchestration: keep original path, no logical cwd override.
+            let manifest_path = if is_orchestration {
+                manifest_path
+            } else {
+                match maybe_project_to_session(&manifest_path, &mut plan, &mut launch) {
+                    Ok(maybe_path) => maybe_path.unwrap_or(manifest_path),
+                    Err(err) => {
+                        eprintln!(
+                            "ATO-WARN source projection failed; falling back to install dir: {err}"
+                        );
+                        manifest_path
+                    }
+                }
+            };
+            (manifest_path, None)
+        };
+
+        notes.extend(resolution.notes.clone());
+        let raw_manifest = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let manifest_value: toml::Value = toml::from_str(&raw_manifest)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+
+        // Store logical_cwd for Execute phase to use when building the full spec.
+        if let Some(lcwd) = logical_cwd {
+            // Stash it in pre_projection_spec if not already set above.
+            if self.pre_projection_spec.is_none() {
+                let target_label = self
+                    .target_label
+                    .unwrap_or_else(|| plan.selected_target_label())
+                    .to_string();
+                let pre_spec = lm::canonicalize_launch_spec(
+                    self.handle,
+                    &target_label,
+                    &plan,
+                    &launch,
+                    &manifest_path,
+                    Some(lcwd),
+                )?;
+                let launch_key = lm::compute_launch_key(&pre_spec);
+                self._launch_lock = lm::acquire_launch_lock(&launch_key).ok();
+                self.pre_projection_spec = Some(pre_spec);
+            }
         }
 
         self.resolution = Some(resolution);
@@ -212,7 +360,14 @@ impl<'a> SessionStartPhaseRunner<'a> {
         Ok(())
     }
 
+
     async fn run_build(&mut self) -> Result<()> {
+        // Fast-path: if Install already returned a live session via reuse,
+        // there is no need to run the build phase at all.
+        if self.install_reused {
+            return Ok(());
+        }
+
         // PR-C: orchestration mode no longer skips Build. The in-process
         // orchestration path runs in this process, so the wrapper owns the
         // build instead of delegating it to a nested `ato run`. The Build
@@ -277,6 +432,11 @@ impl<'a> SessionStartPhaseRunner<'a> {
     }
 
     async fn run_execute(&mut self) -> Result<()> {
+        // Fast-path: install phase already returned a live session.
+        if self.install_reused {
+            return Ok(());
+        }
+
         let resolution = self
             .resolution
             .as_ref()
@@ -305,21 +465,30 @@ impl<'a> SessionStartPhaseRunner<'a> {
         //                                     │  unlock instead of duplicating.
         //   release lock                    ──┘
         //
-        // Lock failures are non-fatal for v0: if we cannot acquire the
-        // file lock (permission, exotic FS, etc.) we proceed without it.
-        // The reuse path still functions — it just falls back to "no race
-        // protection," which is no worse than the pre-RFC behavior.
-        let launch_spec = lm::canonicalize_launch_spec(
-            self.handle,
-            self.target_label
-                .unwrap_or_else(|| plan.selected_target_label()),
-            plan,
-            launch,
-            manifest_path,
-        )?;
+        // If Install already computed the spec (registry capsule warm path),
+        // reuse it so the digest is stable. Otherwise build it fresh here
+        // (local capsule, orchestration, or any path that didn't go through
+        // the warm projection branch).
+        let (launch_spec, _guard) = if let Some(stored) = self.pre_projection_spec.take() {
+            // Lock already acquired and stored; move it so it lives until
+            // this function returns.
+            let lock = self._launch_lock.take();
+            (stored, lock)
+        } else {
+            let spec = lm::canonicalize_launch_spec(
+                self.handle,
+                self.target_label
+                    .unwrap_or_else(|| plan.selected_target_label()),
+                plan,
+                launch,
+                manifest_path,
+                None,
+            )?;
+            let launch_key = lm::compute_launch_key(&spec);
+            let lock = lm::acquire_launch_lock(&launch_key).ok();
+            (spec, lock)
+        };
         let launch_digest = lm::compute_launch_digest(&launch_spec);
-        let launch_key = lm::compute_launch_key(&launch_spec);
-        let _lock = lm::acquire_launch_lock(&launch_key).ok();
 
         // 1. Lookup + validate.
         let lookup_timer = PhaseStageTimer::start(HourglassPhase::Execute, "session_lookup");

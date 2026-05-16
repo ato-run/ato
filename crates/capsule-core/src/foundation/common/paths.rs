@@ -142,6 +142,13 @@ pub fn ato_state_dir() -> PathBuf {
     nacelle_home_dir_or_workspace_tmp().join("state")
 }
 
+/// Returns the content-addressed projection root.
+///
+/// Layout: `~/.ato/projections`
+pub fn ato_projections_dir() -> PathBuf {
+    nacelle_home_dir_or_workspace_tmp().join("projections")
+}
+
 /// Returns the immutable artifact store root.
 ///
 /// Layout: `~/.ato/store`

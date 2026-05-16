@@ -25,7 +25,7 @@ use fs2::FileExt;
 
 use crate::app_control::{http_get_ok, session_root, StoredSessionInfo};
 
-const LAUNCH_DIGEST_VERSION: &str = "ato-launch-digest-v1";
+const LAUNCH_DIGEST_VERSION: &str = "ato-launch-digest-v2";
 const LAUNCH_KEY_VERSION: &str = "ato-launch-key-v1";
 const SESSION_RECORD_SCHEMA_VERSION: u32 = 2;
 /// Session record filename prefix written by `write_session_record`. The
@@ -45,7 +45,14 @@ pub(crate) struct LaunchSpec {
     pub(crate) target_label: String,
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
-    pub(crate) cwd: PathBuf,
+    /// Logical (path-independent) working directory used for digest computation.
+    ///
+    /// For registry-installed capsules this is
+    /// `"projection:<full_key>/source[:<relative>]"` so the digest does not
+    /// change when `ATO_HOME` or the physical projection path changes.
+    /// For local capsules this is the canonical manifest parent directory,
+    /// which is already stable.
+    pub(crate) logical_cwd: String,
     pub(crate) declared_port: Option<u16>,
     pub(crate) readiness_path: String,
     pub(crate) build_input_digest: Option<String>,
@@ -87,7 +94,7 @@ pub(crate) fn compute_launch_digest(spec: &LaunchSpec) -> String {
     for arg in &spec.args {
         update_text(&mut hasher, arg);
     }
-    update_text(&mut hasher, &spec.cwd.display().to_string());
+    update_text(&mut hasher, &spec.logical_cwd);
     update_text(
         &mut hasher,
         &spec
@@ -577,18 +584,31 @@ mod platform {
 /// `ato app session start`. It is used both for slot identity (after
 /// canonicalization, see [`LaunchIdentity`]) and as the back-up matcher in
 /// [`record_matches_slot`].
+///
+/// `logical_cwd` is the path-independent working directory string to use in
+/// the digest. For registry-installed capsules this should be
+/// `"projection:<full_key>/source[:<relative>]"` so the digest is stable
+/// regardless of where `ATO_HOME` lives. For local capsules pass the
+/// canonical manifest parent directory.
 pub(crate) fn canonicalize_launch_spec(
     handle_input: &str,
     target_label: &str,
     plan: &capsule_core::router::ManifestData,
     derived: &capsule_core::launch_spec::LaunchSpec,
     manifest_path: &Path,
+    logical_cwd: Option<String>,
 ) -> Result<LaunchSpec> {
     let identity = canonicalize_identity(handle_input, manifest_path)?;
-    let cwd = derived
-        .working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| derived.working_dir.clone());
+    let logical_cwd = logical_cwd.unwrap_or_else(|| {
+        // Fallback: canonical physical working dir. Stable for local capsules;
+        // for registry capsules the caller should always supply a logical cwd.
+        derived
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| derived.working_dir.clone())
+            .display()
+            .to_string()
+    });
     let readiness_path = "/".to_string();
     let toolchain_fingerprint =
         crate::application::build_materialization::toolchain_fingerprint_for_plan(plan);
@@ -597,7 +617,7 @@ pub(crate) fn canonicalize_launch_spec(
         target_label: target_label.to_string(),
         command: derived.command.clone(),
         args: derived.args.clone(),
-        cwd,
+        logical_cwd,
         declared_port: derived.port,
         readiness_path,
         // v0: build / lock digests are not yet plumbed end-to-end through
@@ -639,7 +659,7 @@ mod tests {
             target_label: "app".to_string(),
             command: "node".to_string(),
             args: vec!["server.js".to_string()],
-            cwd: PathBuf::from("/tmp/byok-ai-chat"),
+            logical_cwd: "projection:abc123def456/source".to_string(),
             declared_port: Some(3000),
             readiness_path: "/".to_string(),
             build_input_digest: None,
@@ -679,11 +699,11 @@ mod tests {
     fn launch_key_is_stable_across_spec_changes() {
         let mut s = sample_spec();
         let before = compute_launch_key(&s);
-        // Changing command / port / cwd MUST NOT change launch_key —
+        // Changing command / port / logical_cwd MUST NOT change launch_key —
         // those represent spec changes within the same logical slot.
         s.command = "npm".to_string();
         s.declared_port = Some(4000);
-        s.cwd = PathBuf::from("/elsewhere");
+        s.logical_cwd = "projection:other_key_here/source".to_string();
         let after = compute_launch_key(&s);
         assert_eq!(before, after);
     }
