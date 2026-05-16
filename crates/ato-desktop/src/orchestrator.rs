@@ -1284,7 +1284,10 @@ fn sibling_ato_binary() -> Result<Option<PathBuf>> {
         // while ato-cli is built into the root workspace's target/{profile}/.
         // If a fresher peer exists 4 ancestors up (repo root), prefer it so that
         // rebuilding ato-cli is immediately picked up without re-bundling.
-        let profile = parent.file_name().and_then(|s| s.to_str()).unwrap_or("debug");
+        let profile = parent
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("debug");
         if let Some(repo_root) = parent.ancestors().nth(4) {
             let peer = repo_root.join("target").join(profile).join(bin_name);
             if peer.is_file() && peer != candidate {
@@ -4543,6 +4546,13 @@ mod fast_path_tests {
             service: None,
             dependency_contracts: None,
             graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
