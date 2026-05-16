@@ -41,10 +41,11 @@ pub use canonical::{
     CanonicalGraphDomain, CanonicalizableGraph, GraphCanonicalForm, CANONICAL_FORM_VERSION,
 };
 pub use launch_bundle::{
-    DerivedDependencyContracts, DerivedDependencyProvider, DerivedExecutionIds,
-    DerivedPreflightView, DerivedReceiptSeed, GraphMaterializationSeedInput, GraphPreflightInput,
-    GraphReceiptSeedInput, GraphRuntimeNodeInput, GraphRuntimeNodeKind, LaunchGraphBundle,
-    LaunchGraphBundleInput, LaunchGraphDerivedViews,
+    DerivedConsentView, DerivedDependencyContracts, DerivedDependencyProvider,
+    DerivedExecutionIds, DerivedPreflightView, DerivedReceiptSeed, GraphConsentInput,
+    GraphMaterializationSeedInput, GraphPreflightInput, GraphReceiptSeedInput,
+    GraphRuntimeNodeInput, GraphRuntimeNodeKind, LaunchGraphBundle, LaunchGraphBundleInput,
+    LaunchGraphDerivedViews,
 };
 pub use types::{
     ExecutionGraph, ExecutionGraphConstraint, ExecutionGraphEdge, ExecutionGraphEdgeKind,

@@ -3070,8 +3070,61 @@ where
         }
     }
 
-    let consent_already_granted =
-        request.dangerously_skip_permissions || crate::consent_store::has_consent(&execution_plan)?;
+    // PR-4b: the consent gate stays on plan-direct `has_consent`
+    // because of the zero-permission short-circuit. The bundle-derived
+    // `ExecutionConsentView` is still built (for symmetry with
+    // preflight, and so the bundle becomes the canonical consent
+    // identity surface for future PRs). Debug parity guard pins the
+    // two surfaces agree outside the zero-permission case.
+    let consent_already_granted = if request.dangerously_skip_permissions {
+        true
+    } else {
+        let plan_granted = crate::consent_store::has_consent(&execution_plan)?;
+        debug_assert!(
+            {
+                let consent_deps =
+                    capsule_core::lockfile::manifest_external_capsule_dependencies(
+                        &decision.plan.manifest,
+                    )
+                    .ok();
+                let view_granted = consent_deps.map(|deps| {
+                    let consent_input =
+                        capsule_core::engine::execution_graph::GraphConsentInput {
+                            scoped_id: execution_plan.consent.key.scoped_id.clone(),
+                            version: execution_plan.consent.key.version.clone(),
+                            target_label: execution_plan.consent.key.target_label.clone(),
+                            policy_segment_hash: execution_plan
+                                .consent
+                                .policy_segment_hash
+                                .clone(),
+                            provisioning_policy_hash: execution_plan
+                                .consent
+                                .provisioning_policy_hash
+                                .clone(),
+                        };
+                    let bundle =
+                        crate::application::graph_views::build_declared_only_bundle_with_consent(
+                            &deps,
+                            Some(decision.plan.manifest_path.display().to_string()),
+                            None,
+                            Vec::new(),
+                            consent_input,
+                        );
+                    let view =
+                        crate::application::graph_views::ExecutionConsentView::from_bundle(
+                            &bundle,
+                        );
+                    crate::consent_store::has_consent_view(&view).unwrap_or(plan_granted)
+                });
+                view_granted
+                    .map(|view_granted| plan_granted || plan_granted == view_granted)
+                    .unwrap_or(true)
+            },
+            "PR-4b parity: has_consent_view disagrees with plan-direct has_consent \
+             at run.rs pre-launch gate (outside the zero-permission short-circuit)"
+        );
+        plan_granted
+    };
     if !consent_already_granted {
         if use_progressive_ui {
             crate::progressive_ui::render_execution_consent_summary(
