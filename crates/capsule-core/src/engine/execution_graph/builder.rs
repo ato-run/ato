@@ -83,16 +83,49 @@ pub struct GraphTargetInput {
     pub runtime: String,
 }
 
-/// A resolved dependency, modelled as a (provider, output) pair.
+/// A resolved dependency, modelled as a (provider, output) pair plus
+/// the lockfile-facing contract facets the dependency was declared
+/// with. PR-4a (refs umbrella v0.6.0 graph-first migration) extends
+/// this to carry source/source_type/contract/injection_bindings/
+/// parameters/credentials so the lockfile verifier can consume a
+/// graph-derived view as primary input.
 ///
-/// In later waves this will carry richer data (lockfile coordinates,
-/// content hashes, etc.); for the skeleton it's enough to anchor a
-/// deterministic Provider/DependencyOutput emission and a
-/// `MaterializesTo` edge between them.
-#[derive(Debug, Clone)]
+/// ## Safety rule for credentials (PR-4a)
+///
+/// `credentials: BTreeMap<String, TemplatedString>` stores the
+/// **manifest template** (e.g. `"{{env.PG_PASSWORD}}"`), NOT the
+/// resolved environment value. `TemplatedString` is the same type
+/// the manifest carries; it deliberately never holds resolved
+/// secrets. Re-using this exact type keeps the graph safe by
+/// construction and gives the lockfile verifier a byte-for-byte
+/// equality check against `LockedCapsuleDependency.credentials`.
+///
+/// Resolved secret values must NEVER flow into this struct or the
+/// bundle's `derived.dependency_contracts`. The host-side
+/// credential materialization layer stays outside the graph.
+#[derive(Debug, Clone, Default)]
 pub struct GraphDependencyInput {
     pub provider: String,
     pub output: String,
+    /// `capsule://...` source reference. PR-4a addition.
+    pub source: Option<String>,
+    /// `"store" | "github" | ...`. PR-4a addition.
+    pub source_type: Option<String>,
+    /// Optional dep-contract URL. PR-4a addition.
+    pub contract: Option<String>,
+    /// metadata → value map injected at startup. PR-4a addition.
+    pub injection_bindings: std::collections::BTreeMap<String, String>,
+    /// Manifest-declared parameter values. PR-4a addition. Type
+    /// reused from the manifest grammar
+    /// ([`crate::foundation::types::dependency_grammar::ParamValue`])
+    /// which is intentionally narrow (String / Int / Bool only) so
+    /// canonical comparison is byte-stable.
+    pub parameters: std::collections::BTreeMap<String, crate::types::ParamValue>,
+    /// Manifest credential templates. PR-4a addition.
+    ///
+    /// Stores `TemplatedString` (templates only), NOT resolved
+    /// values. See the type docstring above.
+    pub credentials: std::collections::BTreeMap<String, crate::types::TemplatedString>,
 }
 
 /// Host-side facets the graph attaches to (filesystem, network, env, …).

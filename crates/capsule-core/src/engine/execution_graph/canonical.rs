@@ -286,11 +286,13 @@ mod tests {
                 GraphDependencyInput {
                     provider: "provider://npm".into(),
                     output: "output://lodash".into(),
-                },
+                ..Default::default()
+            },
                 GraphDependencyInput {
                     provider: "provider://cargo".into(),
                     output: "output://serde".into(),
-                },
+                ..Default::default()
+            },
             ],
             host: Some(GraphHostInput {
                 filesystem: Some("fs://workspace".into()),

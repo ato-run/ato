@@ -85,6 +85,18 @@ pub(crate) fn build_input_from_external_dependencies(
         .map(|dependency| GraphDependencyInput {
             provider: provider_identifier_for_alias(&dependency.alias),
             output: output_identifier_for_alias(&dependency.alias),
+            // PR-4a: route the 6 lockfile facets onto the graph
+            // dependency input so the bundle's
+            // `DerivedDependencyProvider` carries them through to
+            // `verify_lockfile_against_contracts`. `credentials`
+            // holds `TemplatedString` (templates only, never resolved
+            // env values) by virtue of the manifest grammar type.
+            source: Some(dependency.source.clone()),
+            source_type: Some(dependency.source_type.clone()),
+            contract: dependency.contract.clone(),
+            injection_bindings: dependency.injection_bindings.clone(),
+            parameters: dependency.parameters.clone(),
+            credentials: dependency.credentials.clone(),
         })
         .collect::<Vec<_>>();
 
