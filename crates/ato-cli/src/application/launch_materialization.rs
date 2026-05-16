@@ -397,10 +397,17 @@ fn healthcheck_ok(url: &str) -> bool {
 /// Read the session record at `<session_root>/desky-session-<pid>.json` that
 /// `start_runtime_session` / `start_guest_session` just wrote, attach the
 /// schema=2 reuse fields, and rewrite atomically. Idempotent.
+///
+/// When `prelaunch_receipt` is `Some`, the receipt's execution-id facets
+/// are also stamped into the record so the desktop-side reuse lookup can
+/// match a fresh launch against an existing receipt by execution_id without
+/// re-running the v2 observer pipeline. Fields already populated on the
+/// freshly-written record win — this is enrichment, not overwrite.
 pub(crate) fn persist_after_spawn(
     pid: u32,
     launch_digest: &str,
     process_start_time_unix_ms: Option<u64>,
+    prelaunch_receipt: Option<&crate::app_control::session::ExecutionReceiptSessionMetadata>,
 ) -> Result<()> {
     let root = session_root()?;
     let path = root.join(format!("ato-desktop-session-{}.json", pid));
@@ -412,6 +419,30 @@ pub(crate) fn persist_after_spawn(
     record.schema_version = Some(SESSION_RECORD_SCHEMA_VERSION);
     record.launch_digest = Some(launch_digest.to_string());
     record.process_start_time_unix_ms = process_start_time_unix_ms;
+
+    if let Some(metadata) = prelaunch_receipt {
+        if record.execution_id.is_none() {
+            record.execution_id = Some(metadata.execution_id.clone());
+        }
+        if record.execution_receipt_schema_version.is_none() {
+            record.execution_receipt_schema_version = Some(metadata.schema_version);
+        }
+        if record.declared_execution_id.is_none() {
+            record.declared_execution_id = metadata.declared_execution_id.clone();
+        }
+        if record.resolved_execution_id.is_none() {
+            record.resolved_execution_id = metadata.resolved_execution_id.clone();
+        }
+        if record.observed_execution_id.is_none() {
+            record.observed_execution_id = metadata.observed_execution_id.clone();
+        }
+        if record.graph_completeness.is_none() {
+            record.graph_completeness = metadata.graph_completeness.clone();
+        }
+        if record.reproducibility_class.is_none() {
+            record.reproducibility_class = metadata.reproducibility_class.clone();
+        }
+    }
 
     let serialized = serde_json::to_vec_pretty(&record)
         .with_context(|| format!("failed to serialize enriched record {}", path.display()))?;
