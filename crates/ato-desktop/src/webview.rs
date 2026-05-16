@@ -4,6 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,7 +14,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
-use http::header::{CONTENT_TYPE, COOKIE};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST};
 use http::{HeaderMap, HeaderValue};
 use include_dir::{include_dir, Dir};
 #[cfg(target_os = "macos")]
@@ -51,6 +52,7 @@ use crate::state::{
     BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId, PendingConfigRequest,
     PendingConsentRequest, ShellMode, WebSessionState,
 };
+use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::terminal::{TerminalCore, TryRecvOutput};
 use crate::ui::share::{resolve_share_icon, web_favicon_origin, ShareIconSource};
 use capsule_wire::handle::CapsuleDisplayStrategy;
@@ -186,6 +188,7 @@ pub struct WebViewManager {
     /// background threads so the UI never blocks on
     /// `ato app session stop`.
     retention: crate::retention::RetentionTable,
+    webview_retention: WebViewRetentionTable,
     /// Last successful launch for each capsule handle. Persists across
     /// WebView rebuilds so the UI-stop path can find the live session
     /// even when the per-pane WebView's `launched_session` reference
@@ -198,6 +201,7 @@ pub struct WebViewManager {
     /// Whether the dock window is currently open. Used by `ListPanes`
     /// to expose the dock pane to automation callers.
     dock_is_open: bool,
+    stable_origin_routes: StableOriginRouteTable,
 }
 
 /// Reserved pane ID for the dock window's WebView.
@@ -207,6 +211,10 @@ pub const DOCK_AUTOMATION_PANE_ID: usize = 999_000;
 
 struct ManagedWebView {
     pane_id: usize,
+    /// Mutable pane binding used by async handlers (IPC/page-load/title-change)
+    /// so a retained WebView can be reattached to a new pane without keeping
+    /// stale pane_id captures alive in closure environments.
+    pane_binding: Arc<AtomicUsize>,
     route: GuestRoute,
     route_key: String,
     bounds: PaneBounds,
@@ -246,6 +254,15 @@ struct HostPanelIpcMessage {
 }
 
 impl ManagedWebView {
+    fn bound_pane_id(&self) -> usize {
+        self.pane_binding.load(Ordering::Relaxed)
+    }
+
+    fn rebind_pane_id(&mut self, pane_id: usize) {
+        self.pane_binding.store(pane_id, Ordering::Relaxed);
+        self.pane_id = pane_id;
+    }
+
     fn actual_bounds(&self) -> Option<PaneBounds> {
         #[cfg(target_os = "macos")]
         if let Some(frame_host) = &self.frame_host {
@@ -319,6 +336,84 @@ struct PendingLaunchResult {
     session: Result<GuestLaunchSession, LaunchError>,
 }
 
+struct RetainedWebView {
+    stable_origin_key: String,
+    current_session_id: Option<String>,
+    webview: ManagedWebView,
+    retained_at: Instant,
+}
+
+struct WebViewRetentionTable {
+    entries: Vec<RetainedWebView>,
+    ttl: Duration,
+    max_size: usize,
+}
+
+impl WebViewRetentionTable {
+    fn with_defaults() -> Self {
+        Self {
+            entries: Vec::new(),
+            ttl: crate::retention::DEFAULT_TTL,
+            max_size: crate::retention::DEFAULT_MAX_RETAINED,
+        }
+    }
+
+    fn retain(&mut self, mut entry: RetainedWebView, now: Instant) -> Vec<RetainedWebView> {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|item| item.stable_origin_key == entry.stable_origin_key)
+        {
+            existing.current_session_id = entry.current_session_id.take();
+            existing.retained_at = now;
+            existing.webview = entry.webview;
+            return Vec::new();
+        }
+
+        entry.retained_at = now;
+        self.entries.push(entry);
+
+        let mut evicted = Vec::new();
+        while self.entries.len() > self.max_size {
+            evicted.push(self.entries.remove(0));
+        }
+        evicted
+    }
+
+    fn take_by_key(&mut self, stable_origin_key: &str) -> Option<RetainedWebView> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|item| item.stable_origin_key == stable_origin_key)?;
+        Some(self.entries.remove(idx))
+    }
+
+    fn take_by_session_id(&mut self, session_id: &str) -> Option<RetainedWebView> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|item| item.current_session_id.as_deref() == Some(session_id))?;
+        Some(self.entries.remove(idx))
+    }
+
+    fn evict_expired(&mut self, now: Instant) -> Vec<RetainedWebView> {
+        let mut evicted = Vec::new();
+        let mut i = 0;
+        while i < self.entries.len() {
+            if now.duration_since(self.entries[i].retained_at) >= self.ttl {
+                evicted.push(self.entries.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        evicted
+    }
+
+    fn drain(&mut self) -> Vec<RetainedWebView> {
+        self.entries.drain(..).collect()
+    }
+}
+
 impl WebViewManager {
     pub fn new(window_handle: AnyWindowHandle, async_app: AsyncApp) -> Self {
         let automation = AutomationHost::new();
@@ -373,8 +468,10 @@ impl WebViewManager {
             web_context,
             capsule_update_tx: None,
             retention: crate::retention::RetentionTable::with_defaults(),
+            webview_retention: WebViewRetentionTable::with_defaults(),
             handle_to_session: HashMap::new(),
             dock_is_open: false,
+            stable_origin_routes: StableOriginRouteTable::default(),
         }
     }
 
@@ -445,6 +542,7 @@ impl WebViewManager {
         // Idle apps may keep a session past its TTL until the next
         // render — `Drop` covers any leftover at process exit.
         self.sweep_expired_retention(state);
+        self.sweep_expired_webview_retention();
 
         // Drain ato:// / capsule:// deep links seen by the WebView
         // navigation handler so OAuth callbacks delivered through
@@ -545,24 +643,89 @@ impl WebViewManager {
                 state.sync_web_session_state(previous.pane_id, WebSessionState::Closed);
             }
 
-            match &active.route {
-                GuestRoute::CapsuleHandle { handle, .. } => {
-                    self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+            let stable_origin_key = stable_origin_key_for_route(&active.route);
+            if let Some(mut retained) = stable_origin_key
+                .as_deref()
+                .and_then(|key| self.webview_retention.take_by_key(key))
+            {
+                if let Some(session_id) = retained.current_session_id.as_deref() {
+                    let _ = self.retention.take_by_session_id(session_id);
                 }
-                _ if active.profile == HOST_PANEL_PROFILE => {
-                    let payload = crate::settings::host_panel_payload_for_url(state, &route_key);
-                    match self.build_host_panel_child_webview(
+                let restored_session = retained.webview.launched_session.clone();
+                retained.webview.rebind_pane_id(active.pane_id);
+                retained.webview.route = active.route.clone();
+                retained.webview.route_key = route_key.clone();
+                if let Err(error) = retained.webview.apply_bounds(content_bounds(active.bounds)) {
+                    state.push_activity(
+                        ActivityTone::Error,
+                        format!("Failed to resize retained webview: {error}"),
+                    );
+                }
+                self.views.insert(active.pane_id, retained.webview);
+                if let Some(session) = restored_session.as_ref() {
+                    self.handle_to_session
+                        .insert(session.handle.clone(), session.clone());
+                    apply_launch_session_metadata(state, active.pane_id, session);
+                    self.spawn_capsule_update_check(active.pane_id, session, state);
+                    self.start_log_follower(active.pane_id, session);
+                }
+                state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                self.automation.mark_page_loaded(active.pane_id);
+            } else {
+                match &active.route {
+                    GuestRoute::CapsuleHandle { handle, .. } => {
+                        self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+                    }
+                    _ if active.profile == HOST_PANEL_PROFILE => {
+                        let payload =
+                            crate::settings::host_panel_payload_for_url(state, &route_key);
+                        match self.build_host_panel_child_webview(
+                            window,
+                            active.pane_id,
+                            active.route.clone(),
+                            active.bounds,
+                            Some(payload),
+                        ) {
+                            Ok(webview) => {
+                                state.sync_web_session_state(
+                                    active.pane_id,
+                                    WebSessionState::Mounted,
+                                );
+                                self.bridge.log(
+                                    ActivityTone::Info,
+                                    format!("Built host panel WebView for {}", active.route),
+                                );
+                                self.views.insert(active.pane_id, webview);
+                            }
+                            Err(error) => {
+                                state.sync_web_session_state(
+                                    active.pane_id,
+                                    WebSessionState::Closed,
+                                );
+                                state.push_activity(
+                                    ActivityTone::Error,
+                                    format!("Failed to build host panel WebView: {error}"),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    _ => match self.build_webview(
                         window,
-                        active.pane_id,
-                        active.route.clone(),
-                        active.bounds,
-                        Some(payload),
+                        &active,
+                        None,
+                        state.auth_policy_registry.clone(),
                     ) {
                         Ok(webview) => {
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                            if !route_requires_ready_signal(&active.route) {
+                                state.sync_web_session_state(
+                                    active.pane_id,
+                                    WebSessionState::Mounted,
+                                );
+                            }
                             self.bridge.log(
                                 ActivityTone::Info,
-                                format!("Built host panel WebView for {}", active.route),
+                                format!("Built child webview for {}", active.route),
                             );
                             self.views.insert(active.pane_id, webview);
                         }
@@ -570,37 +733,12 @@ impl WebViewManager {
                             state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
                             state.push_activity(
                                 ActivityTone::Error,
-                                format!("Failed to build host panel WebView: {error}"),
+                                format!("Failed to build child webview: {error}"),
                             );
                             return;
                         }
-                    }
+                    },
                 }
-                _ => match self.build_webview(
-                    window,
-                    &active,
-                    None,
-                    state.auth_policy_registry.clone(),
-                ) {
-                    Ok(webview) => {
-                        if !route_requires_ready_signal(&active.route) {
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
-                        }
-                        self.bridge.log(
-                            ActivityTone::Info,
-                            format!("Built child webview for {}", active.route),
-                        );
-                        self.views.insert(active.pane_id, webview);
-                    }
-                    Err(error) => {
-                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                        state.push_activity(
-                            ActivityTone::Error,
-                            format!("Failed to build child webview: {error}"),
-                        );
-                        return;
-                    }
-                },
             }
         } else if matches!(reuse_action, WebViewReuseAction::Navigate) {
             if let Some(existing) = self.views.get_mut(&active.pane_id) {
@@ -1927,6 +2065,7 @@ impl WebViewManager {
         // for raw web app (WebUrl) sessions rather than relying on PageLoadEvent::Finished.
         let mut inject_window_ready_signal = false;
 
+        let pane_binding = Arc::new(AtomicUsize::new(pane.pane_id));
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
                 session,
@@ -2010,6 +2149,7 @@ impl WebViewManager {
                 // we inject a minimal window.onload script + dedicated IPC handler so SessionReady
                 // only fires after all scripts have run and the page has actually rendered.
                 if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    let mut use_stable_origin_proxy = false;
                     build_flags = BuildFlags {
                         inject_bridge: false,
                         enable_ipc: false,
@@ -2018,10 +2158,42 @@ impl WebViewManager {
                         observe_title_changes: true,
                     };
                     inject_window_ready_signal = true;
-                    let url = session.local_url.clone().ok_or_else(|| {
+                    let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    (url, None, Vec::new(), RouteContent::External, None)
+                    let url = match stable_origin_url_for_capsule_web_url(
+                        &pane.route,
+                        &scheme,
+                        &local_url,
+                        &self.stable_origin_routes,
+                    ) {
+                        Ok(Some(stable_url)) => {
+                            use_stable_origin_proxy = true;
+                            stable_url
+                        }
+                        Ok(None) => local_url,
+                        Err(error) => {
+                            warn!(
+                                route = %pane.route,
+                                session_id = %session.session_id,
+                                error = %error,
+                                "failed to configure stable-origin proxy route; falling back to direct local_url"
+                            );
+                            local_url
+                        }
+                    };
+                    build_flags.enable_custom_protocol = use_stable_origin_proxy;
+                    (
+                        url,
+                        None,
+                        Vec::new(),
+                        if use_stable_origin_proxy {
+                            RouteContent::StableOriginProxy(self.stable_origin_routes.clone())
+                        } else {
+                            RouteContent::External
+                        },
+                        None,
+                    )
                 } else {
                     let session_id = session.session_id.clone();
                     let frontend_path = session
@@ -2145,12 +2317,14 @@ impl WebViewManager {
             builder =
                 builder.with_initialization_script_for_main_only(ready_script.to_string(), true);
             let bridge = self.bridge.clone();
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
             builder = builder.with_ipc_handler(move |request| {
                 if request.body().contains("__ato_ready__") {
-                    bridge.push_shell_event(ShellEvent::SessionReady { pane_id });
+                    bridge.push_shell_event(ShellEvent::SessionReady {
+                        pane_id: pane_binding.load(Ordering::Relaxed),
+                    });
                     notify_window(async_app.clone(), window_handle);
                 }
                 // All other IPC messages from the raw web app are silently ignored.
@@ -2205,7 +2379,7 @@ impl WebViewManager {
         {
             let bridge = self.bridge.clone();
             let automation = self.automation.clone();
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let page_load_behavior = build_flags.page_load_behavior;
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
@@ -2225,7 +2399,7 @@ impl WebViewManager {
                         None => base_extras.clone(),
                     };
                     crate::surface_timing::emit_stage("navigation_start", "ok", 0, None, &extras);
-                    automation.mark_page_unloaded(pane_id);
+                    automation.mark_page_unloaded(pane_binding.load(Ordering::Relaxed));
                 }
                 PageLoadEvent::Finished => {
                     // navigation_finished. Note: PageLoadEvent::Finished
@@ -2262,6 +2436,7 @@ impl WebViewManager {
                             &base_extras,
                         );
                     }
+                    let pane_id = pane_binding.load(Ordering::Relaxed);
                     automation.mark_page_loaded(pane_id);
                     match page_load_behavior {
                         PageLoadBehavior::UpdateExternalUrl => {
@@ -2279,18 +2454,21 @@ impl WebViewManager {
 
         if build_flags.observe_title_changes {
             let bridge = self.bridge.clone();
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
             builder = builder.with_document_title_changed_handler(move |title| {
-                bridge.push_shell_event(ShellEvent::TitleChanged { pane_id, title });
+                bridge.push_shell_event(ShellEvent::TitleChanged {
+                    pane_id: pane_binding.load(Ordering::Relaxed),
+                    title,
+                });
                 notify_window(async_app.clone(), window_handle);
             });
         }
 
         // For external URLs, intercept navigations that require browser-side auth.
         if let GuestRoute::ExternalUrl(_) = &pane.route {
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
             let auth_flow = pane.auth_flow;
@@ -2311,6 +2489,7 @@ impl WebViewManager {
                 // WebContext. Untrusted capsule WebViews still hand
                 // those URLs off to the system browser.
                 if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
+                    let pane_id = pane_binding.load(Ordering::Relaxed);
                     if let Ok(mut q) = signals.lock() {
                         if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
                             q.push(AuthHandoffSignal { pane_id, url: uri });
@@ -2387,6 +2566,7 @@ impl WebViewManager {
 
         Ok(ManagedWebView {
             pane_id: pane.pane_id,
+            pane_binding,
             route: pane.route.clone(),
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
@@ -2436,6 +2616,7 @@ impl WebViewManager {
         bounds: PaneBounds,
         payload: Option<Value>,
     ) -> Result<ManagedWebView> {
+        let pane_binding = Arc::new(AtomicUsize::new(pane_id));
         let url = route.to_string();
         let webview_bounds = content_bounds(bounds);
         let payload_json = serde_json::to_string(&payload.unwrap_or(Value::Null))
@@ -2487,22 +2668,25 @@ impl WebViewManager {
         let bridge = self.bridge.clone();
         let async_app = self.async_app.clone();
         let window_handle = self.window_handle;
+        let pane_binding_for_ipc = pane_binding.clone();
         builder = builder.with_ipc_handler(move |request| {
             let Ok(envelope) = serde_json::from_str::<HostPanelIpcEnvelope>(request.body()) else {
                 return;
             };
             if envelope.message.kind == "route-change" {
                 if let Some(path) = envelope.message.path {
+                    let bound_pane_id = pane_binding_for_ipc.load(Ordering::Relaxed);
                     bridge.push_shell_event(ShellEvent::HostPanelRouteChanged {
-                        pane_id: envelope.pane_id.unwrap_or(pane_id),
+                        pane_id: envelope.pane_id.unwrap_or(bound_pane_id),
                         path,
                     });
                     notify_window(async_app.clone(), window_handle);
                 }
             } else if envelope.message.kind == "settings-command" {
                 if let Some(command) = envelope.message.command {
+                    let bound_pane_id = pane_binding_for_ipc.load(Ordering::Relaxed);
                     bridge.push_shell_event(ShellEvent::HostPanelCommand {
-                        pane_id: envelope.pane_id.unwrap_or(pane_id),
+                        pane_id: envelope.pane_id.unwrap_or(bound_pane_id),
                         command,
                         payload: envelope.message.payload.unwrap_or(Value::Null),
                         request_id: envelope.message.request_id,
@@ -2537,6 +2721,7 @@ impl WebViewManager {
 
         Ok(ManagedWebView {
             pane_id,
+            pane_binding,
             route,
             route_key: url,
             bounds: webview_bounds,
@@ -2570,12 +2755,14 @@ impl WebViewManager {
             self.automation.mark_page_unloaded(pane_id);
             if let Some(view) = self.views.remove(&pane_id) {
                 self.retain_launched_session(&view, state);
+                self.retain_webview(view);
             }
             self.visibility_cache.remove(&pane_id);
         }
         // Opportunistic TTL sweep: any pane close is a natural place
         // to spot expired retentions (cheap O(n) over ≤ cap entries).
         self.sweep_expired_retention(state);
+        self.sweep_expired_webview_retention();
     }
 
     /// Demote `view`'s launched session into the retention table
@@ -2644,6 +2831,27 @@ impl WebViewManager {
         }
     }
 
+    fn retain_webview(&mut self, view: ManagedWebView) {
+        if !is_webview_retention_eligible_route(&view.route) {
+            return;
+        }
+        let Some(stable_origin_key) = stable_origin_key_for_webview(&view) else {
+            return;
+        };
+        let _ = view.set_visible(false);
+        let current_session_id = view.launched_session.as_ref().map(|s| s.session_id.clone());
+        let evicted = self.webview_retention.retain(
+            RetainedWebView {
+                stable_origin_key,
+                current_session_id,
+                webview: view,
+                retained_at: Instant::now(),
+            },
+            Instant::now(),
+        );
+        drop(evicted);
+    }
+
     /// Sweep expired retention entries and graceful-stop them.
     /// Called from `sync_from_state` (every render) and from
     /// `prune_panes` so idle time alone keeps retention bounded.
@@ -2658,6 +2866,11 @@ impl WebViewManager {
             );
             crate::retention::spawn_graceful_stop(entry, reason);
         }
+    }
+
+    fn sweep_expired_webview_retention(&mut self) {
+        let evicted = self.webview_retention.evict_expired(Instant::now());
+        drop(evicted);
     }
 
     /// Number of capsule sessions currently sitting in the retention
@@ -2819,6 +3032,14 @@ impl WebViewManager {
         // stop without losing the reference.
         if stopped {
             self.handle_to_session.remove(&handle);
+            if let Some(retained) = self.webview_retention.take_by_session_id(&session_id) {
+                drop(retained);
+            } else if let Some(retained) = self
+                .webview_retention
+                .take_by_key(&format!("handle:{handle}"))
+            {
+                drop(retained);
+            }
         }
         state.sync_web_session_state(active_pane_id, WebSessionState::LaunchFailed);
 
@@ -2831,6 +3052,7 @@ impl WebViewManager {
     /// before the underlying session can be stopped via this path.
     /// Returns the number of sessions queued for stop.
     pub fn stop_all_retained_sessions(&mut self) -> usize {
+        self.webview_retention.drain();
         let drained = self.retention.drain();
         let count = drained.len();
         for (entry, _reason) in drained {
@@ -3099,6 +3321,7 @@ impl Drop for WebViewManager {
             );
             let _ = stop_guest_session(&entry.session_id);
         }
+        self.webview_retention.drain();
 
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
         for existing in self.views.drain().map(|(_, existing)| existing) {
@@ -3675,6 +3898,7 @@ enum RouteContent {
     GuestAssets(GuestLaunchSession),
     External,
     TerminalAssets,
+    StableOriginProxy(StableOriginRouteTable),
 }
 
 impl ProtocolRouter {
@@ -3690,6 +3914,18 @@ impl ProtocolRouter {
     ) {
         let host = request.uri().host().unwrap_or("welcome").to_string();
         let path = request.uri().path().to_string();
+
+        if let RouteContent::StableOriginProxy(routes) = &content {
+            let response = handle_stable_origin_proxy_request(request, routes).unwrap_or_else(|error| {
+                Response::builder()
+                    .status(500)
+                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .body(Cow::Owned(error.to_string().into_bytes()))
+                    .expect("stable-origin proxy error response should build")
+            });
+            responder.respond(response);
+            return;
+        }
 
         // Bridge RPC is routed separately from asset serving because it carries structured host messages.
         if path == "/__ato/bridge" {
@@ -3748,6 +3984,11 @@ impl ProtocolRouter {
                 "text/plain; charset=utf-8",
             ),
             RouteContent::TerminalAssets => serve_terminal_asset(path),
+            RouteContent::StableOriginProxy(_) => build_plain_response(
+                500,
+                "stable-origin proxy should be handled in async request path".to_string(),
+                "text/plain; charset=utf-8",
+            ),
         }
     }
 
@@ -4003,6 +4244,92 @@ fn serve_terminal_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
         )
         .body(Cow::Borrowed(body))
         .context("failed to build terminal asset response")
+}
+
+fn stable_origin_url_for_capsule_web_url(
+    route: &GuestRoute,
+    scheme: &str,
+    local_url: &str,
+    stable_routes: &StableOriginRouteTable,
+) -> Result<Option<String>> {
+    let Some(logical_key) = logical_capsule_key_for_stable_origin(route) else {
+        return Ok(None);
+    };
+
+    let upstream = url::Url::parse(local_url)
+        .with_context(|| format!("invalid local_url for stable-origin proxy: {local_url}"))?;
+    let route = stable_routes
+        .register_or_swap(logical_key, upstream.clone())
+        .with_context(|| format!("failed to register stable-origin proxy route for {upstream}"))?;
+
+    let mut stable_url = url::Url::parse(&format!("{scheme}://{}/", route.stable_host_label))
+        .context("failed to build stable-origin URL")?;
+    stable_url.set_path(upstream.path());
+    stable_url.set_query(upstream.query());
+    Ok(Some(stable_url.to_string()))
+}
+
+fn handle_stable_origin_proxy_request(
+    request: Request<Vec<u8>>,
+    routes: &StableOriginRouteTable,
+) -> Result<Response<Cow<'static, [u8]>>> {
+    let host = request
+        .uri()
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("stable-origin request is missing host"))?;
+    let resolved = routes.validate_and_resolve_host(host)?;
+    let target_url = stable_origin_proxy_target_url(&resolved.upstream, request.uri())?;
+
+    let mut upstream_request = ureq::request(request.method().as_str(), target_url.as_str());
+    for (name, value) in request.headers() {
+        if name == HOST || name == CONTENT_LENGTH {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            upstream_request = upstream_request.set(name.as_str(), value);
+        }
+    }
+
+    let upstream_response = if request.body().is_empty() {
+        upstream_request.call()
+    } else {
+        upstream_request.send_bytes(request.body())
+    };
+
+    let (status, response) = match upstream_response {
+        Ok(response) => (response.status(), response),
+        Err(ureq::Error::Status(status, response)) => (status, response),
+        Err(ureq::Error::Transport(error)) => {
+            return build_plain_response(
+                502,
+                format!("stable-origin upstream transport error: {error}"),
+                "text/plain; charset=utf-8",
+            );
+        }
+    };
+
+    let content_type = response
+        .header("content-type")
+        .map(str::to_string)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let mut reader = response.into_reader();
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .context("failed to read stable-origin upstream response body")?;
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, content_type)
+        .body(Cow::Owned(body))
+        .context("failed to build stable-origin proxy response")
+}
+
+fn stable_origin_proxy_target_url(upstream: &url::Url, request_uri: &http::Uri) -> Result<url::Url> {
+    let mut target = upstream.clone();
+    target.set_path(request_uri.path());
+    target.set_query(request_uri.query());
+    Ok(target)
 }
 
 fn build_plain_response(
@@ -4471,6 +4798,34 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
             None
         }
     }
+}
+
+fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
+    match route {
+        GuestRoute::CapsuleHandle { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::CapsuleUrl { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::Capsule { session, .. } => Some(format!("session:{session}")),
+        GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => None,
+    }
+}
+
+fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
+    matches!(
+        route,
+        GuestRoute::Capsule { .. }
+            | GuestRoute::CapsuleHandle { .. }
+            | GuestRoute::CapsuleUrl { .. }
+    )
+}
+
+fn stable_origin_key_for_webview(view: &ManagedWebView) -> Option<String> {
+    if !is_webview_retention_eligible_route(&view.route) {
+        return None;
+    }
+    if let Some(session) = view.launched_session.as_ref() {
+        return Some(format!("handle:{}", session.handle));
+    }
+    stable_origin_key_for_route(&view.route)
 }
 
 fn compact(value: &str) -> String {
@@ -5331,6 +5686,127 @@ mod tests {
              stop_active_session relies on evicting views[pane_id] \
              to bypass this branch (#112)"
         );
+    }
+
+    #[test]
+    fn stable_origin_key_uses_handle_for_capsule_routes() {
+        let handle_route = GuestRoute::CapsuleHandle {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+        };
+        let url_route = GuestRoute::CapsuleUrl {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+            url: url::Url::parse("http://127.0.0.1:3000").expect("url"),
+        };
+
+        assert_eq!(
+            stable_origin_key_for_route(&handle_route),
+            Some("handle:capsule://org/demo@1.0.0".to_string())
+        );
+        assert_eq!(
+            stable_origin_key_for_route(&url_route),
+            Some("handle:capsule://org/demo@1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn stable_origin_key_is_not_created_for_external_or_terminal_routes() {
+        let external =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let terminal = GuestRoute::Terminal {
+            session_id: "term-1".to_string(),
+        };
+
+        assert_eq!(stable_origin_key_for_route(&external), None);
+        assert_eq!(stable_origin_key_for_route(&terminal), None);
+    }
+
+    #[test]
+    fn stable_origin_web_url_is_created_for_capsule_handle_routes() {
+        let route = GuestRoute::CapsuleHandle {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+        };
+        let table = StableOriginRouteTable::default();
+
+        let stable_url = stable_origin_url_for_capsule_web_url(
+            &route,
+            "capsuletest",
+            "http://127.0.0.1:4173/app?mode=dev",
+            &table,
+        )
+        .expect("stable origin URL should resolve")
+        .expect("capsule route should be in stable-origin scope");
+
+        let parsed = url::Url::parse(&stable_url).expect("stable URL should parse");
+        let expected_host =
+            crate::stable_origin_proxy::stable_host_label_for_key("handle:capsule://org/demo@1.0.0");
+        assert_eq!(parsed.scheme(), "capsuletest");
+        assert_eq!(parsed.path(), "/app");
+        assert_eq!(parsed.query(), Some("mode=dev"));
+        assert_eq!(parsed.host_str(), Some(expected_host.as_str()));
+    }
+
+    #[test]
+    fn stable_origin_web_url_scope_excludes_capsule_url_and_external_routes() {
+        let capsule_url_route = GuestRoute::CapsuleUrl {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+            url: url::Url::parse("http://127.0.0.1:4173/app").expect("url"),
+        };
+        let external_route =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let table = StableOriginRouteTable::default();
+
+        assert_eq!(
+            stable_origin_url_for_capsule_web_url(
+                &capsule_url_route,
+                "capsuletest",
+                "http://127.0.0.1:4173/app",
+                &table,
+            )
+            .expect("capsule url route should return Ok(None)"),
+            None
+        );
+        assert_eq!(
+            stable_origin_url_for_capsule_web_url(
+                &external_route,
+                "capsuletest",
+                "https://example.com",
+                &table,
+            )
+            .expect("external route should return Ok(None)"),
+            None
+        );
+    }
+
+    #[test]
+    fn webview_retention_scope_keeps_capsule_backed_routes_only() {
+        let capsule_handle_route = GuestRoute::CapsuleHandle {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+        };
+        let capsule_session_route = GuestRoute::Capsule {
+            session: "session-1".to_string(),
+            entry_path: "/index.html".to_string(),
+        };
+        let capsule_url_route = GuestRoute::CapsuleUrl {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+            url: url::Url::parse("http://127.0.0.1:4173/app").expect("url"),
+        };
+        let external_route =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let terminal_route = GuestRoute::Terminal {
+            session_id: "term-1".to_string(),
+        };
+
+        assert!(is_webview_retention_eligible_route(&capsule_handle_route));
+        assert!(is_webview_retention_eligible_route(&capsule_session_route));
+        assert!(is_webview_retention_eligible_route(&capsule_url_route));
+        assert!(!is_webview_retention_eligible_route(&external_route));
+        assert!(!is_webview_retention_eligible_route(&terminal_route));
     }
 
     #[test]
