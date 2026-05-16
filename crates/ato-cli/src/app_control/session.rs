@@ -288,7 +288,14 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         "ato app session start",
     );
     futures::executor::block_on(
-        crate::application::receipt_boundary::emit_receipt_on_result(ctx, async {
+        crate::application::receipt_boundary::emit_receipt_on_result(ctx, |sink| async {
+            // PR-3b: hand the boundary's graph-id sink to the runner so
+            // `emit_execution_receipt` can publish declared/resolved ids
+            // immediately after building the LaunchGraphBundle. If the
+            // rest of the runner fails (spawn, healthcheck, etc.), the
+            // partial-receipt boundary still observes the same ids the
+            // success receipt would have carried.
+            runner.receipt_graph_id_sink = Some(sink);
             pipeline.run(&mut runner).await
         }),
     )?;

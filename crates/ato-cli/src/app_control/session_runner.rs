@@ -118,15 +118,24 @@ pub(super) struct SessionStartPhaseRunner<'a> {
     // Set by Execute phase. Read by `start_session` after `pipeline.run`.
     pub(super) session_info: Option<SessionInfo>,
 
-    /// PR-3b: shared LaunchGraphBundle for this launch.
+    /// PR-3b boundary plumbing: handle to the
+    /// `ReceiptEmissionContext::graph_id_sink` for this launch. Set
+    /// by the outer wrapper in
+    /// `app_control::session::start_session_for_capsule` before
+    /// `pipeline.run` so `emit_execution_receipt` can publish
+    /// declared/resolved ids to the boundary the moment the
+    /// LaunchGraphBundle is built.
     ///
-    /// Populated by `emit_execution_receipt` (via
-    /// `build_prelaunch_receipt_document_with_graph`) so downstream
-    /// steps in this runner share the same bundle the receipt was
-    /// derived from instead of re-deriving and risking drift. None
-    /// before receipt emission, or for V1-schema launches.
-    pub(super) launch_graph:
-        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
+    /// Note: PR-3b deliberately does NOT carry the full
+    /// `LaunchGraphBundle` on the runner. The bundle is owned by
+    /// `emit_execution_receipt` and lives only in that method's
+    /// local scope; the sink is the only handle that survives the
+    /// boundary. Session-record enrichment reads declared/resolved
+    /// ids from `ExecutionReceiptSessionMetadata` (built from the
+    /// receipt document), which is the same id space the bundle
+    /// stamped on the document — so no separate carrier is needed.
+    pub(super) receipt_graph_id_sink:
+        Option<crate::application::receipt_boundary::ReceiptGraphIdSink>,
 }
 
 impl<'a> SessionStartPhaseRunner<'a> {
@@ -151,7 +160,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             execute_reused: false,
             execute_prior_kind: None,
             session_info: None,
-            launch_graph: None,
+            receipt_graph_id_sink: None,
         }
     }
 
@@ -525,11 +534,24 @@ impl<'a> SessionStartPhaseRunner<'a> {
         // workspace state.
         let prelaunch_receipt = match self.emit_execution_receipt() {
             Ok((metadata, bundle)) => {
-                // PR-3b: capture the bundle onto self so subsequent
-                // steps in this runner (and any future PR-3c / PR-3d
-                // reader) consult the same instance the receipt was
-                // derived from. Bundle is None on V1-schema launches.
-                self.launch_graph = bundle;
+                // PR-3b: publish declared/resolved ids to the boundary
+                // sink IMMEDIATELY after the bundle is built — so if
+                // the rest of run_execute (spawn, healthcheck,
+                // session-record write) fails, the partial-receipt
+                // boundary wrapper picks up the ids the would-be
+                // success receipt would have carried.
+                if let (Some(sink), Some(bundle_ref)) =
+                    (self.receipt_graph_id_sink.as_ref(), bundle.as_ref())
+                {
+                    sink.set(crate::application::receipt_boundary::GraphIds {
+                        declared_execution_id: Some(
+                            bundle_ref.derived.execution_ids.declared_execution_id.clone(),
+                        ),
+                        resolved_execution_id: Some(
+                            bundle_ref.derived.execution_ids.resolved_execution_id.clone(),
+                        ),
+                    });
+                }
                 Some(metadata)
             }
             Err(err) => {
