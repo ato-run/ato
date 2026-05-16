@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use capsule_core::common::paths::ato_path;
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::ExecutionPlan;
+use capsule_core::execution_plan::model::{ConsentKey, ExecutionPlan};
 use capsule_core::AtoError;
+
+use crate::application::graph_views::ExecutionConsentView;
 
 const CONSENT_FILE_NAME: &str = "executionplan_v1.jsonl";
 
@@ -24,15 +26,29 @@ struct ConsentRecord {
     approved_at: String,
 }
 
-fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
+/// PR-4b core: build a ConsentRecord from the (key, policy hashes)
+/// primitive shared by both plan-taking and view-taking call sites.
+fn consent_record_for_key(
+    key: &ConsentKey,
+    policy_segment_hash: &str,
+    provisioning_policy_hash: &str,
+) -> ConsentRecord {
     ConsentRecord {
-        scoped_id: plan.consent.key.scoped_id.clone(),
-        version: plan.consent.key.version.clone(),
-        target_label: plan.consent.key.target_label.clone(),
-        policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-        provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+        scoped_id: key.scoped_id.clone(),
+        version: key.version.clone(),
+        target_label: key.target_label.clone(),
+        policy_segment_hash: policy_segment_hash.to_string(),
+        provisioning_policy_hash: provisioning_policy_hash.to_string(),
         approved_at: String::new(),
     }
+}
+
+fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
+    consent_record_for_key(
+        &ConsentKey::from_execution_plan(plan),
+        &plan.consent.policy_segment_hash,
+        &plan.consent.provisioning_policy_hash,
+    )
 }
 
 pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), AtoExecutionError> {
@@ -120,6 +136,60 @@ pub fn record_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
 
     store.append_consent(record)?;
     Ok(())
+}
+
+/// PR-4b: view-taking sibling of [`has_consent`]. Returns `Ok(true)`
+/// when the consent log has a matching `(ConsentKey, policy hashes)`
+/// record. The view's 5 consent-identity fields must be populated —
+/// returns `Ok(true)` for unpopulated views by convention (treat as
+/// "no consent needed" / zero-permission), matching the plan-side
+/// `is_zero_permission_plan` short-circuit.
+#[allow(dead_code)] // wired by call sites in preflight.rs / run.rs in this PR
+pub fn has_consent_view(view: &ExecutionConsentView) -> Result<bool, AtoExecutionError> {
+    let record = match consent_record_for_view(view) {
+        Some(record) => record,
+        // View has no consent identity facets populated — treat as
+        // "no consent to record" (same short-circuit as the
+        // zero-permission plan branch).
+        None => return Ok(true),
+    };
+    let store = ConsentStore::new()?;
+    store.is_consented(&record)
+}
+
+/// PR-4b: view-taking sibling of [`record_consent`].
+#[allow(dead_code)] // wired by call sites in preflight.rs / run.rs in this PR
+pub fn record_consent_view(view: &ExecutionConsentView) -> Result<(), AtoExecutionError> {
+    let Some(record) = consent_record_for_view(view) else {
+        return Ok(());
+    };
+    let store = ConsentStore::new()?;
+    if store.is_consented(&record)? {
+        return Ok(());
+    }
+    store.append_consent(record)?;
+    Ok(())
+}
+
+/// PR-4b helper: project an `ExecutionConsentView` into a
+/// `ConsentRecord`. Returns `None` if any of the 5 identity facets is
+/// missing (the view wasn't built with consent input).
+fn consent_record_for_view(view: &ExecutionConsentView) -> Option<ConsentRecord> {
+    let scoped_id = view.scoped_id.as_deref()?;
+    let version = view.version.as_deref()?;
+    let target_label = view.target_label.as_deref()?;
+    let policy_segment_hash = view.policy_segment_hash.as_deref()?;
+    let provisioning_policy_hash = view.provisioning_policy_hash.as_deref()?;
+    let key = ConsentKey {
+        scoped_id: scoped_id.to_string(),
+        version: version.to_string(),
+        target_label: target_label.to_string(),
+    };
+    Some(consent_record_for_key(
+        &key,
+        policy_segment_hash,
+        provisioning_policy_hash,
+    ))
 }
 
 pub fn consent_summary(plan: &ExecutionPlan) -> String {
