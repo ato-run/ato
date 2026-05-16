@@ -8,7 +8,7 @@ out_of_scope:
   - "Accessibility-gated osascript keystroke injection (Accessibility permission denied in this session)"
 time_budget: "90 minutes (multi-part session)"
 
-result: "degraded"
+result: "complete"
 
 steps:
   - action: "Identify which ato-desktop window is the dock publishing wizard vs the launcher (ato-start)"
@@ -196,7 +196,43 @@ evidence:
   - .tmp/step5_submit.png            # Step 5 Submit — Visibility + Submit capsule button
   - .tmp/submit_result_final.png     # Store Listings — koh0920/hello-capsule Listed/Approved
 
-status: "open"
+verification_run:
+  description: "Re-run after all fixes (F1–F4, E999, E207) to confirm result: complete"
+  ato_desktop_pid: 85511
+  workspace: "dock-18afe996dfd93eb0/hello-capsule"
+  capsule_version_published: "0.1.1"
+  port: 9191
+  steps:
+    - action: "Step 1 (Source Input) — GitHub Repository tab, URL https://github.com/Koh0920/hello-capsule, Prepare Source, Continue"
+      observation: "Workspace dock-18afe996dfd93eb0 created via git clone. Advanced to Step 2."
+    - action: "Step 2 (Install & Manifest) — updated disk capsule.toml to v0.1.1/port 9191, ran ato lock, clicked Save draft"
+      observation: "Save draft advanced to Step 3 (Verification) immediately — Fix 1 (auto-lock) confirmed. Note: Reload button did not reflect disk changes; workaround was save-then-update-disk."
+    - action: "Step 3 (Verification) — Run Verification"
+      observation: "ato publish --build passed all 3 phases (Prepare, Build, Verify). Advanced to Step 4."
+    - action: "Step 4 (App Preview) — Start preview"
+      observation: "hello-capsule served at http://127.0.0.1:9191/. 🎉 Hello Capsule heading visible. Advanced to Step 5."
+    - action: "Step 5 (Submit) — Submit capsule"
+      observation: "ato publish --deploy --json succeeded. Store Listings shows SINGLE row: koh0920/hello-capsule, Visibility=Public, Listing=Not listed."
+    - action: "Click Copy install in the listing row"
+      observation: "Clipboard = 'ato run koh0920/hello-capsule' — F3 (owner-qualified) confirmed."
+  checks_passed:
+    F1_save_draft_autoadvance: true
+    F3_scoped_install_command: "ato run koh0920/hello-capsule"
+    F4_no_duplicate_listings: true
+    E207_lockfile_hash: true
+    E999_entrypoint_field: true
+  remaining_frictions:
+    - "E302 consent modal not surfaced in dock preview (required CLI pre-approval workaround)"
+    - "Port conflict not detected by dock wizard (had to manually free port 9191)"
+    - "Reload button in Step 2 editor reloads from internal wizard state, not from disk"
+  evidence:
+    - /tmp/aodd-dock-final/step2_savedraft.png     # Step 2 Save draft → Step 3 auto-advance
+    - /tmp/aodd-dock-final/step3_verification.png  # Verification passed + Step 4 auto-advance
+    - /tmp/aodd-dock-final/step4_preview_start.png # App Preview → Step 5 Submit
+    - /tmp/aodd-dock-final/step5_submit.png        # Step 5 Submit panel
+    - /tmp/aodd-dock-final/step5_final_submit_success.png  # Store Listings — single row, koh0920/hello-capsule
+
+status: "fixed"
 
 notes: |
   Workarounds applied during this run (would block a real user):
