@@ -31,6 +31,7 @@ use serde::Deserialize;
 use super::ato_dock::DockCommand;
 use super::ato_identity::IdentityCommand;
 use super::ato_launch::LaunchCommand;
+use super::ato_onboarding::OnboardingCommand;
 use super::ato_settings::SettingsCommand;
 use super::ato_start::AtoStartCommand;
 use super::ato_store::StoreCommand;
@@ -69,49 +70,14 @@ pub fn make_ipc_handler(queue: SystemBridgeQueue) -> impl Fn(wry::http::Request<
                 return;
             }
         };
-        let capsule = match envelope.capsule.as_str() {
-            "ato-windows" => SystemCapsuleId::AtoWindows,
-            "ato-store" => SystemCapsuleId::AtoStore,
-            "ato-settings" => SystemCapsuleId::AtoSettings,
-            "ato-web-viewer" => SystemCapsuleId::AtoWebViewer,
-            "ato-launch" => SystemCapsuleId::AtoLaunch,
-            "ato-identity" => SystemCapsuleId::AtoIdentity,
-            "ato-start" => SystemCapsuleId::AtoStart,
-            "ato-dock" => SystemCapsuleId::AtoDock,
-            other => {
-                tracing::warn!(slug = %other, "system_capsule::ipc: unknown capsule slug");
+        let capsule = match capsule_id_from_slug(envelope.capsule.as_str()) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(slug = %envelope.capsule, "system_capsule::ipc: unknown capsule slug");
                 return;
             }
         };
-        let command_result = match capsule {
-            SystemCapsuleId::AtoWindows => {
-                serde_json::from_value::<WindowsCommand>(envelope.command)
-                    .map(SystemCommand::AtoWindows)
-            }
-            SystemCapsuleId::AtoStore => serde_json::from_value::<StoreCommand>(envelope.command)
-                .map(SystemCommand::AtoStore),
-            SystemCapsuleId::AtoSettings => {
-                serde_json::from_value::<SettingsCommand>(envelope.command)
-                    .map(SystemCommand::AtoSettings)
-            }
-            SystemCapsuleId::AtoWebViewer => {
-                serde_json::from_value::<WebViewerCommand>(envelope.command)
-                    .map(SystemCommand::AtoWebViewer)
-            }
-            SystemCapsuleId::AtoLaunch => serde_json::from_value::<LaunchCommand>(envelope.command)
-                .map(SystemCommand::AtoLaunch),
-            SystemCapsuleId::AtoIdentity => {
-                serde_json::from_value::<IdentityCommand>(envelope.command)
-                    .map(SystemCommand::AtoIdentity)
-            }
-            SystemCapsuleId::AtoStart => {
-                serde_json::from_value::<AtoStartCommand>(envelope.command)
-                    .map(SystemCommand::AtoStart)
-            }
-            SystemCapsuleId::AtoDock => {
-                serde_json::from_value::<DockCommand>(envelope.command).map(SystemCommand::AtoDock)
-            }
-        };
+        let command_result = parse_system_command(capsule, envelope.command);
         match command_result {
             Ok(cmd) => {
                 if let Ok(mut q) = queue.lock() {
@@ -121,6 +87,56 @@ pub fn make_ipc_handler(queue: SystemBridgeQueue) -> impl Fn(wry::http::Request<
             Err(err) => {
                 tracing::warn!(?capsule, error = %err, "system_capsule::ipc: command parse failed");
             }
+        }
+    }
+}
+
+fn capsule_id_from_slug(slug: &str) -> Option<SystemCapsuleId> {
+    match slug {
+        "ato-windows" => Some(SystemCapsuleId::AtoWindows),
+        "ato-store" => Some(SystemCapsuleId::AtoStore),
+        "ato-settings" => Some(SystemCapsuleId::AtoSettings),
+        "ato-web-viewer" => Some(SystemCapsuleId::AtoWebViewer),
+        "ato-launch" => Some(SystemCapsuleId::AtoLaunch),
+        "ato-identity" => Some(SystemCapsuleId::AtoIdentity),
+        "ato-start" => Some(SystemCapsuleId::AtoStart),
+        "ato-dock" => Some(SystemCapsuleId::AtoDock),
+        "ato-onboarding" => Some(SystemCapsuleId::AtoOnboarding),
+        _ => None,
+    }
+}
+
+fn parse_system_command(
+    capsule: SystemCapsuleId,
+    command: serde_json::Value,
+) -> Result<SystemCommand, serde_json::Error> {
+    match capsule {
+        SystemCapsuleId::AtoWindows => {
+            serde_json::from_value::<WindowsCommand>(command).map(SystemCommand::AtoWindows)
+        }
+        SystemCapsuleId::AtoStore => {
+            serde_json::from_value::<StoreCommand>(command).map(SystemCommand::AtoStore)
+        }
+        SystemCapsuleId::AtoSettings => {
+            serde_json::from_value::<SettingsCommand>(command).map(SystemCommand::AtoSettings)
+        }
+        SystemCapsuleId::AtoWebViewer => {
+            serde_json::from_value::<WebViewerCommand>(command).map(SystemCommand::AtoWebViewer)
+        }
+        SystemCapsuleId::AtoLaunch => {
+            serde_json::from_value::<LaunchCommand>(command).map(SystemCommand::AtoLaunch)
+        }
+        SystemCapsuleId::AtoIdentity => {
+            serde_json::from_value::<IdentityCommand>(command).map(SystemCommand::AtoIdentity)
+        }
+        SystemCapsuleId::AtoStart => {
+            serde_json::from_value::<AtoStartCommand>(command).map(SystemCommand::AtoStart)
+        }
+        SystemCapsuleId::AtoDock => {
+            serde_json::from_value::<DockCommand>(command).map(SystemCommand::AtoDock)
+        }
+        SystemCapsuleId::AtoOnboarding => {
+            serde_json::from_value::<OnboardingCommand>(command).map(SystemCommand::AtoOnboarding)
         }
     }
 }
@@ -163,4 +179,17 @@ pub fn spawn_drain_loop(cx: &mut App, queue: SystemBridgeQueue, host: AnyWindowH
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn onboarding_slug_maps_to_capsule_id() {
+        assert_eq!(
+            capsule_id_from_slug("ato-onboarding"),
+            Some(SystemCapsuleId::AtoOnboarding)
+        );
+    }
 }
