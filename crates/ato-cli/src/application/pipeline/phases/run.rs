@@ -599,15 +599,25 @@ pub(crate) struct RunPipelineState {
     /// PHASE-TIMING. None until run_build_phase populates it.
     pub(crate) build_decision_kind:
         Option<crate::application::build_materialization::BuildResultKind>,
-    /// PR-3b: shared LaunchGraphBundle for this launch.
+    /// PR-3b boundary plumbing: handle to the
+    /// `ReceiptEmissionContext::graph_id_sink` for this launch. Set by
+    /// the outer wrapper (`cli::commands::run::execute`) before the
+    /// pipeline runs. The Execute phase writes declared/resolved ids
+    /// to the sink immediately after
+    /// `build_prelaunch_receipt_document_with_graph` so the partial
+    /// receipt boundary observes the same ids on the failure path.
+    /// `None` for paths that don't go through the wrapper (legacy tests).
     ///
-    /// Populated by `build_prelaunch_receipt_document_with_graph` at
-    /// receipt-emit time so subsequent steps (session record enrichment,
-    /// readiness update, partial receipt boundary) read declared/resolved
-    /// execution ids from the SAME bundle the receipt was derived from
-    /// instead of re-running the bundle builder and risking drift.
-    pub(crate) launch_graph:
-        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
+    /// Note: PR-3b deliberately does NOT carry the full
+    /// `LaunchGraphBundle` on the pipeline state. The bundle is owned
+    /// by the receipt builder and lives only inside the Execute
+    /// phase's local scope; the sink is the only handle that survives
+    /// the boundary. A future PR that needs the bundle later in the
+    /// pipeline can add the carrier explicitly — but adding the
+    /// field today without a reader would be a dead carrier (per
+    /// PR #180 review feedback).
+    pub(crate) receipt_graph_id_sink:
+        Option<crate::application::receipt_boundary::ReceiptGraphIdSink>,
 }
 
 #[derive(Debug)]
@@ -1937,7 +1947,7 @@ where
         native_nacelle: None,
         build_observation: None,
         build_decision_kind: None,
-        launch_graph: None,
+        receipt_graph_id_sink: None,
     })
 }
 
@@ -2697,12 +2707,8 @@ where
         native_nacelle,
         build_observation,
         build_decision_kind: _,
-        // PR-3b: bundle is owned by `RunPipelineState` until receipt
-        // emission below; we'll replace the carrier when the receipt
-        // builder returns the bundle it derived.
-        launch_graph: _,
+        receipt_graph_id_sink,
     } = state;
-    let mut launch_graph: Option<capsule_core::engine::execution_graph::LaunchGraphBundle> = None;
 
     if decision.plan.is_orchestration_mode() {
         if request.background {
@@ -2843,11 +2849,25 @@ where
             &launch_ctx,
             build_observation.as_ref(),
         )?;
-    // PR-3b: stash the bundle on the local carrier so subsequent steps in
-    // this launch (and downstream consumers reading from
-    // `RunPipelineState`) share the same instance the receipt was
-    // derived from.
-    launch_graph = receipt_output.launch_graph;
+    // PR-3b: publish declared/resolved ids to the boundary's
+    // `ReceiptGraphIdSink` IMMEDIATELY after the bundle is built — so
+    // if the rest of this function (writing the receipt, opening the
+    // workload, waiting for readiness) fails, the partial-receipt
+    // boundary wrapper still picks up the ids the would-be success
+    // receipt would have carried.
+    if let (Some(sink), Some(bundle)) = (
+        receipt_graph_id_sink.as_ref(),
+        receipt_output.launch_graph.as_ref(),
+    ) {
+        sink.set(crate::application::receipt_boundary::GraphIds {
+            declared_execution_id: Some(
+                bundle.derived.execution_ids.declared_execution_id.clone(),
+            ),
+            resolved_execution_id: Some(
+                bundle.derived.execution_ids.resolved_execution_id.clone(),
+            ),
+        });
+    }
     let execution_receipt_document = receipt_output.document;
     let execution_receipt_path =
         crate::application::execution_receipts::write_receipt_document_atomic(
