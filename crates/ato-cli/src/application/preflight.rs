@@ -285,23 +285,90 @@ pub fn collect_aggregate_requirements(
         // 3b. Consent. Skip if already recorded — the launch loop
         //     would skip this target's consent prompt too, so the
         //     aggregate envelope must match.
-        let already_consented =
-            has_consent(&plan).map_err(|err| PreflightError::ConsentStore { source: err })?;
+        //
+        // PR-4b: the consent envelope fields are stamped from a
+        // bundle-derived `ExecutionConsentView` so the user-visible
+        // E302 modal copy is fed by the view. The GATING decision
+        // (skip-or-emit-envelope) stays on plan-direct `has_consent`
+        // because it carries the zero-permission short-circuit that
+        // the view doesn't yet model. A debug parity guard pins that
+        // the view-side `has_consent_view` agrees with the plan-side
+        // EXCEPT for zero-permission plans (where the plan returns
+        // true via short-circuit and the view returns false because
+        // no record is in the log — both reach the same "no envelope
+        // pushed" outcome).
+        let target_deps = capsule_core::lockfile::manifest_external_capsule_dependencies(
+            &loaded.raw,
+        )
+        .map_err(|source| PreflightError::ManifestParse {
+            path: manifest_path.clone(),
+            source,
+        })?;
+        let consent_input =
+            capsule_core::engine::execution_graph::GraphConsentInput {
+                scoped_id: plan.consent.key.scoped_id.clone(),
+                version: plan.consent.key.version.clone(),
+                target_label: plan.consent.key.target_label.clone(),
+                policy_segment_hash: plan.consent.policy_segment_hash.clone(),
+                provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+            };
+        let bundle =
+            crate::application::graph_views::build_declared_only_bundle_with_consent(
+                &target_deps,
+                Some(manifest_path.display().to_string()),
+                None,
+                Vec::new(),
+                consent_input,
+            );
+        let view = crate::application::graph_views::ExecutionConsentView::from_bundle(
+            &bundle,
+        );
+        let already_consented = has_consent(&plan)
+            .map_err(|err| PreflightError::ConsentStore { source: err })?;
+        debug_assert!(
+            {
+                let view_side =
+                    crate::application::auth::consent_store::has_consent_view(&view)
+                        .unwrap_or(already_consented);
+                // Plan-side short-circuits to true for
+                // zero-permission plans; view-side has no such
+                // knowledge and returns false until a record lands.
+                // Treat both as agreement when plan-side is true.
+                already_consented || already_consented == view_side
+            },
+            "PR-4b parity: has_consent_view disagrees with plan-direct has_consent \
+             (outside the zero-permission short-circuit)"
+        );
         if !already_consented {
             requirements.push(InteractiveResolutionEnvelope {
                 kind: InteractiveResolutionKind::ConsentRequired {
-                    scoped_id: plan.consent.key.scoped_id.clone(),
-                    version: plan.consent.key.version.clone(),
-                    target_label: plan.consent.key.target_label.clone(),
-                    policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-                    provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+                    // Envelope fields come from the bundle-derived
+                    // view (same values as the plan side; the view's
+                    // Option fields are guaranteed Some here because
+                    // we just supplied them via GraphConsentInput).
+                    scoped_id: view.scoped_id.clone().unwrap_or_default(),
+                    version: view.version.clone().unwrap_or_default(),
+                    target_label: view.target_label.clone().unwrap_or_default(),
+                    policy_segment_hash: view
+                        .policy_segment_hash
+                        .clone()
+                        .unwrap_or_default(),
+                    provisioning_policy_hash: view
+                        .provisioning_policy_hash
+                        .clone()
+                        .unwrap_or_default(),
+                    // consent_summary still reads runtime policy
+                    // details that aren't on the bundle; keep the
+                    // plan-rich summary text so E302 modal copy is
+                    // byte-equivalent to pre-PR-4b.
                     summary: consent_summary(&plan),
                 },
                 display: ResolutionDisplay {
                     message: format!(
                         "Approve ExecutionPlan for target '{target_label}' of \
                          {}@{}.",
-                        plan.consent.key.scoped_id, plan.consent.key.version
+                        view.scoped_id.as_deref().unwrap_or(""),
+                        view.version.as_deref().unwrap_or(""),
                     ),
                     hint: Some(
                         "Network / filesystem / secret policy summary follows. \

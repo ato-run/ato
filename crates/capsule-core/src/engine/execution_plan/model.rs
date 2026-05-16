@@ -184,6 +184,31 @@ pub struct ConsentKey {
     pub target_label: String,
 }
 
+impl ConsentKey {
+    /// PR-4b: canonical projection of `ExecutionPlan.consent.key`.
+    /// Used by `consent_store` as the keyed primitive for both
+    /// plan-taking and view-taking call sites.
+    pub fn from_execution_plan(plan: &ExecutionPlan) -> Self {
+        Self {
+            scoped_id: plan.consent.key.scoped_id.clone(),
+            version: plan.consent.key.version.clone(),
+            target_label: plan.consent.key.target_label.clone(),
+        }
+    }
+
+    /// PR-4b: project from a bundle-derived consent view. The view
+    /// carries the same 3 ConsentKey facets, so this is a passthrough.
+    pub fn from_derived_consent_view(
+        view: &crate::engine::execution_graph::DerivedConsentView,
+    ) -> Self {
+        Self {
+            scoped_id: view.scoped_id.clone(),
+            version: view.version.clone(),
+            target_label: view.target_label.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reproducibility {
     pub platform: Platform,
