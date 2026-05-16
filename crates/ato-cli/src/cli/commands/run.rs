@@ -105,17 +105,23 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // happy path the inner pipeline already emitted a full v2
     // receipt; the wrapper observes `Ok(_)` and returns it unchanged.
     let ctx = crate::application::receipt_boundary::ReceiptEmissionContext::for_boundary("ato run");
-    crate::application::receipt_boundary::emit_receipt_on_result(ctx, async move {
+    crate::application::receipt_boundary::emit_receipt_on_result(ctx, move |sink| async move {
         if args.watch {
-            execute_watch_mode_with_install(args).await
+            execute_watch_mode_with_install(args, sink).await
         } else {
-            execute_normal_mode(args).await
+            execute_normal_mode(args, sink).await
         }
     })
     .await
 }
 
-async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
+async fn execute_watch_mode_with_install(
+    args: RunArgs,
+    _receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+) -> Result<()> {
+    // Watch mode bails before the receipt emit site (no provider-backed
+    // workspace, no v2 bundle build). The sink stays empty, and the
+    // partial-receipt boundary falls back to ctx-level ids if any.
     let install = run_install_phase(&args).await?;
     report_dependency_projection(&args, &install.dependency_projection)?;
     if matches!(
@@ -695,6 +701,12 @@ struct ConsumerRunPhaseRunner<'a> {
     provider_backed_target: bool,
     should_stop_after_install: bool,
     phase_annotations: std::collections::HashMap<HourglassPhase, PhaseAnnotation>,
+    /// PR-3b boundary plumbing: handle to the `ReceiptEmissionContext`'s
+    /// graph-id sink, owned by the wrapper in `execute()`. The Execute
+    /// phase writes declared/resolved ids here immediately after
+    /// `build_prelaunch_receipt_document_with_graph` so the partial
+    /// receipt boundary observes the same ids on the failure path.
+    receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
 }
 
 impl ConsumerRunPhaseRunner<'_> {
@@ -793,6 +805,13 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Prepare, err);
                 })?;
+                // PR-3b: hand the boundary's graph-id sink to the
+                // pipeline state so the Execute phase can publish ids
+                // immediately after building the LaunchGraphBundle.
+                let state = run_phase::attach_receipt_graph_id_sink(
+                    state,
+                    self.receipt_graph_id_sink.clone(),
+                );
                 self.state = Some(state);
                 self.record_phase_annotation(
                     HourglassPhase::Prepare,
@@ -915,7 +934,16 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 Ok(())
             }
             HourglassPhase::Execute => {
-                let input = self.take_state(HourglassPhase::Execute)?;
+                // PR-3b (PR #180 review fix): defensively re-inject the
+                // boundary sink at Execute entry. Prepare already set
+                // it, but a future Build / Verify / DryRun refactor
+                // that reconstructs `RunPipelineState` would silently
+                // drop the field; using the helper here pins the
+                // wire-up at the consumer site.
+                let input = run_phase::attach_receipt_graph_id_sink(
+                    self.take_state(HourglassPhase::Execute)?,
+                    self.receipt_graph_id_sink.clone(),
+                );
                 let result = run_execute_phase(
                     self.args,
                     self.resolved_target(),
@@ -965,7 +993,10 @@ fn report_dependency_projection(
     Ok(())
 }
 
-async fn execute_normal_mode(args: RunArgs) -> Result<()> {
+async fn execute_normal_mode(
+    args: RunArgs,
+    receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+) -> Result<()> {
     // Register a Ctrl+C handler so in-flight run artifacts are cleaned up on SIGINT.
     let _ = ctrlc::set_handler(|| {
         run_sigint_cleanup();
@@ -985,6 +1016,7 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         provider_backed_target: false,
         should_stop_after_install: false,
         phase_annotations: std::collections::HashMap::new(),
+        receipt_graph_id_sink,
     };
 
     let result = pipeline.run(&mut runner).await;
