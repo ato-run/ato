@@ -11,6 +11,15 @@ pub(crate) enum ProjectCommands {
         #[arg(long)]
         json: bool,
     },
+    #[command(
+        about = "Run static manifest inference against a project root and emit the resulting capsule.toml draft"
+    )]
+    InferManifest {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
