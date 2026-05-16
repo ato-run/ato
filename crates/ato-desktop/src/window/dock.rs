@@ -216,7 +216,7 @@ pub fn save_manifest(cx: &mut App, request_id: String, manifest_toml: String) ->
             "kind": "dock:phase_started",
             "request_id": request_id,
             "phase": "manifest",
-            "message": "Saving manifest draft",
+            "message": "Saving manifest and syncing lockfile…",
         }),
     );
 
@@ -233,7 +233,7 @@ pub fn save_manifest(cx: &mut App, request_id: String, manifest_toml: String) ->
                         "kind": "dock:phase_completed",
                         "request_id": request_id,
                         "phase": "manifest",
-                        "message": "Draft saved",
+                        "message": "Draft saved and lockfile synced",
                         "manifest_path": path.display().to_string(),
                         "manifest_toml": manifest_toml,
                     }),
@@ -769,6 +769,20 @@ fn save_manifest_blocking(
         .with_context(|| format!("Failed to write {}", temp_path.display()))?;
     fs::rename(&temp_path, &manifest_path)
         .with_context(|| format!("Failed to move draft into {}", manifest_path.display()))?;
+
+    // Regenerate lockfile so a subsequent preview does not hit E207.
+    let ato_bin = resolve_ato_binary()?;
+    let lock_output = Command::new(&ato_bin)
+        .arg("lock")
+        .current_dir(&working_directory)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| "Failed to run `ato lock`")?;
+    if !lock_output.status.success() {
+        let stderr = String::from_utf8_lossy(&lock_output.stderr);
+        anyhow::bail!("Lock sync failed after saving manifest: {}", stderr.trim());
+    }
+
     Ok(manifest_path)
 }
 
