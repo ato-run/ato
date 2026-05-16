@@ -27,6 +27,28 @@ pub struct LaunchGraphBundleInput {
     pub materialized: GraphMaterializationSeedInput,
     pub preflight: GraphPreflightInput,
     pub receipt: GraphReceiptSeedInput,
+    /// PR-4b (refs umbrella v0.6.0 graph-first migration): consent
+    /// identity facts the consent layer keys on. Today
+    /// `compile_execution_plan` is the only producer of
+    /// `policy_segment_hash` / `provisioning_policy_hash`, so callers
+    /// in `ato-cli` populate this from their `ExecutionPlan.consent`
+    /// at bundle build time. The bundle projects it onto
+    /// `DerivedConsentView`, where the ato-cli's
+    /// `ExecutionConsentView::from_bundle` reads it.
+    pub consent: Option<GraphConsentInput>,
+}
+
+/// PR-4b: consent identity input. Mirrors the 5 fields the consent
+/// log keys on (3 from `ConsentKey` + 2 policy hashes). Callers feed
+/// this from `ExecutionPlan.consent`; capsule-core stays
+/// compile-plan-agnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphConsentInput {
+    pub scoped_id: String,
+    pub version: String,
+    pub target_label: String,
+    pub policy_segment_hash: String,
+    pub provisioning_policy_hash: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +107,21 @@ pub struct LaunchGraphDerivedViews {
     pub preflight: DerivedPreflightView,
     pub dependency_contracts: DerivedDependencyContracts,
     pub receipt_seed: DerivedReceiptSeed,
+    /// PR-4b: consent identity view. `None` when the call site did
+    /// not supply `LaunchGraphBundleInput.consent` (back-compat for
+    /// callers that haven't migrated yet — e.g. legacy unit tests).
+    pub consent: Option<DerivedConsentView>,
+}
+
+/// PR-4b: bundle-projected consent identity. The 5 fields the
+/// consent log keys on; passthrough from `GraphConsentInput`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedConsentView {
+    pub scoped_id: String,
+    pub version: String,
+    pub target_label: String,
+    pub policy_segment_hash: String,
+    pub provisioning_policy_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +231,14 @@ impl ExecutionGraphBuilder {
                 &dependency_inputs,
                 &resolved_graph,
             ),
+            // PR-4b: project consent identity from input. Passthrough.
+            consent: input.consent.map(|input| DerivedConsentView {
+                scoped_id: input.scoped_id,
+                version: input.version,
+                target_label: input.target_label,
+                policy_segment_hash: input.policy_segment_hash,
+                provisioning_policy_hash: input.provisioning_policy_hash,
+            }),
             receipt_seed: DerivedReceiptSeed {
                 runner: input.receipt.runner,
                 host_fingerprint: input.receipt.host_fingerprint,
@@ -446,6 +491,7 @@ mod tests {
                 host_fingerprint: Some("darwin:arm64".to_string()),
                 redaction_policy_version: Some("v1".to_string()),
             },
+            consent: None,
         }
     }
 
@@ -496,6 +542,58 @@ mod tests {
             .map(|provider| provider.alias.as_str())
             .collect::<Vec<_>>();
         assert_eq!(aliases, vec!["cache", "db"]);
+    }
+
+    /// PR-4b round-trip: `GraphConsentInput` flows through the
+    /// bundle build onto `DerivedConsentView` with the same field
+    /// values. No normalization on the projection layer.
+    #[test]
+    fn graph_consent_input_round_trips_to_derived_consent_view() {
+        let mut input = sample_input();
+        input.consent = Some(GraphConsentInput {
+            scoped_id: "publisher/slug".to_string(),
+            version: "1.2.3".to_string(),
+            target_label: "web".to_string(),
+            policy_segment_hash: "blake3:cap".to_string(),
+            provisioning_policy_hash: "blake3:prov".to_string(),
+        });
+        let bundle = ExecutionGraphBuilder::build_launch_bundle(input);
+        let consent = bundle.derived.consent.expect("derived consent view");
+        assert_eq!(consent.scoped_id, "publisher/slug");
+        assert_eq!(consent.version, "1.2.3");
+        assert_eq!(consent.target_label, "web");
+        assert_eq!(consent.policy_segment_hash, "blake3:cap");
+        assert_eq!(consent.provisioning_policy_hash, "blake3:prov");
+    }
+
+    /// PR-4b: when no consent input is provided, the derived view is
+    /// `None`. Back-compat for legacy bundles built without consent
+    /// (e.g. the receipt builder's internal bundle).
+    #[test]
+    fn missing_consent_input_yields_none_derived_view() {
+        let bundle = ExecutionGraphBuilder::build_launch_bundle(sample_input());
+        assert!(bundle.derived.consent.is_none());
+    }
+
+    /// PR-4b: `ConsentKey::from_execution_plan` and
+    /// `ConsentKey::from_derived_consent_view` must produce the same
+    /// key when fed equivalent inputs. This is the load-bearing
+    /// contract for the consent store's two surfaces.
+    #[test]
+    fn consent_key_constructors_agree_on_equivalent_inputs() {
+        use crate::execution_plan::model::ConsentKey;
+
+        let view = DerivedConsentView {
+            scoped_id: "publisher/slug".to_string(),
+            version: "1.2.3".to_string(),
+            target_label: "web".to_string(),
+            policy_segment_hash: "blake3:cap".to_string(),
+            provisioning_policy_hash: "blake3:prov".to_string(),
+        };
+        let key = ConsentKey::from_derived_consent_view(&view);
+        assert_eq!(key.scoped_id, view.scoped_id);
+        assert_eq!(key.version, view.version);
+        assert_eq!(key.target_label, view.target_label);
     }
 
     #[test]
