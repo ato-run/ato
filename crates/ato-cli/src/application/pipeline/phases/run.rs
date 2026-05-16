@@ -599,6 +599,46 @@ pub(crate) struct RunPipelineState {
     /// PHASE-TIMING. None until run_build_phase populates it.
     pub(crate) build_decision_kind:
         Option<crate::application::build_materialization::BuildResultKind>,
+    /// PR-3b boundary plumbing: handle to the
+    /// `ReceiptEmissionContext::graph_id_sink` for this launch. Set by
+    /// the outer wrapper (`cli::commands::run::execute`) before the
+    /// pipeline runs — both Prepare (when the state is first built)
+    /// and Execute (defensive re-injection) call
+    /// [`attach_receipt_graph_id_sink`]. The Execute phase writes
+    /// declared/resolved ids to the sink immediately after
+    /// `build_prelaunch_receipt_document_with_graph` so the partial
+    /// receipt boundary observes the same ids on the failure path.
+    /// `None` for paths that don't go through the wrapper (legacy tests).
+    ///
+    /// Note: PR-3b deliberately does NOT carry the full
+    /// `LaunchGraphBundle` on the pipeline state. The bundle is owned
+    /// by the receipt builder and lives only inside the Execute
+    /// phase's local scope; the sink is the only handle that survives
+    /// the boundary. A future PR that needs the bundle later in the
+    /// pipeline can add the carrier explicitly — but adding the
+    /// field today without a reader would be a dead carrier (per
+    /// PR #180 review feedback).
+    pub(crate) receipt_graph_id_sink:
+        Option<crate::application::receipt_boundary::ReceiptGraphIdSink>,
+}
+
+/// PR-3b plumbing helper (PR #180 review fix): install the given
+/// boundary sink onto a [`RunPipelineState`].
+///
+/// Production paths set the sink at Prepare-phase exit AND re-inject
+/// it at Execute-phase entry. The re-injection at Execute is
+/// defensive — Build / Verify / DryRun mutate the state in place
+/// today and the sink survives, but a future refactor that
+/// reconstructs the state would silently drop the field. Calling
+/// this helper at both ends pins the contract: when the Execute
+/// phase reaches the receipt-emit site, `state.receipt_graph_id_sink`
+/// is `Some(...)` if the wrapper provided one.
+pub(crate) fn attach_receipt_graph_id_sink(
+    mut state: RunPipelineState,
+    sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+) -> RunPipelineState {
+    state.receipt_graph_id_sink = Some(sink);
+    state
 }
 
 #[derive(Debug)]
@@ -1928,6 +1968,7 @@ where
         native_nacelle: None,
         build_observation: None,
         build_decision_kind: None,
+        receipt_graph_id_sink: None,
     })
 }
 
@@ -2687,6 +2728,7 @@ where
         native_nacelle,
         build_observation,
         build_decision_kind: _,
+        receipt_graph_id_sink,
     } = state;
 
     if decision.plan.is_orchestration_mode() {
@@ -2821,13 +2863,33 @@ where
             .await?;
     }
 
-    let execution_receipt_document =
-        crate::application::execution_receipt_builder::build_prelaunch_receipt_document(
+    let receipt_output =
+        crate::application::execution_receipt_builder::build_prelaunch_receipt_document_with_graph(
             &decision.plan,
             &execution_plan,
             &launch_ctx,
             build_observation.as_ref(),
         )?;
+    // PR-3b: publish declared/resolved ids to the boundary's
+    // `ReceiptGraphIdSink` IMMEDIATELY after the bundle is built — so
+    // if the rest of this function (writing the receipt, opening the
+    // workload, waiting for readiness) fails, the partial-receipt
+    // boundary wrapper still picks up the ids the would-be success
+    // receipt would have carried.
+    if let (Some(sink), Some(bundle)) = (
+        receipt_graph_id_sink.as_ref(),
+        receipt_output.launch_graph.as_ref(),
+    ) {
+        sink.set(crate::application::receipt_boundary::GraphIds {
+            declared_execution_id: Some(
+                bundle.derived.execution_ids.declared_execution_id.clone(),
+            ),
+            resolved_execution_id: Some(
+                bundle.derived.execution_ids.resolved_execution_id.clone(),
+            ),
+        });
+    }
+    let execution_receipt_document = receipt_output.document;
     let execution_receipt_path =
         crate::application::execution_receipts::write_receipt_document_atomic(
             &execution_receipt_document,
@@ -3757,7 +3819,7 @@ mod tests {
         resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
         ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
         ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
-        PreparedRunContext, ServiceRequiredAsset,
+        PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -3782,6 +3844,129 @@ mod tests {
             .prefix(name)
             .tempdir_in(root)
             .expect("workspace tempdir")
+    }
+
+    /// PR-3b (PR #180 review fix): contract for the boundary plumbing
+    /// helper. The helper sets `receipt_graph_id_sink: Some(...)` AND
+    /// the resulting state shares the same `Arc`-backed cell as the
+    /// sink passed in — so a `sink.set(...)` call from the outer
+    /// wrapper is observable through the state-side handle the
+    /// Execute phase reads.
+    #[test]
+    fn attach_receipt_graph_id_sink_populates_pipeline_state() {
+        use crate::application::receipt_boundary::{GraphIds, ReceiptGraphIdSink};
+
+        let workspace = workspace_tempdir("attach-sink-fixture");
+        let manifest_dir = workspace.path().to_path_buf();
+        // Minimal manifest with a default target so
+        // `execution_descriptor_from_manifest_parts` succeeds.
+        let mut manifest = toml::map::Map::new();
+        manifest.insert(
+            "schema_version".to_string(),
+            toml::Value::String("0.3".to_string()),
+        );
+        manifest.insert(
+            "name".to_string(),
+            toml::Value::String("attach-sink-demo".to_string()),
+        );
+        manifest.insert(
+            "version".to_string(),
+            toml::Value::String("0.1.0".to_string()),
+        );
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
+        manifest.insert(
+            "default_target".to_string(),
+            toml::Value::String("default".to_string()),
+        );
+        let mut target = toml::map::Map::new();
+        target.insert(
+            "runtime".to_string(),
+            toml::Value::String("source".to_string()),
+        );
+        target.insert(
+            "driver".to_string(),
+            toml::Value::String("native".to_string()),
+        );
+        target.insert(
+            "run".to_string(),
+            toml::Value::String("/usr/bin/true".to_string()),
+        );
+        let mut targets = toml::map::Map::new();
+        targets.insert("default".to_string(), toml::Value::Table(target));
+        manifest.insert("targets".to_string(), toml::Value::Table(targets));
+
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::Value::Table(manifest),
+            manifest_dir.join("capsule.toml"),
+            manifest_dir.clone(),
+            capsule_core::router::ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
+
+        let decision = capsule_core::router::RuntimeDecision {
+            kind: capsule_core::router::RuntimeKind::Source,
+            reason: "test fixture".to_string(),
+            plan,
+        };
+        let prepared = PreparedRunContext::from_authoritative_input(
+            None,
+            &manifest_dir,
+            capsule_core::types::ValidationMode::Strict,
+            Some("default"),
+        )
+        .expect("prepared run context");
+
+        let state = RunPipelineState {
+            preview_session: None,
+            preview_mode: false,
+            use_progressive_ui: false,
+            prepared,
+            decision,
+            launch_ctx: crate::executors::launch_context::RuntimeLaunchContext::empty(),
+            external_capsules: None,
+            dep_contracts: None,
+            agent_attempted: false,
+            derived_execution: None,
+            compatibility_host_mode: None,
+            native_nacelle: None,
+            build_observation: None,
+            build_decision_kind: None,
+            receipt_graph_id_sink: None,
+        };
+
+        assert!(
+            state.receipt_graph_id_sink.is_none(),
+            "fixture sanity: freshly built state has no sink"
+        );
+
+        let sink = ReceiptGraphIdSink::new();
+        let state = super::attach_receipt_graph_id_sink(state, sink.clone());
+
+        assert!(
+            state.receipt_graph_id_sink.is_some(),
+            "PR-3b: attach_receipt_graph_id_sink must populate the field"
+        );
+
+        // Cross-Arc contract: a publish to the original `sink` must
+        // be visible to the state-side handle. This is what makes the
+        // helper meaningful — both sides observe the same cell.
+        sink.set(GraphIds {
+            declared_execution_id: Some("blake3:test-declared".to_string()),
+            resolved_execution_id: Some("blake3:test-resolved".to_string()),
+        });
+        let state_sink = state.receipt_graph_id_sink.as_ref().unwrap();
+        let snapshot = state_sink.snapshot();
+        assert_eq!(
+            snapshot.declared_execution_id.as_deref(),
+            Some("blake3:test-declared"),
+            "PR-3b: state-side sink must share the Arc with the input sink"
+        );
+        assert_eq!(
+            snapshot.resolved_execution_id.as_deref(),
+            Some("blake3:test-resolved")
+        );
     }
 
     #[test]

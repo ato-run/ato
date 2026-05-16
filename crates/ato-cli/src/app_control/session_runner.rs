@@ -117,6 +117,25 @@ pub(super) struct SessionStartPhaseRunner<'a> {
 
     // Set by Execute phase. Read by `start_session` after `pipeline.run`.
     pub(super) session_info: Option<SessionInfo>,
+
+    /// PR-3b boundary plumbing: handle to the
+    /// `ReceiptEmissionContext::graph_id_sink` for this launch. Set
+    /// by the outer wrapper in
+    /// `app_control::session::start_session_for_capsule` before
+    /// `pipeline.run` so `emit_execution_receipt` can publish
+    /// declared/resolved ids to the boundary the moment the
+    /// LaunchGraphBundle is built.
+    ///
+    /// Note: PR-3b deliberately does NOT carry the full
+    /// `LaunchGraphBundle` on the runner. The bundle is owned by
+    /// `emit_execution_receipt` and lives only in that method's
+    /// local scope; the sink is the only handle that survives the
+    /// boundary. Session-record enrichment reads declared/resolved
+    /// ids from `ExecutionReceiptSessionMetadata` (built from the
+    /// receipt document), which is the same id space the bundle
+    /// stamped on the document — so no separate carrier is needed.
+    pub(super) receipt_graph_id_sink:
+        Option<crate::application::receipt_boundary::ReceiptGraphIdSink>,
 }
 
 impl<'a> SessionStartPhaseRunner<'a> {
@@ -141,6 +160,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             execute_reused: false,
             execute_prior_kind: None,
             session_info: None,
+            receipt_graph_id_sink: None,
         }
     }
 
@@ -513,7 +533,27 @@ impl<'a> SessionStartPhaseRunner<'a> {
         // re-emits here so its computed_at refreshes against the same clean
         // workspace state.
         let prelaunch_receipt = match self.emit_execution_receipt() {
-            Ok(pair) => Some(pair),
+            Ok((metadata, bundle)) => {
+                // PR-3b: publish declared/resolved ids to the boundary
+                // sink IMMEDIATELY after the bundle is built — so if
+                // the rest of run_execute (spawn, healthcheck,
+                // session-record write) fails, the partial-receipt
+                // boundary wrapper picks up the ids the would-be
+                // success receipt would have carried.
+                if let (Some(sink), Some(bundle_ref)) =
+                    (self.receipt_graph_id_sink.as_ref(), bundle.as_ref())
+                {
+                    sink.set(crate::application::receipt_boundary::GraphIds {
+                        declared_execution_id: Some(
+                            bundle_ref.derived.execution_ids.declared_execution_id.clone(),
+                        ),
+                        resolved_execution_id: Some(
+                            bundle_ref.derived.execution_ids.resolved_execution_id.clone(),
+                        ),
+                    });
+                }
+                Some(metadata)
+            }
             Err(err) => {
                 eprintln!(
                     "ATO-WARN session start failed to emit execution receipt: {}",
@@ -610,7 +650,16 @@ impl<'a> SessionStartPhaseRunner<'a> {
         Ok(())
     }
 
-    fn emit_execution_receipt(&self) -> Result<super::session::ExecutionReceiptSessionMetadata> {
+    /// Returns the receipt metadata and (for V2 schema launches) the
+    /// `LaunchGraphBundle` that produced the receipt's
+    /// declared/resolved execution ids. PR-3b: callers stash the bundle
+    /// onto the runner so downstream steps share the same instance.
+    fn emit_execution_receipt(
+        &self,
+    ) -> Result<(
+        super::session::ExecutionReceiptSessionMetadata,
+        Option<capsule_core::engine::execution_graph::LaunchGraphBundle>,
+    )> {
         use capsule_core::engine::execution_plan::derive::compile_execution_plan;
         use capsule_core::execution_identity::ExecutionReceiptDocument;
         use capsule_core::router::ExecutionProfile;
@@ -628,12 +677,19 @@ impl<'a> SessionStartPhaseRunner<'a> {
             compile_execution_plan(manifest_path, ExecutionProfile::Dev, self.target_label)
                 .map_err(|err| anyhow::anyhow!("failed to compile execution plan: {err}"))?;
 
-        let document = execution_receipt_builder::build_prelaunch_receipt_document(
-            plan,
-            &compiled.execution_plan,
-            &self.launch_ctx,
-            self.build_observation.as_ref(),
-        )?;
+        let receipt_output =
+            execution_receipt_builder::build_prelaunch_receipt_document_with_graph(
+                plan,
+                &compiled.execution_plan,
+                &self.launch_ctx,
+                self.build_observation.as_ref(),
+            )?;
+        // PR-3b: emit_execution_receipt returns the bundle alongside
+        // the metadata so the caller can stash it onto self without
+        // requiring a `&mut self` borrow here (which would conflict
+        // with the immutable borrows of `self.{resolution, plan, ...}`
+        // held by run_execute across the call site).
+        let document = receipt_output.document;
         let _path = execution_receipts::write_receipt_document_atomic(&document)?;
         let metadata = match document {
             ExecutionReceiptDocument::V1(receipt) => {
@@ -662,7 +718,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 }
             }
         };
-        Ok(metadata)
+        Ok((metadata, receipt_output.launch_graph))
     }
 
     // Note: `maybe_project_to_session` is a free function below the impl
@@ -874,5 +930,50 @@ impl HourglassPhaseRunner for SessionStartPhaseRunner<'_> {
             }
             _ => Some(PhaseAnnotation::with_result_kind("executed")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::receipt_boundary::{GraphIds, ReceiptGraphIdSink};
+
+    /// PR-3b (PR #180 review fix): the wrapper in
+    /// `app_control::session::start_session_for_capsule` writes its
+    /// boundary sink onto the runner before the pipeline runs, so
+    /// `emit_execution_receipt` can publish declared/resolved ids
+    /// the moment the LaunchGraphBundle is built. The smoke test
+    /// here pins the wire-up: after assignment, the runner's
+    /// `receipt_graph_id_sink` shares the same Arc cell as the
+    /// input sink — so a publish on the input side is observable
+    /// from the runner side.
+    #[test]
+    fn assigning_receipt_graph_id_sink_shares_arc_with_input_sink() {
+        let mut runner = SessionStartPhaseRunner::new("publisher/slug", None, false);
+        assert!(
+            runner.receipt_graph_id_sink.is_none(),
+            "fixture sanity: a freshly built runner has no sink"
+        );
+
+        let sink = ReceiptGraphIdSink::new();
+        runner.receipt_graph_id_sink = Some(sink.clone());
+
+        // Publish from the boundary side; the runner side must observe
+        // the same ids because both handles are Arc-clones of one cell.
+        sink.set(GraphIds {
+            declared_execution_id: Some("blake3:session-declared".to_string()),
+            resolved_execution_id: Some("blake3:session-resolved".to_string()),
+        });
+
+        let snapshot = runner.receipt_graph_id_sink.as_ref().unwrap().snapshot();
+        assert_eq!(
+            snapshot.declared_execution_id.as_deref(),
+            Some("blake3:session-declared"),
+            "PR-3b: runner-side sink must share the Arc with the boundary's input sink"
+        );
+        assert_eq!(
+            snapshot.resolved_execution_id.as_deref(),
+            Some("blake3:session-resolved")
+        );
     }
 }

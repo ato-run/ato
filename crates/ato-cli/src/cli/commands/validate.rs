@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::application::execution_graph_adapter::build_input_from_external_dependencies;
+use crate::application::graph_views::{build_declared_only_bundle, DependencyContracts};
 use crate::application::source_inference::{
     materialize_run_from_compatibility, materialize_run_from_source_only,
 };
@@ -102,13 +103,27 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                         }
                     })?;
 
-                // Wave 2 / PR-4b: emit the unified execution graph alongside
-                // the legacy lock-vs-manifest verification. The graph is *not*
-                // load-bearing — `verify_lockfile_external_dependencies`
-                // remains the source of truth for the consistency check; the
-                // graph build is purely a parity observation.
+                // PR-3c: bundle-derived `DependencyContracts` is the
+                // source-of-truth surface for "which providers does this
+                // manifest declare". The legacy
+                // `manifest_external_capsule_dependencies` derivation is
+                // kept for the lockfile-side gating
+                // (`verify_lockfile_external_dependencies`, which still
+                // takes the manifest + lock directly), but the parity
+                // guard below pins that the legacy alias set matches the
+                // bundle's. If this debug_assert fires in a real run,
+                // the receipt path and the validate path are reading
+                // different worlds.
                 let external_dependencies =
                     manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+                let bundle = build_declared_only_bundle(
+                    &external_dependencies,
+                    Some(manifest_path.display().to_string()),
+                    None,
+                    Vec::new(),
+                );
+                let contracts = DependencyContracts::from_bundle(&bundle);
+                debug_assert_bundle_contracts_match_legacy(&contracts, &external_dependencies);
                 debug_assert_provider_aliases_match_lock(&external_dependencies, &legacy_lock.lock);
 
                 verify_lockfile_external_dependencies(&decision.plan.manifest, &legacy_lock.lock)?;
@@ -117,14 +132,24 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 let external_dependencies =
                     manifest_external_capsule_dependencies(&decision.plan.manifest)?;
 
-                // Wave 2 / PR-4a: emit the unified execution graph alongside
-                // the legacy derivation. The graph is *not* load-bearing —
-                // the legacy `external_dependencies` vector below remains the
-                // source of truth for the gating decision. We only debug-assert
-                // shape parity (provider count) to surface drift early.
+                // PR-3c: bundle-derived `DependencyContracts` is the
+                // source-of-truth gating input for the "any external
+                // capsule deps?" check. The legacy
+                // `external_dependencies` vector stays alive as a
+                // debug-mode parity guard so a drift between the
+                // manifest-direct view and the graph projection
+                // surfaces immediately.
+                let bundle = build_declared_only_bundle(
+                    &external_dependencies,
+                    Some(manifest_path.display().to_string()),
+                    None,
+                    Vec::new(),
+                );
+                let contracts = DependencyContracts::from_bundle(&bundle);
+                debug_assert_bundle_contracts_match_legacy(&contracts, &external_dependencies);
                 debug_assert_provider_node_parity(&external_dependencies);
 
-                if !external_dependencies.is_empty() {
+                if !contracts.is_empty() {
                     return Err(AtoExecutionError::lock_incomplete(
                         "external capsule dependencies require capsule.lock.json",
                         Some(CAPSULE_LOCK_FILE_NAME),
@@ -231,6 +256,33 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
     }
 
     Ok(result)
+}
+
+/// PR-3c parity guard: the bundle-derived [`DependencyContracts`] view
+/// must list the same provider aliases (as a set) as the legacy
+/// manifest-direct derivation. Fires only in debug builds so release
+/// validate is a single pass over the graph projection; the same
+/// projection is still computed in release builds for evidence (and so
+/// the producer surface is exercised on every run).
+fn debug_assert_bundle_contracts_match_legacy(
+    contracts: &crate::application::graph_views::DependencyContracts,
+    legacy: &[capsule_core::types::ExternalCapsuleDependency],
+) {
+    debug_assert_eq!(
+        contracts.len(),
+        legacy.len(),
+        "PR-3c: bundle-derived DependencyContracts provider count drifted from legacy \
+         manifest_external_capsule_dependencies"
+    );
+    let mut bundle_aliases: Vec<&str> =
+        contracts.providers.iter().map(|p| p.alias.as_str()).collect();
+    bundle_aliases.sort_unstable();
+    let mut legacy_aliases: Vec<&str> = legacy.iter().map(|d| d.alias.as_str()).collect();
+    legacy_aliases.sort_unstable();
+    debug_assert_eq!(
+        bundle_aliases, legacy_aliases,
+        "PR-3c: bundle-derived DependencyContracts alias set drifted from legacy"
+    );
 }
 
 /// PR-4a / PR-4b equivalence guard: build the unified execution graph from
