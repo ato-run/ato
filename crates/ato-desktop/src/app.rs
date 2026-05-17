@@ -331,6 +331,7 @@ pub fn run() {
         // of hardcoded placeholders.
         cx.set_global(crate::state::AppWindowRegistry::default());
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
+        cx.set_global(crate::state::session::SessionRegistry::default());
         crate::window::install_control_bar_controller(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
