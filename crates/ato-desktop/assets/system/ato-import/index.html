@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Import from GitHub</title>
+<style>
+  :root {
+    --bg-base:   #f7f4ff;
+    --card:      #ffffff;
+    --border:    #e5e5ee;
+    --text:      #1a1a1f;
+    --muted:     #6b6b78;
+    --soft:      #a3a3b0;
+    --accent:    #6366f1;
+    --accent-hover: #4f46e5;
+    --emerald:   #10b981;
+    --rose:      #e11d48;
+    --rose-bg:   #fef2f2;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: var(--card);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .root {
+    width: 100%; height: 100%;
+    padding: 20px 24px 16px;
+    display: flex; flex-direction: column; gap: 14px;
+    overflow: hidden;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 700; }
+  header .repo { font-size: 12.5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .card h2 { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .row { display: flex; gap: 12px; font-size: 12.5px; }
+  .row .label { color: var(--muted); min-width: 110px; }
+  .row .value { font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace; color: var(--text); word-break: break-all; }
+
+  .toml-editor {
+    flex: 1; min-height: 180px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
+    font-size: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: #fafafd;
+    color: var(--text);
+    resize: none;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .toml-editor:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .toml-editor[disabled] { background: #f5f5f8; color: var(--muted); cursor: not-allowed; }
+
+  .status { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  .status.ok .dot { background: var(--emerald); animation: none; }
+  .status.err .dot { background: var(--rose); animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+  .failure {
+    background: var(--rose-bg);
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .failure h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--rose); }
+  .failure .excerpt {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
+    font-size: 11.5px;
+    background: #fff;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    padding: 8px 10px;
+    max-height: 140px;
+    overflow: auto;
+    white-space: pre-wrap;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  .controls { display: flex; gap: 8px; justify-content: flex-end; padding-top: 4px; border-top: 1px solid var(--border); }
+  button {
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    font-size: 12.5px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { background: #f5f5f8; }
+  button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  button[disabled] { opacity: 0.45; cursor: not-allowed; }
+  button[disabled]:hover { background: var(--card); }
+  button.primary[disabled]:hover { background: var(--accent); }
+
+  .empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    flex: 1; gap: 8px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .url-input {
+    width: 100%; max-width: 420px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: var(--card);
+    border-radius: 12px;
+    padding: 20px 24px;
+    width: 400px;
+    max-width: calc(100vw - 32px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .modal h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .modal p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .modal .controls { padding: 0; border: 0; }
+</style>
+</head>
+<body>
+<div class="root" id="root"></div>
+
+<script>
+  // ─── IPC bridge ────────────────────────────────────────────────────────────
+  const POST = (window.ipc && window.ipc.postMessage)
+    ? (m) => window.ipc.postMessage(JSON.stringify(m))
+    : (m) => console.log('[no bridge]', m);
+  const SEND = (command) => POST({ capsule: 'ato-import', command });
+
+  // ─── Snapshot ──────────────────────────────────────────────────────────────
+  let snapshot = window.__ATO_IMPORT_SNAPSHOT || {
+    state: 'idle',
+    repo: null,
+    source: null,
+    recipe: null,
+    editable_recipe_toml: null,
+    last_run: null,
+    submit_enabled: false,
+  };
+  let submitModalOpen = false;
+
+  // Host pushes new snapshots via this function.
+  window.__atoImportSnapshot = function (next) {
+    if (next && typeof next === 'object') {
+      snapshot = next;
+      render();
+    }
+  };
+
+  // ─── Render helpers ────────────────────────────────────────────────────────
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const k in attrs) {
+        if (k === 'className') node.className = attrs[k];
+        else if (k === 'onClick') node.addEventListener('click', attrs[k]);
+        else if (k === 'onInput') node.addEventListener('input', attrs[k]);
+        else if (k === 'onKeyDown') node.addEventListener('keydown', attrs[k]);
+        else if (k === 'disabled') { if (attrs[k]) node.setAttribute('disabled', ''); }
+        else node.setAttribute(k, attrs[k]);
+      }
+    }
+    if (children != null) {
+      const arr = Array.isArray(children) ? children : [children];
+      for (const c of arr) {
+        if (c == null || c === false) continue;
+        if (typeof c === 'string' || typeof c === 'number') {
+          node.appendChild(document.createTextNode(String(c)));
+        } else {
+          node.appendChild(c);
+        }
+      }
+    }
+    return node;
+  }
+
+  function statusLine() {
+    const s = snapshot.state;
+    if (s === 'resolving-source') return statusEl('Resolving repository…', '');
+    if (s === 'inferring-recipe') return statusEl('Inferring launch recipe…', '');
+    if (s === 'running') return statusEl('Running with this recipe…', '');
+    if (s === 'verified') return statusEl('This recipe worked.', 'ok');
+    if (s === 'failed-awaiting-recipe-edit') return statusEl('Run failed. Edit the recipe and retry.', 'err');
+    if (s === 'awaiting-toml-confirmation') return statusEl('Review the launch recipe, then run.', '');
+    return null;
+  }
+
+  function statusEl(text, cls) {
+    return el('div', { className: 'status ' + (cls || '') }, [
+      el('span', { className: 'dot' }),
+      el('span', null, text),
+    ]);
+  }
+
+  function sourceCard() {
+    if (!snapshot.source) return null;
+    const s = snapshot.source;
+    return el('div', { className: 'card' }, [
+      el('h2', null, 'Resolved source'),
+      row('Commit', s.revision_id),
+      row('Tree hash', s.source_tree_hash),
+      row('Subdir', s.subdir),
+    ]);
+  }
+
+  function recipeCard() {
+    if (!snapshot.recipe) return null;
+    const r = snapshot.recipe;
+    return el('div', { className: 'card' }, [
+      el('h2', null, 'Launch recipe'),
+      row('Origin', r.origin),
+      row('Target', r.target_label || '—'),
+      row('Platform', r.platform_os + ' · ' + r.platform_arch),
+      row('Recipe hash', r.recipe_hash),
+    ]);
+  }
+
+  function row(label, value) {
+    return el('div', { className: 'row' }, [
+      el('span', { className: 'label' }, label),
+      el('span', { className: 'value' }, value || ''),
+    ]);
+  }
+
+  function failureCard() {
+    const r = snapshot.last_run;
+    if (!r || r.status !== 'failed') return null;
+    return el('div', { className: 'failure' }, [
+      el('h2', null, 'Run failed'),
+      row('Phase', r.phase || '—'),
+      row('Error', r.error_class || '—'),
+      r.error_excerpt ? el('pre', { className: 'excerpt' }, r.error_excerpt) : null,
+    ]);
+  }
+
+  function tomlEditor() {
+    const editable = snapshot.state === 'awaiting-toml-confirmation'
+                   || snapshot.state === 'failed-awaiting-recipe-edit'
+                   || snapshot.state === 'verified';
+    const value = snapshot.editable_recipe_toml || '';
+    const ta = el('textarea', {
+      className: 'toml-editor',
+      spellcheck: 'false',
+      disabled: !editable,
+      onInput: (e) => {
+        SEND({ kind: 'edit_recipe', toml: e.target.value });
+      },
+    });
+    ta.value = value;
+    return ta;
+  }
+
+  function controls() {
+    const s = snapshot.state;
+    const canRun = (s === 'awaiting-toml-confirmation' || s === 'failed-awaiting-recipe-edit');
+    const isRunning = s === 'running';
+    const canSubmit = !!snapshot.submit_enabled;
+    return el('div', { className: 'controls' }, [
+      el('button', {
+        disabled: !canRun,
+        onClick: () => SEND({ kind: 'run' }),
+      }, s === 'failed-awaiting-recipe-edit' ? 'Edit and retry' : (isRunning ? 'Running…' : 'Run with this recipe')),
+      el('button', {
+        className: 'primary',
+        disabled: !canSubmit,
+        onClick: () => { submitModalOpen = true; render(); },
+      }, 'Submit this working recipe'),
+    ]);
+  }
+
+  function emptyState() {
+    let inputValue = '';
+    const input = el('input', {
+      className: 'url-input',
+      placeholder: 'github.com/owner/repo',
+      type: 'text',
+      onInput: (e) => { inputValue = e.target.value; },
+      onKeyDown: (e) => {
+        if (e.key === 'Enter' && inputValue.trim().length > 0) {
+          SEND({ kind: 'open', url: inputValue.trim() });
+        }
+      },
+    });
+    return el('div', { className: 'empty' }, [
+      el('p', null, 'Import from GitHub'),
+      input,
+      el('p', null, 'Paste a github.com URL or owner/repo and press Enter.'),
+    ]);
+  }
+
+  function submitModal() {
+    if (!submitModalOpen) return null;
+    return el('div', { className: 'modal-overlay' }, [
+      el('div', { className: 'modal' }, [
+        el('h2', null, 'Submit this working recipe'),
+        el('p', null, 'This will share the verified launch recipe so others can run this repository. Sharing to the recipe registry will be enabled in a later release. For now, your verification stays local.'),
+        el('div', { className: 'controls' }, [
+          el('button', { onClick: () => { submitModalOpen = false; render(); } }, 'Cancel'),
+          el('button', { className: 'primary', onClick: () => {
+            SEND({ kind: 'submit_intent' });
+            submitModalOpen = false;
+            render();
+          } }, 'OK'),
+        ]),
+      ]),
+    ]);
+  }
+
+  // ─── Render ────────────────────────────────────────────────────────────────
+  function render() {
+    const root = document.getElementById('root');
+    if (!root) return;
+    root.innerHTML = '';
+
+    // Header
+    const repoLabel = snapshot.repo ? snapshot.repo.source_url_normalized : '';
+    root.appendChild(el('header', null, [
+      el('h1', null, 'Import from GitHub'),
+      el('span', { className: 'repo' }, repoLabel),
+    ]));
+
+    // No repo yet — show input prompt.
+    if (snapshot.state === 'idle' && !snapshot.repo) {
+      root.appendChild(emptyState());
+      return;
+    }
+
+    // Status line
+    const s = statusLine();
+    if (s) root.appendChild(s);
+
+    // Source / recipe info cards
+    const src = sourceCard();
+    if (src) root.appendChild(src);
+    const rec = recipeCard();
+    if (rec) root.appendChild(rec);
+
+    // Failure card (only when last run failed)
+    const fail = failureCard();
+    if (fail) root.appendChild(fail);
+
+    // TOML editor (only after inference)
+    if (snapshot.editable_recipe_toml != null) {
+      root.appendChild(tomlEditor());
+    }
+
+    // Controls
+    if (snapshot.recipe) {
+      root.appendChild(controls());
+    }
+
+    // Submit confirmation modal
+    const m = submitModal();
+    if (m) root.appendChild(m);
+  }
+
+  render();
+</script>
+</body>
+</html>

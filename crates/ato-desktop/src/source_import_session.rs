@@ -1,7 +1,56 @@
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// ---------------------------------------------------------------------------
+// CLI JSON mirror types
+//
+// These mirror the structs in crates/ato-cli/src/cli/dispatch/import_cmd.rs.
+// We do not depend on the ato-cli crate directly because Desktop spawns the
+// CLI as a subprocess. Keep these in sync with the CLI output shape.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ImportSource {
+    pub(crate) source_url_normalized: String,
+    pub(crate) source_host: String,
+    pub(crate) repo_namespace: String,
+    pub(crate) repo_name: String,
+    pub(crate) revision_id: String,
+    pub(crate) source_tree_hash: String,
+    pub(crate) subdir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ImportRecipe {
+    pub(crate) origin: String,
+    pub(crate) target_label: Option<String>,
+    pub(crate) platform_os: String,
+    pub(crate) platform_arch: String,
+    pub(crate) recipe_toml: String,
+    pub(crate) recipe_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ImportRun {
+    pub(crate) status: String,
+    pub(crate) phase: Option<String>,
+    pub(crate) error_class: Option<String>,
+    pub(crate) error_excerpt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ImportOutput {
+    pub(crate) source: ImportSource,
+    pub(crate) recipe: ImportRecipe,
+    pub(crate) run: ImportRun,
+}
+
+// ---------------------------------------------------------------------------
+// Normalized input (kept for the existing dock.rs caller)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NormalizedGitHubRepo {
     pub(crate) owner: String,
     pub(crate) repo: String,
@@ -9,7 +58,12 @@ pub(crate) struct NormalizedGitHubRepo {
     pub(crate) clone_url: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// ---------------------------------------------------------------------------
+// Session state machine
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum GitHubImportSessionState {
     Idle,
     ResolvingSource,
@@ -24,9 +78,11 @@ pub(crate) enum GitHubImportSessionState {
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubImportSession {
     state: GitHubImportSessionState,
-    source: Option<NormalizedGitHubRepo>,
-    recipe_toml: Option<String>,
-    last_error_class: Option<String>,
+    repo: Option<NormalizedGitHubRepo>,
+    source: Option<ImportSource>,
+    recipe: Option<ImportRecipe>,
+    editable_recipe_toml: Option<String>,
+    last_run: Option<ImportRun>,
     submit_enabled: bool,
 }
 
@@ -34,9 +90,11 @@ impl Default for GitHubImportSession {
     fn default() -> Self {
         Self {
             state: GitHubImportSessionState::Idle,
+            repo: None,
             source: None,
-            recipe_toml: None,
-            last_error_class: None,
+            recipe: None,
+            editable_recipe_toml: None,
+            last_run: None,
             submit_enabled: false,
         }
     }
@@ -44,13 +102,13 @@ impl Default for GitHubImportSession {
 
 impl GitHubImportSession {
     pub(crate) fn begin_resolve(&mut self, input: &str) -> Result<&NormalizedGitHubRepo> {
-        let source = normalize_github_import_input(input)?;
-        self.state = GitHubImportSessionState::ResolvingSource;
-        self.source = Some(source);
-        self.recipe_toml = None;
-        self.last_error_class = None;
-        self.submit_enabled = false;
-        Ok(self.source.as_ref().expect("source just set"))
+        let repo = normalize_github_import_input(input)?;
+        *self = Self {
+            state: GitHubImportSessionState::ResolvingSource,
+            repo: Some(repo),
+            ..Self::default()
+        };
+        Ok(self.repo.as_ref().expect("repo just set"))
     }
 
     pub(crate) fn begin_inference(&mut self) {
@@ -58,11 +116,33 @@ impl GitHubImportSession {
         self.submit_enabled = false;
     }
 
-    pub(crate) fn set_inferred_recipe(&mut self, recipe_toml: String) {
-        self.recipe_toml = Some(recipe_toml);
-        self.last_error_class = None;
+    /// Apply the CLI `ato import --emit-json` output (without `--run`).
+    pub(crate) fn apply_inferred_output(&mut self, output: ImportOutput) -> Result<()> {
+        if output.run.status != "not_run" {
+            bail!(
+                "apply_inferred_output expects run.status = \"not_run\", got {:?}",
+                output.run.status
+            );
+        }
+        self.editable_recipe_toml = Some(output.recipe.recipe_toml.clone());
+        self.source = Some(output.source);
+        self.recipe = Some(output.recipe);
+        self.last_run = Some(output.run);
         self.submit_enabled = false;
         self.state = GitHubImportSessionState::AwaitingTomlConfirmation;
+        Ok(())
+    }
+
+    /// Replace the textarea TOML with user-edited content.
+    pub(crate) fn edit_recipe(&mut self, toml: String) -> Result<()> {
+        match self.state {
+            GitHubImportSessionState::AwaitingTomlConfirmation
+            | GitHubImportSessionState::FailedAwaitingRecipeEdit => {
+                self.editable_recipe_toml = Some(toml);
+                Ok(())
+            }
+            _ => bail!("recipe is not editable in state {:?}", self.state),
+        }
     }
 
     pub(crate) fn start_run(&mut self) -> Result<()> {
@@ -77,16 +157,34 @@ impl GitHubImportSession {
         }
     }
 
-    pub(crate) fn record_failed_run(&mut self, error_class: impl Into<String>) {
-        self.last_error_class = Some(error_class.into());
-        self.submit_enabled = false;
-        self.state = GitHubImportSessionState::FailedAwaitingRecipeEdit;
-    }
-
-    pub(crate) fn record_verified_run(&mut self) {
-        self.last_error_class = None;
-        self.submit_enabled = true;
-        self.state = GitHubImportSessionState::Verified;
+    /// Apply the CLI `ato import --run --emit-json` output.
+    ///
+    /// Updates `source` / `recipe` / `last_run` to reflect the latest run.
+    /// `editable_recipe_toml` is preserved so the user's textarea content
+    /// survives a server round-trip (the CLI may normalize whitespace).
+    pub(crate) fn apply_run_result(&mut self, output: ImportOutput) -> Result<()> {
+        match output.run.status.as_str() {
+            "passed" => {
+                self.source = Some(output.source);
+                self.recipe = Some(output.recipe);
+                self.last_run = Some(output.run);
+                self.submit_enabled = true;
+                self.state = GitHubImportSessionState::Verified;
+                Ok(())
+            }
+            "failed" => {
+                self.source = Some(output.source);
+                self.recipe = Some(output.recipe);
+                self.last_run = Some(output.run);
+                self.submit_enabled = false;
+                self.state = GitHubImportSessionState::FailedAwaitingRecipeEdit;
+                Ok(())
+            }
+            other => bail!(
+                "apply_run_result expects run.status passed|failed, got {:?}",
+                other
+            ),
+        }
     }
 
     pub(crate) fn mark_submitted(&mut self) -> Result<()> {
@@ -98,6 +196,32 @@ impl GitHubImportSession {
         Ok(())
     }
 
+    pub(crate) fn submit_payload(&self) -> Option<SubmitPayload> {
+        if self.state != GitHubImportSessionState::Verified {
+            return None;
+        }
+        let source = self.source.clone()?;
+        let recipe = self.recipe.clone()?;
+        let last_run = self.last_run.clone()?;
+        Some(SubmitPayload {
+            source,
+            recipe,
+            last_run,
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            state: self.state,
+            repo: self.repo.clone(),
+            source: self.source.clone(),
+            recipe: self.recipe.clone(),
+            editable_recipe_toml: self.editable_recipe_toml.clone(),
+            last_run: self.last_run.clone(),
+            submit_enabled: self.submit_enabled,
+        }
+    }
+
     pub(crate) fn state(&self) -> GitHubImportSessionState {
         self.state
     }
@@ -105,6 +229,32 @@ impl GitHubImportSession {
     pub(crate) fn submit_enabled(&self) -> bool {
         self.submit_enabled
     }
+
+    pub(crate) fn editable_recipe_toml(&self) -> Option<&str> {
+        self.editable_recipe_toml.as_deref()
+    }
+
+    pub(crate) fn repo(&self) -> Option<&NormalizedGitHubRepo> {
+        self.repo.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub(crate) struct SubmitPayload {
+    pub(crate) source: ImportSource,
+    pub(crate) recipe: ImportRecipe,
+    pub(crate) last_run: ImportRun,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SessionSnapshot {
+    pub(crate) state: GitHubImportSessionState,
+    pub(crate) repo: Option<NormalizedGitHubRepo>,
+    pub(crate) source: Option<ImportSource>,
+    pub(crate) recipe: Option<ImportRecipe>,
+    pub(crate) editable_recipe_toml: Option<String>,
+    pub(crate) last_run: Option<ImportRun>,
+    pub(crate) submit_enabled: bool,
 }
 
 pub(crate) fn normalize_github_import_input(input: &str) -> Result<NormalizedGitHubRepo> {
@@ -181,6 +331,70 @@ fn normalized(owner: &str, repo_raw: &str) -> NormalizedGitHubRepo {
 mod tests {
     use super::*;
 
+    fn sample_source() -> ImportSource {
+        ImportSource {
+            source_url_normalized: "https://github.com/blinkospace/blinko".to_string(),
+            source_host: "github.com".to_string(),
+            repo_namespace: "blinkospace".to_string(),
+            repo_name: "blinko".to_string(),
+            revision_id: "8bd89aabc1234567".to_string(),
+            source_tree_hash: "blake3:treehash".to_string(),
+            subdir: ".".to_string(),
+        }
+    }
+
+    fn sample_recipe(origin: &str) -> ImportRecipe {
+        ImportRecipe {
+            origin: origin.to_string(),
+            target_label: Some("web".to_string()),
+            platform_os: "darwin".to_string(),
+            platform_arch: "arm64".to_string(),
+            recipe_toml: "schema_version = \"0.3\"\n".to_string(),
+            recipe_hash: "blake3:recipehash".to_string(),
+        }
+    }
+
+    fn inferred_output() -> ImportOutput {
+        ImportOutput {
+            source: sample_source(),
+            recipe: sample_recipe("inference"),
+            run: ImportRun {
+                status: "not_run".to_string(),
+                phase: None,
+                error_class: None,
+                error_excerpt: None,
+            },
+        }
+    }
+
+    fn failed_output(error_class: &str) -> ImportOutput {
+        ImportOutput {
+            source: sample_source(),
+            recipe: sample_recipe("inference"),
+            run: ImportRun {
+                status: "failed".to_string(),
+                phase: Some("install".to_string()),
+                error_class: Some(error_class.to_string()),
+                error_excerpt: Some(
+                    "ModuleNotFoundError: No module named 'distutils'".to_string(),
+                ),
+            },
+        }
+    }
+
+    fn passed_output() -> ImportOutput {
+        ImportOutput {
+            source: sample_source(),
+            recipe: sample_recipe("inference"),
+            run: ImportRun {
+                status: "passed".to_string(),
+                phase: None,
+                error_class: None,
+                error_excerpt: None,
+            },
+        }
+    }
+
     #[test]
     fn normalizes_github_repo_inputs() {
         for input in [
@@ -214,26 +428,40 @@ mod tests {
             .begin_resolve("github.com/blinkospace/blinko")
             .expect("source");
         session.begin_inference();
-        session.set_inferred_recipe("schema_version = \"0.3\"".to_string());
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
 
         assert_eq!(
             session.state(),
             GitHubImportSessionState::AwaitingTomlConfirmation
         );
         assert!(!session.submit_enabled());
+        assert_eq!(
+            session.editable_recipe_toml(),
+            Some("schema_version = \"0.3\"\n")
+        );
     }
 
     #[test]
     fn failed_run_returns_to_toml_edit_state() {
         let mut session = GitHubImportSession::default();
         session.begin_resolve("blinkospace/blinko").expect("source");
-        session.set_inferred_recipe("schema_version = \"0.3\"".to_string());
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
         session.start_run().expect("run starts");
-        session.record_failed_run("missing_required_env");
+        session
+            .apply_run_result(failed_output("missing_required_env"))
+            .expect("apply failed");
 
         assert_eq!(
             session.state(),
             GitHubImportSessionState::FailedAwaitingRecipeEdit
+        );
+        assert_eq!(
+            session.snapshot().last_run.as_ref().and_then(|r| r.error_class.clone()),
+            Some("missing_required_env".to_string())
         );
         session.start_run().expect("retry starts");
     }
@@ -242,13 +470,234 @@ mod tests {
     fn successful_run_enables_submit_then_submits() {
         let mut session = GitHubImportSession::default();
         session.begin_resolve("blinkospace/blinko").expect("source");
-        session.set_inferred_recipe("schema_version = \"0.3\"".to_string());
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
         session.start_run().expect("run starts");
-        session.record_verified_run();
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
 
         assert_eq!(session.state(), GitHubImportSessionState::Verified);
         assert!(session.submit_enabled());
+        assert!(session.submit_payload().is_some());
         session.mark_submitted().expect("submitted");
         assert_eq!(session.state(), GitHubImportSessionState::Submitted);
+        assert!(session.submit_payload().is_none());
+    }
+
+    #[test]
+    fn github_import_toml_edit_retry() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+
+        // User edits TOML in textarea before first run.
+        session
+            .edit_recipe("schema_version = \"0.3\"\n# edited\n".to_string())
+            .expect("edit allowed in awaiting state");
+        assert_eq!(
+            session.editable_recipe_toml(),
+            Some("schema_version = \"0.3\"\n# edited\n")
+        );
+
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(failed_output("node_gyp_missing_distutils"))
+            .expect("apply failed");
+        assert_eq!(
+            session.state(),
+            GitHubImportSessionState::FailedAwaitingRecipeEdit
+        );
+
+        // Edit again after failure.
+        session
+            .edit_recipe("schema_version = \"0.3\"\n# retry\n".to_string())
+            .expect("edit allowed in failed state");
+        assert_eq!(
+            session.editable_recipe_toml(),
+            Some("schema_version = \"0.3\"\n# retry\n")
+        );
+
+        session.start_run().expect("retry run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+        assert_eq!(session.state(), GitHubImportSessionState::Verified);
+        assert!(session.submit_enabled());
+    }
+
+    #[test]
+    fn github_import_verified_enables_submit_prompt() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+
+        let payload = session.submit_payload().expect("payload available");
+        assert_eq!(payload.source.repo_name, "blinko");
+        assert_eq!(payload.recipe.recipe_hash, "blake3:recipehash");
+        assert_eq!(payload.last_run.status, "passed");
+    }
+
+    #[test]
+    fn edit_recipe_rejected_outside_editable_states() {
+        let mut session = GitHubImportSession::default();
+        assert!(session.edit_recipe("anything".to_string()).is_err());
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        // ResolvingSource — still not editable.
+        assert!(session.edit_recipe("anything".to_string()).is_err());
+        session.begin_inference();
+        // InferringRecipe — still not editable.
+        assert!(session.edit_recipe("anything".to_string()).is_err());
+    }
+
+    #[test]
+    fn cli_inferred_json_drives_awaiting_toml_state() {
+        let json = r#"{
+            "source": {
+                "source_url_normalized": "https://github.com/blinkospace/blinko",
+                "source_host": "github.com",
+                "repo_namespace": "blinkospace",
+                "repo_name": "blinko",
+                "revision_id": "8bd89aabc1234567",
+                "source_tree_hash": "blake3:tree",
+                "subdir": "."
+            },
+            "recipe": {
+                "origin": "inference",
+                "target_label": "web",
+                "platform_os": "darwin",
+                "platform_arch": "arm64",
+                "recipe_toml": "schema_version = \"0.3\"\n",
+                "recipe_hash": "blake3:recipe"
+            },
+            "run": {
+                "status": "not_run",
+                "phase": null,
+                "error_class": null,
+                "error_excerpt": null
+            }
+        }"#;
+        let output: ImportOutput = serde_json::from_str(json).expect("parses");
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session.begin_inference();
+        session.apply_inferred_output(output).expect("apply");
+        assert_eq!(
+            session.state(),
+            GitHubImportSessionState::AwaitingTomlConfirmation
+        );
+    }
+
+    #[test]
+    fn cli_failed_run_json_drives_failed_state() {
+        let json = r#"{
+            "source": {
+                "source_url_normalized": "https://github.com/blinkospace/blinko",
+                "source_host": "github.com",
+                "repo_namespace": "blinkospace",
+                "repo_name": "blinko",
+                "revision_id": "8bd89a",
+                "source_tree_hash": "blake3:tree",
+                "subdir": "."
+            },
+            "recipe": {
+                "origin": "inference",
+                "target_label": null,
+                "platform_os": "darwin",
+                "platform_arch": "arm64",
+                "recipe_toml": "schema_version = \"0.3\"\n",
+                "recipe_hash": "blake3:recipe"
+            },
+            "run": {
+                "status": "failed",
+                "phase": "install",
+                "error_class": "node_gyp_missing_distutils",
+                "error_excerpt": "ModuleNotFoundError: No module named 'distutils'"
+            }
+        }"#;
+        let output: ImportOutput = serde_json::from_str(json).expect("parses");
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(ImportOutput {
+                source: output.source.clone(),
+                recipe: output.recipe.clone(),
+                run: ImportRun {
+                    status: "not_run".to_string(),
+                    phase: None,
+                    error_class: None,
+                    error_excerpt: None,
+                },
+            })
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session.apply_run_result(output).expect("apply");
+        assert_eq!(
+            session.state(),
+            GitHubImportSessionState::FailedAwaitingRecipeEdit
+        );
+        let snap = session.snapshot();
+        assert_eq!(snap.last_run.as_ref().unwrap().phase.as_deref(), Some("install"));
+        assert_eq!(
+            snap.last_run.as_ref().unwrap().error_class.as_deref(),
+            Some("node_gyp_missing_distutils")
+        );
+    }
+
+    #[test]
+    fn cli_passed_run_json_drives_verified_state() {
+        let json = r#"{
+            "source": {
+                "source_url_normalized": "https://github.com/blinkospace/blinko",
+                "source_host": "github.com",
+                "repo_namespace": "blinkospace",
+                "repo_name": "blinko",
+                "revision_id": "8bd89a",
+                "source_tree_hash": "blake3:tree",
+                "subdir": "."
+            },
+            "recipe": {
+                "origin": "inference",
+                "target_label": "web",
+                "platform_os": "darwin",
+                "platform_arch": "arm64",
+                "recipe_toml": "schema_version = \"0.3\"\n",
+                "recipe_hash": "blake3:recipe"
+            },
+            "run": {
+                "status": "passed",
+                "phase": null,
+                "error_class": null,
+                "error_excerpt": null
+            }
+        }"#;
+        let output: ImportOutput = serde_json::from_str(json).expect("parses");
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(ImportOutput {
+                source: output.source.clone(),
+                recipe: output.recipe.clone(),
+                run: ImportRun {
+                    status: "not_run".to_string(),
+                    phase: None,
+                    error_class: None,
+                    error_excerpt: None,
+                },
+            })
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session.apply_run_result(output).expect("apply");
+        assert_eq!(session.state(), GitHubImportSessionState::Verified);
+        assert!(session.submit_enabled());
     }
 }

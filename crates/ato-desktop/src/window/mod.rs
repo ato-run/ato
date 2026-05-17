@@ -23,6 +23,7 @@ pub mod dock;
 pub mod focus_dispatcher;
 pub mod gestures;
 pub mod identity_window;
+pub mod import_window;
 pub mod launch_window;
 pub mod webview_paste;
 // `pub mod launcher;` was removed in Stage D — the legacy Launcher
