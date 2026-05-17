@@ -166,6 +166,8 @@
     editable_recipe_toml: null,
     last_run: null,
     submit_enabled: false,
+    signed_in: false,
+    source_import_id: null,
   };
   let submitModalOpen = false;
 
@@ -284,7 +286,15 @@
     const s = snapshot.state;
     const canRun = (s === 'awaiting-toml-confirmation' || s === 'failed-awaiting-recipe-edit');
     const isRunning = s === 'running';
-    const canSubmit = !!snapshot.submit_enabled;
+    const isSubmitted = s === 'submitted';
+    const isSignedIn = !!snapshot.signed_in;
+    // Submit is only meaningful from the Verified state. When the user
+    // is not signed in we surface that as the button label rather than
+    // hiding the affordance entirely; the button stays disabled.
+    const submitLabel = isSubmitted
+      ? 'Submitted'
+      : (isSignedIn ? 'Submit this working recipe' : 'Sign in to submit');
+    const canSubmit = !!snapshot.submit_enabled && isSignedIn;
     return el('div', { className: 'controls' }, [
       el('button', {
         disabled: !canRun,
@@ -294,7 +304,7 @@
         className: 'primary',
         disabled: !canSubmit,
         onClick: () => { submitModalOpen = true; render(); },
-      }, 'Submit this working recipe'),
+      }, submitLabel),
     ]);
   }
 
@@ -323,14 +333,14 @@
     return el('div', { className: 'modal-overlay' }, [
       el('div', { className: 'modal' }, [
         el('h2', null, 'Submit this working recipe'),
-        el('p', null, 'This will share the verified launch recipe so others can run this repository. Sharing to the recipe registry will be enabled in a later release. For now, your verification stays local.'),
+        el('p', null, 'This shares the verified launch recipe so others can run this repository under the same revision. The recipe binding is recorded against your account; it does not create or claim a Store capsule.'),
         el('div', { className: 'controls' }, [
           el('button', { onClick: () => { submitModalOpen = false; render(); } }, 'Cancel'),
           el('button', { className: 'primary', onClick: () => {
             SEND({ kind: 'submit_intent' });
             submitModalOpen = false;
             render();
-          } }, 'OK'),
+          } }, 'Submit'),
         ]),
       ]),
     ]);
