@@ -287,8 +287,11 @@ fn debug_assert_bundle_contracts_match_legacy(
         "PR-3c: bundle-derived DependencyContracts provider count drifted from legacy \
          manifest_external_capsule_dependencies"
     );
-    let mut bundle_aliases: Vec<&str> =
-        contracts.providers.iter().map(|p| p.alias.as_str()).collect();
+    let mut bundle_aliases: Vec<&str> = contracts
+        .providers
+        .iter()
+        .map(|p| p.alias.as_str())
+        .collect();
     bundle_aliases.sort_unstable();
     let mut legacy_aliases: Vec<&str> = legacy.iter().map(|d| d.alias.as_str()).collect();
     legacy_aliases.sort_unstable();

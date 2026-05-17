@@ -14,10 +14,10 @@
 //! The bundle itself is built upstream (manifest + lock + policy facts);
 //! these views are pure projections.
 
-use capsule_core::engine::execution_graph::{LaunchGraphBundle, LaunchGraphBundleInput};
 use capsule_core::engine::execution_graph::{
     ExecutionGraphBuilder, GraphPolicyInput, GraphPreflightInput, GraphSourceInput,
 };
+use capsule_core::engine::execution_graph::{LaunchGraphBundle, LaunchGraphBundleInput};
 use capsule_core::types::ExternalCapsuleDependency;
 
 use crate::application::execution_graph_adapter::build_input_from_external_dependencies;

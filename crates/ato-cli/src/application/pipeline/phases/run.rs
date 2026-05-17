@@ -2927,12 +2927,8 @@ where
         receipt_output.launch_graph.as_ref(),
     ) {
         sink.set(crate::application::receipt_boundary::GraphIds {
-            declared_execution_id: Some(
-                bundle.derived.execution_ids.declared_execution_id.clone(),
-            ),
-            resolved_execution_id: Some(
-                bundle.derived.execution_ids.resolved_execution_id.clone(),
-            ),
+            declared_execution_id: Some(bundle.derived.execution_ids.declared_execution_id.clone()),
+            resolved_execution_id: Some(bundle.derived.execution_ids.resolved_execution_id.clone()),
         });
     }
     let execution_receipt_document = receipt_output.document;
