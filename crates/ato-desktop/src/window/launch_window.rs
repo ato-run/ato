@@ -55,14 +55,21 @@ const BOOT_HTML: &str = include_str!("../../assets/system/ato-launch/boot.html")
 /// opens the consent wizard, consumed by `ato_launch::dispatch` on
 /// Approve (spawns the real AppWindow) or cleared on Cancel.
 ///
-/// Single-slot is sufficient for Phase 1 — the consent wizard is
-/// modal-ish in practice; opening a second one before approving the
-/// first replaces the pending target, which matches user intent
-/// ("the most recent launch attempt is the one I'm about to confirm").
+/// Per-launch request tracker keyed by `preview_id` (which the consent
+/// wizard already round-trips through its IPC approve payload). Uses a map
+/// so multiple simultaneous launches do not overwrite each other.
 #[derive(Default, Debug, Clone)]
-pub struct PendingLaunchTarget(pub Option<GuestRoute>);
+pub struct PendingLaunches(pub std::collections::HashMap<String, StashedLaunch>);
 
-impl gpui::Global for PendingLaunchTarget {}
+/// Snapshot stored when the consent wizard opens so the Approve handler
+/// can reconstruct the launch intent without touching the HTML.
+#[derive(Debug, Clone)]
+pub struct StashedLaunch {
+    pub route: GuestRoute,
+    pub requested_client: crate::state::session::SessionClientKind,
+}
+
+impl gpui::Global for PendingLaunches {}
 
 /// Config key/value pairs collected from the consent form and passed
 /// to `open_app_window` → `AppCapsuleShell::new` → `resolve_and_start_guest`.
@@ -425,14 +432,27 @@ pub fn open_consent_window(cx: &mut App) -> Result<()> {
 }
 
 /// Real launch entrypoint: open the consent wizard for a concrete
-/// `GuestRoute`. Stashes the route under `PendingLaunchTarget` so the
-/// broker's Approve handler can spawn the real AppWindow on user
-/// confirmation.
+/// `GuestRoute`. Stashes the route under `PendingLaunches` keyed by
+/// `preview_id` so the broker's Approve handler can find the launch
+/// intent on user confirmation.
 ///
 /// Opens the wizard immediately with a loading state, then spawns a
 /// background task to run `ato internal preflight` and hydrate the
 /// WebView with real capsule identity + requirements.
 pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<()> {
+    open_consent_window_for_route_with_client(
+        cx,
+        route,
+        crate::state::session::SessionClientKind::AtoWindow,
+    )
+}
+
+/// Variant that specifies which display client to attach after approval.
+pub fn open_consent_window_for_route_with_client(
+    cx: &mut App,
+    route: GuestRoute,
+    requested_client: crate::state::session::SessionClientKind,
+) -> Result<()> {
     let (display_name, display_handle) = match &route {
         GuestRoute::CapsuleHandle { handle, label } => {
             let pretty_name = label
@@ -460,7 +480,12 @@ pub fn open_consent_window_for_route(cx: &mut App, route: GuestRoute) -> Result<
         format!("{ms}-{pid}")
     };
 
-    cx.set_global(PendingLaunchTarget(Some(route)));
+        let stashed = StashedLaunch {
+            route,
+            requested_client,
+        };
+        let mut launches = cx.global_mut::<PendingLaunches>();
+        launches.0.insert(preview_id.clone(), stashed);
 
     // Inject loading-state preview so the wizard renders immediately.
     let loading_preview = serde_json::json!({

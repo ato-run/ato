@@ -748,70 +748,23 @@ pub fn run() {
                 let open_mode = crate::config::load_config().desktop.capsule_open_mode;
                 match open_mode {
                     crate::config::CapsuleOpenMode::OsBrowser => {
-                        // Launch capsule in background, then open local URL in OS browser.
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let handle_clone = handle.clone();
-                        std::thread::spawn(move || {
-                            let result = crate::orchestrator::resolve_and_start_guest(
-                                &handle_clone,
-                                &[],
-                                &[],
-                                None,
+                        // Go through the consent wizard — E103/E302 modals
+                        // will appear in the Desktop shell before the capsule
+                        // is launched and opened in the OS browser.
+                        let route =
+                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        if let Err(err) =
+                            crate::window::launch_window::open_consent_window_for_route_with_client(
+                                cx,
+                                route,
+                                crate::state::session::SessionClientKind::OsBrowser,
+                            )
+                        {
+                            tracing::error!(
+                                error = %err,
+                                "NavigateToUrl(capsule, os-browser) open_consent_window_for_route failed"
                             );
-                            let _ = tx.send((handle_clone, result));
-                        });
-                        let async_cx = cx.to_async();
-                        async_cx
-                            .foreground_executor()
-                            .spawn({
-                                let be = async_cx.background_executor().clone();
-                                let aa = async_cx.clone();
-                                async move {
-                                    loop {
-                                        match rx.try_recv() {
-                                            Ok((handle, result)) => {
-                                                aa.update(|_cx| {
-                                                    match result {
-                                                        Ok(session) => {
-                                                            let url = session.local_url.unwrap_or_else(|| {
-                                                                format!("https://ato.run/{}", handle)
-                                                            });
-                                                            if let Err(e) =
-                                                                crate::ui::open_external_url(&url)
-                                                            {
-                                                                tracing::error!(
-                                                                    error = %e,
-                                                                    url = %url,
-                                                                    "os-browser: open_external_url failed"
-                                                                );
-                                                            }
-                                                        }
-                                                        Err(launch_err) => {
-                                                            tracing::error!(
-                                                                error = %launch_err,
-                                                                handle = %handle,
-                                                                "os-browser: resolve_and_start_guest failed"
-                                                            );
-                                                        }
-                                                    }
-                                                });
-                                                break;
-                                            }
-                                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                                tracing::error!(
-                                                    "os-browser: background thread disconnected"
-                                                );
-                                                break;
-                                            }
-                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                                be.timer(std::time::Duration::from_millis(100))
-                                                    .await;
-                                            }
-                                        }
-                                    }
-                                }
-                            })
-                            .detach();
+                        }
                     }
                     crate::config::CapsuleOpenMode::Webviewer => {
                         tracing::warn!(
