@@ -993,9 +993,10 @@ fn apply_desktop_patch_immediate(
     }
     if let Some(v) = patch.get("controlBarMode").and_then(Value::as_str) {
         if let Some(mode) = parse_control_bar_mode(v) {
-            config.desktop.control_bar.mode = mode;
-            config.desktop.control_bar.visible_on_startup = !matches!(mode, ControlBarMode::Hidden);
-            config.desktop.control_bar.auto_hide = matches!(mode, ControlBarMode::AutoHide);
+            let _ = mode;
+            config.desktop.control_bar.mode = ControlBarMode::Floating;
+            config.desktop.control_bar.visible_on_startup = true;
+            config.desktop.control_bar.auto_hide = false;
             changed.push("controlBarMode".to_string());
         }
     }
@@ -1003,12 +1004,10 @@ fn apply_desktop_patch_immediate(
         .get("controlBarVisibleOnStartup")
         .and_then(Value::as_bool)
     {
-        config.desktop.control_bar.visible_on_startup = v;
-        if !v {
-            config.desktop.control_bar.mode = ControlBarMode::Hidden;
-        } else if matches!(config.desktop.control_bar.mode, ControlBarMode::Hidden) {
-            config.desktop.control_bar.mode = ControlBarMode::Floating;
-        }
+        let _ = v;
+        config.desktop.control_bar.visible_on_startup = true;
+        config.desktop.control_bar.mode = ControlBarMode::Floating;
+        config.desktop.control_bar.auto_hide = false;
         changed.push("controlBarVisibleOnStartup".to_string());
     }
     if let Some(v) = patch.get("controlBarPosition").and_then(Value::as_str) {
@@ -1018,14 +1017,10 @@ fn apply_desktop_patch_immediate(
         }
     }
     if let Some(v) = patch.get("controlBarAutoHide").and_then(Value::as_bool) {
-        config.desktop.control_bar.auto_hide = v;
-        config.desktop.control_bar.mode = if v {
-            ControlBarMode::AutoHide
-        } else if matches!(config.desktop.control_bar.mode, ControlBarMode::AutoHide) {
-            ControlBarMode::Floating
-        } else {
-            config.desktop.control_bar.mode
-        };
+        let _ = v;
+        config.desktop.control_bar.auto_hide = false;
+        config.desktop.control_bar.mode = ControlBarMode::Floating;
+        config.desktop.control_bar.visible_on_startup = true;
         changed.push("controlBarAutoHide".to_string());
     }
 }
@@ -1147,10 +1142,7 @@ fn parse_control_bar_position(v: &str) -> Option<ControlBarPosition> {
 
 fn parse_control_bar_mode(v: &str) -> Option<ControlBarMode> {
     match v {
-        "floating" => Some(ControlBarMode::Floating),
-        "auto-hide" => Some(ControlBarMode::AutoHide),
-        "compact-pill" => Some(ControlBarMode::CompactPill),
-        "hidden" => Some(ControlBarMode::Hidden),
+        "floating" | "auto-hide" | "compact-pill" | "hidden" => Some(ControlBarMode::Floating),
         _ => None,
     }
 }
@@ -1267,7 +1259,9 @@ mod tests {
         let mut config = default_config();
         let patch = serde_json::json!({"controlBarMode": "compact-pill"});
         let resp = patch_config_for_capsule(&mut config, &patch, None);
-        assert_eq!(config.desktop.control_bar.mode, ControlBarMode::CompactPill);
+        assert_eq!(config.desktop.control_bar.mode, ControlBarMode::Floating);
+        assert!(config.desktop.control_bar.visible_on_startup);
+        assert!(!config.desktop.control_bar.auto_hide);
         assert_eq!(resp["appliesOnNextLaunch"], false);
     }
 
