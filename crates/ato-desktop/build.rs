@@ -74,14 +74,17 @@ fn check_onboarding_dist(manifest_dir: &PathBuf) {
 }
 
 fn check_dock_dist(manifest_dir: &PathBuf) {
-    let dock_dir = manifest_dir
-        .join("assets")
-        .join("system")
-        .join("ato-dock");
+    let dock_dir = manifest_dir.join("assets").join("system").join("ato-dock");
     let dist_dir = dock_dir.join("dist");
 
-    println!("cargo:rerun-if-changed={}", dock_dir.join("App.jsx").display());
-    println!("cargo:rerun-if-changed={}", dock_dir.join("index.html").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        dock_dir.join("App.jsx").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        dock_dir.join("index.html").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         dock_dir.join("capsule.toml").display()
@@ -129,7 +132,12 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
     }
 
     if !dock_dir.join("node_modules").exists() {
-        run_command("npm", &["install"], &dock_dir, "ato-dock dependency install");
+        run_command(
+            "npm",
+            &["install"],
+            &dock_dir,
+            "ato-dock dependency install",
+        );
     }
 
     run_command("npm", &["run", "build"], &dock_dir, "ato-dock build");
