@@ -394,6 +394,22 @@ pub fn dispatch(
 
         AtoStartCommand::OpenQuery { value } => match classify_query(&value) {
             QueryIntent::CapsuleHandle(handle) => {
+                // GitHub repo inputs (`github.com/owner/repo`) route to
+                // the GitHub Import review surface rather than the
+                // capsule consent flow. Non-GitHub handles continue to
+                // the launch consent path.
+                if let Ok(normalized) =
+                    crate::source_import_session::normalize_github_import_input(&handle)
+                {
+                    if let Err(err) = crate::window::import_window::open_with_url(
+                        cx,
+                        normalized.source_url_normalized.clone(),
+                    ) {
+                        tracing::error!(error = %err, "ato_start: open_query GitHub import failed");
+                    }
+                    let _ = host.update(cx, |_, window, _| window.remove_window());
+                    return Ok(());
+                }
                 let route = GuestRoute::CapsuleHandle {
                     handle: handle.clone(),
                     label: handle,
@@ -407,6 +423,20 @@ pub fn dispatch(
             }
             QueryIntent::ExternalUrl(url_str) => match url::Url::parse(&url_str) {
                 Ok(url) => {
+                    // https://github.com/owner/repo from the URL form
+                    // also routes to GitHub Import.
+                    if let Ok(normalized) =
+                        crate::source_import_session::normalize_github_import_input(&url_str)
+                    {
+                        if let Err(err) = crate::window::import_window::open_with_url(
+                            cx,
+                            normalized.source_url_normalized.clone(),
+                        ) {
+                            tracing::error!(error = %err, "ato_start: open_query GitHub URL failed");
+                        }
+                        let _ = host.update(cx, |_, window, _| window.remove_window());
+                        return Ok(());
+                    }
                     let route = GuestRoute::ExternalUrl(url);
                     if let Err(err) = crate::window::open_app_window(cx, route) {
                         tracing::error!(error = %err, "ato_start: open_query ExternalUrl failed");
