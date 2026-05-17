@@ -24,7 +24,7 @@ import {
   X,
 } from "lucide-react";
 
-import { postDockCommand } from "./src/bridge.js";
+import { postDockCommand, postImportOpen, looksLikeGitHubRepoUrl } from "./src/bridge.js";
 
 const CURRENT_IDENTITY = typeof window !== "undefined" ? window.__ATO_IDENTITY ?? null : null;
 const CURRENT_BOOTSTRAP = typeof window !== "undefined" ? window.__ATO_DOCK_BOOTSTRAP ?? {} : {};
@@ -1060,12 +1060,29 @@ function MyCapsulesPage() {
 
   const createOrSave = () => {
     if (!modal || modal.kind !== "editor") return;
+    const rawUrl = modal.draft.sourceUrl.trim();
+
+    // Import mode + GitHub URL: hand off to the GitHub Import review
+    // surface (ato-import) instead of registering the entry in the
+    // local developer dock. This lets the user verify the launch
+    // recipe before deciding what to do with the repo.
+    if (modal.mode === "import" && looksLikeGitHubRepoUrl(rawUrl)) {
+      const sent = postImportOpen(rawUrl);
+      if (!sent) {
+        setToast({ type: "warning", message: "Import bridge is unavailable" });
+        return;
+      }
+      setToast({ type: "info", message: "Opening GitHub Import…" });
+      setModal(null);
+      return;
+    }
+
     const next = {
       ...modal.draft,
       name: modal.draft.name.trim() || slugify(modal.draft.sourceUrl.split("/").pop() || "new-capsule"),
       owner: CURRENT_USER_NAME,
       ownerId: CURRENT_USER_ID,
-      sourceUrl: modal.draft.sourceUrl.trim() || `github.com/${CURRENT_USER_HANDLE}/${slugify(modal.draft.name || "new-capsule")}`,
+      sourceUrl: rawUrl || `github.com/${CURRENT_USER_HANDLE}/${slugify(modal.draft.name || "new-capsule")}`,
       iconText: iconTextFrom(modal.draft.name || modal.draft.sourceUrl),
       version: modal.draft.version.trim() || "0.1.0",
       updatedAt: "Updated just now",
