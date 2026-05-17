@@ -1,8 +1,7 @@
-//! Thin automation dispatcher used when `ATO_DESKTOP_MULTI_WINDOW=1`
-//! takes the legacy `DesktopShell` out of the boot path. Without
-//! `WebViewManager` the automation socket would never start, so MCP
-//! clients (and AODD scripts) would have nowhere to land their
-//! requests.
+//! Thin automation dispatcher used when Focus View mode takes the
+//! legacy `DesktopShell` out of the boot path. Without `WebViewManager`
+//! the automation socket would never start, so MCP clients (and AODD
+//! scripts) would have nowhere to land their requests.
 //!
 //! This module owns its own `AutomationHost` and a background poller
 //! that drains socket-delivered requests every 50ms. Only the
