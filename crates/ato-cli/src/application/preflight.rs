@@ -172,12 +172,13 @@ pub fn collect_aggregate_requirements(
     // skip dep-driven preflight envelopes. Errors are surfaced as
     // `PreflightError::ManifestParse` instead of `unwrap_or_default`
     // so the failure is visible.
-    let manifest_dependencies = manifest_external_capsule_dependencies(&loaded.raw).map_err(
-        |source| PreflightError::ManifestParse {
-            path: manifest_path.clone(),
-            source,
-        },
-    )?;
+    let manifest_dependencies =
+        manifest_external_capsule_dependencies(&loaded.raw).map_err(|source| {
+            PreflightError::ManifestParse {
+                path: manifest_path.clone(),
+                source,
+            }
+        })?;
     let preflight_bundle = build_declared_only_bundle(
         &manifest_dependencies,
         Some(manifest_path.display().to_string()),
@@ -836,8 +837,7 @@ contract = "service@1"
         // Mirror the path the collector takes: load the manifest,
         // feed `loaded.raw` (NOT `toml::Value::try_from(&loaded.model)`)
         // into the dependency derivation.
-        let loaded =
-            capsule_core::contract::manifest::load_manifest(&manifest_path).expect("load");
+        let loaded = capsule_core::contract::manifest::load_manifest(&manifest_path).expect("load");
         let manifest_dependencies =
             manifest_external_capsule_dependencies(&loaded.raw).expect("derive deps");
         assert_eq!(

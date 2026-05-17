@@ -2364,10 +2364,7 @@ pub(in crate::engine::execution_identity) mod tests {
             receipt.host_fingerprint.as_deref(),
             Some("macos:aarch64:unknown-libc")
         );
-        assert_eq!(
-            receipt.graph_completeness,
-            Some(GraphCompleteness::Partial)
-        );
+        assert_eq!(receipt.graph_completeness, Some(GraphCompleteness::Partial));
         let graph_receipt = receipt.graph_receipt.as_ref().expect("graph_receipt set");
         assert_eq!(graph_receipt.gate, "launch-passed");
         assert_eq!(

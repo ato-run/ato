@@ -165,13 +165,10 @@ pub(crate) fn build_prelaunch_receipt_v2(
     launch_ctx: &RuntimeLaunchContext,
     build_observation: Option<&BuildObservation>,
 ) -> Result<ExecutionReceiptV2> {
-    Ok(build_prelaunch_receipt_v2_with_graph(
-        plan,
-        execution_plan,
-        launch_ctx,
-        build_observation,
-    )?
-    .0)
+    Ok(
+        build_prelaunch_receipt_v2_with_graph(plan, execution_plan, launch_ctx, build_observation)?
+            .0,
+    )
 }
 
 /// PR-3b carrier-aware v2 receipt builder. Returns the receipt AND the
@@ -781,14 +778,12 @@ contract = "service@1"
             .canonical_form(CanonicalGraphDomain::Resolved)
             .digest_hex();
         assert_eq!(
-            bundle.derived.execution_ids.declared_execution_id,
-            declared_from_canonical,
+            bundle.derived.execution_ids.declared_execution_id, declared_from_canonical,
             "PR-3b: bundle.derived.declared id must equal canonical declared digest — \
              the receipt and the carrier are reading off the same field"
         );
         assert_eq!(
-            bundle.derived.execution_ids.resolved_execution_id,
-            resolved_from_canonical,
+            bundle.derived.execution_ids.resolved_execution_id, resolved_from_canonical,
             "PR-3b: bundle.derived.resolved id must equal canonical resolved digest — \
              the receipt and the carrier are reading off the same field"
         );
@@ -847,17 +842,16 @@ contract = "service@1"
         // session_runner::emit_execution_receipt. Pure copy — written
         // out long-form here so any future refactor that drops a
         // field is caught by this test before it ships.
-        let session_metadata =
-            crate::app_control::session::ExecutionReceiptSessionMetadata {
-                execution_id: "blake3:fixture-execution".to_string(),
-                schema_version:
-                    capsule_core::execution_identity::EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
-                declared_execution_id: Some(declared.clone()),
-                resolved_execution_id: Some(resolved.clone()),
-                observed_execution_id: None,
-                graph_completeness: Some("partial".to_string()),
-                reproducibility_class: Some("BestEffort".to_string()),
-            };
+        let session_metadata = crate::app_control::session::ExecutionReceiptSessionMetadata {
+            execution_id: "blake3:fixture-execution".to_string(),
+            schema_version:
+                capsule_core::execution_identity::EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+            declared_execution_id: Some(declared.clone()),
+            resolved_execution_id: Some(resolved.clone()),
+            observed_execution_id: None,
+            graph_completeness: Some("partial".to_string()),
+            reproducibility_class: Some("BestEffort".to_string()),
+        };
         assert_eq!(
             session_metadata.declared_execution_id.as_deref(),
             Some(declared.as_str()),
