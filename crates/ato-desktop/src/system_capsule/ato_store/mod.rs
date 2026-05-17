@@ -14,16 +14,26 @@ use crate::system_capsule::broker::{BrokerError, Capability};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StoreCommand {
-    /// Open / focus the Store window. Mirrors what the
-    /// StartWindow's `OpenStore` IPC action did pre-refactor.
+    /// Open / focus the Store window.
     Open,
     /// Close the Store window that issued this command.
     Close,
     /// Launch a capsule from the store catalog. Triggers the standard
     /// consent → boot wizard flow via `open_consent_window_for_route`.
     OpenCapsule { handle: String },
+    /// Run a capsule immediately (temporary use). Internally resolves,
+    /// installs if missing, then launches.
+    RunCapsule { handle: String },
+    /// Install a capsule into the local store for persistent access.
+    /// Installs but does not necessarily launch.
+    InstallCapsule { handle: String },
     /// Open an external HTTPS URL in a new WebLinkView window.
     BrowseUrl { url: String },
+    /// Request current session status. Desktop responds via
+    /// evaluate_script with a CustomEvent.
+    GetSessionStatus,
+    /// Trigger the desktop auth flow (ato login --desktop-webview).
+    Login,
 }
 
 impl StoreCommand {
@@ -32,7 +42,11 @@ impl StoreCommand {
             StoreCommand::Open => Capability::LaunchSystemCapsule,
             StoreCommand::Close => Capability::WebviewCreate,
             StoreCommand::OpenCapsule { .. } => Capability::WebviewCreate,
+            StoreCommand::RunCapsule { .. } => Capability::WebviewCreate,
+            StoreCommand::InstallCapsule { .. } => Capability::LaunchSystemCapsule,
             StoreCommand::BrowseUrl { .. } => Capability::WebviewCreate,
+            StoreCommand::GetSessionStatus => Capability::WebviewCreate,
+            StoreCommand::Login => Capability::LaunchSystemCapsule,
         }
     }
 }
@@ -54,7 +68,9 @@ pub fn dispatch(
         StoreCommand::Close => {
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
-        StoreCommand::OpenCapsule { handle } => {
+        StoreCommand::OpenCapsule { handle }
+        | StoreCommand::RunCapsule { handle }
+        | StoreCommand::InstallCapsule { handle } => {
             let label = handle
                 .rsplit('/')
                 .next()
@@ -65,11 +81,24 @@ pub fn dispatch(
                 handle: handle.clone(),
                 label,
             };
-            tracing::info!(handle = %handle, "ato_store: opening capsule from catalog");
+            tracing::info!(handle = %handle, "ato_store: opening/installing/running capsule from catalog");
             if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle = %handle, "ato_store: open_consent_window_for_route failed");
             }
+        }
+        StoreCommand::GetSessionStatus => {
+            tracing::debug!(
+                "ato_store: GetSessionStatus — stub, responds via init_script in future"
+            );
+            // TODO: In a follow-up PR, dispatch ato desktop-auth-handoff,
+            // evaluate_script a CustomEvent('ato:auth-state-changed', {authenticated, publisher}).
+        }
+        StoreCommand::Login => {
+            tracing::info!("ato_store: Login triggered — desktop auth flow");
+            // TODO: spawn ato login --desktop-webview as child process,
+            // open a second WebView for OAuth, on completion inject auth token
+            // and dispatch a CustomEvent to the store WebView.
         }
         StoreCommand::BrowseUrl { url } => {
             if let Ok(parsed) = url::Url::parse(&url) {
