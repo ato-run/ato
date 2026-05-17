@@ -433,8 +433,22 @@ pub fn run() {
         // Quit is intercepted by DesktopShell so it can prompt the
         // user to keep or clear persisted tabs. ConfirmQuitKeep /
         // ConfirmQuitClear / CancelQuit are the resolution actions.
-        cx.on_action(|_: &ConfirmQuitKeep, cx| cx.quit());
+        cx.on_action(|_: &ConfirmQuitKeep, cx| {
+            if crate::window::is_multi_window_enabled() {
+                let count = cx
+                    .global_mut::<crate::state::session::SessionRegistry>()
+                    .stop_all_running();
+                tracing::info!(count, "app quit: stopped running sessions");
+            }
+            cx.quit();
+        });
         cx.on_action(|_: &ConfirmQuitClear, cx| {
+            if crate::window::is_multi_window_enabled() {
+                let count = cx
+                    .global_mut::<crate::state::session::SessionRegistry>()
+                    .stop_all_running();
+                tracing::info!(count, "app quit: stopped running sessions");
+            }
             if let Ok(path) = ato_path("desktop-tabs.json") {
                 let _ = std::fs::remove_file(&path);
             }
