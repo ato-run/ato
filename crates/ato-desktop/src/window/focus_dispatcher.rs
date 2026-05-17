@@ -351,13 +351,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             // spawns the AppWindow, opens
                                             // the boot wizard.
                                             "ForceApprovePending" => {
-                                                let pending = cx
-                                                    .try_global::<crate::window::launch_window::PendingLaunchTarget>()
-                                                    .and_then(|g| g.0.clone());
-                                                cx.set_global(
-                                                    crate::window::launch_window::PendingLaunchTarget(None),
-                                                );
-                                                match pending {
+                                                let stashed: Option<crate::state::GuestRoute> = cx
+                                                    .global_mut::<crate::window::launch_window::PendingLaunches>()
+                                                    .0
+                                                    .drain()
+                                                    .next()
+                                                    .map(|(_, s)| s.route);
+                                                match stashed {
                                                     Some(route) => {
                                                         tracing::info!(
                                                             ?route,
