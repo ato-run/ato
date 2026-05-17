@@ -804,7 +804,7 @@ fn info_icon_button() -> impl IntoElement {
             window.dispatch_action(Box::new(ToggleControlBarInfoPopup), cx);
         })
         .child(
-            Icon::new(IconName::Info)
+            Icon::new(IconName::Settings)
                 .size(px(13.0))
                 .text_color(rgb(0x71717a)),
         )
