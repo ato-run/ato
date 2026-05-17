@@ -305,8 +305,11 @@ impl ControlBarShellPlaceholder {
                 }
                 InputEvent::Blur => {
                     this.omnibar_focused = false;
+                    let was_expanded = cx.global::<ControlBarController>().expanded;
                     cx.global_mut::<ControlBarController>().collapse();
-                    resize_bar_window_in_handler(window, false);
+                    if was_expanded && !cx.global::<ControlBarController>().expanded {
+                        resize_bar_window_in_handler(window, false);
+                    }
                     cx.notify();
                 }
             },
