@@ -116,7 +116,11 @@ actions!(
         // Opens the Dock window — the publisher tool for managing
         // capsules, setting up a Dock, and monitoring publish status.
         // URL: capsule://run.ato.desktop/dock
-        OpenDockWindow
+        OpenDockWindow,
+        // Toggle the Control Bar info popup (anchor below URL bar)
+        ToggleControlBarInfoPopup,
+        // Toggle star/pin state for the current capsule URL
+        ToggleStarCapsule
     ]
 );
 
@@ -349,6 +353,8 @@ pub fn run() {
         cx.set_global(crate::window::dock::DockEntitySlot::default());
         cx.set_global(crate::window::capsule_panel::CapsulePanelWindowSlot::default());
         cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot::default());
+        // Slot tracking the control bar info popup.
+        cx.set_global(crate::window::control_bar::InfoPopupWindowSlot::default());
         // Slot tracking the in-Desktop OAuth login window.
         cx.set_global(crate::window::auth_login_window::AuthLoginWindowSlot::default());
 
@@ -520,6 +526,22 @@ pub fn run() {
             {
                 cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot(None));
                 tracing::info!("Capsule settings window closed; slot cleared");
+            }
+            let info_popup_slot = cx
+                .global::<crate::window::control_bar::InfoPopupWindowSlot>()
+                .0;
+            if info_popup_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                cx.set_global(crate::window::control_bar::InfoPopupWindowSlot(None));
+                if let Some(shell) = cx.global::<crate::window::ControlBarController>().shell.clone()
+                {
+                    shell.update(cx, |shell, _| {
+                        shell.info_popup_open = false;
+                    });
+                }
+                tracing::info!("Info popup window closed; slot cleared");
             }
             let store_slot = cx
                 .global::<crate::window::store::StoreWindowSlot>()
@@ -941,6 +963,23 @@ pub fn run() {
                 tracing::error!(error = %err, "failed to open dock window");
             }
         });
+
+        // Toggle the Control Bar info popup. Dispatched from the info icon
+        // button in the URL pill — safe because it runs outside render.
+        cx.on_action(|_: &ToggleControlBarInfoPopup, cx: &mut App| {
+            if let Some(shell) = cx.global::<crate::window::ControlBarController>().shell.clone() {
+                shell.update(cx, |shell, cx| shell.toggle_info_popup(cx));
+            }
+        });
+
+        // Toggle star/pin state for the current capsule URL. Dispatched from
+        // the star icon button in the URL pill.
+        cx.on_action(|_: &ToggleStarCapsule, cx: &mut App| {
+            if let Some(shell) = cx.global::<crate::window::ControlBarController>().shell.clone() {
+                shell.update(cx, |shell, cx| shell.toggle_star(cx));
+            }
+        });
+
         cx.on_action(|_: &OpenCapsulePanel, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 return;
