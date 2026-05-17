@@ -11,7 +11,7 @@ pub(crate) struct ImportArgs {
     #[arg(long = "recipe", value_name = "PATH")]
     pub(crate) recipe: Option<PathBuf>,
 
-    /// Run the resolved source with the provided recipe. Initial implementation records intent only.
+    /// Run the resolved source in a shadow workspace with the selected recipe.
     #[arg(long = "run", default_value_t = false)]
     pub(crate) run: bool,
 
