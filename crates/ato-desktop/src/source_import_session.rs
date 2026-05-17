@@ -84,6 +84,14 @@ pub(crate) struct GitHubImportSession {
     editable_recipe_toml: Option<String>,
     last_run: Option<ImportRun>,
     submit_enabled: bool,
+    /// True when `ato desktop-auth-handoff` succeeded for this session.
+    /// Drives whether the source-imports API calls run and how the UI
+    /// labels the Submit button (real action vs. "Sign in to submit").
+    signed_in: bool,
+    /// Source-import row id returned by the first
+    /// `POST /v1/source-imports` call. Required for subsequent
+    /// `/attempt` and `/submit-working-recipe` calls.
+    source_import_id: Option<String>,
 }
 
 impl Default for GitHubImportSession {
@@ -96,6 +104,8 @@ impl Default for GitHubImportSession {
             editable_recipe_toml: None,
             last_run: None,
             submit_enabled: false,
+            signed_in: false,
+            source_import_id: None,
         }
     }
 }
@@ -219,6 +229,8 @@ impl GitHubImportSession {
             editable_recipe_toml: self.editable_recipe_toml.clone(),
             last_run: self.last_run.clone(),
             submit_enabled: self.submit_enabled,
+            signed_in: self.signed_in,
+            source_import_id: self.source_import_id.clone(),
         }
     }
 
@@ -236,6 +248,28 @@ impl GitHubImportSession {
 
     pub(crate) fn repo(&self) -> Option<&NormalizedGitHubRepo> {
         self.repo.as_ref()
+    }
+
+    /// Record whether the user is currently signed in to ato. The
+    /// dispatch layer calls this once per session after the
+    /// `ato desktop-auth-handoff` discovery completes.
+    pub(crate) fn set_signed_in(&mut self, signed_in: bool) {
+        self.signed_in = signed_in;
+    }
+
+    pub(crate) fn signed_in(&self) -> bool {
+        self.signed_in
+    }
+
+    /// Record the source-import id returned by
+    /// `POST /v1/source-imports`. Subsequent /attempt and
+    /// /submit-working-recipe calls require this id.
+    pub(crate) fn set_source_import_id(&mut self, id: String) {
+        self.source_import_id = Some(id);
+    }
+
+    pub(crate) fn source_import_id(&self) -> Option<&str> {
+        self.source_import_id.as_deref()
     }
 }
 
@@ -255,6 +289,14 @@ pub(crate) struct SessionSnapshot {
     pub(crate) editable_recipe_toml: Option<String>,
     pub(crate) last_run: Option<ImportRun>,
     pub(crate) submit_enabled: bool,
+    /// True when ato desktop-auth-handoff returned credentials for
+    /// this session. The React UI uses this to decide whether the
+    /// Submit button reads "Submit this working recipe" (actionable)
+    /// or "Sign in to submit" (no-op until login).
+    pub(crate) signed_in: bool,
+    /// Source-import row id; null until the first
+    /// `POST /v1/source-imports` round-trip completes.
+    pub(crate) source_import_id: Option<String>,
 }
 
 pub(crate) fn normalize_github_import_input(input: &str) -> Result<NormalizedGitHubRepo> {
@@ -545,6 +587,25 @@ mod tests {
         assert_eq!(payload.source.repo_name, "blinko");
         assert_eq!(payload.recipe.recipe_hash, "blake3:recipehash");
         assert_eq!(payload.last_run.status, "passed");
+    }
+
+    #[test]
+    fn signed_in_and_source_import_id_round_trip_through_snapshot() {
+        let mut session = GitHubImportSession::default();
+        assert!(!session.signed_in());
+        assert!(session.source_import_id().is_none());
+
+        session.set_signed_in(true);
+        session.set_source_import_id("si_abc123".to_string());
+
+        let snap = session.snapshot();
+        assert!(snap.signed_in);
+        assert_eq!(snap.source_import_id.as_deref(), Some("si_abc123"));
+
+        // begin_resolve resets the session, including signed_in and id.
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        assert!(!session.signed_in());
+        assert!(session.source_import_id().is_none());
     }
 
     #[test]
