@@ -6,6 +6,7 @@ mod config;
 mod engine;
 mod explain_hash;
 mod fetch;
+mod import_cmd;
 mod inspect;
 mod install;
 mod internal;
@@ -45,6 +46,7 @@ use self::cache::execute_cache_command;
 use self::config::execute_config_command;
 use self::explain_hash::execute_explain_hash_command;
 use self::fetch::{execute_fetch_command, execute_finalize_command};
+use self::import_cmd::execute_import_command;
 use self::inspect::execute_inspect_command;
 use self::ipc::execute_ipc_command;
 use self::key::execute_key_command;
@@ -158,6 +160,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         ),
 
         Commands::ExplainHash { capsule } => execute_explain_hash_command(&capsule),
+
+        Commands::Import(args) => execute_import_command(args),
 
         Commands::Cache { command } => execute_cache_command(command),
 

@@ -36,6 +36,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::orchestrator::resolve_ato_binary;
+use crate::source_import_session::normalize_github_import_input;
 use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
 use crate::system_capsule::ipc as system_ipc;
@@ -1403,29 +1404,7 @@ fn default_manifest_toml(
 }
 
 fn normalize_public_github_url(raw_url: &str) -> Result<String> {
-    let url = Url::parse(raw_url.trim()).with_context(|| {
-        "Enter a public GitHub repository URL like https://github.com/owner/repo".to_string()
-    })?;
-    let host = url
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if url.scheme() != "https" || host != "github.com" {
-        anyhow::bail!("Only public https://github.com/<owner>/<repo> URLs are supported");
-    }
-    let segments: Vec<_> = url
-        .path_segments()
-        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
-        .unwrap_or_else(Vec::new);
-    if segments.len() != 2 {
-        anyhow::bail!("Use a repository root URL like https://github.com/<owner>/<repo>");
-    }
-    let owner = segments[0];
-    let repo = segments[1].trim_end_matches(".git");
-    if owner.is_empty() || repo.is_empty() {
-        anyhow::bail!("GitHub repository URL is missing owner or repo");
-    }
-    Ok(format!("https://github.com/{owner}/{repo}.git"))
+    normalize_github_import_input(raw_url).map(|repo| repo.clone_url)
 }
 
 fn parse_publish_json_output(stdout: &str) -> Result<Value> {
@@ -1645,12 +1624,19 @@ mod tests {
 
     #[test]
     fn normalize_public_github_url_accepts_repo_root_only() {
-        assert_eq!(
-            normalize_public_github_url("https://github.com/ato-run/ato").expect("repo url"),
-            "https://github.com/ato-run/ato.git"
-        );
+        for input in [
+            "ato-run/ato",
+            "github.com/ato-run/ato",
+            "https://github.com/ato-run/ato",
+        ] {
+            assert_eq!(
+                normalize_public_github_url(input).expect("repo url"),
+                "https://github.com/ato-run/ato.git"
+            );
+        }
         assert!(normalize_public_github_url("https://github.com/ato-run/ato/tree/main").is_err());
         assert!(normalize_public_github_url("http://github.com/ato-run/ato").is_err());
+        assert!(normalize_public_github_url("capsule://github.com/ato-run/ato").is_err());
     }
 
     #[test]
