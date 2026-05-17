@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --font-body: "Plus Jakarta Sans", "Geist", "Avenir Next", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Roboto Mono", monospace;
+  --c-bg: #F9FAFB;
+  --c-surface: #FFFFFF;
+  --c-primary: #111827;
+  --c-primary-hover: #374151;
+  --c-success: #10B981;
+  --c-link: #2563EB;
+  --c-border: #E5E7EB;
+  --c-text: #111827;
+  --c-text-secondary: #6B7280;
+  --c-text-muted: #9CA3AF;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  background: var(--c-bg);
+  color: var(--c-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.14);
+  color: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+code,
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+.dock-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.dock-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dock-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.35);
+  border-radius: 999px;
+}
+
+.dock-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.55);
+}
+
+.dock-fade-in {
+  animation: dockFadeIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dockFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dock-slide-up {
+  animation: dockSlideUp 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dockSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dock-content-enter {
+  animation: dockContentEnter 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dockContentEnter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dock-toast-enter {
+  animation: dockToastIn 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dockToastIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.dock-modal-enter {
+  animation: dockModalIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dockModalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dock-fade-in,
+  .dock-slide-up,
+  .dock-content-enter,
+  .dock-toast-enter,
+  .dock-modal-enter {
+    animation: none;
+  }
+}
