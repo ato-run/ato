@@ -706,13 +706,16 @@ pub(super) fn start_runtime_session(
         runtime_process.child.id() as i32,
         dep_contracts.as_ref(),
     );
-    // Slice A of #125 (umbrella #74): populate the persisted ExecutionGraph
-    // subset alongside `dependency_contracts`. Write-only — teardown still
-    // reads `dependency_contracts`. Parity is enforced in debug builds by
-    // the populator's internal `debug_assert!`.
+    // PR-5a: emit provider→provider `depends_on` edges from the
+    // live `RunningGraph.deps()[i].needs` so PR-5b's
+    // `teardown_from_graph` has the reverse-topological ordering it
+    // needs. When `dep_contracts` is `None`, the needs map is empty
+    // and the populator behaves like the 1-arg form.
+    let provider_needs = dep_contracts_provider_needs(dep_contracts.as_ref());
     let graph =
-        crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
+        crate::application::session_graph_populate::populate_graph_from_dependency_contracts_with_needs(
             legacy_dependency_contracts.as_ref(),
+            provider_needs.as_ref(),
         );
     let dependency_contracts =
         crate::application::session_graph_populate::dependency_contracts_from_graph(
@@ -1012,20 +1015,24 @@ pub(super) fn start_orchestration_session_in_process(
     // [dependencies.<alias>] subset — same as single-target session.
     let legacy_dependency_contracts =
         dependency_contracts_for_session_record(leaf_local_pid, dep_contracts.as_ref());
-    // Slice A of #125 (umbrella #74): populate the persisted ExecutionGraph
-    // subset alongside `dependency_contracts`. Write-only — teardown still
-    // reads `dependency_contracts`. Parity is enforced in debug builds by
-    // the populator's internal `debug_assert!`.
+    // PR-5a: live provider needs + manifest service depends_on map
+    // for teardown-order edges. See session_graph_populate.rs
+    // EDGE_KIND_DEPENDS_ON / EDGE_KIND_USES docstrings.
+    let provider_needs = dep_contracts_provider_needs(dep_contracts.as_ref());
+    let manifest_service_deps = manifest_service_depends_on_map(&plan.manifest);
     let graph =
-        crate::application::session_graph_populate::populate_graph_from_dependency_contracts(
+        crate::application::session_graph_populate::populate_graph_from_dependency_contracts_with_needs(
             legacy_dependency_contracts.as_ref(),
+            provider_needs.as_ref(),
         );
     let orchestration_services =
         orchestration_services_for_session_record(std::process::id() as i32, &detached.services);
-    let graph = crate::application::session_graph_populate::append_orchestration_services_to_graph(
-        graph,
-        orchestration_services.as_ref(),
-    );
+    let graph =
+        crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
+            graph,
+            orchestration_services.as_ref(),
+            manifest_service_deps.as_ref(),
+        );
     let dependency_contracts =
         crate::application::session_graph_populate::dependency_contracts_from_graph(
             graph.as_ref(),
@@ -1407,6 +1414,74 @@ fn dependency_contracts_for_session_record(
         consumer_pid,
         providers,
     })
+}
+
+/// PR-5a: extract per-provider `needs` (alias → needed-aliases) so
+/// the session_graph populator can emit provider→provider
+/// `depends_on` edges.
+///
+/// Today `RunningDep` does not carry `needs` (that field exists on
+/// `TeardownTarget` but not on the live runtime dep). Until a
+/// future commit threads needs through to `RunningDep`,
+/// provider→provider `depends_on` edges remain empty and
+/// PR-5b's `teardown_from_graph` will see no inter-provider
+/// ordering. Provider teardown still works via the legacy
+/// `teardown_reverse_topological` fallback because
+/// `graph_complete_for_teardown` returns false when a multi-
+/// provider session has no `depends_on` edges between them. Single-
+/// provider sessions are unaffected.
+///
+/// This stub returns `None` unconditionally so the populator skips
+/// emitting any provider depends_on edges. PR-6 demotion (or a
+/// future PR-5c) will lift this once `RunningDep.needs` exists.
+fn dep_contracts_provider_needs(
+    _dep_contracts: Option<&DependencyContractGuard>,
+) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    None
+}
+
+/// PR-5a: extract per-service `depends_on` (service-name →
+/// dep-targets) from the raw manifest's `[services.<name>]` table.
+/// Targets may be either sibling service names or provider aliases;
+/// the populator classifies them at edge-emit time. Returns `None`
+/// when the manifest has no `[services]` table or no depends_on
+/// declarations.
+fn manifest_service_depends_on_map(
+    manifest_raw: &toml::Value,
+) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    let services = manifest_raw.get("services")?.as_table()?;
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (service_name, value) in services {
+        let depends_on = value
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // Also fold in [services.<name>.dependencies.<alias>] keys
+        // (service-to-provider).
+        let mut targets = depends_on;
+        if let Some(deps_table) =
+            value.get("dependencies").and_then(|v| v.as_table())
+        {
+            for alias in deps_table.keys() {
+                if !targets.iter().any(|t| t == alias) {
+                    targets.push(alias.clone());
+                }
+            }
+        }
+        if !targets.is_empty() {
+            out.insert(service_name.clone(), targets);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInfo {
