@@ -417,6 +417,30 @@ impl SessionRegistry {
         });
     }
 
+    /// Stop every session that is still running (Starting or Ready).
+    /// Called on app quit so the Focus-mode close path (which lacks
+    /// `WebViewManager::Drop`) does not leave orphan processes.
+    ///
+    /// Delegates to `stop_session_once` which guards against double-stop.
+    pub fn stop_all_running(&mut self) -> usize {
+        let running: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.process_state,
+                    SessionProcessState::Starting | SessionProcessState::Ready
+                )
+            })
+            .map(|s| s.session_id.clone())
+            .collect();
+        let count = running.len();
+        for sid in &running {
+            self.stop_session_once(sid);
+        }
+        count
+    }
+
     // ── view model ───────────────────────────────────────────────────────
 
     /// Build `SessionViewEntry` rows for the Open Windows screen.
@@ -939,5 +963,38 @@ mod tests {
             .collect();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].window_id, Some(200));
+    }
+
+    #[test]
+    fn stop_all_running_stops_only_running_sessions() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "t1"));
+        reg.register_session(make_session("s2", "t2"));
+        reg.register_session(make_session("s3", "t3"));
+
+        reg.update_process_state("s1", SessionProcessState::Ready);
+        reg.update_process_state("s2", SessionProcessState::Stopped);
+        reg.update_process_state("s3", SessionProcessState::Stopping);
+
+        let count = reg.stop_all_running();
+        assert_eq!(count, 1);
+        assert_eq!(
+            reg.get_session("s1").unwrap().process_state,
+            SessionProcessState::Stopping
+        );
+        assert_eq!(
+            reg.get_session("s2").unwrap().process_state,
+            SessionProcessState::Stopped
+        );
+    }
+
+    #[test]
+    fn stop_all_running_on_all_stopped_returns_zero() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "t1"));
+        reg.update_process_state("s1", SessionProcessState::Stopped);
+
+        let count = reg.stop_all_running();
+        assert_eq!(count, 0);
     }
 }
