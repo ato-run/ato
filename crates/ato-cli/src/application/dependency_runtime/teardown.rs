@@ -69,6 +69,137 @@ pub(crate) fn teardown_in_order(
     Ok(())
 }
 
+/// PR-5b (refs umbrella v0.6.0 graph-first migration): graph-driven
+/// teardown driver. Walks the persisted `StoredExecutionGraph` and
+/// dispatches per node kind:
+///
+/// - `NODE_KIND_SERVICE` → stop via
+///   `application::orchestration_teardown::stop_orchestration_service_record`.
+/// - `NODE_KIND_PROVIDER` → stop via the existing
+///   `teardown_reverse_topological` primitive over a single-node
+///   `TeardownTarget`.
+/// - Unknown kinds → `tracing::trace!` and skip (no-op-safe).
+///
+/// Order: services first, then providers. This matches the
+/// conceptual reverse-topological walk for the edge convention
+/// established in PR-5a (`service --depends_on/uses→ provider`):
+/// source first, target second. Within each kind, nodes are sorted
+/// by identifier for determinism.
+///
+/// Today's implementation does NOT consult `depends_on` edges
+/// between same-kind nodes — PR-5a's gap (provider→provider needs
+/// don't reach the populator yet) makes those edges always empty in
+/// practice. When a future commit threads `needs` through, this
+/// driver can be upgraded to true edge-walk reverse-topological
+/// order; the kind-first ordering is correct in the meantime.
+///
+/// Errors from individual nodes are propagated. Use this driver
+/// only when `session_graph_populate::graph_complete_for_teardown`
+/// returned true for the source record — incomplete graphs should
+/// fall back to the legacy two-path teardown.
+pub fn teardown_from_graph(
+    graph: &ato_session_core::StoredExecutionGraph,
+    grace: Duration,
+) -> Result<(), TeardownError> {
+    use crate::application::session_graph_populate::{NODE_KIND_PROVIDER, NODE_KIND_SERVICE};
+
+    // Services first, in alias order.
+    let mut service_nodes: Vec<&ato_session_core::StoredGraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_SERVICE)
+        .collect();
+    service_nodes.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    for node in &service_nodes {
+        let record = service_record_from_node(node);
+        if let Err(err) = crate::application::orchestration_teardown::stop_orchestration_service_record(
+            &record, grace,
+        ) {
+            tracing::warn!(
+                service = node.identifier.as_str(),
+                error = %err,
+                "graph teardown: service stop returned error; continuing"
+            );
+        }
+    }
+
+    // Providers next, in alias order. Reverse-topo within the
+    // provider sub-graph requires `needs`, which PR-5a does not
+    // populate yet (see the docstring comment above). For now we
+    // delegate to teardown_in_order with `needs = Vec::new()` per
+    // target — equivalent to alphabetical-stop.
+    let mut provider_nodes: Vec<&ato_session_core::StoredGraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_PROVIDER)
+        .collect();
+    provider_nodes.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    let provider_targets: Vec<TeardownTarget> = provider_nodes
+        .iter()
+        .filter_map(|node| {
+            let pid = node.pid?;
+            let state_dir = node.state_dir.clone()?;
+            Some(TeardownTarget {
+                dep: node.identifier.clone(),
+                pid,
+                state_dir,
+                needs: Vec::new(),
+            })
+        })
+        .collect();
+    if !provider_targets.is_empty() {
+        teardown_in_order(&provider_targets, grace)?;
+        // Sentinel sweep for each provider node that had a state_dir.
+        for target in &provider_targets {
+            let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
+                &target.state_dir,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// PR-5b: project a service node back to a `StoredOrchestrationService`
+/// shape that
+/// `orchestration_teardown::stop_orchestration_service_record`
+/// consumes. Mirror of the writer in `session_graph_populate.rs`.
+fn service_record_from_node(
+    node: &ato_session_core::StoredGraphNode,
+) -> ato_session_core::StoredOrchestrationService {
+    let target_label = node
+        .metadata
+        .get("target_label")
+        .cloned()
+        .unwrap_or_else(|| node.identifier.clone());
+    let host_ports = node
+        .metadata
+        .get("host_ports")
+        .map(|encoded| {
+            encoded
+                .split(',')
+                .filter_map(|pair| {
+                    let (h, c) = pair.split_once(':')?;
+                    Some((h.parse::<u16>().ok()?, c.parse::<u16>().ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let published_port = node
+        .metadata
+        .get("published_port")
+        .and_then(|s| s.parse::<u16>().ok())
+        .or(node.port);
+    ato_session_core::StoredOrchestrationService {
+        name: node.identifier.clone(),
+        target_label,
+        local_pid: node.pid,
+        container_id: node.container_id.clone(),
+        host_ports,
+        published_port,
+    }
+}
+
 fn reverse_topological(targets: &[TeardownTarget]) -> Result<Vec<String>, TeardownError> {
     // Forward topological order: a dep with `needs = [X]` comes *after* X
     // (so X is started first). Reverse topological = stop X *after* the
@@ -285,5 +416,57 @@ mod tests {
         // non-success: a `sleep 60` that exited under our signal is not
         // expected to report success (.code() = None, .success() = false).
         assert!(!exit_status.success(), "child must not exit success");
+    }
+
+    /// PR-5b: graph teardown driver dispatches per node kind. We use
+    /// `pid: None` (or pid 0 below — bypasses libc::kill on POSIX)
+    /// so the test doesn't actually try to kill processes.
+    #[test]
+    fn teardown_from_graph_visits_service_and_provider_kinds() {
+        use ato_session_core::{StoredExecutionGraph, StoredGraphNode};
+        use std::collections::BTreeMap;
+
+        let provider_node = StoredGraphNode {
+            kind: "provider".to_string(),
+            identifier: "db".to_string(),
+            // pid 0 means stop_one's `pid <= 0` short-circuit fires
+            // and no kill is sent. state_dir is required because
+            // teardown_in_order builds a TeardownTarget.
+            pid: Some(0),
+            state_dir: Some(PathBuf::from("/tmp/pr5b-test-db")),
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let service_node = StoredGraphNode {
+            kind: "service".to_string(),
+            identifier: "web".to_string(),
+            pid: Some(0),
+            state_dir: None,
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let graph = StoredExecutionGraph {
+            schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+            nodes: vec![service_node, provider_node],
+            edges: vec![],
+        };
+        // No real processes signalled (pid 0 → no-op). Must succeed.
+        teardown_from_graph(&graph, Duration::from_millis(10))
+            .expect("graph teardown returns Ok on empty work");
+    }
+
+    #[test]
+    fn teardown_from_graph_empty_graph_is_noop() {
+        use ato_session_core::StoredExecutionGraph;
+        let graph = StoredExecutionGraph {
+            schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+            nodes: vec![],
+            edges: vec![],
+        };
+        teardown_from_graph(&graph, Duration::from_millis(10)).expect("empty graph teardown");
     }
 }

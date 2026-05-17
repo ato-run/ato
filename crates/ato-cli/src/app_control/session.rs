@@ -2626,33 +2626,70 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             false
         }
     };
-    if !sidecar_has_providers || !stopped {
-        match stop_recorded_dependency_contracts(session_record.as_ref(), true) {
-            Ok(record_stopped) => {
-                if record_stopped {
-                    let _ = process_manager.delete_pid(session_id);
+
+    // PR-5b: prefer graph-driven teardown when the persisted graph is
+    // complete (every provider has pid+state_dir; service node count
+    // matches; etc — see `graph_complete_for_teardown`). Incomplete
+    // graphs (older session records, partial teardown info) fall
+    // through to the legacy two-path teardown below.
+    let used_graph_teardown = if let Some(record) = session_record.as_ref() {
+        if crate::application::session_graph_populate::graph_complete_for_teardown(record) {
+            if let Some(graph) = record.graph.as_ref() {
+                match crate::application::dependency_runtime::teardown::teardown_from_graph(
+                    graph,
+                    Duration::from_secs(0),
+                ) {
+                    Ok(()) => {
+                        stopped = true;
+                        let _ = process_manager.delete_pid(session_id);
+                        true
+                    }
+                    Err(err) => {
+                        if stop_error.is_none() {
+                            stop_error = Some(anyhow::Error::new(err));
+                        }
+                        false
+                    }
                 }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !used_graph_teardown {
+        if !sidecar_has_providers || !stopped {
+            match stop_recorded_dependency_contracts(session_record.as_ref(), true) {
+                Ok(record_stopped) => {
+                    if record_stopped {
+                        let _ = process_manager.delete_pid(session_id);
+                    }
+                    stopped |= record_stopped;
+                }
+                Err(err) => {
+                    if stop_error.is_none() {
+                        stop_error = Some(err);
+                    }
+                }
+            }
+        }
+        // Orchestration `[services]` graph teardown (#73 PR-D, closes #28
+        // phase 2). Independent of the dep-contract sidecar — orchestration
+        // sessions persist their services subset on the record and there is
+        // no sidecar form. `force=true` matches the dep-contract path's
+        // behavior on `stop_session`.
+        match stop_recorded_orchestration_services(session_record.as_ref(), true) {
+            Ok(record_stopped) => {
                 stopped |= record_stopped;
             }
             Err(err) => {
                 if stop_error.is_none() {
                     stop_error = Some(err);
                 }
-            }
-        }
-    }
-    // Orchestration `[services]` graph teardown (#73 PR-D, closes #28
-    // phase 2). Independent of the dep-contract sidecar — orchestration
-    // sessions persist their services subset on the record and there is
-    // no sidecar form. `force=true` matches the dep-contract path's
-    // behavior on `stop_session`.
-    match stop_recorded_orchestration_services(session_record.as_ref(), true) {
-        Ok(record_stopped) => {
-            stopped |= record_stopped;
-        }
-        Err(err) => {
-            if stop_error.is_none() {
-                stop_error = Some(err);
             }
         }
     }
