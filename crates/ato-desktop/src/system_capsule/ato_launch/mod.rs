@@ -100,14 +100,19 @@ pub fn dispatch(
             }
             cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
 
-            let pending = cx
-                .try_global::<crate::window::launch_window::PendingLaunchTarget>()
-                .and_then(|g| g.0.clone());
-            cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
+            let stashed = cx
+                .global_mut::<crate::window::launch_window::PendingLaunches>()
+                .0
+                .remove(&preview_id);
+            let pending_route = stashed.as_ref().map(|s| s.route.clone());
+            let requested_client = stashed
+                .as_ref()
+                .map(|s| s.requested_client)
+                .unwrap_or(crate::state::session::SessionClientKind::AtoWindow);
 
             // Derive route handle for secret grants (must match what
             // AppCapsuleShell uses via secrets_for_capsule).
-            let route_handle: Option<String> = match &pending {
+            let route_handle: Option<String> = match &pending_route {
                 Some(GuestRoute::CapsuleHandle { handle, .. }) => Some(handle.clone()),
                 Some(GuestRoute::CapsuleUrl { handle, .. }) => Some(handle.clone()),
                 _ => None,
@@ -159,7 +164,7 @@ pub fn dispatch(
                 plain_configs.clone(),
             ));
 
-            if let Some(route) = pending {
+            if let Some(route) = pending_route {
                 match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
                     Ok(boot_handle) => {
                         // start_boot_launch owns the background launch
@@ -205,7 +210,7 @@ pub fn dispatch(
         }
         LaunchCommand::Cancel => {
             tracing::info!("ato_launch: user cancelled");
-            cx.set_global(crate::window::launch_window::PendingLaunchTarget(None));
+            cx.set_global(crate::window::launch_window::PendingLaunches::default());
             cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
