@@ -179,6 +179,7 @@ pub fn dispatch(
                             route.clone(),
                             plain_configs,
                             boot_handle,
+                            requested_client,
                         );
 
                         // Record launch in the start-page history so the
