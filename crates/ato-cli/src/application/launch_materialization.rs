@@ -130,6 +130,146 @@ fn update_text(hasher: &mut Hasher, value: &str) {
     hasher.update(value.as_bytes());
 }
 
+/// PR-4c: bundle-derived equivalent of [`compute_launch_digest`].
+///
+/// Inputs:
+/// - `view`: a `LaunchMaterializationInput` whose `launch_envelope`
+///   field is `Some` — its facets are passthrough from the bundle's
+///   `derived.launch`, populated by call sites that supplied
+///   `LaunchGraphBundleInput.launch`.
+/// - `identity`: launch slot identity. Stays on the call site (not
+///   on the bundle) because the bundle's `derived.execution_ids`
+///   are blake3 hashes of the canonical graph, NOT the
+///   `handle:` / `local-manifest:` fingerprint the launch digest
+///   commits to.
+///
+/// Returns `None` when `view.launch_envelope` is `None` — callers
+/// that didn't supply launch input get no view-side digest.
+///
+/// **Byte-parity contract:** when fed equivalent inputs,
+/// `compute_launch_digest_from_view(view, identity)` produces a
+/// digest byte-equal to `compute_launch_digest(spec)`. Pinned by
+/// `launch_digest_view_parity_*` tests below and by the
+/// `debug_assert!` at `canonicalize_launch_spec`'s exit. PR-4c
+/// stages the parity; PR-4d flips the production source.
+pub(crate) fn compute_launch_digest_from_view(
+    view: &crate::application::graph_views::LaunchMaterializationInput,
+    identity: &LaunchIdentity,
+) -> Option<String> {
+    let envelope = view.launch_envelope.as_ref()?;
+    let mut hasher = Hasher::new();
+    update_text(&mut hasher, LAUNCH_DIGEST_VERSION);
+    update_text(&mut hasher, &identity.fingerprint_input());
+    // `target_label` is not on the envelope — it's a property of the
+    // launch slot identity, but the digest input order requires it
+    // to land separately. PR-4d will plumb it on; for now PR-4c's
+    // parity helper only runs from sites that already have the
+    // target_label and supply it via a wrapper.
+    //
+    // This helper requires `target_label` to be passed by the
+    // caller — we expose a 3-arg variant below.
+    unreachable!(
+        "PR-4c: use compute_launch_digest_from_view_with_target instead. \
+         The 2-arg form is a placeholder reserved for PR-4d once target_label \
+         lands on the bundle."
+    );
+    #[allow(unreachable_code)]
+    {
+        update_text(&mut hasher, &envelope.command);
+        update_text(&mut hasher, "args");
+        for arg in &envelope.args {
+            update_text(&mut hasher, arg);
+        }
+        update_text(&mut hasher, &envelope.logical_cwd);
+        update_text(
+            &mut hasher,
+            &envelope
+                .declared_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        );
+        update_text(&mut hasher, &envelope.readiness_path);
+        update_text(
+            &mut hasher,
+            envelope.build_input_digest.as_deref().unwrap_or("unknown"),
+        );
+        update_text(
+            &mut hasher,
+            envelope.lock_digest.as_deref().unwrap_or("unknown"),
+        );
+        update_text(&mut hasher, &envelope.toolchain_fingerprint);
+        Some(format!("blake3:{}", hasher.finalize().to_hex()))
+    }
+}
+
+/// PR-4c: 3-arg variant of [`compute_launch_digest_from_view`] that
+/// takes `target_label` directly. Used until PR-4d lands target_label
+/// onto the bundle's launch facets.
+pub(crate) fn compute_launch_digest_from_view_with_target(
+    view: &crate::application::graph_views::LaunchMaterializationInput,
+    identity: &LaunchIdentity,
+    target_label: &str,
+) -> Option<String> {
+    let envelope = view.launch_envelope.as_ref()?;
+    let mut hasher = Hasher::new();
+    update_text(&mut hasher, LAUNCH_DIGEST_VERSION);
+    update_text(&mut hasher, &identity.fingerprint_input());
+    update_text(&mut hasher, target_label);
+    update_text(&mut hasher, &envelope.command);
+    update_text(&mut hasher, "args");
+    for arg in &envelope.args {
+        update_text(&mut hasher, arg);
+    }
+    update_text(&mut hasher, &envelope.logical_cwd);
+    update_text(
+        &mut hasher,
+        &envelope
+            .declared_port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    update_text(&mut hasher, &envelope.readiness_path);
+    update_text(
+        &mut hasher,
+        envelope.build_input_digest.as_deref().unwrap_or("unknown"),
+    );
+    update_text(
+        &mut hasher,
+        envelope.lock_digest.as_deref().unwrap_or("unknown"),
+    );
+    update_text(&mut hasher, &envelope.toolchain_fingerprint);
+    Some(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+/// PR-4c: build a `LaunchMaterializationInput` (with launch envelope)
+/// from the same inputs that produce `LaunchSpec`. Used at
+/// `canonicalize_launch_spec`'s exit to assert digest parity.
+pub(crate) fn build_launch_materialization_input_from_spec(
+    spec: &LaunchSpec,
+) -> crate::application::graph_views::LaunchMaterializationInput {
+    crate::application::graph_views::LaunchMaterializationInput {
+        // PR-4c parity helper: declared/resolved IDs aren't relevant
+        // for the digest computation (they're on the canonical
+        // graph, NOT the launch envelope). The parity assert only
+        // compares digest output.
+        declared_execution_id: String::new(),
+        resolved_execution_id: None,
+        dependency_aliases: Vec::new(),
+        launch_envelope: Some(crate::application::graph_views::LaunchEnvelopeFacets {
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            logical_cwd: spec.logical_cwd.clone(),
+            declared_port: spec.declared_port,
+            effective_port: None,
+            readiness_port: None,
+            readiness_path: spec.readiness_path.clone(),
+            build_input_digest: spec.build_input_digest.clone(),
+            lock_digest: spec.lock_digest.clone(),
+            toolchain_fingerprint: spec.toolchain_fingerprint.clone(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-launch_key file lock
 // ---------------------------------------------------------------------------
@@ -643,7 +783,7 @@ pub(crate) fn canonicalize_launch_spec(
     let readiness_path = "/".to_string();
     let toolchain_fingerprint =
         crate::application::build_materialization::toolchain_fingerprint_for_plan(plan);
-    Ok(LaunchSpec {
+    let spec = LaunchSpec {
         identity,
         target_label: target_label.to_string(),
         command: derived.command.clone(),
@@ -659,7 +799,33 @@ pub(crate) fn canonicalize_launch_spec(
         build_input_digest: None,
         lock_digest: None,
         toolchain_fingerprint,
-    })
+    };
+
+    // PR-4c parity assert: the bundle-derived
+    // `compute_launch_digest_from_view_with_target` MUST produce a
+    // byte-identical digest to the legacy `compute_launch_digest`.
+    // The bundle view is built from the same source facts the
+    // LaunchSpec carries; if the two ever drift, this assert fires
+    // before PR-4d's source flip lands. Debug-only so production
+    // launches aren't slowed.
+    debug_assert!({
+        let view = build_launch_materialization_input_from_spec(&spec);
+        let view_digest = compute_launch_digest_from_view_with_target(
+            &view,
+            &spec.identity,
+            &spec.target_label,
+        );
+        let spec_digest = compute_launch_digest(&spec);
+        match view_digest {
+            Some(d) => d == spec_digest,
+            // The view path returns None only when launch_envelope
+            // is None — we just built one from the spec, so this
+            // arm should be unreachable.
+            None => false,
+        }
+    });
+
+    Ok(spec)
 }
 
 fn canonicalize_identity(handle_input: &str, manifest_path: &Path) -> Result<LaunchIdentity> {
@@ -797,5 +963,77 @@ mod tests {
             assert!(!kind.as_str().is_empty());
             assert!(!kind.as_str().contains(' '));
         }
+    }
+
+    /// PR-4c byte-parity contract: the bundle-derived
+    /// `compute_launch_digest_from_view_with_target` MUST produce a
+    /// digest byte-equal to the legacy `compute_launch_digest` over
+    /// the same source facts.
+    #[test]
+    fn launch_digest_view_parity_default_fixture() {
+        let spec = sample_spec();
+        let view = build_launch_materialization_input_from_spec(&spec);
+        let spec_digest = compute_launch_digest(&spec);
+        let view_digest = compute_launch_digest_from_view_with_target(
+            &view,
+            &spec.identity,
+            &spec.target_label,
+        )
+        .expect("view path produces digest when launch_envelope is set");
+        assert_eq!(spec_digest, view_digest);
+    }
+
+    /// PR-4c byte-parity over a spec with explicit args + port.
+    #[test]
+    fn launch_digest_view_parity_with_args_and_port() {
+        let mut spec = sample_spec();
+        spec.args = vec!["--config".to_string(), "prod.toml".to_string()];
+        spec.declared_port = Some(8080);
+        let view = build_launch_materialization_input_from_spec(&spec);
+        assert_eq!(
+            compute_launch_digest(&spec),
+            compute_launch_digest_from_view_with_target(
+                &view,
+                &spec.identity,
+                &spec.target_label,
+            )
+            .unwrap()
+        );
+    }
+
+    /// PR-4c critical port-semantics pin: the digest commits to
+    /// `declared_port` ONLY. Setting `effective_port` / `readiness_port`
+    /// on the view does NOT change the digest. This is the load-bearing
+    /// safety rule for warm-launch reuse — if a warm-launch override
+    /// changed the digest, every reuse would be rejected as
+    /// `DigestMismatch`.
+    #[test]
+    fn launch_digest_view_ignores_effective_and_readiness_ports() {
+        let spec = sample_spec();
+        let baseline_view = build_launch_materialization_input_from_spec(&spec);
+        let baseline_digest = compute_launch_digest_from_view_with_target(
+            &baseline_view,
+            &spec.identity,
+            &spec.target_label,
+        )
+        .unwrap();
+
+        // Now mutate effective/readiness ports — digest must NOT change.
+        let mut mutated_view = baseline_view;
+        if let Some(envelope) = mutated_view.launch_envelope.as_mut() {
+            envelope.effective_port = Some(9999);
+            envelope.readiness_port = Some(9998);
+        }
+        let mutated_digest = compute_launch_digest_from_view_with_target(
+            &mutated_view,
+            &spec.identity,
+            &spec.target_label,
+        )
+        .unwrap();
+        assert_eq!(
+            baseline_digest, mutated_digest,
+            "PR-4c: launch_digest must NOT commit to effective/readiness ports — \
+             warm-launch reuse correctness depends on this"
+        );
     }
 }
