@@ -853,6 +853,7 @@ pub fn start_boot_launch(
     route: GuestRoute,
     configs: Vec<(String, String)>,
     boot_handle: AnyWindowHandle,
+    requested_client: crate::state::session::SessionClientKind,
 ) {
     let abort_flag = Arc::new(AtomicBool::new(false));
     let boot_shell_weak = cx
@@ -967,35 +968,90 @@ pub fn start_boot_launch(
                                             );
                                         });
                                     }
-                                    match crate::window::orchestrator::open_ready_capsule_window(
-                                        cx,
-                                        route_for_open.clone(),
-                                        session,
-                                    ) {
-                                        Ok(app_handle) => {
-                                            close_boot_window_handle(cx, boot_handle);
-                                            let _ = app_handle.update(cx, |_, window, _| {
-                                                window.activate_window()
-                                            });
-                                            record_start_history(&route_for_open);
+
+                                    if requested_client
+                                        == crate::state::session::SessionClientKind::OsBrowser
+                                    {
+                                        // OsBrowser path: open in system browser,
+                                        // register an OsBrowser client in SessionRegistry.
+                                        if let Some(ref url) = session.local_url {
+                                            let _ = crate::ui::open_external_url(url);
                                         }
-                                        Err(err) => {
-                                            stop_session_async(session_id);
-                                            if let Some(shell) = shell_for_result
-                                                .as_ref()
-                                                .and_then(|weak| weak.upgrade())
-                                            {
-                                                let _ = shell.update(cx, |shell, _cx| {
-                                                    shell.push_detail(
-                                                        "Failed to create app window from session",
-                                                    );
+                                        let mut registry = cx
+                                            .global_mut::<crate::state::session::SessionRegistry>();
+                                        use crate::state::session::{
+                                            CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession,
+                                            LaunchVia, SessionClient, SessionClientId,
+                                            SessionClientKind, SessionClientState,
+                                            SessionProcessState,
+                                        };
+                                        use std::time::SystemTime;
+                                        let caps_session = CapsuleSession {
+                                            session_id: session.session_id.clone(),
+                                            handle: session.handle.clone(),
+                                            canonical_handle: session.canonical_handle.clone(),
+                                            title: session
+                                                .snapshot_label
+                                                .clone()
+                                                .unwrap_or_else(|| session.handle.clone()),
+                                            process_state: SessionProcessState::Ready,
+                                            local_url: session.local_url.clone(),
+                                            healthcheck_url: session.healthcheck_url.clone(),
+                                            launch_context: CapsuleLaunchContext {
+                                                handle_or_url: session.handle.clone(),
+                                                target: Some(session.target_label.clone()),
+                                                requested_client: SessionClientKind::OsBrowser,
+                                                source: CapsuleOpenSource::NavigateToUrl,
+                                            },
+                                            launch_via: LaunchVia::Desktop,
+                                            created_at: SystemTime::now(),
+                                            last_seen_at: SystemTime::now(),
+                                        };
+                                        registry.register_session(caps_session);
+                                        let client = SessionClient {
+                                            client_id: SessionClientId::next(),
+                                            session_id: session.session_id.clone(),
+                                            client_kind: SessionClientKind::OsBrowser,
+                                            window_id: None,
+                                            pane_id: None,
+                                            state: SessionClientState::External,
+                                            attached_at: SystemTime::now(),
+                                            last_seen_at: SystemTime::now(),
+                                        };
+                                        registry.attach_client(client);
+                                        close_boot_window_handle(cx, boot_handle);
+                                        record_start_history(&route_for_open);
+                                    } else {
+                                        match crate::window::orchestrator::open_ready_capsule_window(
+                                            cx,
+                                            route_for_open.clone(),
+                                            session,
+                                        ) {
+                                            Ok(app_handle) => {
+                                                close_boot_window_handle(cx, boot_handle);
+                                                let _ = app_handle.update(cx, |_, window, _| {
+                                                    window.activate_window()
                                                 });
+                                                record_start_history(&route_for_open);
                                             }
-                                            show_boot_failure(
-                                                cx,
-                                                &shell_for_result,
-                                                &format!("App window creation failed: {err}"),
-                                            );
+                                            Err(err) => {
+                                                stop_session_async(session_id);
+                                                if let Some(shell) = shell_for_result
+                                                    .as_ref()
+                                                    .and_then(|weak| weak.upgrade())
+                                                {
+                                                    let _ = shell.update(cx, |shell, _cx| {
+                                                        shell.push_detail(
+                                                            "Failed to create app window from session",
+                                                        );
+                                                    });
+                                                }
+                                                show_boot_failure(
+                                                    cx,
+                                                    &shell_for_result,
+                                                    &format!("App window creation failed: {err}"),
+                                                );
+                                            }
                                         }
                                     }
                                 }
