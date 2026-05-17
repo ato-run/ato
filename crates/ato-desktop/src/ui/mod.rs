@@ -222,7 +222,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
 /// macOS/Linux/Windows fan-out — we only ship to those three so
 /// that's the entire matrix. Errors bubble up so the caller can
 /// surface them in the activity rail.
-fn open_external_url(url: &str) -> std::io::Result<()> {
+pub(crate) fn open_external_url(url: &str) -> std::io::Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         std::process::Command::new("open")
     } else if cfg!(target_os = "windows") {
