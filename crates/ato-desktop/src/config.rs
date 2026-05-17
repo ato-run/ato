@@ -161,6 +161,9 @@ pub struct DesktopSettings {
     pub onboarding: OnboardingSettings,
     #[serde(default)]
     pub control_bar: ControlBarSettings,
+    /// Controls whether closing a window stops the capsule process.
+    #[serde(default)]
+    pub window_close_behavior: WindowCloseBehavior,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -274,6 +277,14 @@ pub enum CapsuleOpenMode {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
+pub enum WindowCloseBehavior {
+    #[default]
+    KeepSessionRunning,
+    StopSession,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum ControlBarPosition {
     #[default]
     Top,
@@ -300,6 +311,7 @@ impl Default for DesktopSettings {
             restore_window_frames: false,
             onboarding: OnboardingSettings::default(),
             control_bar: ControlBarSettings::default(),
+            window_close_behavior: WindowCloseBehavior::KeepSessionRunning,
         }
     }
 }
@@ -1245,6 +1257,10 @@ mod tests {
         assert!(d.control_bar.visible_on_startup);
         assert_eq!(d.control_bar.position, ControlBarPosition::Top);
         assert!(!d.control_bar.auto_hide);
+        assert_eq!(
+            d.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
         assert!(!d.onboarding.completed);
         assert!(!d.onboarding.skipped);
         assert_eq!(d.onboarding.version, 0);
@@ -1273,6 +1289,10 @@ mod tests {
         );
         assert!(!parsed.desktop.control_bar.auto_hide);
         assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
     }
 
     #[test]
@@ -1319,6 +1339,10 @@ mod tests {
         assert!(!parsed.desktop.onboarding.skipped);
         assert_eq!(parsed.desktop.onboarding.version, 0);
         assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Window);
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
     }
 
     #[test]
@@ -1364,6 +1388,47 @@ mod tests {
         assert!(
             result.is_err(),
             "unknown capsule open mode should be rejected by serde"
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_default_is_keep_session_running() {
+        let config = DesktopConfig::default();
+        assert_eq!(
+            config.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_deserialize_stop_session() {
+        let json = r#"{"desktop": {"window_close_behavior": "stop-session"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::StopSession
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_missing_defaults_to_keep_session_running() {
+        let json = r#"{"desktop": {}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_roundtrip() {
+        let mut config = DesktopConfig::default();
+        config.desktop.window_close_behavior = WindowCloseBehavior::StopSession;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::StopSession
         );
     }
 }
