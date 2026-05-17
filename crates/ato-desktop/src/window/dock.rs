@@ -1,9 +1,8 @@
-//! Dock window — mounts a Wry WebView loading the local
-//! `ato-dock` system capsule HTML from
-//! `assets/system/ato-dock/index.html`.
+//! Dock window — mounts a Wry WebView loading the built
+//! `ato-dock` system capsule from `assets/system/ato-dock/dist`.
 //!
-//! The HTML is served via a `capsule-dock://` custom protocol
-//! handler so WKWebView receives it with a proper origin.
+//! The built assets are served via a `capsule-dock://` custom
+//! protocol handler so WKWebView receives them with a proper origin.
 //!
 //! The Dock hosts the real publisher flow: source preparation,
 //! manifest editing, verification, preview, and submit. All long-
@@ -27,6 +26,7 @@ use gpui::{
     Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
@@ -44,7 +44,48 @@ use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 const DOCK_SCHEME: &str = "capsule-dock";
-const DOCK_HTML: &str = include_str!("../../assets/system/ato-dock/index.html");
+const DOCK_CAPSULE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/system/ato-dock");
+const DOCK_CAPSULE_TOML: &str = include_str!("../../assets/system/ato-dock/capsule.toml");
+
+#[derive(Deserialize)]
+struct DockCapsuleManifest {
+    run: Option<String>,
+}
+
+fn dock_run_dir_from_manifest() -> String {
+    let run = toml::from_str::<DockCapsuleManifest>(DOCK_CAPSULE_TOML)
+        .ok()
+        .and_then(|manifest| manifest.run)
+        .unwrap_or_else(|| "dist".to_string());
+
+    let trimmed = run.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return "dist".to_string();
+    }
+    if trimmed
+        .split('/')
+        .any(|segment| segment == ".." || segment.is_empty())
+    {
+        return "dist".to_string();
+    }
+    trimmed.to_string()
+}
+
+fn dock_mime_type(file_path: &str) -> &'static str {
+    match file_path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "json" => "application/json",
+        "map" => "application/json",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
 
 /// Slot tracking the single open Dock window.
 #[derive(Default)]
@@ -577,6 +618,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
         .lock()
         .map(|state| state.event_queue.clone())
         .map_err(|_| anyhow::anyhow!("Dock runtime lock poisoned"))?;
+    let dock_run_dir = dock_run_dir_from_manifest();
 
     // Compose the init script: i18n strings first, then the automation
     // agent so `window.__atoAgent` is available for MCP automation.
@@ -624,6 +666,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .into(),
         };
         let url = format!("{DOCK_SCHEME}://localhost/");
+        let dock_run_dir_for_protocol = dock_run_dir.clone();
 
         // Clone the automation host so the page-load closure can call
         // mark_page_loaded without capturing a non-Send type.
@@ -655,20 +698,46 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                             })
                         })
                         .unwrap_or_else(|_| json!({}));
-                    let inject = format!(
-                        "<head><script>window.__ATO_IDENTITY={};window.__ATO_DOCK_BOOTSTRAP={};</script>",
-                        serde_json::to_string(&current_identity)
-                            .unwrap_or_else(|_| "null".to_string()),
-                        serde_json::to_string(&runtime_snapshot)
-                            .unwrap_or_else(|_| "null".to_string()),
-                    );
-                    let html = DOCK_HTML.replacen("<head>", &inject, 1);
-                    let body: Cow<'static, [u8]> = Cow::Owned(html.into_bytes());
+
+                    let raw_path = _req.uri().path();
+                    let file_path = if raw_path == "/" || raw_path.is_empty() {
+                        "index.html"
+                    } else {
+                        raw_path.strip_prefix('/').unwrap_or(raw_path)
+                    };
+                    let content_path = format!("{}/{}", dock_run_dir_for_protocol, file_path);
+                    let file = match DOCK_CAPSULE_DIR.get_file(&content_path) {
+                        Some(file) => file,
+                        None => {
+                            let response = Response::builder()
+                                .status(404)
+                                .header("Content-Type", "text/plain; charset=utf-8")
+                                .body(Cow::Borrowed(b"not found" as &[u8]))
+                                .expect("dock not-found response must build");
+                            responder.respond(response);
+                            return;
+                        }
+                    };
+
+                    let body: Cow<'static, [u8]> = if file_path == "index.html" {
+                        let inject = format!(
+                            "<head><script>window.__ATO_IDENTITY={};window.__ATO_DOCK_BOOTSTRAP={};</script>",
+                            serde_json::to_string(&current_identity)
+                                .unwrap_or_else(|_| "null".to_string()),
+                            serde_json::to_string(&runtime_snapshot)
+                                .unwrap_or_else(|_| "null".to_string()),
+                        );
+                        let html = String::from_utf8_lossy(file.contents())
+                            .replacen("<head>", &inject, 1);
+                        Cow::Owned(html.into_bytes())
+                    } else {
+                        Cow::Borrowed(file.contents())
+                    };
                     let response = Response::builder()
-                        .header("Content-Type", "text/html; charset=utf-8")
+                        .header("Content-Type", dock_mime_type(file_path))
                         .header("Cache-Control", "no-store, no-cache")
                         .body(body)
-                        .expect("dock HTML response must build");
+                        .expect("dock asset response must build");
                     responder.respond(response);
                 },
             )
