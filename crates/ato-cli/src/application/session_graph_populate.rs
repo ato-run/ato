@@ -60,6 +60,23 @@ pub(crate) const NODE_KIND_SERVICE: &str = "service";
 /// `ExecutionGraphEdgeKind::Provides` for the provider → output direction.
 pub(crate) const EDGE_KIND_PROVIDES: &str = "provides";
 
+/// PR-5a teardown-order edges (refs umbrella v0.6.0 graph-first
+/// migration). Convention: **source DEPENDS ON target**.
+///
+/// `depends_on` is provider → provider OR service → service.
+/// `uses` is service → provider (a service depends on the providers
+/// its dep-contract resolves to).
+///
+/// PR-5b's `teardown_from_graph` walks these in reverse-topological
+/// order: tear down a node before the nodes it depends on. e.g. an
+/// edge `service-web --depends_on→ provider-db` means stop
+/// `service-web` first, then `provider-db`.
+pub(crate) const EDGE_KIND_DEPENDS_ON: &str = "depends_on";
+/// PR-5a teardown-order edge: service → provider (a service uses a
+/// provider). Same direction convention as `depends_on` — source
+/// depends on target, so source is torn down first.
+pub(crate) const EDGE_KIND_USES: &str = "uses";
+
 /// Identifier prefix for output (dependency-output) nodes/edges. The
 /// slice-A subset does not emit `DependencyOutput` *nodes* (only
 /// providers + `provides` edges to a synthetic output identifier),
@@ -327,6 +344,183 @@ fn graph_provider_set_matches(
     graph_aliases.len() == contract_aliases.len() && graph_aliases == contract_aliases
 }
 
+// ---------------------------------------------------------------------------
+// PR-5a additions (refs umbrella v0.6.0 graph-first migration)
+// ---------------------------------------------------------------------------
+
+/// PR-5a: 3-arg wrapper around
+/// [`populate_graph_from_dependency_contracts`] that ALSO emits
+/// `depends_on` edges between provider nodes derived from the
+/// provided `provider_needs` map (alias → needed-alias list).
+///
+/// `provider_needs` is sourced from the live `RunningGraph.deps()[i].needs`
+/// at the populate call site in `app_control/session.rs`. The
+/// information isn't in `StoredDependencyContracts` today and a
+/// schema bump would be additive, so we route it through the
+/// populator's input instead of widening the stored DTO.
+///
+/// When `provider_needs` is `None` or empty, this is equivalent to
+/// the 1-arg form.
+pub(crate) fn populate_graph_from_dependency_contracts_with_needs(
+    dependency_contracts: Option<&StoredDependencyContracts>,
+    provider_needs: Option<&BTreeMap<String, Vec<String>>>,
+) -> Option<StoredExecutionGraph> {
+    let mut graph = populate_graph_from_dependency_contracts(dependency_contracts)?;
+    if let Some(needs) = provider_needs {
+        for (source_alias, target_aliases) in needs {
+            for target_alias in target_aliases {
+                graph.edges.push(StoredGraphEdge {
+                    source: source_alias.clone(),
+                    target: target_alias.clone(),
+                    kind: EDGE_KIND_DEPENDS_ON.to_string(),
+                    metadata: BTreeMap::new(),
+                });
+            }
+        }
+        graph.edges.sort_by(|a, b| {
+            a.source
+                .cmp(&b.source)
+                .then_with(|| a.target.cmp(&b.target))
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+    }
+    Some(graph)
+}
+
+/// PR-5a: 3-arg wrapper around
+/// [`append_orchestration_services_to_graph`] that ALSO emits
+/// service-to-service `depends_on` edges (from the manifest's
+/// `[services.<name>] depends_on = [...]`) and service-to-provider
+/// `uses` edges (from the manifest's
+/// `[services.<name>.dependencies.<alias>]` blocks).
+///
+/// `manifest_service_deps` carries `service_name → Vec<dep_target>`
+/// where `dep_target` is either a sibling service name (emits
+/// `depends_on`) or a provider alias (emits `uses`). Disambiguation
+/// is by membership in the already-emitted service node set vs the
+/// already-emitted provider node set.
+///
+/// When `manifest_service_deps` is `None` or empty, this is
+/// equivalent to the 2-arg form.
+pub(crate) fn append_orchestration_services_to_graph_with_deps(
+    graph: Option<StoredExecutionGraph>,
+    services: Option<&StoredOrchestrationServices>,
+    manifest_service_deps: Option<&BTreeMap<String, Vec<String>>>,
+) -> Option<StoredExecutionGraph> {
+    let mut graph = append_orchestration_services_to_graph(graph, services)?;
+    if let Some(deps) = manifest_service_deps {
+        // Pre-compute the service-name and provider-alias sets so we
+        // can classify each target.
+        let service_names: std::collections::BTreeSet<String> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NODE_KIND_SERVICE)
+            .map(|node| node.identifier.clone())
+            .collect();
+        let provider_aliases: std::collections::BTreeSet<String> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NODE_KIND_PROVIDER)
+            .map(|node| node.identifier.clone())
+            .collect();
+
+        for (service_name, targets) in deps {
+            for target in targets {
+                let edge_kind = if service_names.contains(target) {
+                    EDGE_KIND_DEPENDS_ON
+                } else if provider_aliases.contains(target) {
+                    EDGE_KIND_USES
+                } else {
+                    // Unknown target — skip (don't emit a dangling
+                    // edge). The teardown driver would ignore it
+                    // anyway.
+                    continue;
+                };
+                graph.edges.push(StoredGraphEdge {
+                    source: service_name.clone(),
+                    target: target.clone(),
+                    kind: edge_kind.to_string(),
+                    metadata: BTreeMap::new(),
+                });
+            }
+        }
+        graph.edges.sort_by(|a, b| {
+            a.source
+                .cmp(&b.source)
+                .then_with(|| a.target.cmp(&b.target))
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+    }
+    Some(graph)
+}
+
+/// PR-5a: completeness predicate consumed by PR-5b's `stop_session`
+/// path. `teardown_from_graph` is preferred when this returns `true`;
+/// `false` falls through to the legacy two-path teardown.
+///
+/// The check is conservative — every facet that the legacy paths
+/// rely on for actual process / container teardown must be present
+/// in the graph:
+///   - provider count matches `dependency_contracts.providers.len()`,
+///     every provider node has `pid` AND `state_dir`
+///   - service count matches `orchestration_services.services.len()`,
+///     every service node has either `local_pid` or `container_id`
+///
+/// Sessions written before PR-5a (no `depends_on` edges, no
+/// completeness facts populated) naturally return `false` here and
+/// take the legacy teardown path.
+pub(crate) fn graph_complete_for_teardown(
+    record: &ato_session_core::StoredSessionInfo,
+) -> bool {
+    let Some(graph) = record.graph.as_ref() else {
+        return false;
+    };
+
+    // Provider parity.
+    let provider_count = record
+        .dependency_contracts
+        .as_ref()
+        .map(|c| c.providers.len())
+        .unwrap_or(0);
+    let provider_nodes: Vec<&StoredGraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_PROVIDER)
+        .collect();
+    if provider_nodes.len() != provider_count {
+        return false;
+    }
+    if !provider_nodes
+        .iter()
+        .all(|node| node.pid.is_some() && node.state_dir.is_some())
+    {
+        return false;
+    }
+
+    // Service parity.
+    let service_count = record
+        .orchestration_services
+        .as_ref()
+        .map(|s| s.services.len())
+        .unwrap_or(0);
+    let service_nodes: Vec<&StoredGraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_SERVICE)
+        .collect();
+    if service_nodes.len() != service_count {
+        return false;
+    }
+    if !service_nodes
+        .iter()
+        .all(|node| node.pid.is_some() || node.container_id.is_some())
+    {
+        return false;
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +685,237 @@ mod tests {
             "slice A only emits Provider nodes; got kinds: {:?}",
             graph.nodes.iter().map(|n| &n.kind).collect::<Vec<_>>()
         );
+    }
+
+    /// PR-5a: provider→provider `depends_on` edges from
+    /// `provider_needs` round-trip onto the graph.
+    #[test]
+    fn provider_depends_on_edges_round_trip() {
+        let contracts = StoredDependencyContracts {
+            consumer_pid: 4242,
+            providers: vec![provider("db", 1), provider("cache", 2)],
+        };
+        let mut needs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        needs.insert("cache".to_string(), vec!["db".to_string()]);
+        let graph = populate_graph_from_dependency_contracts_with_needs(
+            Some(&contracts),
+            Some(&needs),
+        )
+        .expect("populate returns Some");
+        let depends_on: Vec<&StoredGraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EDGE_KIND_DEPENDS_ON)
+            .collect();
+        assert_eq!(depends_on.len(), 1);
+        assert_eq!(depends_on[0].source, "cache");
+        assert_eq!(depends_on[0].target, "db");
+    }
+
+    /// PR-5a: service→provider `uses` edges land for an
+    /// orchestration manifest with service-to-provider dependencies.
+    #[test]
+    fn service_uses_provider_edges_round_trip() {
+        use ato_session_core::{
+            StoredOrchestrationService, StoredOrchestrationServices,
+        };
+
+        let contracts = StoredDependencyContracts {
+            consumer_pid: 4242,
+            providers: vec![provider("db", 1)],
+        };
+        let graph =
+            populate_graph_from_dependency_contracts(Some(&contracts)).expect("graph");
+
+        let services = StoredOrchestrationServices {
+            wrapper_pid: 5555,
+            services: vec![StoredOrchestrationService {
+                name: "web".to_string(),
+                target_label: "web".to_string(),
+                local_pid: Some(6666),
+                container_id: None,
+                host_ports: Default::default(),
+                published_port: Some(3000),
+            }],
+        };
+
+        let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        service_deps.insert("web".to_string(), vec!["db".to_string()]);
+
+        let graph = append_orchestration_services_to_graph_with_deps(
+            Some(graph),
+            Some(&services),
+            Some(&service_deps),
+        )
+        .expect("Some graph");
+
+        let uses: Vec<&StoredGraphEdge> =
+            graph.edges.iter().filter(|e| e.kind == EDGE_KIND_USES).collect();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].source, "web");
+        assert_eq!(uses[0].target, "db");
+    }
+
+    /// PR-5a: service→service `depends_on` edges land for an
+    /// orchestration manifest with inter-service dependencies.
+    #[test]
+    fn service_depends_on_service_edges_round_trip() {
+        use ato_session_core::{
+            StoredOrchestrationService, StoredOrchestrationServices,
+        };
+
+        let services = StoredOrchestrationServices {
+            wrapper_pid: 5555,
+            services: vec![
+                StoredOrchestrationService {
+                    name: "main".to_string(),
+                    target_label: "main".to_string(),
+                    local_pid: Some(1111),
+                    container_id: None,
+                    host_ports: Default::default(),
+                    published_port: None,
+                },
+                StoredOrchestrationService {
+                    name: "web".to_string(),
+                    target_label: "web".to_string(),
+                    local_pid: Some(2222),
+                    container_id: None,
+                    host_ports: Default::default(),
+                    published_port: Some(3000),
+                },
+            ],
+        };
+        let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        service_deps.insert("web".to_string(), vec!["main".to_string()]);
+
+        let graph = append_orchestration_services_to_graph_with_deps(
+            None,
+            Some(&services),
+            Some(&service_deps),
+        )
+        .expect("Some graph");
+
+        let depends_on: Vec<&StoredGraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EDGE_KIND_DEPENDS_ON)
+            .collect();
+        assert_eq!(depends_on.len(), 1);
+        assert_eq!(depends_on[0].source, "web");
+        assert_eq!(depends_on[0].target, "main");
+    }
+
+    /// PR-5a: completeness predicate returns true for a fully
+    /// populated record and false for any missing facet.
+    #[test]
+    fn graph_complete_for_teardown_requires_every_facet() {
+        use ato_session_core::{StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo};
+        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+
+        let provider_node = StoredGraphNode {
+            kind: NODE_KIND_PROVIDER.to_string(),
+            identifier: "db".to_string(),
+            pid: Some(1234),
+            state_dir: Some(PathBuf::from("/tmp/db")),
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let service_node = StoredGraphNode {
+            kind: NODE_KIND_SERVICE.to_string(),
+            identifier: "web".to_string(),
+            pid: Some(5678),
+            state_dir: None,
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let make_record = |providers_match: bool, has_pid: bool, has_service_pid: bool| {
+            let mut providers = vec![provider("db", 1234)];
+            if !providers_match {
+                providers.push(provider("cache", 9999));
+            }
+            let mut pn = provider_node.clone();
+            if !has_pid {
+                pn.pid = None;
+            }
+            let mut sn = service_node.clone();
+            if !has_service_pid {
+                sn.pid = None;
+                sn.container_id = None;
+            }
+            StoredSessionInfo {
+                session_id: "x".into(),
+                handle: "p/s".into(),
+                normalized_handle: "p/s".into(),
+                canonical_handle: None,
+                trust_state: TrustState::Untrusted,
+                source: None,
+                restricted: false,
+                snapshot: None,
+                runtime: CapsuleRuntimeDescriptor {
+                    target_label: "main".into(),
+                    runtime: None,
+                    driver: None,
+                    language: None,
+                    port: None,
+                },
+                display_strategy: CapsuleDisplayStrategy::GuestWebview,
+                pid: 0,
+                log_path: String::new(),
+                manifest_path: String::new(),
+                target_label: "main".into(),
+                notes: vec![],
+                guest: None,
+                web: None,
+                terminal: None,
+                service: None,
+                dependency_contracts: Some(StoredDependencyContracts {
+                    consumer_pid: 0,
+                    providers,
+                }),
+                graph: Some(StoredExecutionGraph {
+                    schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+                    nodes: vec![pn, sn],
+                    edges: vec![],
+                }),
+                execution_id: None,
+                execution_receipt_schema_version: None,
+                declared_execution_id: None,
+                resolved_execution_id: None,
+                observed_execution_id: None,
+                graph_completeness: None,
+                reproducibility_class: None,
+                orchestration_services: Some(StoredOrchestrationServices {
+                    wrapper_pid: 0,
+                    services: vec![StoredOrchestrationService {
+                        name: "web".into(),
+                        target_label: "web".into(),
+                        local_pid: None,
+                        container_id: None,
+                        host_ports: Default::default(),
+                        published_port: None,
+                    }],
+                }),
+                schema_version: None,
+                launch_digest: None,
+                process_start_time_unix_ms: None,
+            }
+        };
+
+        // Happy path: all facets populated.
+        assert!(graph_complete_for_teardown(&make_record(true, true, true)));
+
+        // Provider count mismatch.
+        assert!(!graph_complete_for_teardown(&make_record(false, true, true)));
+
+        // Provider missing pid.
+        assert!(!graph_complete_for_teardown(&make_record(true, false, true)));
+
+        // Service missing both pid and container_id.
+        assert!(!graph_complete_for_teardown(&make_record(true, true, false)));
     }
 }
