@@ -1219,8 +1219,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Boot state for end users: a single Ato Store tab pointed at
-    /// https://ato.run. `demo()` (below) is kept intact because the
+    /// Boot state for end users: a Launchpad task and an Ato Store
+    /// WebView tab. `demo()` (below) is kept intact because the
     /// rendering tests + `ui/panels/launcher_v2.rs` assertions rely
     /// on its 3-task graph; switching the production boot path here
     /// avoids touching that test surface.
@@ -1228,13 +1228,33 @@ impl AppState {
         let store = GuestRoute::ExternalUrl(
             url::Url::parse("https://ato.run/").expect("https://ato.run/ is a valid URL"),
         );
-        let store_task = TaskSet {
+
+        let launcher_task = TaskSet {
             id: 1,
-            title: "Ato".to_string(),
+            title: "Launchpad".to_string(),
             focused_pane: 1,
             pane_tree: PaneTree::Leaf(1),
             panes: vec![Pane {
                 id: 1,
+                title: "Launchpad".to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::Launcher,
+            }],
+            split_ratio: 0.5,
+            route_candidates: vec![],
+            route_index: 0,
+            preview: "Launchpad".to_string(),
+        };
+
+        let ato_task = TaskSet {
+            id: 2,
+            title: "Ato".to_string(),
+            focused_pane: 2,
+            pane_tree: PaneTree::Leaf(2),
+            panes: vec![Pane {
+                id: 2,
                 title: store.to_string(),
                 role: PaneRole::Primary,
                 visible: true,
@@ -1274,11 +1294,11 @@ impl AppState {
             active_workspace: 1,
             workspaces: vec![Workspace {
                 id: 1,
-                title: "Ato".to_string(),
+                title: "Home".to_string(),
                 active_task: 1,
-                tasks: vec![store_task],
+                tasks: vec![launcher_task, ato_task],
             }],
-            command_bar_text: "https://ato.run/".to_string(),
+            command_bar_text: String::new(),
             activity: Vec::new(),
             retention_count: 0,
             capsule_logs: HashMap::new(),
@@ -1317,8 +1337,8 @@ impl AppState {
             capsule_search_query: String::new(),
             app_windows: AppWindowRegistry::default(),
             pending_host_actions: VecDeque::new(),
-            next_task_id: 2,
-            next_pane_id: 2,
+            next_task_id: 3,
+            next_pane_id: 3,
             next_new_tab_index: 1,
         };
         state.sync_theme_from_config();
