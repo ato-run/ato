@@ -151,6 +151,9 @@ pub struct DesktopSettings {
     /// Initial presentation mode for content windows opened by Focus View.
     #[serde(default)]
     pub content_window_default_presentation: ContentWindowPresentation,
+    /// Where capsule handles should open by default.
+    #[serde(default)]
+    pub capsule_open_mode: CapsuleOpenMode,
     /// Whether to restore the last window frames (position/size) on launch.
     #[serde(default)]
     pub restore_window_frames: bool,
@@ -263,6 +266,15 @@ pub enum ContentWindowPresentation {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
+pub enum CapsuleOpenMode {
+    #[default]
+    Window,
+    Webviewer,
+    OsBrowser,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum ControlBarPosition {
     #[default]
     Top,
@@ -285,6 +297,7 @@ impl Default for DesktopSettings {
             focus_view_enabled: default_focus_view_enabled(),
             startup_surface: StartupSurface::Start,
             content_window_default_presentation: ContentWindowPresentation::Windowed,
+            capsule_open_mode: CapsuleOpenMode::Window,
             restore_window_frames: false,
             onboarding: OnboardingSettings::default(),
             control_bar: ControlBarSettings::default(),
@@ -1227,6 +1240,7 @@ mod tests {
             ContentWindowPresentation::Windowed
         );
         assert!(!d.restore_window_frames);
+        assert_eq!(d.capsule_open_mode, CapsuleOpenMode::Window);
         assert!(d.control_bar.always_on_top);
         assert_eq!(d.control_bar.mode, ControlBarMode::Floating);
         assert!(d.control_bar.visible_on_startup);
@@ -1244,6 +1258,7 @@ mod tests {
         config.desktop.content_window_default_presentation = ContentWindowPresentation::Fullscreen;
         config.desktop.control_bar.position = ControlBarPosition::Bottom;
         config.desktop.control_bar.auto_hide = false;
+        config.desktop.capsule_open_mode = CapsuleOpenMode::Webviewer;
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
@@ -1258,6 +1273,7 @@ mod tests {
             ControlBarPosition::Bottom
         );
         assert!(!parsed.desktop.control_bar.auto_hide);
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
     }
 
     #[test]
@@ -1303,6 +1319,7 @@ mod tests {
         assert!(!parsed.desktop.onboarding.completed);
         assert!(!parsed.desktop.onboarding.skipped);
         assert_eq!(parsed.desktop.onboarding.version, 0);
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Window);
     }
 
     #[test]
@@ -1318,5 +1335,36 @@ mod tests {
         assert!(!parsed.desktop.onboarding.completed);
         assert!(!parsed.desktop.onboarding.skipped);
         assert_eq!(parsed.desktop.onboarding.version, 0);
+    }
+
+    #[test]
+    fn capsule_open_mode_deserialize_webviewer() {
+        let json = r#"{"desktop": {"capsule_open_mode": "webviewer"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
+    }
+
+    #[test]
+    fn capsule_open_mode_deserialize_os_browser() {
+        let json = r#"{"desktop": {"capsule_open_mode": "os-browser"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::OsBrowser);
+    }
+
+    #[test]
+    fn capsule_open_mode_missing_defaults_to_window() {
+        let json = r#"{"desktop": {}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Window);
+    }
+
+    #[test]
+    fn capsule_open_mode_unknown_value_ignored() {
+        let json = r#"{"desktop": {"capsule_open_mode": "unknown-mode"}}"#;
+        let result: Result<DesktopConfig, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown capsule open mode should be rejected by serde"
+        );
     }
 }
