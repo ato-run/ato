@@ -366,12 +366,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                         );
                                                         match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
                                                             Ok(boot_handle) => {
-                                                                crate::window::launch_window::start_boot_launch(
-                                                                    cx,
-                                                                    route.clone(),
-                                                                    Vec::new(),
-                                                                    boot_handle,
-                                                                );
+                                                                 crate::window::launch_window::start_boot_launch(
+                                                                     cx,
+                                                                     route.clone(),
+                                                                     Vec::new(),
+                                                                     boot_handle,
+                                                                     crate::state::session::SessionClientKind::AtoWindow,
+                                                                 );
                                                             }
                                                             Err(err) => {
                                                                 tracing::error!(?err, "open_boot_window failed");
