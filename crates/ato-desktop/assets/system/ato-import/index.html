@@ -33,6 +33,16 @@
     display: flex; flex-direction: column; gap: 14px;
     overflow: hidden;
   }
+  /* The scroll-area holds everything between header and controls.
+     When the failure card / TOML editor push total content beyond the
+     window height, only the middle scrolls — the controls stay
+     reachable at the bottom of the window. */
+  .scroll-area {
+    flex: 1; min-height: 0;
+    overflow-y: auto;
+    display: flex; flex-direction: column; gap: 14px;
+    padding-right: 4px;
+  }
   header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
   header h1 { margin: 0; font-size: 16px; font-weight: 700; }
   header .repo { font-size: 12.5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace; }
@@ -365,31 +375,33 @@
       return;
     }
 
-    // Status line
+    // Scrollable middle: status / cards / failure / TOML editor.
+    // Controls stay pinned to the bottom of `.root` regardless of
+    // how tall this section grows.
+    const scroll = el('div', { className: 'scroll-area' }, []);
+
     const s = statusLine();
-    if (s) root.appendChild(s);
+    if (s) scroll.appendChild(s);
 
-    // Source / recipe info cards
     const src = sourceCard();
-    if (src) root.appendChild(src);
+    if (src) scroll.appendChild(src);
     const rec = recipeCard();
-    if (rec) root.appendChild(rec);
+    if (rec) scroll.appendChild(rec);
 
-    // Failure card (only when last run failed)
     const fail = failureCard();
-    if (fail) root.appendChild(fail);
+    if (fail) scroll.appendChild(fail);
 
-    // TOML editor (only after inference)
     if (snapshot.editable_recipe_toml != null) {
-      root.appendChild(tomlEditor());
+      scroll.appendChild(tomlEditor());
     }
+    root.appendChild(scroll);
 
-    // Controls
+    // Controls (pinned bottom — outside the scroll area)
     if (snapshot.recipe) {
       root.appendChild(controls());
     }
 
-    // Submit confirmation modal
+    // Submit confirmation modal (full overlay, not in scroll area)
     const m = submitModal();
     if (m) root.appendChild(m);
   }
