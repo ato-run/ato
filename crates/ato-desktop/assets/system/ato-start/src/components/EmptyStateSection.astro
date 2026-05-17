@@ -1,0 +1,42 @@
+---
+// Two-column: Recent Capsules + Local Apps empty states 
+---
+<div class="grid grid-cols-2 gap-6 mb-8">
+  <div class="flex flex-col gap-3">
+    <div class="flex items-center justify-between px-1">
+      <div class="flex items-center gap-2 text-[13px] font-bold text-slate-800">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#A855F7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Recent Capsules
+      </div>
+      <button class="section-link text-[11px] font-bold text-rose-500 hover:text-rose-600 transition-colors" data-action="show_all_recent">Show all</button>
+    </div>
+    <div class="h-28 border border-rose-50 bg-[#FCFDFE] rounded-2xl flex items-center justify-center gap-4 p-4 shadow-[inset_0_0_20px_rgba(244,63,94,0.02)]">
+      <div class="w-12 h-12 bg-white rounded-full flex items-center justify-center shadow-sm border border-slate-100 text-slate-300 shrink-0">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>
+      </div>
+      <div class="flex flex-col">
+        <h4 class="text-[13px] font-bold text-slate-700">No capsules launched yet</h4>
+        <p class="text-[11px] text-slate-500 mt-0.5">Run a repo or app to create your workspace.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="flex flex-col gap-3">
+    <div class="flex items-center justify-between px-1">
+      <div class="flex items-center gap-2 text-[13px] font-bold text-slate-800">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 002-2V8a2 2 0 00-2-2h-7.93a2 2 0 01-1.66-.9l-.82-1.2A2 2 0 007.93 3H4a2 2 0 00-2 2v13c0 1.1.9 2 2 2z"/></svg>
+        Local Apps
+      </div>
+      <button class="section-link text-[11px] font-bold text-rose-500 hover:text-rose-600 transition-colors" data-action="show_all_local">Show all</button>
+    </div>
+    <div class="h-28 border border-rose-50 bg-[#FCFDFE] rounded-2xl flex items-center justify-center gap-4 p-4 shadow-[inset_0_0_20px_rgba(244,63,94,0.02)]">
+      <div class="w-12 h-12 bg-white rounded-full flex items-center justify-center shadow-sm border border-slate-100 text-slate-300 shrink-0">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 002-2V8a2 2 0 00-2-2h-7.93a2 2 0 01-1.66-.9l-.82-1.2A2 2 0 007.93 3H4a2 2 0 00-2 2v13c0 1.1.9 2 2 2z"/></svg>
+      </div>
+      <div class="flex flex-col">
+        <h4 class="text-[13px] font-bold text-slate-700">No local apps found yet</h4>
+        <p class="text-[11px] text-slate-500 mt-0.5">Open a project folder to get started.</p>
+      </div>
+    </div>
+  </div>
+</div>
