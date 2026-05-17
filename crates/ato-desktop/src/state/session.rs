@@ -124,7 +124,7 @@ impl CapsuleSession {
 // ── Client (display surface) ─────────────────────────────────────────────────
 
 /// What kind of display surface is attached to a session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum SessionClientKind {
     /// Focus View top-level GPUI window.
     AtoWindow,
@@ -137,7 +137,7 @@ pub enum SessionClientKind {
 }
 
 /// Per-client lifecycle state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum SessionClientState {
     /// Window/Pane is open and actively displaying the capsule.
     Attached,
@@ -166,7 +166,7 @@ pub struct SessionClient {
 
 /// Derived presentation state for the Open Windows / Card Switcher UI.
 /// Determined by priority: Failed/Stopped > Visible > External > Detached > Headless.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum PresentationState {
     Failed,
     Stopped,
@@ -191,14 +191,14 @@ impl PresentationState {
 }
 
 /// Compact client info attached to a `SessionViewEntry`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ClientSummary {
     pub client_kind: SessionClientKind,
     pub state: SessionClientState,
 }
 
 /// One row in the Open Windows screen.  Always 1 session = 1 row.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SessionViewEntry {
     pub session_id: String,
     pub title: String,

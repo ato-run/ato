@@ -23,6 +23,7 @@ use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
 use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
 use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
+use crate::state::session::SessionRegistry;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
 
@@ -432,6 +433,19 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                 req.send(Err(msg));
                             }
                         }
+                    }
+                    AutomationCommand::ListSessions => {
+                        let entries = async_app_for_loop.update(|cx| {
+                            cx.global::<SessionRegistry>().view_entries()
+                        });
+                        let sessions_json = match serde_json::to_value(&entries) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                req.send(Err(format!("serialize sessions failed: {e}")));
+                                continue;
+                            }
+                        };
+                        req.send(Ok(serde_json::json!({ "sessions": sessions_json })));
                     }
                     other => {
                         // Non-dock browser_* and other commands with no
