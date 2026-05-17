@@ -620,6 +620,7 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         "host_dispatch_action" => Ok(AutomationCommand::HostDispatchAction {
             action: s("action")?,
         }),
+        "list_sessions" => Ok(AutomationCommand::ListSessions),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")
