@@ -42,10 +42,10 @@ pub use canonical::{
 };
 pub use launch_bundle::{
     DerivedConsentView, DerivedDependencyContracts, DerivedDependencyProvider,
-    DerivedExecutionIds, DerivedPreflightView, DerivedReceiptSeed, GraphConsentInput,
-    GraphMaterializationSeedInput, GraphPreflightInput, GraphReceiptSeedInput,
-    GraphRuntimeNodeInput, GraphRuntimeNodeKind, LaunchGraphBundle, LaunchGraphBundleInput,
-    LaunchGraphDerivedViews,
+    DerivedExecutionIds, DerivedLaunchView, DerivedPreflightView, DerivedReceiptSeed,
+    GraphConsentInput, GraphLaunchInput, GraphMaterializationSeedInput, GraphPreflightInput,
+    GraphReceiptSeedInput, GraphRuntimeNodeInput, GraphRuntimeNodeKind, LaunchGraphBundle,
+    LaunchGraphBundleInput, LaunchGraphDerivedViews,
 };
 pub use types::{
     ExecutionGraph, ExecutionGraphConstraint, ExecutionGraphEdge, ExecutionGraphEdgeKind,

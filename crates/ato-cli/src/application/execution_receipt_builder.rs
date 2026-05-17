@@ -395,6 +395,7 @@ fn build_launch_graph_bundle(
             // separate `ExecutionConsentView` path inside
             // preflight / run.rs.
             consent: None,
+            launch: None,
         },
     ))
 }
