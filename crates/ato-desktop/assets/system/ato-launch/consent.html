@@ -423,7 +423,7 @@
   </div>
   <div class="panel-body">
     <div>
-      <div class="fld-label" style="margin-bottom:8px">Allowed hosts</div>
+      <div class="fld-label" style="margin-bottom:8px">Network IDs (Allowed hosts)</div>
       <div class="host-list" id="net-host-list"></div>
       <button class="add-host-btn" style="margin-top:6px" onclick="addNetHost()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -572,7 +572,12 @@
       const key = m[1].trim().toLowerCase().replace(/\s+/g, '_');
       const val = m[2].trim();
       switch (key) {
-        case 'network':     r.network   = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
+        case 'network':
+        case 'network_ids': {
+          const networkIds = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : [];
+          r.network = networkIds;
+          break;
+        }
         case 'read_only':   r.readOnly  = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
         case 'read_write':  r.readWrite = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
         case 'secrets':     r.secrets   = val && val !== 'None' ? val.split(/,\s*/).filter(Boolean) : []; break;
