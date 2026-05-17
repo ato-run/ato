@@ -1,13 +1,3 @@
-//! Store window — mounts a Wry WebView loading the local `ato-store`
-//! system capsule HTML from `assets/system/ato-store/index.html`.
-//! The Control Bar's "ストア" button dispatches `OpenStoreWindow`
-//! which lands here.
-//!
-//! The HTML is served via a `capsule-store://` custom protocol handler
-//! so that WKWebView receives it with a proper origin (avoiding the
-//! null-origin / `loadHTMLString:baseURL:nil` path that breaks JS on
-//! macOS for larger HTML documents).
-
 use std::borrow::Cow;
 
 use anyhow::Result;
@@ -17,6 +7,7 @@ use gpui::{
     WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use include_dir::{include_dir, Dir};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;
 use wry::{Rect, WebView, WebViewBuilder};
@@ -26,21 +17,13 @@ use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
-/// URI scheme used for serving the store HTML via the custom protocol handler.
+const STORE_DIST: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/system/ato-store/dist");
 const STORE_SCHEME: &str = "capsule-store";
 
-/// Slot tracking the single open Store window so the Control Bar's
-/// Store button focuses an existing window on a 2nd+ click instead
-/// of spawning a duplicate.
 #[derive(Default)]
 pub struct StoreWindowSlot(pub Option<AnyWindowHandle>);
 impl gpui::Global for StoreWindowSlot {}
 
-/// Lightweight GPUI entity whose only job is to keep the Wry
-/// `WebView` alive for the lifetime of its window. Wry mounts the
-/// `WKWebView` as a child NSView of the window's content view, so
-/// the GPUI `Render` body just provides a white backdrop in case
-/// the page is still loading.
 pub struct StoreWebView {
     _webview: WebView,
     window_size: Size<Pixels>,
@@ -84,32 +67,7 @@ impl StoreWebView {
     }
 }
 
-const STORE_HTML: &str = include_str!("../../assets/system/ato-store/index.html");
-
-/// Fetch the capsule catalog from api.ato.run and return it as a JSON string.
-/// Falls back to an empty array on any error.
-fn fetch_capsules_json() -> String {
-    match ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .get("https://api.ato.run/v1/capsules?limit=50")
-        .call()
-    {
-        Ok(resp) => resp.into_string().unwrap_or_else(|_| "[]".to_string()),
-        Err(err) => {
-            tracing::warn!(?err, "ato-store: failed to fetch capsule catalog");
-            "[]".to_string()
-        }
-    }
-}
-
-/// Open the Store window (local ato-store system capsule). On a 2nd+
-/// click the existing window gets focused / brought to front rather
-/// than a duplicate spawned. Returns the GPUI `WindowHandle` so the
-/// Focus-mode boot path can use the Store as its initial window and
-/// hand the handle to `focus_dispatcher::start`.
 pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
-    // Focus-on-existing — mirrors `open_launcher_window`.
     let existing = cx.global::<StoreWindowSlot>().0;
     if let Some(handle) = existing {
         let result = handle.update(cx, |_, window, _| window.activate_window());
@@ -125,7 +83,6 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let locale = resolve_locale(config.general.language);
 
     let win_size = size(px(1100.0), px(760.0));
-    // Position just below the Focus-mode Control Bar (36 top + 56 height + 16 gap = 108).
     let bounds = match cx.primary_display() {
         Some(d) => {
             let db = d.bounds();
@@ -149,14 +106,9 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let queue = system_ipc::new_queue();
     let drain_queue = queue.clone();
 
-    // The capsule catalog is injected via initialization script as
-    // window.__CAPSULES_DATA__ before the page's init() runs.
-    // Currently hardcoded to empty; real data will be fetched and injected
-    // via evaluate_script after PageLoadEvent::Finished.
-    let init_script = compose_init_script(locale, Some("window.__CAPSULES_DATA__ = [];"));
+    let init_script = compose_init_script(locale, Some(""));
 
     let handle = cx.open_window(options, move |window, cx| {
-        // Size the WebView to fill the window's content area.
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -168,12 +120,26 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
         };
         let store_url = format!("{}://localhost/", STORE_SCHEME);
         let webview = WebViewBuilder::new()
-            .with_asynchronous_custom_protocol(STORE_SCHEME.to_string(), |_id, _req, responder| {
-                let body: Cow<'static, [u8]> = Cow::Borrowed(STORE_HTML.as_bytes());
+            .with_asynchronous_custom_protocol(STORE_SCHEME.to_string(), |_id, req, responder| {
+                let path = req.uri().path();
+                let file_path = if path == "/" || path.is_empty() {
+                    "index.html".to_string()
+                } else {
+                    path.trim_start_matches('/').to_string()
+                };
+                let (content_type, body, status) = match resolve_store_file(&file_path) {
+                    Some((mime, data)) => (mime, Cow::from(data), 200),
+                    None => (
+                        "text/plain; charset=utf-8",
+                        Cow::Borrowed(b"not found" as &[u8]),
+                        404,
+                    ),
+                };
                 let response = Response::builder()
-                    .header("Content-Type", "text/html; charset=utf-8")
+                    .status(status)
+                    .header("Content-Type", content_type)
                     .body(body)
-                    .expect("store HTML response must build");
+                    .expect("store protocol response must build");
                 responder.respond(response);
             })
             .with_url(&store_url)
@@ -191,8 +157,6 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.new(|cx| gpui_component::Root::new(store, window, cx))
     })?;
     cx.set_global(StoreWindowSlot(Some(*handle)));
-    // Register in the cross-window content registry so the Control
-    // Bar badge increments AND the Card Switcher renders a card.
     use crate::window::content_windows::{
         ContentWindowEntry, ContentWindowKind, OpenContentWindows,
     };
@@ -210,4 +174,30 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
     );
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
     Ok(*handle)
+}
+
+fn resolve_store_file(file_path: &str) -> Option<(&'static str, Vec<u8>)> {
+    let resolved = if file_path.ends_with('/') || file_path.is_empty() {
+        format!("{}index.html", file_path)
+    } else {
+        file_path.to_string()
+    };
+
+    STORE_DIST.get_file(&resolved).map(|file| {
+        let ext = resolved.rsplit('.').next().unwrap_or("");
+        let mime = match ext {
+            "html" => "text/html; charset=utf-8",
+            "js" => "application/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "png" => "image/png",
+            "svg" => "image/svg+xml",
+            "ico" => "image/x-icon",
+            "json" => "application/json",
+            "ttf" => "font/ttf",
+            "woff" => "font/woff",
+            "woff2" => "font/woff2",
+            _ => "application/octet-stream",
+        };
+        (mime, file.contents().to_vec())
+    })
 }

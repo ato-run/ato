@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "ato-desktop-xtask"
 # Must track ato-desktop's version because xtask reads
