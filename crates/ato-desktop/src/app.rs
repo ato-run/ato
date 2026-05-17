@@ -335,6 +335,8 @@ pub fn run() {
         // of hardcoded placeholders.
         cx.set_global(crate::state::AppWindowRegistry::default());
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
+        cx.set_global(crate::state::session::SessionRegistry::default());
+        cx.set_global(crate::window::launch_window::PendingLaunches::default());
         crate::window::install_control_bar_controller(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
@@ -437,8 +439,22 @@ pub fn run() {
         // Quit is intercepted by DesktopShell so it can prompt the
         // user to keep or clear persisted tabs. ConfirmQuitKeep /
         // ConfirmQuitClear / CancelQuit are the resolution actions.
-        cx.on_action(|_: &ConfirmQuitKeep, cx| cx.quit());
+        cx.on_action(|_: &ConfirmQuitKeep, cx| {
+            if crate::window::is_multi_window_enabled() {
+                let count = cx
+                    .global_mut::<crate::state::session::SessionRegistry>()
+                    .stop_all_running();
+                tracing::info!(count, "app quit: stopped running sessions");
+            }
+            cx.quit();
+        });
         cx.on_action(|_: &ConfirmQuitClear, cx| {
+            if crate::window::is_multi_window_enabled() {
+                let count = cx
+                    .global_mut::<crate::state::session::SessionRegistry>()
+                    .stop_all_running();
+                tracing::info!(count, "app quit: stopped running sessions");
+            }
             if let Ok(path) = ato_path("desktop-tabs.json") {
                 let _ = std::fs::remove_file(&path);
             }
@@ -559,6 +575,33 @@ pub fn run() {
             {
                 crate::window::dock::cleanup_dock_window(cx);
                 tracing::info!("Dock window closed; slot cleared");
+            }
+
+            // Session lifecycle handling based on windowCloseBehavior.
+            // The AppCapsuleShell Drop will detach the client; we decide
+            // whether to also stop the process here.
+            let close_behavior =
+                crate::config::load_config().desktop.window_close_behavior;
+            let mut registry =
+                cx.global_mut::<crate::state::session::SessionRegistry>();
+            let affected_session_ids =
+                registry.detach_clients_by_window_id(closed_id);
+            match close_behavior {
+                crate::config::WindowCloseBehavior::StopSession => {
+                    for sid in &affected_session_ids {
+                        registry.stop_session_once(sid);
+                    }
+                    tracing::info!(
+                        ?affected_session_ids,
+                        "windowCloseBehavior=stop-session: stopping sessions"
+                    );
+                }
+                crate::config::WindowCloseBehavior::KeepSessionRunning => {
+                    tracing::info!(
+                        ?affected_session_ids,
+                        "windowCloseBehavior=keep-session-running: sessions detached"
+                    );
+                }
             }
 
             // In Focus mode the Control Bar is a process-lifetime
@@ -769,70 +812,23 @@ pub fn run() {
                 let open_mode = crate::config::load_config().desktop.capsule_open_mode;
                 match open_mode {
                     crate::config::CapsuleOpenMode::OsBrowser => {
-                        // Launch capsule in background, then open local URL in OS browser.
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let handle_clone = handle.clone();
-                        std::thread::spawn(move || {
-                            let result = crate::orchestrator::resolve_and_start_guest(
-                                &handle_clone,
-                                &[],
-                                &[],
-                                None,
+                        // Go through the consent wizard — E103/E302 modals
+                        // will appear in the Desktop shell before the capsule
+                        // is launched and opened in the OS browser.
+                        let route =
+                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        if let Err(err) =
+                            crate::window::launch_window::open_consent_window_for_route_with_client(
+                                cx,
+                                route,
+                                crate::state::session::SessionClientKind::OsBrowser,
+                            )
+                        {
+                            tracing::error!(
+                                error = %err,
+                                "NavigateToUrl(capsule, os-browser) open_consent_window_for_route failed"
                             );
-                            let _ = tx.send((handle_clone, result));
-                        });
-                        let async_cx = cx.to_async();
-                        async_cx
-                            .foreground_executor()
-                            .spawn({
-                                let be = async_cx.background_executor().clone();
-                                let aa = async_cx.clone();
-                                async move {
-                                    loop {
-                                        match rx.try_recv() {
-                                            Ok((handle, result)) => {
-                                                aa.update(|_cx| {
-                                                    match result {
-                                                        Ok(session) => {
-                                                            let url = session.local_url.unwrap_or_else(|| {
-                                                                format!("https://ato.run/{}", handle)
-                                                            });
-                                                            if let Err(e) =
-                                                                crate::ui::open_external_url(&url)
-                                                            {
-                                                                tracing::error!(
-                                                                    error = %e,
-                                                                    url = %url,
-                                                                    "os-browser: open_external_url failed"
-                                                                );
-                                                            }
-                                                        }
-                                                        Err(launch_err) => {
-                                                            tracing::error!(
-                                                                error = %launch_err,
-                                                                handle = %handle,
-                                                                "os-browser: resolve_and_start_guest failed"
-                                                            );
-                                                        }
-                                                    }
-                                                });
-                                                break;
-                                            }
-                                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                                tracing::error!(
-                                                    "os-browser: background thread disconnected"
-                                                );
-                                                break;
-                                            }
-                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                                be.timer(std::time::Duration::from_millis(100))
-                                                    .await;
-                                            }
-                                        }
-                                    }
-                                }
-                            })
-                            .detach();
+                        }
                     }
                     crate::config::CapsuleOpenMode::Webviewer => {
                         tracing::warn!(
