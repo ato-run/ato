@@ -334,6 +334,20 @@
           </div>
         </div>
         <div class="block">
+          <div class="block-title">Capsule behavior</div>
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label"><span data-i18n="settings.capsule_open_mode">Open capsules in</span></span>
+              <span class="row-sublabel" data-i18n="settings.capsule_open_mode.hint">Choose where capsule links open by default. Existing windows are not moved.</span>
+            </div>
+            <select class="setting-select" id="sel-capsuleOpenMode">
+              <option value="window" data-i18n="settings.capsule_open_mode.window">Ato window</option>
+              <option value="webviewer" data-i18n="settings.capsule_open_mode.webviewer">Ato web viewer</option>
+              <option value="os-browser" data-i18n="settings.capsule_open_mode.os_browser">OS default browser</option>
+            </select>
+          </div>
+        </div>
+        <div class="block">
           <div class="block-title" data-i18n="settings.section.controlbar">コントロールバー</div>
           <div class="row">
             <span class="row-label" data-i18n="settings.controlbar.mode">表示モード</span>
@@ -572,6 +586,7 @@ bindToggle('tog-focusViewEnabled',          'focusViewEnabled');
 bindSelect('sel-startupSurface',            'startupSurface');
 bindSelect('sel-contentWindowDefaultPresentation', 'contentWindowDefaultPresentation');
 bindToggle('tog-restoreWindowFrames',       'restoreWindowFrames');
+bindSelect('sel-capsuleOpenMode',           'capsuleOpenMode');
 bindSelect('sel-controlBarMode',            'controlBarMode');
 bindToggle('tog-controlBarAlwaysOnTop',     'controlBarAlwaysOnTop');
 bindSelect('sel-controlBarPosition',        'controlBarPosition');
@@ -606,6 +621,7 @@ function hydrateFromSnapshot(snap) {
   setOptionalSelect('sel-startupSurface',       val(r, 'desktop', 'startupSurface'));
   setOptionalSelect('sel-contentWindowDefaultPresentation', val(r, 'desktop', 'contentWindowDefaultPresentation'));
   setToggleEl('tog-restoreWindowFrames',        val(r, 'desktop', 'restoreWindowFrames'));
+  setOptionalSelect('sel-capsuleOpenMode',       val(r, 'desktop', 'capsuleOpenMode'));
   setOptionalSelect('sel-controlBarMode',        val(r, 'desktop', 'controlBar', 'mode'));
   setToggleEl('tog-controlBarAlwaysOnTop',      val(r, 'desktop', 'controlBar', 'alwaysOnTop'));
   setOptionalSelect('sel-controlBarPosition',   val(r, 'desktop', 'controlBar', 'position'));
