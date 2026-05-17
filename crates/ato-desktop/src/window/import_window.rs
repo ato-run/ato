@@ -23,6 +23,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
+use crate::source_import_api::ApiCreds;
 use crate::source_import_session::{GitHubImportSession, SessionSnapshot};
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -48,6 +49,14 @@ pub struct ImportWindowSlot {
     pub shell: Option<WeakEntity<ImportWindowShell>>,
 }
 impl gpui::Global for ImportWindowSlot {}
+
+/// Cached ato-api credentials for the current import session.
+/// Cleared on session reset; refreshed by the dispatch layer at the
+/// start of each `begin_open`. Kept out of `SessionSnapshot` so the
+/// session token never crosses into JS / the snapshot serialization.
+#[derive(Default, Clone)]
+pub struct ImportApiCreds(pub Option<ApiCreds>);
+impl gpui::Global for ImportApiCreds {}
 
 pub struct ImportWindowShell {
     _webview: WebView,
