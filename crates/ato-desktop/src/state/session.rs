@@ -359,6 +359,64 @@ impl SessionRegistry {
         self.sessions.len()
     }
 
+    // ── lifecycle actions ──────────────────────────────────────────────
+
+    /// Detach all clients associated with a GPUI window, without stopping
+    /// the session processes.
+    pub fn detach_clients_by_window_id(&mut self, window_id: u64) -> Vec<String> {
+        let client_ids = self.clients_by_window_id(window_id);
+        let mut session_ids = Vec::new();
+        for cid in &client_ids {
+            if let Some(sid) = self.session_id_for_client(*cid) {
+                session_ids.push(sid.to_string());
+            }
+            self.detach_client(*cid);
+        }
+        session_ids.sort();
+        session_ids.dedup();
+        session_ids
+    }
+
+    /// Mark a session as `Stopping` and spawn a background thread to
+    /// actually stop the process.  Only acts once — if the session is
+    /// already `Stopping` or `Stopped`, this is a no-op.
+    ///
+    /// The caller SHOULD arrange for the completion event to update the
+    /// process state on the UI thread (via `AsyncApp::update()`).
+    pub fn stop_session_once(&mut self, session_id: &str) {
+        let needs_stop = match self.sessions.get(session_id) {
+            Some(s)
+                if !matches!(
+                    s.process_state,
+                    SessionProcessState::Stopping | SessionProcessState::Stopped
+                ) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !needs_stop {
+            return;
+        }
+        self.update_process_state(session_id, SessionProcessState::Stopping);
+
+        let sid = session_id.to_string();
+        std::thread::spawn(move || {
+            match crate::orchestrator::stop_guest_session(&sid) {
+                Ok(true) => {
+                    tracing::info!(session_id = %sid, "stop_session_once: stopped");
+                }
+                Ok(false) => {
+                    tracing::info!(session_id = %sid, "stop_session_once: already inactive");
+                }
+                Err(err) => {
+                    tracing::error!(session_id = %sid, error = %err, "stop_session_once: stop failed");
+                }
+            }
+            // TODO(D4): post completion to UI thread to update process_state to Stopped
+        });
+    }
+
     // ── view model ───────────────────────────────────────────────────────
 
     /// Build `SessionViewEntry` rows for the Open Windows screen.
