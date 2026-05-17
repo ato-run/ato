@@ -27,6 +27,8 @@
   "control_bar.info.show_identity": "Show execution identity",
   "control_bar.info.view_logs": "View logs",
   "control_bar.info.open_settings": "Open capsule settings",
+  "control_bar.info.restart": "Restart",
+  "control_bar.info.stop": "Stop",
   "control_bar.info.unmanaged_desc": "This page is not managed by a capsule.",
 
   "start.title": "New Window",

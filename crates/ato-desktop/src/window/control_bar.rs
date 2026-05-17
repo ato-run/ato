@@ -1,6 +1,6 @@
 //! Floating Control Bar window — a white pill with the following regions:
-//! [Settings] [Restart] [Stop] [URL Bar] | [Windows/Tray+badge] [Store] [Profile]
-//! Reproduces the reference mockup at `control-bar-enhanced.png`:
+//! [Settings] [URL Bar] | [Windows/Tray+badge] [Store] [Profile]
+//! Restart and Stop are accessed via the Info popup menu.
 //! - Opaque white pill with a soft multi-layer drop shadow
 //! - Transparent window backdrop so the shadow blurs through to the
 //!   desktop / app behind without a coloured halo
@@ -558,7 +558,7 @@ fn bar_pill(
         .child(right_action_group(window_count, locale))
 }
 
-/// Left group: [Settings] [Restart] [Stop]
+/// Left group: [Settings]
 fn left_action_group(locale: LocaleCode) -> impl IntoElement {
     div()
         .flex()
@@ -570,16 +570,6 @@ fn left_action_group(locale: LocaleCode) -> impl IntoElement {
             Some(tr(locale, "control_bar.settings").into()),
             ActionTarget::Settings,
             None,
-        ))
-        .child(session_action_button(
-            "restart",
-            PillIcon::Builtin(IconName::Redo2),
-            ActionTarget::Restart,
-        ))
-        .child(session_action_button(
-            "stop",
-            PillIcon::Custom("icons/stop-square.svg"),
-            ActionTarget::Stop,
         ))
 }
 
@@ -625,54 +615,6 @@ fn compact_pill() -> impl IntoElement {
         .border_color(hsla(0.0, 0.0, 0.0, 0.08))
 }
 
-/// Session lifecycle action button — icon only, no label, no border.
-/// Restart and Stop use this style.
-fn session_action_button(
-    id: &'static str,
-    icon: PillIcon,
-    target: ActionTarget,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .w(px(36.0))
-        .h(px(36.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(18.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(0.0, 0.0, 0.0, 0.05)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            dispatch_action_target(window, cx, target);
-        })
-        .child(match icon {
-            PillIcon::Builtin(name) => Icon::new(name)
-                .size(px(16.0))
-                .text_color(rgb(0x3f3f46))
-                .into_any_element(),
-            PillIcon::Custom(path) => svg()
-                .path(SharedString::from(path))
-                .size(px(16.0))
-                .text_color(rgb(0x3f3f46))
-                .into_any_element(),
-        })
-}
-
-fn dispatch_action_target(window: &mut Window, cx: &mut App, target: ActionTarget) {
-    let Some(window_id) = ControlBarShellPlaceholder::frontmost_capsule_window_id(cx) else {
-        return;
-    };
-    match target {
-        ActionTarget::Restart => {
-            window.dispatch_action(Box::new(RestartContentWindow { window_id }), cx);
-        }
-        ActionTarget::Stop => {
-            window.dispatch_action(Box::new(StopContentWindow { window_id }), cx);
-        }
-        _ => {}
-    }
-}
-
 fn profile_button() -> impl IntoElement {
     div()
         .id("profile")
@@ -703,11 +645,6 @@ enum ActionTarget {
     Settings,
     Store,
     CardSwitcher,
-    FocusUrl,
-    Restart,
-    Stop,
-    CapsuleSettings,
-    ToggleInfo,
 }
 
 #[derive(Clone)]
@@ -746,25 +683,6 @@ fn pill_button(
             }
             ActionTarget::CardSwitcher => {
                 window.dispatch_action(Box::new(OpenCardSwitcher), cx);
-            }
-            ActionTarget::FocusUrl => {
-                if let Err(err) = focus_control_bar_input(cx) {
-                    tracing::error!(error = %err, "Control Bar URL focus failed");
-                }
-            }
-            ActionTarget::Restart | ActionTarget::Stop => {
-                dispatch_action_target(window, cx, target);
-            }
-            ActionTarget::CapsuleSettings => {
-                if let Some(window_id) = ControlBarShellPlaceholder::frontmost_capsule_window_id(cx)
-                {
-                    window.dispatch_action(Box::new(OpenContentWindowSettings { window_id }), cx);
-                }
-            }
-            ActionTarget::ToggleInfo => {
-                if let Some(controller) = cx.global::<ControlBarController>().shell.clone() {
-                    controller.update(cx, |shell, cx| shell.toggle_info_popup(cx));
-                }
             }
         });
     match icon {
@@ -1053,6 +971,23 @@ fn info_popup_managed(
                 win.dispatch_action(Box::new(OpenContentWindowSettings { window_id }), cx);
             },
         ))
+        .child(info_popup_divider())
+        .child(info_popup_item_enabled(
+            "Restart",
+            "info-restart",
+            true,
+            move |win, cx| {
+                win.dispatch_action(Box::new(RestartContentWindow { window_id }), cx);
+            },
+        ))
+        .child(info_popup_item_enabled(
+            "Stop",
+            "info-stop",
+            true,
+            move |win, cx| {
+                win.dispatch_action(Box::new(StopContentWindow { window_id }), cx);
+            },
+        ))
 }
 
 fn info_popup_unmanaged(title: &str, url: &str) -> impl IntoElement {
@@ -1160,7 +1095,7 @@ fn info_popup_item_enabled(
 fn open_info_popup(cx: &mut App, model: InfoPopupModel) -> Result<AnyWindowHandle> {
     close_info_popup(cx);
 
-    let popup_size = size(px(300.0), px(360.0));
+    let popup_size = size(px(300.0), px(440.0));
 
     let control_bar = match cx.global::<ControlBarController>().handle {
         Some(h) => h,
