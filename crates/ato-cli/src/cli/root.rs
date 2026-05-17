@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use super::app::AppCommands;
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
+use super::import_cmd::ImportArgs;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
 use super::key::KeyCommands;
@@ -248,6 +249,12 @@ pub(crate) enum Commands {
         #[arg(long = "capsule")]
         capsule: String,
     },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Import a GitHub repository as a source recipe session"
+    )]
+    Import(ImportArgs),
 
     #[command(about = "Inspect or prune the local A1 dependency cache")]
     Cache {

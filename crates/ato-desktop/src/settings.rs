@@ -4,9 +4,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{
-    CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode, ControlBarPosition,
-    DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore, StartupSurface,
-    ThemeConfig, UpdateChannel,
+    CapsuleOpenMode, CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode,
+    ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore,
+    StartupSurface, ThemeConfig, UpdateChannel,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -326,6 +326,7 @@ fn desktop_settings_resolved(config: &DesktopConfig) -> Value {
         "focusViewEnabled": setting(d.focus_view_enabled, SettingSource::Global, false, None, SafetyClass::Immediate),
         "startupSurface": setting(d.startup_surface, SettingSource::Global, false, None, SafetyClass::Immediate),
         "contentWindowDefaultPresentation": setting(d.content_window_default_presentation, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "capsuleOpenMode": setting(d.capsule_open_mode, SettingSource::Global, false, None, SafetyClass::Immediate),
         "restoreWindowFrames": setting(d.restore_window_frames, SettingSource::Global, false, None, SafetyClass::Immediate),
         "controlBar": {
             "mode": setting(cb.mode, SettingSource::Global, false, None, SafetyClass::Immediate),
@@ -983,6 +984,12 @@ fn apply_desktop_patch_immediate(
             changed.push("contentWindowDefaultPresentation".to_string());
         }
     }
+    if let Some(v) = patch.get("capsuleOpenMode").and_then(Value::as_str) {
+        if let Some(mode) = parse_capsule_open_mode(v) {
+            config.desktop.capsule_open_mode = mode;
+            changed.push("capsuleOpenMode".to_string());
+        }
+    }
     if let Some(v) = patch.get("restoreWindowFrames").and_then(Value::as_bool) {
         config.desktop.restore_window_frames = v;
         changed.push("restoreWindowFrames".to_string());
@@ -1132,6 +1139,15 @@ fn parse_content_window_presentation(v: &str) -> Option<ContentWindowPresentatio
     }
 }
 
+fn parse_capsule_open_mode(v: &str) -> Option<CapsuleOpenMode> {
+    match v {
+        "window" => Some(CapsuleOpenMode::Window),
+        "webviewer" => Some(CapsuleOpenMode::Webviewer),
+        "os-browser" => Some(CapsuleOpenMode::OsBrowser),
+        _ => None,
+    }
+}
+
 fn parse_control_bar_position(v: &str) -> Option<ControlBarPosition> {
     match v {
         "top" => Some(ControlBarPosition::Top),
@@ -1213,6 +1229,7 @@ mod tests {
             .expect("snapshot must contain resolved.desktop");
         assert!(desktop.get("focusViewEnabled").is_some());
         assert!(desktop.get("startupSurface").is_some());
+        assert!(desktop.get("capsuleOpenMode").is_some());
         assert!(desktop.get("controlBar").is_some());
         let cb = desktop.get("controlBar").unwrap();
         assert!(cb.get("mode").is_some());
@@ -1361,5 +1378,50 @@ mod tests {
         // mode is platform-dependent but must be one of the two values
         let mode = storage["mode"].as_str().unwrap();
         assert!(mode == "0600" || mode == "platform-acl");
+    }
+
+    #[test]
+    fn snapshot_includes_capsule_open_mode() {
+        let config = default_config();
+        let snap = settings_snapshot_from_config(&config);
+        let desktop = snap
+            .get("resolved")
+            .and_then(|r| r.get("desktop"))
+            .expect("snapshot must contain resolved.desktop");
+        let entry = desktop
+            .get("capsuleOpenMode")
+            .expect("resolved.desktop.capsuleOpenMode must be present");
+        assert_eq!(entry["declared"].as_str(), Some("window"));
+        assert_eq!(entry["effective"].as_str(), Some("window"));
+    }
+
+    #[test]
+    fn patch_capsule_open_mode_webviewer() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"capsuleOpenMode": "webviewer"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(changed.contains(&"capsuleOpenMode".to_string()));
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn capsule_open_mode_not_in_next_launch_keys() {
+        assert!(
+            !NEXT_LAUNCH_KEYS.contains(&"capsuleOpenMode"),
+            "capsuleOpenMode must not be in NEXT_LAUNCH_KEYS"
+        );
+    }
+
+    #[test]
+    fn patch_capsule_open_mode_unknown_ignored() {
+        let mut config = default_config();
+        let original = config.desktop.capsule_open_mode;
+        let patch = serde_json::json!({"capsuleOpenMode": "unknown-mode"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.capsule_open_mode, original);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(!changed.contains(&"capsuleOpenMode".to_string()));
     }
 }
