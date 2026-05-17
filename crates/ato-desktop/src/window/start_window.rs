@@ -74,8 +74,7 @@ impl StartWindowShell {
 }
 
 const START_CAPSULE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/system/ato-start");
-const START_CAPSULE_TOML: &str =
-    include_str!("../../assets/system/ato-start/capsule.toml");
+const START_CAPSULE_TOML: &str = include_str!("../../assets/system/ato-start/capsule.toml");
 const START_SCHEME: &str = "capsule-start";
 
 #[derive(Deserialize)]
@@ -159,28 +158,28 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
                         path.strip_prefix('/').unwrap_or(path)
                     };
                     let content_path = format!("{}/{}", start_run_dir_for_protocol, file_path);
-                    let (content_type, body, status) = match START_CAPSULE_DIR.get_file(&content_path)
-                    {
-                        Some(file) => {
-                            let ext = file_path.rsplit('.').next().unwrap_or("");
-                            let mime = match ext {
-                                "html" => "text/html; charset=utf-8",
-                                "js" => "application/javascript; charset=utf-8",
-                                "css" => "text/css; charset=utf-8",
-                                "png" => "image/png",
-                                "svg" => "image/svg+xml",
-                                "ico" => "image/x-icon",
-                                "json" => "application/json",
-                                _ => "application/octet-stream",
-                            };
-                            (mime, Cow::from(file.contents().to_vec()), 200)
-                        }
-                        None => (
-                            "text/plain; charset=utf-8",
-                            Cow::Borrowed(b"not found" as &[u8]),
-                            404,
-                        ),
-                    };
+                    let (content_type, body, status) =
+                        match START_CAPSULE_DIR.get_file(&content_path) {
+                            Some(file) => {
+                                let ext = file_path.rsplit('.').next().unwrap_or("");
+                                let mime = match ext {
+                                    "html" => "text/html; charset=utf-8",
+                                    "js" => "application/javascript; charset=utf-8",
+                                    "css" => "text/css; charset=utf-8",
+                                    "png" => "image/png",
+                                    "svg" => "image/svg+xml",
+                                    "ico" => "image/x-icon",
+                                    "json" => "application/json",
+                                    _ => "application/octet-stream",
+                                };
+                                (mime, Cow::from(file.contents().to_vec()), 200)
+                            }
+                            None => (
+                                "text/plain; charset=utf-8",
+                                Cow::Borrowed(b"not found" as &[u8]),
+                                404,
+                            ),
+                        };
                     let response = Response::builder()
                         .status(status)
                         .header("Content-Type", content_type)
