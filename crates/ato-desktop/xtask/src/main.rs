@@ -9,12 +9,18 @@ const APP_IDENTIFIER: &str = "run.ato.desktop";
 const DEFAULT_TARGET: &str = "darwin-arm64";
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("frontend") => {
-            let subcommand = args.next();
-            let forwarded = normalize_passthrough_args(args.collect());
-            match subcommand.as_deref() {
+    let all: Vec<String> = std::env::args().skip(1).collect();
+
+    let Some(cmd) = all.first().map(String::as_str) else {
+        print_help();
+        return Ok(());
+    };
+
+    match cmd {
+        "frontend" => {
+            let subcommand = all.get(1).map(String::as_str);
+            let forwarded = normalize_passthrough_args(all[2..].to_vec());
+            match subcommand {
                 Some("build") => frontend_build(&forwarded),
                 Some("dev") => frontend_dev(&forwarded),
                 Some("help") | Some("--help") | Some("-h") | None => {
@@ -24,19 +30,28 @@ fn main() -> Result<()> {
                 Some(other) => bail!("unsupported frontend command: {}", other),
             }
         }
-        Some("bundle") => {
+        "store" => {
+            let forwarded = normalize_passthrough_args(all[1..].to_vec());
+            let do_install = forwarded.iter().any(|a| a == "--install");
+            store_build(do_install)
+        }
+        "bundle" => {
             let mut target = DEFAULT_TARGET.to_string();
             let mut sign = false;
             let mut do_notarize = false;
             let mut do_zip = false;
             let mut do_msi = false;
             let mut do_appimage = false;
-            while let Some(arg) = args.next() {
+            let mut i = 1;
+            while let Some(arg) = all.get(i) {
+                i += 1;
                 match arg.as_str() {
                     "--target" => {
-                        target = args
-                            .next()
-                            .context("--target requires a value such as darwin-arm64")?;
+                        target = all
+                            .get(i)
+                            .context("--target requires a value such as darwin-arm64")?
+                            .clone();
+                        i += 1;
                     }
                     "--sign" => sign = true,
                     "--notarize" => do_notarize = true,
@@ -89,15 +104,15 @@ fn main() -> Result<()> {
                 other => bail!("unsupported bundle target: {}", other),
             }
         }
-        Some("notarize") => {
-            let bundle = args
-                .next()
+        "notarize" => {
+            let bundle = all
+                .get(1)
                 .context("notarize requires a path to the .app bundle")?;
-            notarize_bundle(Path::new(&bundle))
+            notarize_bundle(Path::new(bundle))
         }
-        Some("zip") => {
-            let path = args
-                .next()
+        "zip" => {
+            let path = all
+                .get(1)
                 .context("zip requires a path to a .app bundle (macOS) or staging dir (Windows)")?;
             let target = Path::new(&path)
                 .parent()
@@ -111,9 +126,9 @@ fn main() -> Result<()> {
                 other => bail!("unsupported zip target: {}", other),
             }
         }
-        Some("msi") => {
-            let staging = args
-                .next()
+        "msi" => {
+            let staging = all
+                .get(1)
                 .context("msi requires a path to the staging directory")?;
             let target = Path::new(&staging)
                 .parent()
@@ -123,9 +138,9 @@ fn main() -> Result<()> {
                 .to_string();
             package_msi(Path::new(&staging), &target)
         }
-        Some("appimage") => {
-            let staging = args
-                .next()
+        "appimage" => {
+            let staging = all
+                .get(1)
                 .context("appimage requires a path to the staging directory")?;
             let target = Path::new(&staging)
                 .parent()
@@ -135,11 +150,7 @@ fn main() -> Result<()> {
                 .to_string();
             package_appimage(Path::new(&staging), &target)
         }
-        Some("help") | Some("--help") | Some("-h") | None => {
-            print_help();
-            Ok(())
-        }
-        Some(other) => bail!("unsupported xtask command: {}", other),
+        other => bail!("unsupported xtask command: {}", other),
     }
 }
 
@@ -149,18 +160,59 @@ fn print_help() {
          Commands:\n  \
                      frontend build [-- <vite-args...>]\n  \
                      frontend dev   [-- <vite-args...>]\n  \
-           bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
-           notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
-           zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
-           msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
-           appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
+                     store build [--install]\n  \
+            bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
+            notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
+            zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
+            msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
+            appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
          Targets:\n  \
-           darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
+            darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
          macOS code-signing modes (resolved at runtime):\n  \
-           - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
-           - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
+            - if MAC_DEVELOPER_ID_NAME is set: real Developer ID (hardened runtime + entitlements)\n  \
+            - else:                            ad-hoc (`codesign --sign -`) — v0.5 default\n\n\
          Windows: signtool integration is scaffolded but env-gated; v0.5 ships unsigned (L10).\n"
     );
+}
+
+fn store_build(do_install: bool) -> Result<()> {
+    let paths = WorkspacePaths::discover()?;
+    let store_root = &paths.store_root;
+
+    if !store_root.join("node_modules").exists() || do_install {
+        println!("Installing store dependencies…");
+        let status = Command::new("pnpm")
+            .args(["install", "--frozen-lockfile"])
+            .current_dir(store_root)
+            .status()
+            .context("failed to run pnpm install in apps/ato-web")?;
+        if !status.success() {
+            bail!("pnpm install failed with status {}", status);
+        }
+    }
+
+    println!("Building desktop-store…");
+    let status = Command::new("pnpm")
+        .args(["run", "build:desktop-store"])
+        .current_dir(store_root)
+        .status()
+        .context("failed to run pnpm build:desktop-store in apps/ato-web")?;
+    if !status.success() {
+        bail!("pnpm build:desktop-store failed with status {}", status);
+    }
+
+    let src = &paths.store_dist_source;
+    let dest = &paths.store_dist_dest;
+    if dest.exists() {
+        fs::remove_dir_all(dest)
+            .with_context(|| format!("failed to remove old store dist at {}", dest.display()))?;
+    }
+    copy_dir_recursive(src, dest)?;
+    println!(
+        "Copied desktop-store dist to {}",
+        dest.display()
+    );
+    Ok(())
 }
 
 fn print_frontend_help() {
@@ -1085,6 +1137,9 @@ struct WorkspacePaths {
     ato_manifest: PathBuf,
     nacelle_manifest: PathBuf,
     target_root: PathBuf,
+    store_root: PathBuf,
+    store_dist_source: PathBuf,
+    store_dist_dest: PathBuf,
 }
 
 impl WorkspacePaths {
@@ -1128,6 +1183,18 @@ impl WorkspacePaths {
         // nacelle lives at <repo>/crates/nacelle in the monorepo.
         let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
         let target_root = repo_root.join("target");
+        // ato-web lives as a sibling of the ato repo root
+        // (apps/ato-web alongside apps/ato).
+        let store_root = repo_root
+            .parent()
+            .map(|p| p.join("ato-web"))
+            .unwrap_or_else(|| repo_root.join("..").join("ato-web"));
+        let store_dist_source = store_root.join("dist-desktop");
+        let store_dist_dest = desktop_root
+            .join("assets")
+            .join("system")
+            .join("ato-store")
+            .join("dist");
 
         Ok(Self {
             desktop_root,
@@ -1136,6 +1203,9 @@ impl WorkspacePaths {
             ato_manifest,
             nacelle_manifest,
             target_root,
+            store_root,
+            store_dist_source,
+            store_dist_dest,
         })
     }
 }
