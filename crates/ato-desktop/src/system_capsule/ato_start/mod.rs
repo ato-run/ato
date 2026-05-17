@@ -52,6 +52,8 @@ pub enum AtoStartCommand {
     OpenCapsule { handle: String },
     /// Open the ato-store system capsule. Requires `LaunchSystemCapsule`.
     OpenStore,
+    /// Open the ato-settings system capsule. Requires `LaunchSystemCapsule`.
+    OpenSettings,
     /// Open a local directory as a capsule. Requires `WebviewCreate`.
     OpenLocalPath { path: String },
     /// Close the start window. Requires `WindowsClose`.
@@ -65,6 +67,7 @@ impl AtoStartCommand {
             AtoStartCommand::OpenQuery { .. } => Capability::WebviewCreate,
             AtoStartCommand::OpenCapsule { .. } => Capability::WebviewCreate,
             AtoStartCommand::OpenStore => Capability::LaunchSystemCapsule,
+            AtoStartCommand::OpenSettings => Capability::LaunchSystemCapsule,
             AtoStartCommand::OpenLocalPath { .. } => Capability::WebviewCreate,
             AtoStartCommand::Close => Capability::WindowsClose,
         }
@@ -456,6 +459,12 @@ pub fn dispatch(
                 tracing::error!(error = %err, "ato_start: open_store failed");
             }
             let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+
+        AtoStartCommand::OpenSettings => {
+            if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
+                tracing::error!(error = %err, "ato_start: open_settings failed");
+            }
         }
 
         AtoStartCommand::OpenLocalPath { path } => {
