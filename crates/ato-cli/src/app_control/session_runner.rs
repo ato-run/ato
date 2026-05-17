@@ -545,10 +545,18 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 {
                     sink.set(crate::application::receipt_boundary::GraphIds {
                         declared_execution_id: Some(
-                            bundle_ref.derived.execution_ids.declared_execution_id.clone(),
+                            bundle_ref
+                                .derived
+                                .execution_ids
+                                .declared_execution_id
+                                .clone(),
                         ),
                         resolved_execution_id: Some(
-                            bundle_ref.derived.execution_ids.resolved_execution_id.clone(),
+                            bundle_ref
+                                .derived
+                                .execution_ids
+                                .resolved_execution_id
+                                .clone(),
                         ),
                     });
                 }

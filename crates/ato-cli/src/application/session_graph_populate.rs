@@ -280,10 +280,7 @@ pub(crate) fn dependency_contracts_from_graph(
                     .map(std::path::PathBuf::from)
                     .unwrap_or_default()
             });
-            let log_path = node
-                .metadata
-                .get("log_path")
-                .map(std::path::PathBuf::from);
+            let log_path = node.metadata.get("log_path").map(std::path::PathBuf::from);
             let runtime_export_keys = node
                 .metadata
                 .get("runtime_export_keys")
