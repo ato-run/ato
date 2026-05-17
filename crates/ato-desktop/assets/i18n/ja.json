@@ -27,6 +27,8 @@
   "control_bar.info.show_identity": "実行IDを表示",
   "control_bar.info.view_logs": "ログを表示",
   "control_bar.info.open_settings": "カプセル設定を開く",
+  "control_bar.info.restart": "再起動",
+  "control_bar.info.stop": "停止",
   "control_bar.info.unmanaged_desc": "このページはカプセルで管理されていません。",
 
   "start.title": "新しいウィンドウ",
