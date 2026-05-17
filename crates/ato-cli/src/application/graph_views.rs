@@ -151,6 +151,7 @@ pub(crate) fn build_declared_only_bundle(
         preflight,
         receipt: Default::default(),
         consent: None,
+        launch: None,
     })
 }
 
@@ -204,6 +205,7 @@ pub(crate) fn build_declared_only_bundle_with_consent(
         preflight,
         receipt: Default::default(),
         consent: Some(consent),
+        launch: None,
     })
 }
 
@@ -236,6 +238,35 @@ pub(crate) struct LaunchMaterializationInput {
     pub resolved_execution_id: Option<String>,
     /// Dependency aliases — declared-domain.
     pub dependency_aliases: Vec<String>,
+    /// PR-4c: launch envelope facets. `None` when the bundle was built
+    /// without `LaunchGraphBundleInput.launch`. When `Some`, the
+    /// fields here are byte-equivalent to the `LaunchSpec` facets
+    /// the legacy `compute_launch_digest` commits to, and
+    /// `compute_launch_digest_from_view` produces a byte-identical
+    /// digest. See `launch_materialization::compute_launch_digest_from_view`.
+    pub launch_envelope: Option<LaunchEnvelopeFacets>,
+}
+
+/// PR-4c: ato-cli mirror of `DerivedLaunchView`. Stays in ato-cli so
+/// the digest helper can live next to `compute_launch_digest`
+/// without crossing the crate boundary for every digest test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaunchEnvelopeFacets {
+    pub command: String,
+    pub args: Vec<String>,
+    pub logical_cwd: String,
+    /// IN the digest.
+    pub declared_port: Option<u16>,
+    /// NOT in the digest.
+    #[allow(dead_code)]
+    pub effective_port: Option<u16>,
+    /// NOT in the digest.
+    #[allow(dead_code)]
+    pub readiness_port: Option<u16>,
+    pub readiness_path: String,
+    pub build_input_digest: Option<String>,
+    pub lock_digest: Option<String>,
+    pub toolchain_fingerprint: String,
 }
 
 impl LaunchMaterializationInput {
@@ -247,10 +278,25 @@ impl LaunchMaterializationInput {
         let resolved_execution_id =
             Some(bundle.derived.execution_ids.resolved_execution_id.clone())
                 .filter(|id| !id.is_empty());
+        let launch_envelope = bundle.derived.launch.as_ref().map(|view| {
+            LaunchEnvelopeFacets {
+                command: view.command.clone(),
+                args: view.args.clone(),
+                logical_cwd: view.logical_cwd.clone(),
+                declared_port: view.declared_port,
+                effective_port: view.effective_port,
+                readiness_port: view.readiness_port,
+                readiness_path: view.readiness_path.clone(),
+                build_input_digest: view.build_input_digest.clone(),
+                lock_digest: view.lock_digest.clone(),
+                toolchain_fingerprint: view.toolchain_fingerprint.clone(),
+            }
+        });
         Self {
             declared_execution_id: bundle.derived.execution_ids.declared_execution_id.clone(),
             resolved_execution_id,
             dependency_aliases: bundle.derived.preflight.dependency_aliases.clone(),
+            launch_envelope,
         }
     }
 }
