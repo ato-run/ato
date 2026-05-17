@@ -63,3 +63,6 @@ Desktop.ini
 .envrc.local
 
 claudedocs/
+
+# Internal research artifacts
+docs/internal/research/*.csv
