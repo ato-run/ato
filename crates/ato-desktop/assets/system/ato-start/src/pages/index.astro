@@ -1,0 +1,138 @@
+---
+import "../styles/tailwind.css";
+import BackgroundDecorations from "../components/BackgroundDecorations.astro";
+import SearchSection from "../components/SearchSection.astro";
+import ActionCards from "../components/ActionCards.astro";
+import EmptyStateSection from "../components/EmptyStateSection.astro";
+import FeaturedApps from "../components/FeaturedApps.astro";
+---
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>新しいウィンドウ</title>
+</head>
+<body class="bg-slate-50 font-sans selection:bg-rose-100 selection:text-rose-900 overflow-hidden w-screen h-screen">
+  <div class="relative w-full h-full">
+
+    <BackgroundDecorations />
+
+    <div class="absolute inset-0 z-10 flex flex-col">
+      <div class="flex-1 overflow-y-auto px-8 pb-8 custom-scrollbar">
+        <SearchSection />
+        <ActionCards />
+        <EmptyStateSection />
+        <FeaturedApps />
+      </div>
+    </div>
+
+    <button id="settingsBtn" class="absolute bottom-6 left-6 z-30 w-9 h-9 bg-white rounded-[10px] shadow-sm border border-slate-200 flex items-center justify-center text-slate-500 hover:text-slate-700 hover:bg-slate-50 hover:shadow transition-all">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+    </button>
+  </div>
+
+  <style is:global>
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #E2E8F0; border-radius: 20px; }
+    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background-color: #CBD5E1; }
+  </style>
+
+  <script>
+    (function () {
+      'use strict';
+
+      function ipc(command) {
+        if (window.ipc) {
+          window.ipc.postMessage(JSON.stringify({ capsule: 'ato-start', command }));
+        }
+      }
+
+      const snap = window.__ATO_START_SNAPSHOT__ || {};
+      const searchInput = document.getElementById('searchInput');
+
+      function submitSearch() {
+        const value = searchInput.value.trim();
+        if (!value) return;
+        ipc({ kind: 'open_query', value });
+      }
+
+      function fillSearch(value) {
+        searchInput.value = value;
+        searchInput.focus();
+        searchInput.setSelectionRange(value.length, value.length);
+      }
+
+      if (searchInput) {
+        searchInput.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') submitSearch();
+          if (e.key === 'Escape') ipc({ kind: 'close' });
+        });
+      }
+
+      document.querySelectorAll('.chip[data-fill]').forEach(function (chip) {
+        chip.addEventListener('click', function () {
+          fillSearch(this.dataset.fill);
+        });
+      });
+
+      document.querySelectorAll('.action-card[data-action]').forEach(function (card) {
+        card.addEventListener('click', function () {
+          var action = this.dataset.action;
+          if (action === 'github') fillSearch('https://github.com/');
+          else if (action === 'local') fillSearch('~/');
+          else if (action === 'store') ipc({ kind: 'open_store' });
+        });
+      });
+
+      document.querySelectorAll('.tab-btn[data-tab]').forEach(function (tab) {
+        tab.addEventListener('click', function () {
+          var t = this.dataset.tab;
+          if (t === 'store') ipc({ kind: 'open_store' });
+          else if (t === 'github') fillSearch('https://github.com/');
+          else if (t === 'local') fillSearch('~/');
+          else if (t === 'recent') ipc({ kind: 'show_all_recent' });
+        });
+      });
+
+      document.querySelectorAll('.section-link[data-action]').forEach(function (link) {
+        link.addEventListener('click', function () {
+          var action = this.dataset.action;
+          if (action === 'show_all_recent') ipc({ kind: 'show_all_recent' });
+          else if (action === 'show_all_local') ipc({ kind: 'show_all_local' });
+          else if (action === 'view_all_store') ipc({ kind: 'open_store' });
+        });
+      });
+
+      document.querySelectorAll('.featured-card').forEach(function (card) {
+        card.addEventListener('click', function () {
+          var handle = this.dataset.handle;
+          if (handle) ipc({ kind: 'open_capsule', handle: handle });
+        });
+        var launchBtn = card.querySelector('.featured-launch');
+        if (launchBtn) {
+          launchBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var handle = card.dataset.handle;
+            if (handle) ipc({ kind: 'open_capsule', handle: handle });
+          });
+        }
+      });
+
+      document.getElementById('settingsBtn').addEventListener('click', function () {
+        ipc({ kind: 'open_settings' });
+      });
+
+      document.addEventListener('keydown', function (e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+          e.preventDefault();
+          if (searchInput) { searchInput.focus(); searchInput.select(); }
+        }
+      });
+
+      if (searchInput) searchInput.focus();
+    })();
+  </script>
+</body>
+</html>

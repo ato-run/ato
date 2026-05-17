@@ -1,10 +1,14 @@
 //! StartWindow — Wry-hosted HTML "new window" start surface.
 //!
-//! The start page is now the `ato-start` system capsule, served from
-//! `assets/system/ato-start/index.html`. Real data is pre-injected as
-//! `window.__ATO_START_SNAPSHOT__` via `with_initialization_script`
-//! at window construction time, so the page renders immediately without
-//! a round-trip IPC request.
+//! The start page is the `ato-start` system capsule. The built Astro
+//! output is embedded at compile time via `include_dir!` and served
+//! through a custom protocol handler. The served subdirectory is read
+//! from `assets/system/ato-start/capsule.toml` (`run` field).
+//! Real data is pre-injected as `window.__ATO_START_SNAPSHOT__` via
+//! `with_initialization_script` at window construction time, so the
+//! page renders immediately without a round-trip IPC request.
+
+use std::borrow::Cow;
 
 use anyhow::Result;
 use gpui::prelude::*;
@@ -13,7 +17,10 @@ use gpui::{
     WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
+use include_dir::{include_dir, Dir};
+use serde::Deserialize;
 use wry::dpi::{LogicalPosition, LogicalSize};
+use wry::http::Response;
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
@@ -66,7 +73,31 @@ impl StartWindowShell {
     }
 }
 
-const START_HTML: &str = include_str!("../../assets/system/ato-start/index.html");
+const START_CAPSULE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/system/ato-start");
+const START_CAPSULE_TOML: &str =
+    include_str!("../../assets/system/ato-start/capsule.toml");
+const START_SCHEME: &str = "capsule-start";
+
+#[derive(Deserialize)]
+struct StartCapsuleManifest {
+    run: Option<String>,
+}
+
+fn start_run_dir_from_manifest() -> String {
+    let run = toml::from_str::<StartCapsuleManifest>(START_CAPSULE_TOML)
+        .ok()
+        .and_then(|m| m.run)
+        .unwrap_or_else(|| "dist".to_string());
+
+    let trimmed = run.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return "dist".to_string();
+    }
+    if trimmed.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+        return "dist".to_string();
+    }
+    trimmed.to_string()
+}
 
 /// Spawn a fresh ato-start window. Always opens a new window — there
 /// is no slot or focus-reuse pathway. Snapshot data is injected at
@@ -104,6 +135,7 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
 
     let queue = system_ipc::new_queue();
     let queue_for_drain = queue.clone();
+    let start_run_dir = start_run_dir_from_manifest();
     let handle = cx.open_window(options, move |window, cx| {
         let win_size = window.bounds().size;
         let webview_rect = Rect {
@@ -114,11 +146,52 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             )
             .into(),
         };
-        let queue_for_ipc = queue.clone();
+        let start_url = format!("{START_SCHEME}://localhost/");
+        let start_run_dir_for_protocol = start_run_dir.clone();
         let webview = WebViewBuilder::new()
-            .with_html(START_HTML)
+            .with_asynchronous_custom_protocol(
+                START_SCHEME.to_string(),
+                move |_id, req, responder| {
+                    let path = req.uri().path();
+                    let file_path = if path == "/" || path.is_empty() {
+                        "index.html"
+                    } else {
+                        path.strip_prefix('/').unwrap_or(path)
+                    };
+                    let content_path = format!("{}/{}", start_run_dir_for_protocol, file_path);
+                    let (content_type, body, status) = match START_CAPSULE_DIR.get_file(&content_path)
+                    {
+                        Some(file) => {
+                            let ext = file_path.rsplit('.').next().unwrap_or("");
+                            let mime = match ext {
+                                "html" => "text/html; charset=utf-8",
+                                "js" => "application/javascript; charset=utf-8",
+                                "css" => "text/css; charset=utf-8",
+                                "png" => "image/png",
+                                "svg" => "image/svg+xml",
+                                "ico" => "image/x-icon",
+                                "json" => "application/json",
+                                _ => "application/octet-stream",
+                            };
+                            (mime, Cow::from(file.contents().to_vec()), 200)
+                        }
+                        None => (
+                            "text/plain; charset=utf-8",
+                            Cow::Borrowed(b"not found" as &[u8]),
+                            404,
+                        ),
+                    };
+                    let response = Response::builder()
+                        .status(status)
+                        .header("Content-Type", content_type)
+                        .body(body)
+                        .expect("start protocol response must build");
+                    responder.respond(response);
+                },
+            )
+            .with_url(&start_url)
             .with_initialization_script(&init_script)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler(queue.clone()))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Start WebView");
