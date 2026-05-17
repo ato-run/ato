@@ -141,8 +141,7 @@ pub struct DeveloperSettings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DesktopSettings {
     /// Whether the Focus View (multi-window) mode is enabled.
-    /// Env `ATO_DESKTOP_MULTI_WINDOW` takes precedence over this value during
-    /// the migration period.
+    /// Set to `false` to use the legacy single-window DesktopShell.
     #[serde(default = "default_focus_view_enabled")]
     pub focus_view_enabled: bool,
     /// Which surface is shown after the app starts.
