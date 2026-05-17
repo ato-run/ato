@@ -1205,8 +1205,8 @@ fn open_info_popup(cx: &mut App, model: InfoPopupModel) -> Result<AnyWindowHandl
 
 fn close_info_popup(cx: &mut App) {
     if let Some(handle) = cx.global::<InfoPopupWindowSlot>().0 {
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
         cx.set_global(InfoPopupWindowSlot(None));
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
 }
 
