@@ -540,6 +540,33 @@ pub fn run() {
                 tracing::info!("Dock window closed; slot cleared");
             }
 
+            // Session lifecycle handling based on windowCloseBehavior.
+            // The AppCapsuleShell Drop will detach the client; we decide
+            // whether to also stop the process here.
+            let close_behavior =
+                crate::config::load_config().desktop.window_close_behavior;
+            let mut registry =
+                cx.global_mut::<crate::state::session::SessionRegistry>();
+            let affected_session_ids =
+                registry.detach_clients_by_window_id(closed_id);
+            match close_behavior {
+                crate::config::WindowCloseBehavior::StopSession => {
+                    for sid in &affected_session_ids {
+                        registry.stop_session_once(sid);
+                    }
+                    tracing::info!(
+                        ?affected_session_ids,
+                        "windowCloseBehavior=stop-session: stopping sessions"
+                    );
+                }
+                crate::config::WindowCloseBehavior::KeepSessionRunning => {
+                    tracing::info!(
+                        ?affected_session_ids,
+                        "windowCloseBehavior=keep-session-running: sessions detached"
+                    );
+                }
+            }
+
             // In Focus mode the Control Bar is a process-lifetime
             // singleton with its own lifecycle, decoupled from any
             // AppWindow. Closing the last AppWindow therefore should
