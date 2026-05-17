@@ -228,22 +228,16 @@ impl<'de> Deserialize<'de> for ControlBarSettings {
         }
 
         let raw = RawControlBarSettings::deserialize(deserializer)?;
-        let mode = raw.mode.unwrap_or_else(|| {
-            if !raw.visible_on_startup {
-                ControlBarMode::Hidden
-            } else if raw.auto_hide {
-                ControlBarMode::AutoHide
-            } else {
-                ControlBarMode::Floating
-            }
-        });
+        let _ = raw.mode;
 
         Ok(Self {
-            mode,
+            // Temporary safety gate: force a single stable mode while
+            // non-floating behaviors are being debugged.
+            mode: ControlBarMode::Floating,
             always_on_top: raw.always_on_top,
-            visible_on_startup: raw.visible_on_startup,
+            visible_on_startup: true,
             position: raw.position,
-            auto_hide: raw.auto_hide,
+            auto_hide: false,
         })
     }
 }
@@ -1270,21 +1264,27 @@ mod tests {
     fn control_bar_settings_legacy_auto_hide_maps_to_mode() {
         let json = r#"{"auto_hide": true, "visible_on_startup": true}"#;
         let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.mode, ControlBarMode::AutoHide);
+        assert_eq!(parsed.mode, ControlBarMode::Floating);
+        assert!(parsed.visible_on_startup);
+        assert!(!parsed.auto_hide);
     }
 
     #[test]
     fn control_bar_settings_legacy_hidden_maps_to_mode() {
         let json = r#"{"visible_on_startup": false, "auto_hide": false}"#;
         let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.mode, ControlBarMode::Hidden);
+        assert_eq!(parsed.mode, ControlBarMode::Floating);
+        assert!(parsed.visible_on_startup);
+        assert!(!parsed.auto_hide);
     }
 
     #[test]
     fn control_bar_settings_explicit_mode_wins_over_legacy_flags() {
         let json = r#"{"mode": "compact-pill", "visible_on_startup": false, "auto_hide": true}"#;
         let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.mode, ControlBarMode::CompactPill);
+        assert_eq!(parsed.mode, ControlBarMode::Floating);
+        assert!(parsed.visible_on_startup);
+        assert!(!parsed.auto_hide);
     }
 
     #[test]

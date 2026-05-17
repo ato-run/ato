@@ -586,18 +586,18 @@ pub fn run() {
             }
         });
 
-        cx.on_action(|action: &SetControlBarMode, cx: &mut App| {
+        cx.on_action(|_action: &SetControlBarMode, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            // Temporary safety gate: keep control bar in floating mode only.
+            let mode = ControlBarMode::Floating;
             let mut config = crate::config::load_config();
-            config.desktop.control_bar.mode = action.mode;
-            config.desktop.control_bar.visible_on_startup =
-                !matches!(action.mode, ControlBarMode::Hidden);
-            config.desktop.control_bar.auto_hide =
-                matches!(action.mode, ControlBarMode::AutoHide);
+            config.desktop.control_bar.mode = mode;
+            config.desktop.control_bar.visible_on_startup = true;
+            config.desktop.control_bar.auto_hide = false;
             crate::config::save_config(&config);
-            if let Err(err) = crate::window::set_control_bar_mode(cx, action.mode) {
+            if let Err(err) = crate::window::set_control_bar_mode(cx, mode) {
                 tracing::error!(error = %err, "SetControlBarMode failed");
             }
         });
@@ -1069,36 +1069,13 @@ fn install_app_menus(cx: &mut App) {
                 MenuItem::action("Show Control Bar", ShowControlBar),
                 MenuItem::action("Hide Control Bar", HideControlBar),
                 MenuItem::submenu(
-                    Menu::new("Control Bar Mode").items([
-                        MenuItem::action(
-                            "Floating",
-                            SetControlBarMode {
-                                mode: ControlBarMode::Floating,
-                            },
-                        )
-                        .checked(mode == ControlBarMode::Floating),
-                        MenuItem::action(
-                            "Auto-hide",
-                            SetControlBarMode {
-                                mode: ControlBarMode::AutoHide,
-                            },
-                        )
-                        .checked(mode == ControlBarMode::AutoHide),
-                        MenuItem::action(
-                            "Compact pill",
-                            SetControlBarMode {
-                                mode: ControlBarMode::CompactPill,
-                            },
-                        )
-                        .checked(mode == ControlBarMode::CompactPill),
-                        MenuItem::action(
-                            "Hidden",
-                            SetControlBarMode {
-                                mode: ControlBarMode::Hidden,
-                            },
-                        )
-                        .checked(mode == ControlBarMode::Hidden),
-                    ]),
+                    Menu::new("Control Bar Mode").items([MenuItem::action(
+                        "Floating",
+                        SetControlBarMode {
+                            mode: ControlBarMode::Floating,
+                        },
+                    )
+                    .checked(mode == ControlBarMode::Floating)]),
                 ),
                 MenuItem::separator(),
                 MenuItem::action("Open Store", OpenStoreWindow),
