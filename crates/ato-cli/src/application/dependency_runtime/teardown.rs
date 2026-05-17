@@ -71,93 +71,196 @@ pub(crate) fn teardown_in_order(
 
 /// PR-5b (refs umbrella v0.6.0 graph-first migration): graph-driven
 /// teardown driver. Walks the persisted `StoredExecutionGraph` and
-/// dispatches per node kind:
+/// stops each teardown-eligible node in reverse-topological order
+/// derived from the graph's `depends_on` / `uses` edges.
+///
+/// # Edge convention
+///
+/// `depends_on` / `uses` edges are oriented "source DEPENDS ON
+/// target", i.e. the source node REQUIRES the target node. For
+/// startup, that means the target starts first. For teardown, the
+/// reverse: the source stops first.
+///
+/// ```text
+/// Edge: service-web --uses→ provider-db
+///   Startup order:  provider-db, then service-web.
+///   Teardown order: service-web, then provider-db.
+/// ```
+///
+/// ```text
+/// Edge: service-a --depends_on→ service-b
+///   Startup order:  service-b, then service-a.
+///   Teardown order: service-a, then service-b.
+/// ```
+///
+/// # Algorithm
+///
+/// DFS post-order over outgoing `depends_on` / `uses` edges yields
+/// forward (startup) topological order — dependencies appear before
+/// dependents. The driver reverses that list for teardown.
+///
+/// Kind dispatch per node:
 ///
 /// - `NODE_KIND_SERVICE` → stop via
 ///   `application::orchestration_teardown::stop_orchestration_service_record`.
 /// - `NODE_KIND_PROVIDER` → stop via the existing
-///   `teardown_reverse_topological` primitive over a single-node
-///   `TeardownTarget`.
-/// - Unknown kinds → `tracing::trace!` and skip (no-op-safe).
+///   `teardown_in_order` primitive over a single-node
+///   `TeardownTarget`, followed by a `sweep_stale_sentinel`.
+/// - Unknown / non-teardown kinds (e.g. capability outputs) →
+///   `tracing::trace!` and skip (no-op-safe).
 ///
-/// Order: services first, then providers. This matches the
-/// conceptual reverse-topological walk for the edge convention
-/// established in PR-5a (`service --depends_on/uses→ provider`):
-/// source first, target second. Within each kind, nodes are sorted
-/// by identifier for determinism.
+/// Unknown edge kinds (e.g. `provides`, `owns`) are not part of
+/// teardown ordering and are silently skipped from adjacency
+/// construction (a `tracing::trace!` is emitted on first
+/// encounter).
 ///
-/// Today's implementation does NOT consult `depends_on` edges
-/// between same-kind nodes — PR-5a's gap (provider→provider needs
-/// don't reach the populator yet) makes those edges always empty in
-/// practice. When a future commit threads `needs` through, this
-/// driver can be upgraded to true edge-walk reverse-topological
-/// order; the kind-first ordering is correct in the meantime.
+/// # Caller contract
 ///
-/// Errors from individual nodes are propagated. Use this driver
-/// only when `session_graph_populate::graph_complete_for_teardown`
-/// returned true for the source record — incomplete graphs should
-/// fall back to the legacy two-path teardown.
+/// Use this driver only when
+/// `session_graph_populate::graph_complete_for_teardown` returned
+/// true for the source record — incomplete graphs (missing edges
+/// when multi-node, missing pid/state_dir, etc.) must fall back to
+/// the legacy two-path teardown.
 pub fn teardown_from_graph(
     graph: &ato_session_core::StoredExecutionGraph,
     grace: Duration,
 ) -> Result<(), TeardownError> {
     use crate::application::session_graph_populate::{NODE_KIND_PROVIDER, NODE_KIND_SERVICE};
 
-    // Services first, in alias order.
-    let mut service_nodes: Vec<&ato_session_core::StoredGraphNode> = graph
-        .nodes
-        .iter()
-        .filter(|node| node.kind == NODE_KIND_SERVICE)
-        .collect();
-    service_nodes.sort_by(|a, b| a.identifier.cmp(&b.identifier));
-    for node in &service_nodes {
-        let record = service_record_from_node(node);
-        if let Err(err) = crate::application::orchestration_teardown::stop_orchestration_service_record(
-            &record, grace,
-        ) {
-            tracing::warn!(
-                service = node.identifier.as_str(),
-                error = %err,
-                "graph teardown: service stop returned error; continuing"
-            );
-        }
-    }
+    let teardown_order = compute_teardown_order(graph)?;
 
-    // Providers next, in alias order. Reverse-topo within the
-    // provider sub-graph requires `needs`, which PR-5a does not
-    // populate yet (see the docstring comment above). For now we
-    // delegate to teardown_in_order with `needs = Vec::new()` per
-    // target — equivalent to alphabetical-stop.
-    let mut provider_nodes: Vec<&ato_session_core::StoredGraphNode> = graph
+    // Index nodes by identifier for kind dispatch.
+    let nodes_by_id: BTreeMap<&str, &ato_session_core::StoredGraphNode> = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == NODE_KIND_PROVIDER)
+        .map(|node| (node.identifier.as_str(), node))
         .collect();
-    provider_nodes.sort_by(|a, b| a.identifier.cmp(&b.identifier));
-    let provider_targets: Vec<TeardownTarget> = provider_nodes
-        .iter()
-        .filter_map(|node| {
-            let pid = node.pid?;
-            let state_dir = node.state_dir.clone()?;
-            Some(TeardownTarget {
-                dep: node.identifier.clone(),
-                pid,
-                state_dir,
-                needs: Vec::new(),
-            })
-        })
-        .collect();
-    if !provider_targets.is_empty() {
-        teardown_in_order(&provider_targets, grace)?;
-        // Sentinel sweep for each provider node that had a state_dir.
-        for target in &provider_targets {
-            let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
-                &target.state_dir,
-            );
+
+    for id in &teardown_order {
+        let Some(node) = nodes_by_id.get(id.as_str()) else {
+            continue;
+        };
+        match node.kind.as_str() {
+            kind if kind == NODE_KIND_SERVICE => {
+                let record = service_record_from_node(node);
+                if let Err(err) =
+                    crate::application::orchestration_teardown::stop_orchestration_service_record(
+                        &record, grace,
+                    )
+                {
+                    tracing::warn!(
+                        service = node.identifier.as_str(),
+                        error = %err,
+                        "graph teardown: service stop returned error; continuing"
+                    );
+                }
+            }
+            kind if kind == NODE_KIND_PROVIDER => {
+                let Some(pid) = node.pid else {
+                    continue;
+                };
+                let Some(state_dir) = node.state_dir.clone() else {
+                    continue;
+                };
+                let target = TeardownTarget {
+                    dep: node.identifier.clone(),
+                    pid,
+                    state_dir: state_dir.clone(),
+                    needs: Vec::new(),
+                };
+                teardown_in_order(std::slice::from_ref(&target), grace)?;
+                let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
+                    &state_dir,
+                );
+            }
+            other => {
+                tracing::trace!(
+                    node_kind = other,
+                    identifier = node.identifier.as_str(),
+                    "teardown_from_graph: non-teardown node kind, skipping"
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+/// PR-5b-fix: pure computation of the teardown order over a stored
+/// graph. Extracted from `teardown_from_graph` so tests can assert
+/// the ordering without spawning real processes. Returns identifiers
+/// in the order they should be stopped (source-first).
+///
+/// Walks `depends_on` and `uses` edges as forward adjacency
+/// (source DEPENDS ON target), does DFS post-order from every
+/// eligible node (sorted), then reverses the resulting forward-topo
+/// order. Cycles surface as `TeardownError::CycleDetected`.
+pub(crate) fn compute_teardown_order(
+    graph: &ato_session_core::StoredExecutionGraph,
+) -> Result<Vec<String>, TeardownError> {
+    use crate::application::session_graph_populate::{
+        EDGE_KIND_DEPENDS_ON, EDGE_KIND_PROVIDES, EDGE_KIND_USES, NODE_KIND_PROVIDER,
+        NODE_KIND_SERVICE,
+    };
+
+    let mut eligible_ids: Vec<&str> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_PROVIDER || node.kind == NODE_KIND_SERVICE)
+        .map(|node| node.identifier.as_str())
+        .collect();
+    eligible_ids.sort();
+    eligible_ids.dedup();
+
+    let eligible_set: BTreeSet<&str> = eligible_ids.iter().copied().collect();
+
+    let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for id in &eligible_ids {
+        adj.insert(*id, Vec::new());
+    }
+    for edge in &graph.edges {
+        match edge.kind.as_str() {
+            EDGE_KIND_DEPENDS_ON | EDGE_KIND_USES => {
+                let (src, tgt) = (edge.source.as_str(), edge.target.as_str());
+                if eligible_set.contains(src) && eligible_set.contains(tgt) {
+                    adj.entry(src).or_default().push(tgt);
+                }
+            }
+            EDGE_KIND_PROVIDES => {
+                // Not a teardown-ordering edge — `provides` is
+                // provider→capability output. Skip silently.
+            }
+            other => {
+                tracing::trace!(
+                    edge_kind = other,
+                    source = edge.source.as_str(),
+                    target = edge.target.as_str(),
+                    "compute_teardown_order: unknown edge kind, skipping"
+                );
+            }
+        }
+    }
+    for neighbors in adj.values_mut() {
+        neighbors.sort();
+        neighbors.dedup();
+    }
+
+    let mut visited: BTreeSet<&str> = BTreeSet::new();
+    let mut visiting: BTreeSet<&str> = BTreeSet::new();
+    let mut forward_order: Vec<String> = Vec::new();
+    for start in &eligible_ids {
+        let mut stack: Vec<&str> = Vec::new();
+        dfs(
+            start,
+            &adj,
+            &mut visited,
+            &mut visiting,
+            &mut forward_order,
+            &mut stack,
+        )?;
+    }
+    forward_order.reverse();
+    Ok(forward_order)
 }
 
 /// PR-5b: project a service node back to a `StoredOrchestrationService`
@@ -468,5 +571,116 @@ mod tests {
             edges: vec![],
         };
         teardown_from_graph(&graph, Duration::from_millis(10)).expect("empty graph teardown");
+    }
+
+    // ---------- PR-5b-fix: edge-traversal ordering tests ----------
+
+    fn node(kind: &str, id: &str) -> ato_session_core::StoredGraphNode {
+        ato_session_core::StoredGraphNode {
+            kind: kind.to_string(),
+            identifier: id.to_string(),
+            pid: Some(0),
+            state_dir: None,
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn edge(source: &str, target: &str, kind: &str) -> ato_session_core::StoredGraphEdge {
+        ato_session_core::StoredGraphEdge {
+            source: source.to_string(),
+            target: target.to_string(),
+            kind: kind.to_string(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn graph(
+        nodes: Vec<ato_session_core::StoredGraphNode>,
+        edges: Vec<ato_session_core::StoredGraphEdge>,
+    ) -> ato_session_core::StoredExecutionGraph {
+        ato_session_core::StoredExecutionGraph {
+            schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+            nodes,
+            edges,
+        }
+    }
+
+    fn index_of(order: &[String], id: &str) -> usize {
+        order
+            .iter()
+            .position(|s| s == id)
+            .unwrap_or_else(|| panic!("expected '{id}' in teardown order {order:?}"))
+    }
+
+    /// PR-5b-fix test 1: service A depends_on service B → A stops first.
+    #[test]
+    fn service_a_depends_on_service_b_a_stops_first() {
+        let g = graph(
+            vec![node("service", "service-a"), node("service", "service-b")],
+            vec![edge("service-a", "service-b", "depends_on")],
+        );
+        let order = compute_teardown_order(&g).expect("topo");
+        assert!(
+            index_of(&order, "service-a") < index_of(&order, "service-b"),
+            "service-a (dependent) must teardown before service-b: {order:?}"
+        );
+    }
+
+    /// PR-5b-fix test 2: service uses provider → service first, provider second.
+    #[test]
+    fn service_uses_provider_service_stops_first() {
+        let g = graph(
+            vec![node("service", "web"), node("provider", "db")],
+            vec![edge("web", "db", "uses")],
+        );
+        let order = compute_teardown_order(&g).expect("topo");
+        assert!(
+            index_of(&order, "web") < index_of(&order, "db"),
+            "service-web (uses db) must teardown before provider-db: {order:?}"
+        );
+    }
+
+    /// PR-5b-fix test 3: provider depends_on provider → dependent first.
+    #[test]
+    fn provider_depends_on_provider_dependent_first() {
+        let g = graph(
+            vec![node("provider", "app"), node("provider", "db")],
+            vec![edge("app", "db", "depends_on")],
+        );
+        let order = compute_teardown_order(&g).expect("topo");
+        assert!(
+            index_of(&order, "app") < index_of(&order, "db"),
+            "provider-app (dependent) must teardown before provider-db: {order:?}"
+        );
+    }
+
+    /// PR-5b-fix: unknown edge kinds skip silently (no panic, no error).
+    #[test]
+    fn unknown_edge_kind_is_skipped() {
+        let g = graph(
+            vec![node("provider", "a"), node("provider", "b")],
+            vec![edge("a", "b", "mystery_kind")],
+        );
+        let order = compute_teardown_order(&g).expect("topo");
+        // No ordering edges → alphabetical eligible-node order survives,
+        // post-order reversed. The exact order isn't asserted — only
+        // that both nodes appear and no error fires.
+        assert_eq!(order.len(), 2, "expected both providers, got {order:?}");
+    }
+
+    /// PR-5b-fix: capability/output nodes are skipped from teardown
+    /// adjacency. The `provides` edge that connects provider→output
+    /// is not a teardown ordering edge.
+    #[test]
+    fn provides_edges_do_not_constrain_teardown_order() {
+        let g = graph(
+            vec![node("provider", "db"), node("output", "db-port")],
+            vec![edge("db", "db-port", "provides")],
+        );
+        let order = compute_teardown_order(&g).expect("topo");
+        assert_eq!(order, vec!["db".to_string()]);
     }
 }

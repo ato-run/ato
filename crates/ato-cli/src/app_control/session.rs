@@ -34,6 +34,8 @@ use crate::application::pipeline::phases::run::{
 use crate::application::session_graph_populate::{
     EDGE_KIND_PROVIDES, NODE_KIND_PROVIDER, NODE_KIND_SERVICE,
 };
+#[cfg(unix)]
+use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
     prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
@@ -1960,187 +1962,34 @@ fn stop_recorded_orchestration_services(
         return Ok(false);
     }
 
-    // Lazy OCI client: only build if we actually have an OCI service.
-    // Avoids spinning up a tokio runtime + bollard handshake for the
-    // common case of a fully-managed (local-only) orchestration capsule.
-    let has_oci = snapshot.services.iter().any(|s| s.container_id.is_some());
-    let oci_runtime = if has_oci {
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => Some(rt),
-            Err(err) => {
-                eprintln!(
-                    "ATO-WARN failed to build tokio runtime for orchestration teardown: {err}"
-                );
-                None
-            }
-        }
+    // PR-5b-fix: per-service teardown is delegated to the
+    // `orchestration_teardown` primitive so behavior is identical
+    // whether the legacy iteration here or the graph-driven
+    // `teardown_from_graph` driver invokes it. `force=true` collapses
+    // to `Duration::ZERO`, matching the legacy "immediate SIGKILL"
+    // semantics.
+    let grace = if force {
+        Duration::from_secs(0)
     } else {
-        None
+        Duration::from_secs(10)
     };
-    let oci_client = oci_runtime.as_ref().and_then(|_| {
-        match capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default() {
-            Ok(c) => Some(c),
-            Err(err) => {
-                eprintln!(
-                    "ATO-WARN failed to connect to OCI engine for orchestration teardown: {err}"
-                );
-                None
-            }
-        }
-    });
 
     let mut any_stopped = false;
     // Reverse-topological: services were started by ServicePhaseCoordinator
     // in topological order, so reverse iteration is the correct teardown
-    // order (consumers before providers).
+    // order (consumers before providers). The per-service primitive
+    // implements pgroup kill, descendant walk, lsof fallback, and OCI
+    // stop/remove (PR-5b-fix).
     for service in snapshot.services.iter().rev() {
-        if let Some(container_id) = service.container_id.as_deref() {
-            let (Some(rt), Some(client)) = (oci_runtime.as_ref(), oci_client.as_ref()) else {
+        match crate::application::orchestration_teardown::stop_orchestration_service_record(
+            service, grace,
+        ) {
+            Ok(true) => any_stopped = true,
+            Ok(false) => {}
+            Err(err) => {
                 eprintln!(
-                    "ATO-WARN orchestration service '{}' has container_id but no OCI client; skipping",
-                    service.name
-                );
-                continue;
-            };
-            // Short timeout: the daemon will SIGKILL the container if it
-            // doesn't exit gracefully within the budget. 5s matches the
-            // `OCI_STOP_TIMEOUT_SECS` constant in `executors::orchestrator`.
-            use capsule_core::runtime::oci::OciRuntimeClient as _;
-            match rt.block_on(client.stop_container(container_id, 5)) {
-                Ok(()) => any_stopped = true,
-                Err(err) => {
-                    eprintln!(
-                        "ATO-WARN failed to stop OCI container {} for service '{}': {}",
-                        container_id, service.name, err
-                    );
-                }
-            }
-            if let Err(err) = rt.block_on(client.remove_container(container_id, force)) {
-                eprintln!(
-                    "ATO-WARN failed to remove OCI container {} for service '{}': {}",
-                    container_id, service.name, err
-                );
-            }
-        } else if let Some(pid) = service.local_pid {
-            #[cfg(unix)]
-            {
-                if pid > 0 {
-                    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-
-                    // Strategy in order of preference:
-                    //
-                    //   1. **Process-group kill** when the recorded
-                    //      `local_pid` is currently a pgroup leader
-                    //      (`getpgid(pid) == pid`). The
-                    //      `nacelle::manager::supervisor` spawn path
-                    //      sets this via `cmd.process_group(0)`, so a
-                    //      `kill(-pgid, sig)` reaps the wrapper AND
-                    //      every descendant atomically.
-                    //
-                    //   2. **Descendant walk + per-pid kill** when (1)
-                    //      doesn't apply — the typical orchestration
-                    //      session: ato-cli spawns nacelle (pid recorded
-                    //      as `local_pid`), nacelle internally launches
-                    //      `uv run` / `npm run dev` wrappers via the
-                    //      direct/sandbox-exec launchers (which inherit
-                    //      ato-cli's pgroup, not their own). A plain
-                    //      per-pid SIGKILL on the recorded pid kills
-                    //      nacelle but leaves the wrappers it spawned
-                    //      alive as init-reparented orphans (#92 AODD
-                    //      Phase 2 → #111). Capture the descendants via
-                    //      `pgrep -P` recursively *before* signaling so
-                    //      we don't lose them when reparenting happens,
-                    //      then signal recorded pid, then signal each
-                    //      descendant. Idempotent on stale/dead pids
-                    //      (ESRCH is silently swallowed).
-                    //
-                    //   3. The lsof-by-published-port fallback (#109)
-                    //      stays as a belt-and-suspenders for any
-                    //      listener we still missed (e.g. a service
-                    //      that spawned outside the recorded subtree).
-                    let mut signaled_via_pgroup = false;
-                    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
-                    if pgid > 0 && pgid == pid as libc::pid_t {
-                        let ret = unsafe { libc::kill(-pgid, signal) };
-                        if ret == 0 {
-                            any_stopped = true;
-                            signaled_via_pgroup = true;
-                        } else {
-                            let err = std::io::Error::last_os_error();
-                            if err.raw_os_error() != Some(libc::ESRCH) {
-                                eprintln!(
-                                    "ATO-WARN failed to signal process group {} for service '{}': {}",
-                                    pgid, service.name, err
-                                );
-                            }
-                        }
-                    }
-
-                    if !signaled_via_pgroup {
-                        // Capture descendants BEFORE signaling — once
-                        // the recorded pid is killed, its children are
-                        // reparented to init and `pgrep -P recorded`
-                        // returns nothing, leaking the wrappers.
-                        let descendants = collect_descendant_pids(pid as u32, &service.name);
-
-                        // Per-pid kill on the recorded pid first.
-                        let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
-                        if ret == 0 {
-                            any_stopped = true;
-                        } else {
-                            let err = std::io::Error::last_os_error();
-                            if err.raw_os_error() != Some(libc::ESRCH) {
-                                eprintln!(
-                                    "ATO-WARN failed to signal local service '{}' (pid {}): {}",
-                                    service.name, pid, err
-                                );
-                            }
-                        }
-
-                        // Then signal every descendant we captured.
-                        // Each signal is idempotent — ESRCH means the
-                        // process already died (e.g. parent's death
-                        // cascaded), which is the desired end state.
-                        for child_pid in descendants {
-                            let ret = unsafe { libc::kill(child_pid as libc::pid_t, signal) };
-                            if ret == 0 {
-                                any_stopped = true;
-                            } else {
-                                let err = std::io::Error::last_os_error();
-                                if err.raw_os_error() != Some(libc::ESRCH) {
-                                    eprintln!(
-                                        "ATO-WARN failed to signal descendant {} (under recorded pid {}, service '{}'): {}",
-                                        child_pid, pid, service.name, err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                // Belt-and-suspenders for the wrapper-vs-workload PID gap
-                // (#108): even with the pgroup kill above, older
-                // session records (no pgroup, or pgid != recorded pid)
-                // and any spawn mode that drops out of the recorded
-                // pgroup land here. Look up the current listener via
-                // `lsof` and SIGKILL anything that's still bound to
-                // `published_port`; idempotent (returns false when the
-                // port is already free or the resolved pid matches
-                // what we just signaled, including via the pgroup).
-                if let Some(port) = service.published_port {
-                    if kill_listeners_on_published_port(port, pid, force, &service.name) {
-                        any_stopped = true;
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (pid, force);
-                eprintln!(
-                    "ATO-WARN local orchestration service teardown is unix-only; service '{}' (pid {}) was left running",
-                    service.name, pid
+                    "ATO-WARN failed to stop orchestration service '{}': {}",
+                    service.name, err
                 );
             }
         }
@@ -2209,169 +2058,12 @@ fn parse_graph_host_ports(encoded: &str) -> BTreeMap<u16, u16> {
         .collect()
 }
 
-/// Walk the descendant tree of `root_pid` via `pgrep -P` (BFS) and
-/// return every transitive child's pid. Used by
-/// `stop_recorded_orchestration_services` to capture the wrapper
-/// subtree BEFORE killing the recorded pid (#111). Once the recorded
-/// pid dies, its children get reparented to init and `pgrep -P` no
-/// longer finds them — by capturing first, we keep an explicit list
-/// of pids to follow up on.
-///
-/// Best-effort: failures (missing `pgrep`, malformed output, fork
-/// races) yield an empty / partial list and a debug-level message.
-/// The caller still has the lsof-by-published-port fallback (#109)
-/// for any listener we miss here.
-///
-/// Bounded depth (32 levels) and bounded total pids (256) so a
-/// pathological process tree can't make teardown loop forever or
-/// allocate without limit.
-#[cfg(unix)]
-fn collect_descendant_pids(root_pid: u32, service_name: &str) -> Vec<u32> {
-    use std::collections::VecDeque;
-
-    const MAX_DEPTH: usize = 32;
-    const MAX_PIDS: usize = 256;
-
-    let mut collected: Vec<u32> = Vec::new();
-    let mut frontier: VecDeque<(u32, usize)> = VecDeque::new();
-    frontier.push_back((root_pid, 0));
-
-    while let Some((parent, depth)) = frontier.pop_front() {
-        if depth >= MAX_DEPTH || collected.len() >= MAX_PIDS {
-            break;
-        }
-        let output = match Command::new("pgrep")
-            .args(["-P", &parent.to_string()])
-            .output()
-        {
-            Ok(o) => o,
-            Err(err) => {
-                tracing::debug!(
-                    parent,
-                    service = service_name,
-                    error = %err,
-                    "collect_descendant_pids: pgrep -P failed"
-                );
-                continue;
-            }
-        };
-        // pgrep exits 1 when the parent has no children — not an error.
-        if !output.status.success() && output.status.code() != Some(1) {
-            tracing::debug!(
-                parent,
-                service = service_name,
-                exit = ?output.status.code(),
-                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                "collect_descendant_pids: pgrep returned non-success"
-            );
-            continue;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for token in stdout.split_whitespace() {
-            let Ok(child) = token.parse::<u32>() else {
-                continue;
-            };
-            if child == 0 || child == parent || collected.contains(&child) {
-                continue;
-            }
-            collected.push(child);
-            frontier.push_back((child, depth + 1));
-            if collected.len() >= MAX_PIDS {
-                break;
-            }
-        }
-    }
-
-    collected
-}
-
-/// Kill any process currently bound to `port` on `127.0.0.1` whose pid
-/// differs from `recorded_pid` (which the caller already attempted to
-/// signal). Used as the wrapper-vs-workload fallback in
-/// `stop_recorded_orchestration_services` (#108): when ato spawned the
-/// service via `npm run dev` / `uv run` / a shell wrapper, the recorded
-/// `local_pid` is the wrapper and the actual listener is its child.
-/// `lsof -nP -iTCP:<port> -sTCP:LISTEN` is the host-portable way to
-/// resolve the current listener; macOS and Linux both ship it.
-///
-/// Returns `true` iff at least one previously-unsignaled pid was
-/// successfully killed.
-#[cfg(unix)]
-fn kill_listeners_on_published_port(
-    port: u16,
-    recorded_pid: i32,
-    force: bool,
-    service_name: &str,
-) -> bool {
-    let listener_pids = match listener_pids_on_port(port) {
-        Ok(pids) => pids,
-        Err(err) => {
-            eprintln!(
-                "ATO-WARN failed to enumerate listeners on port {} for service '{}': {}",
-                port, service_name, err
-            );
-            return false;
-        }
-    };
-    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-    let mut killed = false;
-    for pid in listener_pids {
-        if pid as i32 == recorded_pid {
-            // Already handled by the recorded-pid kill above.
-            continue;
-        }
-        let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
-        if ret == 0 {
-            killed = true;
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ESRCH) {
-                eprintln!(
-                    "ATO-WARN failed to signal port-{} listener (pid {}) for service '{}': {}",
-                    port, pid, service_name, err
-                );
-            }
-        }
-    }
-    killed
-}
-
-/// Best-effort resolve "which pids are listening on TCP `port` on the
-/// loopback right now?" using `lsof`. Returns the parsed pid list (may
-/// be empty if nothing is bound). Limited to TCP / IPv4 LISTEN to match
-/// how managed services bind their sockets — the orchestrator's
-/// readiness probe only ever waits on TCP listeners on 127.0.0.1.
-#[cfg(unix)]
-fn listener_pids_on_port(port: u16) -> Result<Vec<u32>> {
-    // `-t` prints PIDs only (one per line), bypassing the column-parsing
-    // hazard of the default human format.
-    let output = Command::new("lsof")
-        .args(["-nP", "-t", &format!("-iTCP:{}", port), "-sTCP:LISTEN"])
-        .output()
-        .with_context(|| format!("failed to invoke lsof for port {}", port))?;
-    // `lsof` exits 1 when there are no matches — that is not an error
-    // for our purposes, so only fail on unexpected exit codes.
-    if !output.status.success() && output.status.code() != Some(1) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "lsof exited {:?} for port {}: {}",
-            output.status.code(),
-            port,
-            stderr.trim()
-        );
-    }
-    let mut pids = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(pid) = trimmed.parse::<u32>() {
-            pids.push(pid);
-        }
-    }
-    Ok(pids)
-}
+// PR-5b-fix: `collect_descendant_pids`, `kill_listeners_on_published_port`,
+// and `listener_pids_on_port` moved to
+// `crate::application::orchestration_teardown` so the graph-driven
+// teardown driver can reuse them. The legacy
+// `stop_recorded_orchestration_services` (above) delegates per-service
+// to that primitive.
 
 fn stop_recorded_dependency_contracts(
     record: Option<&StoredSessionInfo>,
@@ -4483,6 +4175,100 @@ mod tests {
         }
         let _ = workload.kill();
         panic!("orphan workload (pid {workload_pid}) was not killed within 1s");
+    }
+
+    /// PR-5b-fix parity test: the graph-driven teardown path
+    /// (`teardown_from_graph` → `stop_orchestration_service_record`)
+    /// must do the same `published_port` lsof listener cleanup that
+    /// the legacy `stop_recorded_orchestration_services` does — see
+    /// the sibling test above. Same setup (dead recorded pid + live
+    /// orphan listener); the only difference is which teardown entry
+    /// point we call. If they diverge, the graph path is unsafe.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "depends on lsof + python3 cold-start; flaky under loaded `cargo test`"]
+    fn teardown_from_graph_kills_orphan_listener_via_published_port_parity_with_legacy() {
+        use std::collections::BTreeMap;
+        use std::net::TcpListener;
+
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind workload listener for graph parity test");
+        let port = listener.local_addr().expect("listener addr").port();
+        drop(listener);
+
+        let workload = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import http.server, socketserver; \
+                     socketserver.TCPServer.allow_reuse_address = True; \
+                     httpd = socketserver.TCPServer(('127.0.0.1', {port}), http.server.SimpleHTTPRequestHandler); \
+                     httpd.serve_forever()"
+                ),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn orphan workload");
+        let workload_pid = workload.id();
+
+        let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(pids) = listener_pids_on_port(port) {
+                if pids.contains(&workload_pid) {
+                    break;
+                }
+            }
+            if std::time::Instant::now() >= bound_deadline {
+                let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
+                panic!(
+                    "orphan workload (pid {workload_pid}) failed to bind 127.0.0.1:{port} within 10s"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let dead_recorded_pid: i32 = 999_999_999;
+
+        // Build a single-service graph carrying the dead recorded pid
+        // + the live `published_port`. No depends_on/uses edges
+        // needed (single service → no ordering ambiguity).
+        let mut metadata = BTreeMap::new();
+        metadata.insert("target_label".to_string(), "web".to_string());
+        metadata.insert("published_port".to_string(), port.to_string());
+
+        let service_node = ato_session_core::StoredGraphNode {
+            kind: NODE_KIND_SERVICE.to_string(),
+            identifier: "web".to_string(),
+            pid: Some(dead_recorded_pid),
+            state_dir: None,
+            port: Some(port),
+            container_id: None,
+            capability: None,
+            metadata,
+        };
+        let graph = ato_session_core::StoredExecutionGraph {
+            schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+            nodes: vec![service_node],
+            edges: vec![],
+        };
+
+        crate::application::dependency_runtime::teardown::teardown_from_graph(
+            &graph,
+            Duration::from_secs(0),
+        )
+        .expect("graph teardown");
+
+        // Same exit poll as the legacy parity test.
+        let mut workload = workload;
+        for _ in 0..40 {
+            if workload.try_wait().expect("workload wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = workload.kill();
+        panic!("orphan workload (pid {workload_pid}) was not killed within 1s by graph teardown");
     }
 
     /// #111 wrapper-and-workload pgroup teardown: the recorded `local_pid`

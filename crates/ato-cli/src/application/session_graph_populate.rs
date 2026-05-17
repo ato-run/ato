@@ -466,6 +466,14 @@ pub(crate) fn append_orchestration_services_to_graph_with_deps(
 ///   - service count matches `orchestration_services.services.len()`,
 ///     every service node has either `local_pid` or `container_id`
 ///
+/// PR-5b-fix: also require explicit ordering edges when multiple
+/// providers or multiple services exist. Without inter-provider
+/// `depends_on` edges (for multi-provider) or inter-service
+/// `depends_on` edges (for multi-service), the graph can't express
+/// teardown order and we must fall back to the legacy path which
+/// orders by alias / insertion order. Single-of-a-kind sessions are
+/// unaffected (no ordering needed when there's only one node).
+///
 /// Sessions written before PR-5a (no `depends_on` edges, no
 /// completeness facts populated) naturally return `false` here and
 /// take the legacy teardown path.
@@ -516,6 +524,41 @@ pub(crate) fn graph_complete_for_teardown(
         .all(|node| node.pid.is_some() || node.container_id.is_some())
     {
         return false;
+    }
+
+    // PR-5b-fix: multi-provider requires explicit depends_on edges
+    // between providers; otherwise teardown order is unspecified.
+    if provider_nodes.len() > 1 {
+        let provider_ids: std::collections::BTreeSet<&str> = provider_nodes
+            .iter()
+            .map(|n| n.identifier.as_str())
+            .collect();
+        let has_inter_provider_depends_on = graph.edges.iter().any(|edge| {
+            edge.kind == EDGE_KIND_DEPENDS_ON
+                && provider_ids.contains(edge.source.as_str())
+                && provider_ids.contains(edge.target.as_str())
+        });
+        if !has_inter_provider_depends_on {
+            return false;
+        }
+    }
+
+    // PR-5b-fix: multi-service requires explicit depends_on edges
+    // between services; uses-only edges (service→provider) don't
+    // order services among themselves.
+    if service_nodes.len() > 1 {
+        let service_ids: std::collections::BTreeSet<&str> = service_nodes
+            .iter()
+            .map(|n| n.identifier.as_str())
+            .collect();
+        let has_inter_service_depends_on = graph.edges.iter().any(|edge| {
+            edge.kind == EDGE_KIND_DEPENDS_ON
+                && service_ids.contains(edge.source.as_str())
+                && service_ids.contains(edge.target.as_str())
+        });
+        if !has_inter_service_depends_on {
+            return false;
+        }
     }
 
     true
@@ -917,5 +960,245 @@ mod tests {
 
         // Service missing both pid and container_id.
         assert!(!graph_complete_for_teardown(&make_record(true, true, false)));
+    }
+
+    /// PR-5b-fix: multi-provider session with no depends_on edges
+    /// between providers must return false — graph has no ordering
+    /// info, fall back to legacy.
+    #[test]
+    fn graph_complete_for_teardown_rejects_multi_provider_without_ordering() {
+        use ato_session_core::StoredSessionInfo;
+        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+
+        let p1 = StoredGraphNode {
+            kind: NODE_KIND_PROVIDER.to_string(),
+            identifier: "db".to_string(),
+            pid: Some(1234),
+            state_dir: Some(PathBuf::from("/tmp/db")),
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let p2 = StoredGraphNode {
+            kind: NODE_KIND_PROVIDER.to_string(),
+            identifier: "cache".to_string(),
+            pid: Some(2345),
+            state_dir: Some(PathBuf::from("/tmp/cache")),
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let make_record = |edges: Vec<StoredGraphEdge>| StoredSessionInfo {
+            session_id: "x".into(),
+            handle: "p/s".into(),
+            normalized_handle: "p/s".into(),
+            canonical_handle: None,
+            trust_state: TrustState::Untrusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "main".into(),
+                runtime: None,
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
+            pid: 0,
+            log_path: String::new(),
+            manifest_path: String::new(),
+            target_label: "main".into(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 0,
+                providers: vec![provider("db", 1234), provider("cache", 2345)],
+            }),
+            graph: Some(StoredExecutionGraph {
+                schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![p1.clone(), p2.clone()],
+                edges,
+            }),
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: None,
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+
+        // No ordering edges between db and cache → must reject.
+        assert!(!graph_complete_for_teardown(&make_record(vec![])));
+
+        // With an explicit depends_on edge between providers → accept.
+        let depends_on = StoredGraphEdge {
+            source: "cache".to_string(),
+            target: "db".to_string(),
+            kind: EDGE_KIND_DEPENDS_ON.to_string(),
+            metadata: BTreeMap::new(),
+        };
+        assert!(graph_complete_for_teardown(&make_record(vec![depends_on])));
+    }
+
+    /// PR-5b-fix: multi-service session with no depends_on edges
+    /// between services must return false. uses-only edges
+    /// (service→provider) don't order services among themselves.
+    #[test]
+    fn graph_complete_for_teardown_rejects_multi_service_without_ordering() {
+        use ato_session_core::{
+            StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
+        };
+        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+
+        let s1 = StoredGraphNode {
+            kind: NODE_KIND_SERVICE.to_string(),
+            identifier: "web".to_string(),
+            pid: Some(1111),
+            state_dir: None,
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let s2 = StoredGraphNode {
+            kind: NODE_KIND_SERVICE.to_string(),
+            identifier: "worker".to_string(),
+            pid: Some(2222),
+            state_dir: None,
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let prov = StoredGraphNode {
+            kind: NODE_KIND_PROVIDER.to_string(),
+            identifier: "db".to_string(),
+            pid: Some(3333),
+            state_dir: Some(PathBuf::from("/tmp/db")),
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let make_record = |edges: Vec<StoredGraphEdge>| StoredSessionInfo {
+            session_id: "x".into(),
+            handle: "p/s".into(),
+            normalized_handle: "p/s".into(),
+            canonical_handle: None,
+            trust_state: TrustState::Untrusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "main".into(),
+                runtime: None,
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
+            pid: 0,
+            log_path: String::new(),
+            manifest_path: String::new(),
+            target_label: "main".into(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 0,
+                providers: vec![provider("db", 3333)],
+            }),
+            graph: Some(StoredExecutionGraph {
+                schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![s1.clone(), s2.clone(), prov.clone()],
+                edges,
+            }),
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: Some(StoredOrchestrationServices {
+                wrapper_pid: 0,
+                services: vec![
+                    StoredOrchestrationService {
+                        name: "web".into(),
+                        target_label: "web".into(),
+                        local_pid: Some(1111),
+                        container_id: None,
+                        host_ports: Default::default(),
+                        published_port: None,
+                    },
+                    StoredOrchestrationService {
+                        name: "worker".into(),
+                        target_label: "worker".into(),
+                        local_pid: Some(2222),
+                        container_id: None,
+                        host_ports: Default::default(),
+                        published_port: None,
+                    },
+                ],
+            }),
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+
+        // Only uses-edges (service→provider); no service→service ordering.
+        let uses_only = vec![
+            StoredGraphEdge {
+                source: "web".to_string(),
+                target: "db".to_string(),
+                kind: EDGE_KIND_USES.to_string(),
+                metadata: BTreeMap::new(),
+            },
+            StoredGraphEdge {
+                source: "worker".to_string(),
+                target: "db".to_string(),
+                kind: EDGE_KIND_USES.to_string(),
+                metadata: BTreeMap::new(),
+            },
+        ];
+        assert!(!graph_complete_for_teardown(&make_record(uses_only)));
+
+        // Add an explicit service→service depends_on → accept.
+        let mut with_ordering = vec![
+            StoredGraphEdge {
+                source: "web".to_string(),
+                target: "db".to_string(),
+                kind: EDGE_KIND_USES.to_string(),
+                metadata: BTreeMap::new(),
+            },
+            StoredGraphEdge {
+                source: "worker".to_string(),
+                target: "db".to_string(),
+                kind: EDGE_KIND_USES.to_string(),
+                metadata: BTreeMap::new(),
+            },
+        ];
+        with_ordering.push(StoredGraphEdge {
+            source: "web".to_string(),
+            target: "worker".to_string(),
+            kind: EDGE_KIND_DEPENDS_ON.to_string(),
+            metadata: BTreeMap::new(),
+        });
+        assert!(graph_complete_for_teardown(&make_record(with_ordering)));
     }
 }
