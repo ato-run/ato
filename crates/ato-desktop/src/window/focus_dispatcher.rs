@@ -23,6 +23,7 @@ use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
 use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
 use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
+use crate::state::session::SessionRegistry;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
 
@@ -351,13 +352,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             // spawns the AppWindow, opens
                                             // the boot wizard.
                                             "ForceApprovePending" => {
-                                                let pending = cx
-                                                    .try_global::<crate::window::launch_window::PendingLaunchTarget>()
-                                                    .and_then(|g| g.0.clone());
-                                                cx.set_global(
-                                                    crate::window::launch_window::PendingLaunchTarget(None),
-                                                );
-                                                match pending {
+                                                let stashed: Option<crate::state::GuestRoute> = cx
+                                                    .global_mut::<crate::window::launch_window::PendingLaunches>()
+                                                    .0
+                                                    .drain()
+                                                    .next()
+                                                    .map(|(_, s)| s.route);
+                                                match stashed {
                                                     Some(route) => {
                                                         tracing::info!(
                                                             ?route,
@@ -365,12 +366,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                         );
                                                         match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
                                                             Ok(boot_handle) => {
-                                                                crate::window::launch_window::start_boot_launch(
-                                                                    cx,
-                                                                    route.clone(),
-                                                                    Vec::new(),
-                                                                    boot_handle,
-                                                                );
+                                                                 crate::window::launch_window::start_boot_launch(
+                                                                     cx,
+                                                                     route.clone(),
+                                                                     Vec::new(),
+                                                                     boot_handle,
+                                                                     crate::state::session::SessionClientKind::AtoWindow,
+                                                                 );
                                                             }
                                                             Err(err) => {
                                                                 tracing::error!(?err, "open_boot_window failed");
@@ -432,6 +434,19 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                 req.send(Err(msg));
                             }
                         }
+                    }
+                    AutomationCommand::ListSessions => {
+                        let entries = async_app_for_loop.update(|cx| {
+                            cx.global::<SessionRegistry>().view_entries()
+                        });
+                        let sessions_json = match serde_json::to_value(&entries) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                req.send(Err(format!("serialize sessions failed: {e}")));
+                                continue;
+                            }
+                        };
+                        req.send(Ok(serde_json::json!({ "sessions": sessions_json })));
                     }
                     other => {
                         // Non-dock browser_* and other commands with no
