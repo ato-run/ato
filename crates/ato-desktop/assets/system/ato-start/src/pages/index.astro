@@ -5,6 +5,7 @@ import SearchSection from "../components/SearchSection.astro";
 import ActionCards from "../components/ActionCards.astro";
 import EmptyStateSection from "../components/EmptyStateSection.astro";
 import FeaturedApps from "../components/FeaturedApps.astro";
+import LaunchpadGrid from "../components/LaunchpadGrid.astro";
 ---
 <!doctype html>
 <html lang="ja">
@@ -22,6 +23,7 @@ import FeaturedApps from "../components/FeaturedApps.astro";
       <div class="flex-1 overflow-y-auto px-8 pb-8 custom-scrollbar">
         <SearchSection />
         <ActionCards />
+        <LaunchpadGrid />
         <EmptyStateSection />
         <FeaturedApps />
       </div>
@@ -118,6 +120,21 @@ import FeaturedApps from "../components/FeaturedApps.astro";
             if (handle) ipc({ kind: 'open_capsule', handle: handle });
           });
         }
+      });
+
+      // ── Launchpad tiles ──────────────────────────────────────
+      document.querySelectorAll('.launchpad-tile[data-action]').forEach(function (tile) {
+        tile.addEventListener('click', function () {
+          var action = this.dataset.action;
+          if (action === 'open_query') {
+            var query = this.dataset.query;
+            if (query) ipc({ kind: 'open_query', value: query });
+          } else if (action === 'open_store') {
+            ipc({ kind: 'open_store' });
+          } else if (action === 'open_settings') {
+            ipc({ kind: 'open_settings' });
+          }
+        });
       });
 
       document.getElementById('settingsBtn').addEventListener('click', function () {
