@@ -86,11 +86,10 @@ actions!(
         // changing the action name.
         StopActiveSession,
         StopAllRetainedSessions,
-        // #169 — gated on `ATO_DESKTOP_MULTI_WINDOW=1`. Opens an
-        // additional top-level GPUI window rendering the placeholder
-        // `AppWindowShell` so the multi-window orchestrator can be
-        // exercised end-to-end before later layers (#171–#174) plug in
-        // real content. The action is wired regardless of the flag,
+        // #169 — Opens an additional top-level GPUI window rendering the
+        // placeholder `AppWindowShell` so the multi-window orchestrator
+        // can be exercised end-to-end before later layers (#171–#174)
+        // plug in real content. The action is wired unconditionally,
         // but the handler is a no-op when the flag is off.
         OpenAppWindowExperiment,
         // #173 — opens the Card Switcher overlay window.
@@ -398,9 +397,9 @@ pub fn run() {
             // #169 / #170 / #173 — Focus View companion windows.
             // Keystroke bindings are intentionally limited to
             // in-Focus navigation (Launcher, Card Switcher). The
-            // legacy ↔ Focus mode itself is chosen at startup via
-            // `ATO_DESKTOP_MULTI_WINDOW`; there is no in-session
-            // toggle. `OpenAppWindowExperiment` survives as an
+            // legacy ↔ Focus mode itself is chosen via config key
+            // `desktop.focus_view_enabled` at startup; there is no
+            // in-session toggle. `OpenAppWindowExperiment` survives as an
             // action handler (reachable via the automation socket
             // `host_dispatch_action` for AODD scripts that need to
             // spawn an additional Focus AppWindow), but has no key
@@ -645,9 +644,8 @@ pub fn run() {
         });
 
         // #169 — multi-window experiment action. Opens a placeholder
-        // `AppWindowShell` window when `ATO_DESKTOP_MULTI_WINDOW=1`.
-        // When the flag is off this is a no-op so the binding never
-        // surprises users who haven't opted in.
+        // `AppWindowShell` window (Focus View is now the default;
+        // opt out via config `desktop.focus_view_enabled = false`).
         cx.on_action(|_: &OpenAppWindowExperiment, cx: &mut App| {
             tracing::info!("OpenAppWindowExperiment handler entered");
             if !crate::window::is_multi_window_enabled() {
@@ -745,25 +743,148 @@ pub fn run() {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&handle)
                     .to_string();
-                let route = crate::state::GuestRoute::CapsuleHandle { handle, label };
-                // Gate every capsule launch on a pre-flight consent
-                // wizard. On Approve the broker spawns the real
-                // AppWindow + boot wizard; on Cancel nothing happens.
-                if let Err(err) =
-                    crate::window::launch_window::open_consent_window_for_route(cx, route)
-                {
-                    tracing::error!(
-                        error = %err,
-                        "NavigateToUrl(capsule) open_consent_window_for_route failed"
-                    );
+
+                let open_mode = crate::config::load_config().desktop.capsule_open_mode;
+                match open_mode {
+                    crate::config::CapsuleOpenMode::OsBrowser => {
+                        // Launch capsule in background, then open local URL in OS browser.
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let handle_clone = handle.clone();
+                        std::thread::spawn(move || {
+                            let result = crate::orchestrator::resolve_and_start_guest(
+                                &handle_clone,
+                                &[],
+                                &[],
+                                None,
+                            );
+                            let _ = tx.send((handle_clone, result));
+                        });
+                        let async_cx = cx.to_async();
+                        async_cx
+                            .foreground_executor()
+                            .spawn({
+                                let be = async_cx.background_executor().clone();
+                                let aa = async_cx.clone();
+                                async move {
+                                    loop {
+                                        match rx.try_recv() {
+                                            Ok((handle, result)) => {
+                                                aa.update(|_cx| {
+                                                    match result {
+                                                        Ok(session) => {
+                                                            let url = session.local_url.unwrap_or_else(|| {
+                                                                format!("https://ato.run/{}", handle)
+                                                            });
+                                                            if let Err(e) =
+                                                                crate::ui::open_external_url(&url)
+                                                            {
+                                                                tracing::error!(
+                                                                    error = %e,
+                                                                    url = %url,
+                                                                    "os-browser: open_external_url failed"
+                                                                );
+                                                            }
+                                                        }
+                                                        Err(launch_err) => {
+                                                            tracing::error!(
+                                                                error = %launch_err,
+                                                                handle = %handle,
+                                                                "os-browser: resolve_and_start_guest failed"
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                                break;
+                                            }
+                                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                                tracing::error!(
+                                                    "os-browser: background thread disconnected"
+                                                );
+                                                break;
+                                            }
+                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                                be.timer(std::time::Duration::from_millis(100))
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
+                            })
+                            .detach();
+                    }
+                    crate::config::CapsuleOpenMode::Webviewer => {
+                        tracing::warn!(
+                            "capsule_open_mode=webviewer: not yet implemented, falling back to window"
+                        );
+                        // fall through to window behaviour
+                        let route =
+                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        if let Err(err) =
+                            crate::window::launch_window::open_consent_window_for_route(
+                                cx, route,
+                            )
+                        {
+                            tracing::error!(
+                                error = %err,
+                                "NavigateToUrl(capsule) open_consent_window_for_route failed"
+                            );
+                        }
+                    }
+                    crate::config::CapsuleOpenMode::Window => {
+                        let route =
+                            crate::state::GuestRoute::CapsuleHandle { handle, label };
+                        // Gate every capsule launch on a pre-flight consent
+                        // wizard. On Approve the broker spawns the real
+                        // AppWindow + boot wizard; on Cancel nothing happens.
+                        if let Err(err) =
+                            crate::window::launch_window::open_consent_window_for_route(
+                                cx, route,
+                            )
+                        {
+                            tracing::error!(
+                                error = %err,
+                                "NavigateToUrl(capsule) open_consent_window_for_route failed"
+                            );
+                        }
+                    }
                 }
                 return;
             }
             match url::Url::parse(raw) {
                 Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
-                    let route = crate::state::GuestRoute::ExternalUrl(parsed);
-                    if let Err(err) = crate::window::open_app_window(cx, route) {
-                        tracing::error!(error = %err, "NavigateToUrl(http) open_app_window failed");
+                    let open_mode = crate::config::load_config().desktop.capsule_open_mode;
+                    match open_mode {
+                        crate::config::CapsuleOpenMode::OsBrowser => {
+                            let url_str = parsed.to_string();
+                            if let Err(e) = crate::ui::open_external_url(&url_str) {
+                                tracing::error!(
+                                    error = %e,
+                                    url = %url_str,
+                                    "os-browser: open_external_url for http URL failed"
+                                );
+                            }
+                        }
+                        crate::config::CapsuleOpenMode::Webviewer => {
+                            tracing::warn!(
+                                "capsule_open_mode=webviewer: not yet implemented for http URLs, falling back to window"
+                            );
+                            let route = crate::state::GuestRoute::ExternalUrl(parsed);
+                            if let Err(err) = crate::window::open_app_window(cx, route) {
+                                tracing::error!(
+                                    error = %err,
+                                    "NavigateToUrl(http) open_app_window failed"
+                                );
+                            }
+                        }
+                        crate::config::CapsuleOpenMode::Window => {
+                            let route = crate::state::GuestRoute::ExternalUrl(parsed);
+                            if let Err(err) = crate::window::open_app_window(cx, route) {
+                                tracing::error!(
+                                    error = %err,
+                                    "NavigateToUrl(http) open_app_window failed"
+                                );
+                            }
+                        }
                     }
                 }
                 Ok(parsed) => {
@@ -842,14 +963,12 @@ pub fn run() {
             }
         });
 
-        // ATO_DESKTOP_MULTI_WINDOW selects the entire startup surface.
-        // The two modes are mutually exclusive — there is no in-session
-        // toggle, only a process-lifetime choice. Multi-window mode
-        // opens the redesigned Focus View (AppWindow + Control Bar)
-        // directly; single-window mode opens the legacy `DesktopShell`
-        // and never touches the new code paths.
+        // The two startup modes are mutually exclusive — there is no
+        // in-session toggle, only a process-lifetime choice. Focus View
+        // (AppWindow + Control Bar) is the default; config key
+        // `desktop.focus_view_enabled = false` selects legacy DesktopShell.
         if crate::window::is_multi_window_enabled() {
-            tracing::info!("ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode");
+            tracing::info!("Focus View mode — selected by desktop.focus_view_enabled config");
             // Spawn the Control Bar FIRST as a Focus-mode singleton.
             // Its lifecycle is independent of any AppWindow: closing
             // the active AppWindow does not close the bar; opening a
@@ -930,7 +1049,7 @@ pub fn run() {
                 );
             }
         } else {
-            tracing::info!("ATO_DESKTOP_MULTI_WINDOW unset — booting legacy DesktopShell");
+            tracing::info!("Legacy DesktopShell mode — desktop.focus_view_enabled is false");
             let bounds = Bounds::centered(None, size(px(1440.0), px(920.0)), cx);
             cx.open_window(
                 WindowOptions {
