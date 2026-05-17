@@ -36,6 +36,44 @@ pub struct LaunchGraphBundleInput {
     /// `DerivedConsentView`, where the ato-cli's
     /// `ExecutionConsentView::from_bundle` reads it.
     pub consent: Option<GraphConsentInput>,
+    /// PR-4c (refs umbrella v0.6.0 graph-first migration): launch
+    /// envelope facets the launch digest commits to. Today
+    /// `application::launch_materialization::LaunchSpec` is the
+    /// digest input; PR-4c stages a bundle-derived view path that
+    /// must produce byte-identical digests, with `debug_assert!`
+    /// parity at the launch site. PR-4d flips the source after a
+    /// soak; this PR does NOT change `compute_launch_digest`'s
+    /// production wiring.
+    pub launch: Option<GraphLaunchInput>,
+}
+
+/// PR-4c: launch envelope input. Mirrors the LaunchSpec facets the
+/// digest commits to. Three port fields are kept separate because
+/// `LaunchSpec.declared_port` and the runtime's resolved
+/// (effective/readiness) ports diverge in warm-launch scenarios —
+/// only `declared_port` enters the digest. See the docstrings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLaunchInput {
+    pub command: String,
+    pub args: Vec<String>,
+    pub logical_cwd: String,
+    /// Port declared by the manifest target. THIS is what
+    /// `LaunchSpec.declared_port` carries today and what
+    /// `compute_launch_digest` commits to. PR-4c's parity assert
+    /// pins byte-equivalent digests when this field matches.
+    pub declared_port: Option<u16>,
+    /// Effective port the runtime will bind. May differ from
+    /// `declared_port` when warm-launch or desktop override applies.
+    /// **NOT** in the digest.
+    pub effective_port: Option<u16>,
+    /// Port the readiness probe targets. Typically equals
+    /// `effective_port` for web runtimes, `None` for non-web. **NOT**
+    /// in the digest.
+    pub readiness_port: Option<u16>,
+    pub readiness_path: String,
+    pub build_input_digest: Option<String>,
+    pub lock_digest: Option<String>,
+    pub toolchain_fingerprint: String,
 }
 
 /// PR-4b: consent identity input. Mirrors the 5 fields the consent
@@ -111,6 +149,28 @@ pub struct LaunchGraphDerivedViews {
     /// not supply `LaunchGraphBundleInput.consent` (back-compat for
     /// callers that haven't migrated yet — e.g. legacy unit tests).
     pub consent: Option<DerivedConsentView>,
+    /// PR-4c: launch envelope view. `None` when the call site did
+    /// not supply `LaunchGraphBundleInput.launch`.
+    pub launch: Option<DerivedLaunchView>,
+}
+
+/// PR-4c: bundle-projected launch envelope. Passthrough of
+/// `GraphLaunchInput`; documents which fields enter the digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedLaunchView {
+    pub command: String,
+    pub args: Vec<String>,
+    pub logical_cwd: String,
+    /// IN the digest.
+    pub declared_port: Option<u16>,
+    /// NOT in the digest.
+    pub effective_port: Option<u16>,
+    /// NOT in the digest.
+    pub readiness_port: Option<u16>,
+    pub readiness_path: String,
+    pub build_input_digest: Option<String>,
+    pub lock_digest: Option<String>,
+    pub toolchain_fingerprint: String,
 }
 
 /// PR-4b: bundle-projected consent identity. The 5 fields the
@@ -238,6 +298,19 @@ impl ExecutionGraphBuilder {
                 target_label: input.target_label,
                 policy_segment_hash: input.policy_segment_hash,
                 provisioning_policy_hash: input.provisioning_policy_hash,
+            }),
+            // PR-4c: project launch envelope from input. Passthrough.
+            launch: input.launch.map(|input| DerivedLaunchView {
+                command: input.command,
+                args: input.args,
+                logical_cwd: input.logical_cwd,
+                declared_port: input.declared_port,
+                effective_port: input.effective_port,
+                readiness_port: input.readiness_port,
+                readiness_path: input.readiness_path,
+                build_input_digest: input.build_input_digest,
+                lock_digest: input.lock_digest,
+                toolchain_fingerprint: input.toolchain_fingerprint,
             }),
             receipt_seed: DerivedReceiptSeed {
                 runner: input.receipt.runner,
@@ -492,6 +565,7 @@ mod tests {
                 redaction_policy_version: Some("v1".to_string()),
             },
             consent: None,
+            launch: None,
         }
     }
 
