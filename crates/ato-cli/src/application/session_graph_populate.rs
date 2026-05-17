@@ -474,6 +474,12 @@ pub(crate) fn append_orchestration_services_to_graph_with_deps(
 /// orders by alias / insertion order. Single-of-a-kind sessions are
 /// unaffected (no ordering needed when there's only one node).
 ///
+/// PR-5b-fix (review round 2): also reject sessions whose provider
+/// identifiers overlap with their service identifiers. The graph
+/// teardown driver keys nodes by identifier alone (single namespace),
+/// so a collision would silently drop one side; the legacy two-path
+/// teardown is the safe choice in that case.
+///
 /// Sessions written before PR-5a (no `depends_on` edges, no
 /// completeness facts populated) naturally return `false` here and
 /// take the legacy teardown path.
@@ -526,13 +532,35 @@ pub(crate) fn graph_complete_for_teardown(
         return false;
     }
 
+    let provider_ids: std::collections::BTreeSet<&str> = provider_nodes
+        .iter()
+        .map(|n| n.identifier.as_str())
+        .collect();
+    let service_ids: std::collections::BTreeSet<&str> = service_nodes
+        .iter()
+        .map(|n| n.identifier.as_str())
+        .collect();
+
+    // PR-5b-fix (review round 2): provider and service node
+    // identifiers share a single namespace inside `teardown_from_graph`
+    // (`nodes_by_id: BTreeMap<&str, _>` and `compute_teardown_order`'s
+    // eligible-node dedup both key on identifier alone). If a provider
+    // alias collides with a service name — e.g. provider `db` and a
+    // service literally called `db` — one node would overwrite the
+    // other and silently leak the loser at teardown. Equally,
+    // `append_orchestration_services_to_graph_with_deps` classifies
+    // edge targets by service-name membership first, then provider
+    // alias, so a service→provider `uses` edge could be miscategorized
+    // as service→service `depends_on` when the names overlap. Refuse
+    // graph-driven teardown for any record whose provider IDs intersect
+    // its service IDs; the legacy two-path teardown is the safe choice.
+    if !provider_ids.is_disjoint(&service_ids) {
+        return false;
+    }
+
     // PR-5b-fix: multi-provider requires explicit depends_on edges
     // between providers; otherwise teardown order is unspecified.
     if provider_nodes.len() > 1 {
-        let provider_ids: std::collections::BTreeSet<&str> = provider_nodes
-            .iter()
-            .map(|n| n.identifier.as_str())
-            .collect();
         let has_inter_provider_depends_on = graph.edges.iter().any(|edge| {
             edge.kind == EDGE_KIND_DEPENDS_ON
                 && provider_ids.contains(edge.source.as_str())
@@ -547,10 +575,6 @@ pub(crate) fn graph_complete_for_teardown(
     // between services; uses-only edges (service→provider) don't
     // order services among themselves.
     if service_nodes.len() > 1 {
-        let service_ids: std::collections::BTreeSet<&str> = service_nodes
-            .iter()
-            .map(|n| n.identifier.as_str())
-            .collect();
         let has_inter_service_depends_on = graph.edges.iter().any(|edge| {
             edge.kind == EDGE_KIND_DEPENDS_ON
                 && service_ids.contains(edge.source.as_str())
@@ -1200,5 +1224,103 @@ mod tests {
             metadata: BTreeMap::new(),
         });
         assert!(graph_complete_for_teardown(&make_record(with_ordering)));
+    }
+
+    /// PR-5b-fix (review round 2): when a provider alias collides
+    /// with a service name, `teardown_from_graph`'s single-namespace
+    /// node lookup would silently drop one side. The completeness
+    /// predicate must refuse the graph path so the legacy two-path
+    /// teardown handles such a session.
+    #[test]
+    fn graph_complete_for_teardown_rejects_provider_service_identifier_collision() {
+        use ato_session_core::{
+            StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
+        };
+        use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
+
+        // Provider and service share the identifier "db".
+        let provider_node = StoredGraphNode {
+            kind: NODE_KIND_PROVIDER.to_string(),
+            identifier: "db".to_string(),
+            pid: Some(1234),
+            state_dir: Some(PathBuf::from("/tmp/db-provider")),
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+        let service_node = StoredGraphNode {
+            kind: NODE_KIND_SERVICE.to_string(),
+            identifier: "db".to_string(),
+            pid: Some(5678),
+            state_dir: None,
+            port: None,
+            container_id: None,
+            capability: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let record = StoredSessionInfo {
+            session_id: "x".into(),
+            handle: "p/s".into(),
+            normalized_handle: "p/s".into(),
+            canonical_handle: None,
+            trust_state: TrustState::Untrusted,
+            source: None,
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "main".into(),
+                runtime: None,
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::GuestWebview,
+            pid: 0,
+            log_path: String::new(),
+            manifest_path: String::new(),
+            target_label: "main".into(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 0,
+                providers: vec![provider("db", 1234)],
+            }),
+            graph: Some(StoredExecutionGraph {
+                schema_version: StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![provider_node, service_node],
+                edges: vec![],
+            }),
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: Some(StoredOrchestrationServices {
+                wrapper_pid: 0,
+                services: vec![StoredOrchestrationService {
+                    name: "db".into(),
+                    target_label: "db".into(),
+                    local_pid: Some(5678),
+                    container_id: None,
+                    host_ports: Default::default(),
+                    published_port: None,
+                }],
+            }),
+            schema_version: None,
+            launch_digest: None,
+            process_start_time_unix_ms: None,
+        };
+
+        assert!(
+            !graph_complete_for_teardown(&record),
+            "must reject provider/service identifier collision"
+        );
     }
 }
