@@ -573,12 +573,12 @@ fn left_action_group(locale: LocaleCode) -> impl IntoElement {
         ))
         .child(session_action_button(
             "restart",
-            PillIcon::Builtin(IconName::Redo),
+            PillIcon::Builtin(IconName::Redo2),
             ActionTarget::Restart,
         ))
         .child(session_action_button(
             "stop",
-            PillIcon::Builtin(IconName::CircleX),
+            PillIcon::Custom("icons/stop-square.svg"),
             ActionTarget::Stop,
         ))
 }
@@ -907,7 +907,7 @@ fn star_icon_button(icon: IconName) -> impl IntoElement {
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             window.dispatch_action(Box::new(ToggleStarCapsule), cx);
         })
-        .child(Icon::new(icon).size(px(13.0)).text_color(rgb(0xf59e0b)))
+        .child(Icon::new(icon).size(px(13.0)).text_color(rgb(0x9ca3af)))
 }
 
 // ─── Info Popup ───────────────────────────────────────────────────────
