@@ -130,6 +130,24 @@ pub struct NavigateToUrl {
     pub url: String,
 }
 
+/// Returns true if `input` looks like a GitHub repository URL (with or
+/// without scheme/host prefix). Used by the control bar to route GitHub
+/// repo inputs to the GitHub Import review surface instead of the
+/// capsule:// / external-URL flows. Bare `owner/repo` is intentionally
+/// excluded to avoid colliding with other input intents in the URL bar.
+fn looks_like_github_repo_input(input: &str) -> bool {
+    let lower = input.trim().to_ascii_lowercase();
+    const PREFIXES: &[&str] = &[
+        "github.com/",
+        "www.github.com/",
+        "https://github.com/",
+        "https://www.github.com/",
+        "http://github.com/",
+        "http://www.github.com/",
+    ];
+    PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
 pub struct SetControlBarMode {
@@ -751,6 +769,29 @@ pub fn run() {
                 return;
             }
             tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
+
+            // GitHub Import: github.com/owner/repo or https://github.com/...
+            // is routed to the GitHub Import review surface rather than the
+            // capsule consent or external-URL flows. Bare `owner/repo` is
+            // not matched here to avoid colliding with other input intents.
+            if looks_like_github_repo_input(raw) {
+                if let Ok(normalized) =
+                    crate::source_import_session::normalize_github_import_input(raw)
+                {
+                    if let Err(err) = crate::window::import_window::open_with_url(
+                        cx,
+                        normalized.source_url_normalized.clone(),
+                    ) {
+                        tracing::error!(
+                            error = %err,
+                            url = %raw,
+                            "NavigateToUrl(github): open_with_url failed"
+                        );
+                    }
+                    return;
+                }
+            }
+
             if let Some(rest) = raw.strip_prefix("capsule://") {
                 let handle = rest.trim_end_matches('/').to_string();
                 if handle.is_empty() {

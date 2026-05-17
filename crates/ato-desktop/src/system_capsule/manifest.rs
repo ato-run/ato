@@ -124,6 +124,16 @@ const TABLE: &[SystemCapsuleManifest] = &[
         display_name: "Onboarding",
         allowed_capabilities: &[Capability::OnboardingComplete],
     },
+    SystemCapsuleManifest {
+        id: SystemCapsuleId::AtoImport,
+        slug: "import",
+        display_name: "Import",
+        // ato-import: GitHub Import review surface. Needs to spawn its
+        // own host window (WebviewCreate covers re-opens), close its
+        // own window (WindowsClose). Subprocess spawning of ato-cli
+        // is gated outside the capability system.
+        allowed_capabilities: &[Capability::WebviewCreate, Capability::WindowsClose],
+    },
 ];
 
 /// Canonical handle URL for a system capsule slug. Mirrors the value
