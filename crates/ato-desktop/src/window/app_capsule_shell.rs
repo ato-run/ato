@@ -418,35 +418,22 @@ impl Drop for AppCapsuleShell {
         // Signal the background thread to not display the session if it
         // arrives after the entity is gone.
         self.abort_flag.store(true, Ordering::Release);
+
+        // Session lifecycle is now owned by the SessionRegistry.
+        // on_window_closed in app.rs handles detach_client / stop_session_once
+        // based on windowCloseBehavior. Drop is only a safety net: log
+        // if a session exists but was NOT stopped by the close handler.
         if let Some(Ok(session)) = &self.pending_result {
-            let sid = session.session_id.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::orchestrator::stop_guest_session(&sid) {
-                    tracing::warn!(
-                        session_id = %sid,
-                        error = %err,
-                        "AppCapsuleShell drop: pending session stop failed"
-                    );
-                }
-            });
+            tracing::warn!(
+                session_id = %session.session_id,
+                "AppCapsuleShell drop: pending session was not consumed by close handler"
+            );
         }
-        // If a session was already running, stop it.
         if let CapsuleBootState::Ready { session } = &self.boot_state {
-            let sid = session.session_id.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::orchestrator::stop_guest_session(&sid) {
-                    tracing::warn!(
-                        session_id = %sid,
-                        error = %err,
-                        "AppCapsuleShell drop: stop_guest_session failed"
-                    );
-                } else {
-                    tracing::info!(
-                        session_id = %sid,
-                        "AppCapsuleShell drop: session stopped"
-                    );
-                }
-            });
+            tracing::warn!(
+                session_id = %session.session_id,
+                "AppCapsuleShell drop: ready session was not detached by close handler"
+            );
         }
     }
 }
