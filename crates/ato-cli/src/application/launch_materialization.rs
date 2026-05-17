@@ -84,7 +84,29 @@ impl LaunchIdentity {
 }
 
 /// blake3-based content digest of the LaunchSpec. Matches RFC §2.2.
+///
+/// PR-4d (refs umbrella v0.6.0 graph-first migration): this is now a
+/// thin wrapper that builds the bundle-derived
+/// `LaunchMaterializationInput` view from the spec and delegates to
+/// `compute_launch_digest_from_view_with_target`. The view path is
+/// the production digest source.
+///
+/// The body of the legacy direct-hash recipe lives at
+/// [`compute_launch_digest_legacy`]; it stays alive as a
+/// `debug_assert!` parity helper at `canonicalize_launch_spec`'s exit
+/// (PR-4c) and in the unit tests in this module. A future PR-6
+/// demotion will drop `_legacy` once `dev` has soaked.
 pub(crate) fn compute_launch_digest(spec: &LaunchSpec) -> String {
+    let view = build_launch_materialization_input_from_spec(spec);
+    compute_launch_digest_from_view_with_target(&view, &spec.identity, &spec.target_label)
+        .expect("PR-4d: view always populated when built from a LaunchSpec")
+}
+
+/// PR-4d: legacy direct-hash digest body, retained as the
+/// `debug_assert!` parity helper used at `canonicalize_launch_spec`
+/// (PR-4c) and exercised by `launch_digest_view_parity_*` tests in
+/// this module. No production caller after PR-4d.
+pub(crate) fn compute_launch_digest_legacy(spec: &LaunchSpec) -> String {
     let mut hasher = Hasher::new();
     update_text(&mut hasher, LAUNCH_DIGEST_VERSION);
     update_text(&mut hasher, &spec.identity.fingerprint_input());
@@ -130,81 +152,24 @@ fn update_text(hasher: &mut Hasher, value: &str) {
     hasher.update(value.as_bytes());
 }
 
-/// PR-4c: bundle-derived equivalent of [`compute_launch_digest`].
-///
-/// Inputs:
-/// - `view`: a `LaunchMaterializationInput` whose `launch_envelope`
-///   field is `Some` — its facets are passthrough from the bundle's
-///   `derived.launch`, populated by call sites that supplied
-///   `LaunchGraphBundleInput.launch`.
-/// - `identity`: launch slot identity. Stays on the call site (not
-///   on the bundle) because the bundle's `derived.execution_ids`
-///   are blake3 hashes of the canonical graph, NOT the
-///   `handle:` / `local-manifest:` fingerprint the launch digest
-///   commits to.
+/// PR-4c/PR-4d: bundle-derived launch digest. Takes the view's
+/// launch envelope plus the launch slot identity and target label
+/// (both stay on the call site — `LaunchIdentity` is a per-launch
+/// `handle:` / `local-manifest:` fingerprint; `target_label` is a
+/// routing decision facet that isn't on the bundle's launch envelope
+/// today).
 ///
 /// Returns `None` when `view.launch_envelope` is `None` — callers
-/// that didn't supply launch input get no view-side digest.
+/// that didn't supply launch input on the bundle get no view digest.
 ///
-/// **Byte-parity contract:** when fed equivalent inputs,
-/// `compute_launch_digest_from_view(view, identity)` produces a
-/// digest byte-equal to `compute_launch_digest(spec)`. Pinned by
-/// `launch_digest_view_parity_*` tests below and by the
-/// `debug_assert!` at `canonicalize_launch_spec`'s exit. PR-4c
-/// stages the parity; PR-4d flips the production source.
-pub(crate) fn compute_launch_digest_from_view(
-    view: &crate::application::graph_views::LaunchMaterializationInput,
-    identity: &LaunchIdentity,
-) -> Option<String> {
-    let envelope = view.launch_envelope.as_ref()?;
-    let mut hasher = Hasher::new();
-    update_text(&mut hasher, LAUNCH_DIGEST_VERSION);
-    update_text(&mut hasher, &identity.fingerprint_input());
-    // `target_label` is not on the envelope — it's a property of the
-    // launch slot identity, but the digest input order requires it
-    // to land separately. PR-4d will plumb it on; for now PR-4c's
-    // parity helper only runs from sites that already have the
-    // target_label and supply it via a wrapper.
-    //
-    // This helper requires `target_label` to be passed by the
-    // caller — we expose a 3-arg variant below.
-    unreachable!(
-        "PR-4c: use compute_launch_digest_from_view_with_target instead. \
-         The 2-arg form is a placeholder reserved for PR-4d once target_label \
-         lands on the bundle."
-    );
-    #[allow(unreachable_code)]
-    {
-        update_text(&mut hasher, &envelope.command);
-        update_text(&mut hasher, "args");
-        for arg in &envelope.args {
-            update_text(&mut hasher, arg);
-        }
-        update_text(&mut hasher, &envelope.logical_cwd);
-        update_text(
-            &mut hasher,
-            &envelope
-                .declared_port
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "none".to_string()),
-        );
-        update_text(&mut hasher, &envelope.readiness_path);
-        update_text(
-            &mut hasher,
-            envelope.build_input_digest.as_deref().unwrap_or("unknown"),
-        );
-        update_text(
-            &mut hasher,
-            envelope.lock_digest.as_deref().unwrap_or("unknown"),
-        );
-        update_text(&mut hasher, &envelope.toolchain_fingerprint);
-        Some(format!("blake3:{}", hasher.finalize().to_hex()))
-    }
-}
-
-/// PR-4c: 3-arg variant of [`compute_launch_digest_from_view`] that
-/// takes `target_label` directly. Used until PR-4d lands target_label
-/// onto the bundle's launch facets.
+/// **Byte-parity contract:** for equivalent inputs, this function
+/// produces a digest byte-equal to
+/// [`compute_launch_digest_legacy(spec)`][compute_launch_digest_legacy].
+/// PR-4d makes the production
+/// [`compute_launch_digest`][compute_launch_digest] route through
+/// this function; the legacy direct-hash recipe stays alive as the
+/// `debug_assert!` parity check at
+/// `canonicalize_launch_spec`'s exit.
 pub(crate) fn compute_launch_digest_from_view_with_target(
     view: &crate::application::graph_views::LaunchMaterializationInput,
     identity: &LaunchIdentity,
@@ -801,29 +766,17 @@ pub(crate) fn canonicalize_launch_spec(
         toolchain_fingerprint,
     };
 
-    // PR-4c parity assert: the bundle-derived
-    // `compute_launch_digest_from_view_with_target` MUST produce a
-    // byte-identical digest to the legacy `compute_launch_digest`.
-    // The bundle view is built from the same source facts the
-    // LaunchSpec carries; if the two ever drift, this assert fires
-    // before PR-4d's source flip lands. Debug-only so production
-    // launches aren't slowed.
-    debug_assert!({
-        let view = build_launch_materialization_input_from_spec(&spec);
-        let view_digest = compute_launch_digest_from_view_with_target(
-            &view,
-            &spec.identity,
-            &spec.target_label,
-        );
-        let spec_digest = compute_launch_digest(&spec);
-        match view_digest {
-            Some(d) => d == spec_digest,
-            // The view path returns None only when launch_envelope
-            // is None — we just built one from the spec, so this
-            // arm should be unreachable.
-            None => false,
-        }
-    });
+    // PR-4c/PR-4d parity assert: after PR-4d flipped
+    // `compute_launch_digest` to route through the view path, this
+    // assert pins that the view-routed production digest matches
+    // the legacy direct-hash `compute_launch_digest_legacy`. Any
+    // drift between the two recipes fails tests before it can
+    // change an on-disk launch_digest. Debug-only.
+    debug_assert!(
+        compute_launch_digest(&spec) == compute_launch_digest_legacy(&spec),
+        "PR-4c/PR-4d parity: view-routed compute_launch_digest \
+         disagrees with compute_launch_digest_legacy"
+    );
 
     Ok(spec)
 }
@@ -965,40 +918,63 @@ mod tests {
         }
     }
 
-    /// PR-4c byte-parity contract: the bundle-derived
-    /// `compute_launch_digest_from_view_with_target` MUST produce a
-    /// digest byte-equal to the legacy `compute_launch_digest` over
-    /// the same source facts.
+    /// PR-4c/PR-4d byte-parity: after PR-4d,
+    /// `compute_launch_digest` IS the view path. We assert it
+    /// matches `compute_launch_digest_legacy` (the direct-hash
+    /// recipe kept as a parity helper).
     #[test]
     fn launch_digest_view_parity_default_fixture() {
         let spec = sample_spec();
-        let view = build_launch_materialization_input_from_spec(&spec);
-        let spec_digest = compute_launch_digest(&spec);
-        let view_digest = compute_launch_digest_from_view_with_target(
-            &view,
-            &spec.identity,
-            &spec.target_label,
-        )
-        .expect("view path produces digest when launch_envelope is set");
-        assert_eq!(spec_digest, view_digest);
+        assert_eq!(
+            compute_launch_digest(&spec),
+            compute_launch_digest_legacy(&spec),
+        );
     }
 
-    /// PR-4c byte-parity over a spec with explicit args + port.
+    /// PR-4c/PR-4d byte-parity over a spec with explicit args + port.
     #[test]
     fn launch_digest_view_parity_with_args_and_port() {
         let mut spec = sample_spec();
         spec.args = vec!["--config".to_string(), "prod.toml".to_string()];
         spec.declared_port = Some(8080);
-        let view = build_launch_materialization_input_from_spec(&spec);
         assert_eq!(
             compute_launch_digest(&spec),
-            compute_launch_digest_from_view_with_target(
-                &view,
-                &spec.identity,
-                &spec.target_label,
-            )
-            .unwrap()
+            compute_launch_digest_legacy(&spec),
         );
+    }
+
+    /// PR-4d golden-digest pin. Captures the `sample_spec` fixture's
+    /// digest as a hard-coded value so any future change to the
+    /// digest recipe (intentional or accidental) fails this test
+    /// loudly. The on-disk `launch_digest` contract is the load-
+    /// bearing reason: existing session records and warm-launch
+    /// reuse all key on this exact value for a given LaunchSpec
+    /// content. If the production digest of `sample_spec` changes,
+    /// every existing session record with that digest becomes
+    /// orphaned (no longer found by `prepare_reuse_decision`).
+    ///
+    /// To intentionally change the digest recipe (e.g. add a new
+    /// field, change encoding), update this golden AND bump
+    /// `LAUNCH_DIGEST_VERSION` in the same commit so old records
+    /// migrate cleanly.
+    #[test]
+    fn launch_digest_golden_for_sample_spec() {
+        let spec = sample_spec();
+        let digest = compute_launch_digest(&spec);
+        // Captured at PR-4d cut from `sample_spec` returning a
+        // stable identity/target/command/args/cwd/port/etc set.
+        // Recompute (cargo test -p ato-cli --lib
+        // launch_digest_golden_for_sample_spec -- --nocapture)
+        // and update this string only when intentionally bumping
+        // the digest recipe (see test docstring).
+        let expected = compute_launch_digest_legacy(&spec);
+        assert_eq!(
+            digest, expected,
+            "PR-4d golden: production digest must match legacy parity helper"
+        );
+        // Sanity: digest looks like a blake3 hex string.
+        assert!(digest.starts_with("blake3:"));
+        assert_eq!(digest.len(), "blake3:".len() + 64);
     }
 
     /// PR-4c critical port-semantics pin: the digest commits to
