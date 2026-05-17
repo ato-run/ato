@@ -76,14 +76,9 @@ pub fn open_configured_startup_surface(
 }
 
 /// Returns true if Focus View (multi-window) mode is active.
-/// Checks the `ATO_DESKTOP_MULTI_WINDOW` env var first (developer override),
-/// then falls back to `desktop.focus_view_enabled` in the config file.
+/// Reads `desktop.focus_view_enabled` from the config file (default: true).
+/// The `ATO_DESKTOP_MULTI_WINDOW` env var is no longer honored; use the
+/// config key to opt out of Focus View.
 pub fn is_multi_window_enabled() -> bool {
-    match std::env::var("ATO_DESKTOP_MULTI_WINDOW") {
-        Ok(v) => {
-            let trimmed = v.trim();
-            !trimmed.is_empty() && !matches!(trimmed, "0" | "false" | "off" | "no")
-        }
-        Err(_) => crate::config::load_config().desktop.focus_view_enabled,
-    }
+    crate::config::load_config().desktop.focus_view_enabled
 }
