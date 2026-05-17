@@ -843,4 +843,101 @@ mod tests {
         assert!(pl.get(req1.launch_id).is_some());
         assert!(pl.get(req2.launch_id).is_some());
     }
+
+    #[test]
+    fn detach_all_clients_keeps_session_alive() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+        let cid = SessionClientId::next();
+        reg.attach_client(make_client(
+            cid,
+            "s1",
+            SessionClientKind::AtoWindow,
+            Some(100),
+            SessionClientState::Attached,
+        ));
+
+        let affected = reg.detach_clients_by_window_id(100);
+        assert_eq!(affected, vec!["s1"]);
+        assert!(reg.get_session("s1").is_some());
+        let clients = reg.clients_for_session("s1");
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].state, SessionClientState::Detached);
+    }
+
+    #[test]
+    fn detach_and_stop_removes_session_and_process() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+        let cid = SessionClientId::next();
+        reg.attach_client(make_client(
+            cid,
+            "s1",
+            SessionClientKind::AtoWindow,
+            Some(100),
+            SessionClientState::Attached,
+        ));
+
+        reg.detach_clients_by_window_id(100);
+        reg.update_process_state("s1", SessionProcessState::Stopping);
+        reg.update_process_state("s1", SessionProcessState::Stopped);
+
+        assert!(reg.get_session("s1").is_some());
+        assert_eq!(
+            reg.get_session("s1").unwrap().process_state,
+            SessionProcessState::Stopped
+        );
+    }
+
+    #[test]
+    fn stop_on_already_stopped_session_is_noop() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+
+        reg.update_process_state("s1", SessionProcessState::Stopped);
+        let state_before = reg.get_session("s1").unwrap().process_state.clone();
+        reg.stop_session_once("s1");
+        let state_after = reg.get_session("s1").unwrap().process_state.clone();
+        assert_eq!(state_before, state_after);
+        assert_eq!(state_after, SessionProcessState::Stopped);
+    }
+
+    #[test]
+    fn detach_clients_by_unknown_window_returns_empty() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+        let affected = reg.detach_clients_by_window_id(999);
+        assert!(affected.is_empty());
+        assert!(reg.get_session("s1").is_some());
+    }
+
+    #[test]
+    fn detach_keeps_other_window_clients() {
+        let mut reg = SessionRegistry::default();
+        reg.register_session(make_session("s1", "test/capsule"));
+        reg.attach_client(make_client(
+            SessionClientId::next(),
+            "s1",
+            SessionClientKind::AtoWindow,
+            Some(100),
+            SessionClientState::Attached,
+        ));
+        reg.attach_client(make_client(
+            SessionClientId::next(),
+            "s1",
+            SessionClientKind::AtoWindow,
+            Some(200),
+            SessionClientState::Attached,
+        ));
+
+        let affected = reg.detach_clients_by_window_id(100);
+        assert_eq!(affected, vec!["s1"]);
+        let remaining: Vec<_> = reg
+            .clients_for_session("s1")
+            .into_iter()
+            .filter(|c| c.state == SessionClientState::Attached)
+            .collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].window_id, Some(200));
+    }
 }
