@@ -39,10 +39,13 @@ pub(crate) fn infer(repo: &str) -> Result<ImportOutput> {
 /// The returned `ImportOutput.run.status` is `"passed"` or `"failed"`.
 /// A failed shadow-workspace run still exits 0 at the CLI level — the
 /// failure shows up inside the JSON's `run` field, not as a process error.
-pub(crate) fn run_with_recipe(repo: &str, recipe_path: &Path) -> Result<ImportOutput> {
+///
+/// When `allow_unsafe` is true, the child process inherits
+/// `CAPSULE_ALLOW_UNSAFE=1` so source/native execution is permitted.
+pub(crate) fn run_with_recipe(repo: &str, recipe_path: &Path, allow_unsafe: bool) -> Result<ImportOutput> {
     let ato = resolve_ato_binary()?;
-    let output = Command::new(&ato)
-        .arg("import")
+    let mut cmd = Command::new(&ato);
+    cmd.arg("import")
         .arg(repo)
         .arg("--recipe")
         .arg(recipe_path)
@@ -50,7 +53,11 @@ pub(crate) fn run_with_recipe(repo: &str, recipe_path: &Path) -> Result<ImportOu
         .arg("--emit-json")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if allow_unsafe {
+        cmd.env("CAPSULE_ALLOW_UNSAFE", "1");
+    }
+    let output = cmd
         .output()
         .with_context(|| format!("failed to spawn {} import --run", ato.display()))?;
 

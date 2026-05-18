@@ -34,6 +34,12 @@ pub enum ImportCommand {
     /// User clicked "Submit this working recipe". PR-2 stores intent
     /// only; PR-3 will POST to the source-imports API.
     SubmitIntent,
+    /// Retry inference after a previous inference failure.
+    RetryInference,
+    /// User confirmed they want to allow unsafe execution
+    /// (e.g. source/native runtime). After setting the session
+    /// flag, re-dispatches Run.
+    ConfirmUnsafeExecution,
     /// User dismissed the window. Closes the host window.
     Close,
 }
@@ -47,6 +53,8 @@ impl ImportCommand {
             ImportCommand::EditRecipe { .. } => Capability::WebviewCreate,
             ImportCommand::Run => Capability::WebviewCreate,
             ImportCommand::SubmitIntent => Capability::WebviewCreate,
+            ImportCommand::RetryInference => Capability::WebviewCreate,
+            ImportCommand::ConfirmUnsafeExecution => Capability::WebviewCreate,
             ImportCommand::Close => Capability::WindowsClose,
         }
     }
@@ -62,6 +70,8 @@ pub fn dispatch(
         ImportCommand::EditRecipe { toml } => handle_edit(cx, toml),
         ImportCommand::Run => handle_run(cx),
         ImportCommand::SubmitIntent => handle_submit_intent(cx),
+        ImportCommand::RetryInference => handle_retry_inference(cx),
+        ImportCommand::ConfirmUnsafeExecution => handle_confirm_unsafe(cx),
         ImportCommand::Close => {
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
@@ -159,11 +169,11 @@ pub fn begin_open(cx: &mut App, url: String) {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(?error, "ato-import: inference failed");
-                    // Leave session in InferringRecipe; UI shows the
-                    // status line. A later PR will surface this as a
-                    // dedicated error card.
                     if let Ok(mut session) = session_for_bg.lock() {
+                        let _ = session.record_inference_failure(
+                            "cli_inference_error".to_string(),
+                            format!("{error:#}"),
+                        );
                         session.set_signed_in(creds.is_some());
                     }
                 }
@@ -172,6 +182,19 @@ pub fn begin_open(cx: &mut App, url: String) {
         });
     })
     .detach();
+}
+
+fn handle_confirm_unsafe(cx: &mut App) {
+    let session_arc = session_arc(cx);
+    {
+        let mut session = match session_arc.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        session.confirm_unsafe_execution();
+    }
+    push_current_snapshot(cx);
+    handle_run(cx);
 }
 
 fn handle_edit(cx: &mut App, toml: String) {
@@ -190,9 +213,63 @@ fn handle_edit(cx: &mut App, toml: String) {
     // back to avoid re-rendering the textarea under the user's cursor.
 }
 
+fn handle_retry_inference(cx: &mut App) {
+    let session_arc = session_arc(cx);
+    let repo_url = {
+        let mut session = match session_arc.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if let Err(error) = session.retry_inference() {
+            tracing::debug!(?error, "ato-import: retry_inference rejected");
+            return;
+        }
+        match session.repo() {
+            Some(r) => r.source_url_normalized.clone(),
+            None => {
+                tracing::warn!("ato-import: retry_inference without resolved repo");
+                return;
+            }
+        }
+    };
+    push_current_snapshot(cx);
+
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    let session_for_bg = session_arc.clone();
+    fe.spawn(async move {
+        let outcome: Result<ImportOutput, anyhow::Error> = be
+            .spawn(async move { runner_infer(&repo_url) })
+            .await;
+        let _ = aa.update(move |cx| {
+            match outcome {
+                Ok(output) => {
+                    if let Ok(mut session) = session_for_bg.lock() {
+                        if let Err(error) = session.apply_inferred_output(output) {
+                            tracing::warn!(?error, "ato-import: apply_inferred on retry failed");
+                        }
+                    }
+                }
+                Err(error) => {
+                    if let Ok(mut session) = session_for_bg.lock() {
+                        let _ = session.record_inference_failure(
+                            "cli_inference_error".to_string(),
+                            format!("{error:#}"),
+                        );
+                    }
+                }
+            }
+            push_current_snapshot(cx);
+        });
+    })
+    .detach();
+}
+
 fn handle_run(cx: &mut App) {
     let session_arc = session_arc(cx);
-    let (repo_url, recipe_toml) = {
+    let (repo_url, recipe_toml, allow_unsafe) = {
         let mut session = match session_arc.lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -209,7 +286,8 @@ fn handle_run(cx: &mut App) {
             }
         };
         let toml = session.editable_recipe_toml().unwrap_or_default().to_string();
-        (repo, toml)
+        let allow_unsafe = session.unsafe_execution_confirmed();
+        (repo, toml, allow_unsafe)
     };
     push_current_snapshot(cx);
 
@@ -222,10 +300,9 @@ fn handle_run(cx: &mut App) {
     fe.spawn(async move {
         let outcome: Result<ImportOutput, anyhow::Error> = be
             .spawn(async move {
-                let recipe_path = write_temp_recipe(&recipe_toml)?;
-                let result = runner_run(&repo_url, &recipe_path);
-                // Best-effort cleanup; ignore errors.
-                let _ = fs::remove_file(&recipe_path);
+                let (temp_dir, recipe_path) = write_temp_recipe(&recipe_toml)?;
+                let result = runner_run(&repo_url, &recipe_path, allow_unsafe);
+                let _ = fs::remove_dir_all(&temp_dir);
                 result
             })
             .await;
@@ -297,7 +374,11 @@ fn handle_run(cx: &mut App) {
                                 phase: Some("install".to_string()),
                                 error_class: Some("desktop_runner_error".to_string()),
                                 error_excerpt: Some(format!("{error:#}")),
+                                command_mode: None,
+                                requires_host_shell: None,
+                                shell_kind: None,
                             },
+                            recipe_resolution: None,
                         };
                         if session.state() != GitHubImportSessionState::Running {
                             // Session was reset / advanced concurrently.
@@ -367,10 +448,9 @@ fn handle_submit_intent(cx: &mut App) {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(?error, "ato-import: submit_working_recipe failed");
-                    // Stay in Verified; the UI surfaces this in a
-                    // follow-up PR. For now the user can retry by
-                    // clicking Submit again.
+                    if let Ok(mut session) = session_for_bg.lock() {
+                        session.set_submit_error(format!("{error:#}"));
+                    }
                 }
             }
             push_current_snapshot(cx);
@@ -379,7 +459,7 @@ fn handle_submit_intent(cx: &mut App) {
     .detach();
 }
 
-fn write_temp_recipe(toml: &str) -> anyhow::Result<PathBuf> {
+fn write_temp_recipe(toml: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -389,7 +469,7 @@ fn write_temp_recipe(toml: &str) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     let path = dir.join("recipe.toml");
     fs::write(&path, toml)?;
-    Ok(path)
+    Ok((dir, path))
 }
 
 fn empty_source_for_failure() -> crate::source_import_session::ImportSource {
