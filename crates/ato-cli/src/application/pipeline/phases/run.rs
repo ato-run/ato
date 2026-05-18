@@ -2744,6 +2744,31 @@ fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspac
     }
 }
 
+/// Resolve `{{deps.<alias>.runtime_exports.<key>}}` templates using the
+/// dependency orchestrator's resolved exports. If the value is not a
+/// template, it is returned unchanged.
+fn resolve_dep_template_inner(
+    value: &str,
+    graph: &RunningGraph,
+) -> String {
+    if !value.contains("deps.") || !value.contains("runtime_exports.") {
+        return value.to_string();
+    }
+    let re = regex::Regex::new(r"\{\{deps\.(\w+)\.runtime_exports\.(\w+)\}\}").unwrap();
+    let mut result = value.to_string();
+    for cap in re.captures_iter(value) {
+        let alias = &cap[1];
+        let export_key = &cap[2];
+        if let Some(exports) = graph.runtime_exports(alias) {
+            if let Some(resolved) = exports.get(export_key) {
+                let pattern = format!("{{{{deps.{}.runtime_exports.{}}}}}", alias, export_key);
+                result = result.replace(&pattern, resolved);
+            }
+        }
+    }
+    result
+}
+
 pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -3181,6 +3206,55 @@ where
     {
         crate::progressive_ui::show_cancel("Preview cancelled.")?;
         return Ok(());
+    }
+
+    // Run prestart_command after provider readiness and consent, before
+    // the main process launch (e.g., Prisma database migrations).
+    if let Some(command) = decision
+        .plan
+        .prestart_command_string()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        let prestart_cwd = crate::adapters::runtime::provisioning::dependency_root(&decision.plan);
+        tracing::info!(%command, cwd=%prestart_cwd.display(), "running prestart command");
+        let target_env: Vec<(String, String)> = decision.plan.execution_env().into_iter().collect();
+        // Resolve {{deps.X.runtime_exports.Y}} templates from the running dep graph.
+        let resolved_env: Vec<(String, String)> = {
+            let graph = dep_contracts.as_ref().and_then(DependencyContractGuard::graph);
+            target_env.into_iter().map(|(key, value)| {
+                let resolved = if let Some(g) = graph {
+                    resolve_dep_template_inner(&value, g)
+                } else {
+                    value.to_string()
+                };
+                (key, resolved)
+            }).collect()
+        };
+        tracing::info!(%command, cwd=%prestart_cwd.display(), env_count=%resolved_env.len(), has_graph=%dep_contracts.as_ref().and_then(DependencyContractGuard::graph).is_some(), "running prestart command");
+        // Debug: log DATABASE_URL value
+        if let Some((_, db_url)) = resolved_env.iter().find(|(k, _)| k == "DATABASE_URL") {
+            tracing::info!(%db_url, "prestart DATABASE_URL resolved");
+        }
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(&command)
+            .current_dir(&prestart_cwd)
+            .stdin(std::process::Stdio::null());
+        for (key, value) in &resolved_env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd
+            .spawn()
+            .context("failed to spawn prestart command")?;
+        let status = child.wait().context("prestart command wait failed")?;
+        if !status.success() {
+            anyhow::bail!(
+                "prestart command exited with status {}: {}",
+                status,
+                command
+            );
+        }
     }
 
     match guard_result.executor_kind {
