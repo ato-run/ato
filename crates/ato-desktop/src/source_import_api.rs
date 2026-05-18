@@ -20,7 +20,7 @@ use serde_json::json;
 use ureq;
 
 use crate::orchestrator::resolve_ato_binary;
-use crate::source_import_session::{ImportRecipe, ImportRun, ImportSource};
+use crate::source_import_session::{ImportRun, ImportSource, SubmitPayload};
 
 const TIMEOUT_SECS: u64 = 30;
 
@@ -151,22 +151,37 @@ impl ApiClient {
     }
 
     /// POST /v1/source-imports/:id/submit-working-recipe.
+    ///
+    /// Sends both the post-run recipe metadata and the provenance pointers
+    /// (`base_recipe_hash`, `base_recipe_resolution.source`, `edited_locally`).
+    /// The API uses the provenance fields to short-circuit recipe insert
+    /// when the user submitted a verbatim verified-remote recipe — so the
+    /// same `recipe_hash` ends up bound to the existing verified binding
+    /// instead of being re-inserted as a fresh `manual` recipe.
     pub(crate) fn submit_working_recipe(
         &self,
         source_import_id: &str,
-        recipe: &ImportRecipe,
+        payload: &SubmitPayload,
         editable_recipe_toml: &str,
     ) -> Result<()> {
         let url = format!(
             "{}/v1/source-imports/{}/submit-working-recipe",
             self.creds.api_base_url, source_import_id
         );
+        let base_resolution_source = payload
+            .base_recipe_resolution
+            .as_ref()
+            .map(|r| r.source.as_str());
         let body = json!({
             "recipe_toml": editable_recipe_toml,
-            "origin": recipe.origin,
-            "target_label": recipe.target_label,
-            "platform_os": optional(&recipe.platform_os),
-            "platform_arch": optional(&recipe.platform_arch),
+            "recipe_hash": payload.recipe.recipe_hash,
+            "origin": payload.recipe.origin,
+            "target_label": payload.recipe.target_label,
+            "platform_os": optional(&payload.recipe.platform_os),
+            "platform_arch": optional(&payload.recipe.platform_arch),
+            "base_recipe_hash": payload.base_recipe_hash,
+            "base_recipe_resolution_source": base_resolution_source,
+            "edited_locally": payload.edited_locally,
         });
         let _: SubmitResponse = self.post_json(&url, &body)?;
         Ok(())
