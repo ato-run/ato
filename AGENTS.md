@@ -337,6 +337,7 @@ try {
 
 - **Engine Discovery**: Set `NACELLE_PATH` or use `ato engine register`
 - **Build Failures**: `cargo clean && cargo build`
+- **Desktop ato binary**: Develop ato-desktop against a locally-built CLI by setting `ATO_DESKTOP_ATO_BIN=target/debug/ato` (or `target/release/ato`). Without this, Desktop falls back to `$PATH` resolution which may pick up an older installed release. Desktop logs the resolved binary path on startup.
 - **Debug**: Use `tracing`, `RUST_BACKTRACE=1`
 
 ## Release Notes
