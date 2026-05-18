@@ -37,6 +37,12 @@ pub(crate) struct ImportRun {
     pub(crate) phase: Option<String>,
     pub(crate) error_class: Option<String>,
     pub(crate) error_excerpt: Option<String>,
+    #[serde(default)]
+    pub(crate) command_mode: Option<String>,
+    #[serde(default)]
+    pub(crate) requires_host_shell: Option<bool>,
+    #[serde(default)]
+    pub(crate) shell_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +50,17 @@ pub(crate) struct ImportOutput {
     pub(crate) source: ImportSource,
     pub(crate) recipe: ImportRecipe,
     pub(crate) run: ImportRun,
+    #[serde(default)]
+    pub(crate) recipe_resolution: Option<RecipeResolution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RecipeResolution {
+    pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) fallback: Option<String>,
+    #[serde(default)]
+    pub(crate) error_class: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +85,7 @@ pub(crate) enum GitHubImportSessionState {
     Idle,
     ResolvingSource,
     InferringRecipe,
+    InferenceFailed,
     AwaitingTomlConfirmation,
     Running,
     FailedAwaitingRecipeEdit,
@@ -92,6 +110,19 @@ pub(crate) struct GitHubImportSession {
     /// `POST /v1/source-imports` call. Required for subsequent
     /// `/attempt` and `/submit-working-recipe` calls.
     source_import_id: Option<String>,
+    /// When inference itself fails (CLI non-zero exit or parse error),
+    /// these fields carry the error details for the UI.
+    inference_error_class: Option<String>,
+    inference_error_excerpt: Option<String>,
+    /// When submit-working-recipe fails, this holds the error excerpt
+    /// so the UI can surface it without losing the Verified state.
+    submit_error_excerpt: Option<String>,
+    /// Set to true after the user explicitly confirms they want to
+    /// allow unsafe execution (e.g. source/native runtime). Required
+    /// before `ato import --run` may proceed with source/native.
+    unsafe_execution_confirmed: bool,
+    /// Metadata about how the recipe was resolved (remote binding, inference, or fallback).
+    recipe_resolution: Option<RecipeResolution>,
 }
 
 impl Default for GitHubImportSession {
@@ -106,6 +137,11 @@ impl Default for GitHubImportSession {
             submit_enabled: false,
             signed_in: false,
             source_import_id: None,
+            inference_error_class: None,
+            inference_error_excerpt: None,
+            submit_error_excerpt: None,
+            unsafe_execution_confirmed: false,
+            recipe_resolution: None,
         }
     }
 }
@@ -231,6 +267,11 @@ impl GitHubImportSession {
             submit_enabled: self.submit_enabled,
             signed_in: self.signed_in,
             source_import_id: self.source_import_id.clone(),
+            inference_error_class: self.inference_error_class.clone(),
+            inference_error_excerpt: self.inference_error_excerpt.clone(),
+            submit_error_excerpt: self.submit_error_excerpt.clone(),
+            unsafe_execution_confirmed: self.unsafe_execution_confirmed,
+            recipe_resolution: self.recipe_resolution.clone(),
         }
     }
 
@@ -271,6 +312,65 @@ impl GitHubImportSession {
     pub(crate) fn source_import_id(&self) -> Option<&str> {
         self.source_import_id.as_deref()
     }
+
+    pub(crate) fn inference_error_class(&self) -> Option<&str> {
+        self.inference_error_class.as_deref()
+    }
+
+    pub(crate) fn inference_error_excerpt(&self) -> Option<&str> {
+        self.inference_error_excerpt.as_deref()
+    }
+
+    /// Record that inference (CLI `ato import --emit-json`) failed.
+    /// Transitions from `InferringRecipe` → `InferenceFailed`.
+    pub(crate) fn record_inference_failure(&mut self, error_class: String, error_excerpt: String) -> Result<()> {
+        if self.state != GitHubImportSessionState::InferringRecipe {
+            bail!(
+                "record_inference_failure expects InferringRecipe, got {:?}",
+                self.state
+            );
+        }
+        self.inference_error_class = Some(error_class);
+        self.inference_error_excerpt = Some(error_excerpt);
+        self.submit_enabled = false;
+        self.state = GitHubImportSessionState::InferenceFailed;
+        Ok(())
+    }
+
+    /// Retry inference after it previously failed. Transitions from
+    /// `InferenceFailed` → `InferringRecipe`.
+    pub(crate) fn retry_inference(&mut self) -> Result<()> {
+        if self.state != GitHubImportSessionState::InferenceFailed {
+            bail!(
+                "retry_inference expects InferenceFailed, got {:?}",
+                self.state
+            );
+        }
+        self.inference_error_class = None;
+        self.inference_error_excerpt = None;
+        self.state = GitHubImportSessionState::InferringRecipe;
+        Ok(())
+    }
+
+    pub(crate) fn submit_error_excerpt(&self) -> Option<&str> {
+        self.submit_error_excerpt.as_deref()
+    }
+
+    pub(crate) fn set_submit_error(&mut self, excerpt: String) {
+        self.submit_error_excerpt = Some(excerpt);
+    }
+
+    pub(crate) fn clear_submit_error(&mut self) {
+        self.submit_error_excerpt = None;
+    }
+
+    pub(crate) fn unsafe_execution_confirmed(&self) -> bool {
+        self.unsafe_execution_confirmed
+    }
+
+    pub(crate) fn confirm_unsafe_execution(&mut self) {
+        self.unsafe_execution_confirmed = true;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -297,6 +397,11 @@ pub(crate) struct SessionSnapshot {
     /// Source-import row id; null until the first
     /// `POST /v1/source-imports` round-trip completes.
     pub(crate) source_import_id: Option<String>,
+    pub(crate) inference_error_class: Option<String>,
+    pub(crate) inference_error_excerpt: Option<String>,
+    pub(crate) submit_error_excerpt: Option<String>,
+    pub(crate) unsafe_execution_confirmed: bool,
+    pub(crate) recipe_resolution: Option<RecipeResolution>,
 }
 
 pub(crate) fn normalize_github_import_input(input: &str) -> Result<NormalizedGitHubRepo> {
@@ -405,7 +510,11 @@ mod tests {
                 phase: None,
                 error_class: None,
                 error_excerpt: None,
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
             },
+            recipe_resolution: None,
         }
     }
 
@@ -420,7 +529,11 @@ mod tests {
                 error_excerpt: Some(
                     "ModuleNotFoundError: No module named 'distutils'".to_string(),
                 ),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
             },
+            recipe_resolution: None,
         }
     }
 
@@ -433,7 +546,11 @@ mod tests {
                 phase: None,
                 error_class: None,
                 error_excerpt: None,
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
             },
+            recipe_resolution: None,
         }
     }
 
@@ -697,7 +814,11 @@ mod tests {
                     phase: None,
                     error_class: None,
                     error_excerpt: None,
+                    command_mode: None,
+                    requires_host_shell: None,
+                    shell_kind: None,
                 },
+                recipe_resolution: None,
             })
             .expect("apply inferred");
         session.start_run().expect("run starts");
@@ -753,12 +874,310 @@ mod tests {
                     phase: None,
                     error_class: None,
                     error_excerpt: None,
+                    command_mode: None,
+                    requires_host_shell: None,
+                    shell_kind: None,
                 },
+                recipe_resolution: None,
             })
             .expect("apply inferred");
         session.start_run().expect("run starts");
         session.apply_run_result(output).expect("apply");
         assert_eq!(session.state(), GitHubImportSessionState::Verified);
         assert!(session.submit_enabled());
+    }
+
+    #[test]
+    fn inference_failure_state_and_retry() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session.begin_inference();
+        assert_eq!(session.state(), GitHubImportSessionState::InferringRecipe);
+
+        session
+            .record_inference_failure(
+                "cli_nonzero_exit".to_string(),
+                "ato import failed (status 1)".to_string(),
+            )
+            .expect("record inference failure");
+        assert_eq!(session.state(), GitHubImportSessionState::InferenceFailed);
+
+        let snap = session.snapshot();
+        assert_eq!(
+            snap.inference_error_class.as_deref(),
+            Some("cli_nonzero_exit")
+        );
+        assert_eq!(
+            snap.inference_error_excerpt.as_deref(),
+            Some("ato import failed (status 1)")
+        );
+
+        session.retry_inference().expect("retry inference");
+        assert_eq!(session.state(), GitHubImportSessionState::InferringRecipe);
+        assert!(session.inference_error_class().is_none());
+        assert!(session.inference_error_excerpt().is_none());
+    }
+
+    #[test]
+    fn inference_failure_includes_errors_in_snapshot() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("owner/repo").expect("source");
+        session.begin_inference();
+        session
+            .record_inference_failure(
+                "parse_error".to_string(),
+                "invalid JSON".to_string(),
+            )
+            .expect("record");
+
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::InferenceFailed);
+        assert_eq!(
+            snap.inference_error_class.as_deref(),
+            Some("parse_error")
+        );
+        assert_eq!(
+            snap.inference_error_excerpt.as_deref(),
+            Some("invalid JSON")
+        );
+        assert!(!snap.submit_enabled);
+    }
+
+    #[test]
+    fn inference_failure_is_reset_on_new_resolve() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session.begin_inference();
+        session
+            .record_inference_failure(
+                "cli_nonzero_exit".to_string(),
+                "failed".to_string(),
+            )
+            .expect("record failure");
+
+        session.begin_resolve("other/repo").expect("new resolve");
+        assert!(session.inference_error_class().is_none());
+        assert!(session.inference_error_excerpt().is_none());
+        assert_eq!(session.state(), GitHubImportSessionState::ResolvingSource);
+    }
+
+    #[test]
+    fn record_inference_failure_rejected_outside_inferring_state() {
+        let mut session = GitHubImportSession::default();
+        assert!(
+            session
+                .record_inference_failure("x".to_string(), "y".to_string())
+                .is_err()
+        );
+        session.begin_resolve("owner/repo").expect("resolve");
+        assert!(
+            session
+                .record_inference_failure("x".to_string(), "y".to_string())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retry_inference_rejected_outside_inference_failed_state() {
+        let mut session = GitHubImportSession::default();
+        assert!(session.retry_inference().is_err());
+        session.begin_resolve("owner/repo").expect("resolve");
+        assert!(session.retry_inference().is_err());
+    }
+
+    #[test]
+    fn submit_error_leaves_session_verified_and_retryable() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+        assert_eq!(session.state(), GitHubImportSessionState::Verified);
+        assert!(session.submit_enabled());
+
+        session.set_submit_error("Connection refused".to_string());
+        assert_eq!(session.state(), GitHubImportSessionState::Verified);
+        assert!(session.submit_enabled());
+        assert_eq!(session.submit_error_excerpt(), Some("Connection refused"));
+
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::Verified);
+        assert_eq!(
+            snap.submit_error_excerpt.as_deref(),
+            Some("Connection refused")
+        );
+        // User can still submit again after seeing the error.
+        assert!(snap.submit_enabled);
+    }
+
+    #[test]
+    fn submit_error_cleared_and_round_trips_through_snapshot() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+
+        session.set_submit_error("timeout".to_string());
+        let snap = session.snapshot();
+        assert_eq!(
+            snap.submit_error_excerpt.as_deref(),
+            Some("timeout")
+        );
+
+        session.clear_submit_error();
+        assert!(session.submit_error_excerpt().is_none());
+        let snap = session.snapshot();
+        assert!(snap.submit_error_excerpt.is_none());
+    }
+
+    #[test]
+    fn submit_error_reset_on_new_resolve() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session.set_submit_error("stale error".to_string());
+
+        session.begin_resolve("other/repo").expect("new resolve");
+        assert!(session.submit_error_excerpt().is_none());
+    }
+
+    #[test]
+    fn submit_success_marks_submitted() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+
+        session.mark_submitted().expect("mark submitted");
+        assert_eq!(session.state(), GitHubImportSessionState::Submitted);
+        assert!(!session.submit_enabled());
+    }
+
+    #[test]
+    fn snapshot_includes_inference_and_submit_error_fields() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("owner/repo").expect("source");
+        session.begin_inference();
+        session
+            .record_inference_failure("inf_error".to_string(), "inference failed".to_string())
+            .expect("record");
+
+        session.set_submit_error("sub_error".to_string());
+        let snap = session.snapshot();
+        assert_eq!(snap.inference_error_class.as_deref(), Some("inf_error"));
+        assert_eq!(snap.inference_error_excerpt.as_deref(), Some("inference failed"));
+        assert_eq!(snap.submit_error_excerpt.as_deref(), Some("sub_error"));
+    }
+
+    #[test]
+    fn unsafe_execution_defaults_to_false_and_resets_on_new_resolve() {
+        let mut session = GitHubImportSession::default();
+        assert!(!session.unsafe_execution_confirmed());
+        session.confirm_unsafe_execution();
+        assert!(session.unsafe_execution_confirmed());
+
+        session.begin_resolve("owner/repo").expect("resolve");
+        assert!(!session.unsafe_execution_confirmed());
+    }
+
+    #[test]
+    fn unsafe_execution_flag_round_trips_through_snapshot() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("owner/repo").expect("resolve");
+        session.confirm_unsafe_execution();
+
+        let snap = session.snapshot();
+        assert!(snap.unsafe_execution_confirmed);
+
+        session.begin_resolve("other/repo").expect("new resolve");
+        let snap = session.snapshot();
+        assert!(!snap.unsafe_execution_confirmed);
+    }
+
+    #[test]
+    fn unsafe_flag_not_in_submit_payload() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        session.confirm_unsafe_execution();
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+
+        let payload = session.submit_payload().expect("payload");
+        assert_eq!(payload.last_run.status, "passed");
+    }
+
+    #[test]
+    fn full_happy_path_open_to_submitted_simulates_desktop_gui_aodd() {
+        let mut session = GitHubImportSession::default();
+        assert_eq!(session.state(), GitHubImportSessionState::Idle);
+
+        // Open: resolve + infer
+        session
+            .begin_resolve("ato-run/import-fixture-static")
+            .expect("resolve");
+        session.begin_inference();
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        assert_eq!(
+            session.state(),
+            GitHubImportSessionState::AwaitingTomlConfirmation
+        );
+
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::AwaitingTomlConfirmation);
+        assert!(snap.editable_recipe_toml.is_some());
+        assert!(!snap.submit_enabled);
+        assert!(!snap.unsafe_execution_confirmed);
+
+        // User confirms unsafe execution
+        session.confirm_unsafe_execution();
+        assert!(session.unsafe_execution_confirmed());
+
+        // Run
+        session.start_run().expect("run starts");
+        assert_eq!(session.state(), GitHubImportSessionState::Running);
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::Running);
+
+        // Run result: passed
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+        assert_eq!(session.state(), GitHubImportSessionState::Verified);
+        assert!(session.submit_enabled());
+        assert!(session.submit_payload().is_some());
+
+        // Simulate signed in + source_import_id
+        session.set_signed_in(true);
+        session.set_source_import_id("si_test".to_string());
+        let snap = session.snapshot();
+        assert!(snap.signed_in);
+        assert_eq!(snap.source_import_id.as_deref(), Some("si_test"));
+
+        // Submit
+        session.mark_submitted().expect("mark submitted");
+        assert_eq!(session.state(), GitHubImportSessionState::Submitted);
+        assert!(!session.submit_enabled());
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::Submitted);
     }
 }
