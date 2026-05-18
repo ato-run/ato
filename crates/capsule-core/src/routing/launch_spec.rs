@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{CapsuleError, Result};
+use crate::foundation::types::command_spec::contains_shell_operators;
 use crate::router::ManifestData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +102,29 @@ fn derive_run_command_launch_spec(
     env_vars: HashMap<String, String>,
     port: Option<u16>,
 ) -> Result<LaunchSpec> {
+    // When the run command contains shell operators (&&, ||, |, ;, env prefix,
+    // etc.), wrap the entire command in `sh -c` so it is interpreted correctly.
+    // Without this, `cd server && bun start` would launch `cd` as a binary
+    // with `server`, `&&`, `bun`, `start` as arguments — which is wrong.
+    if contains_shell_operators(run_command) {
+        let mut args = vec!["-c".to_string(), run_command.to_string()];
+        if !plan.targets_oci_cmd().is_empty() {
+            args.extend(plan.targets_oci_cmd());
+        }
+        return Ok(LaunchSpec {
+            working_dir: resolve_launch_working_dir(plan, run_command),
+            command: "sh".to_string(),
+            args,
+            env_vars,
+            required_lockfile: None,
+            runtime,
+            driver,
+            language,
+            port,
+            source: LaunchSpecSource::RunCommand,
+        });
+    }
+
     let tokens = shell_words::split(run_command).unwrap_or_else(|_| vec![run_command.to_string()]);
     let Some(first) = tokens.first().map(String::as_str) else {
         return Err(CapsuleError::Config("run_command is empty".into()));
