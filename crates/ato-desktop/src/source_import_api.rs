@@ -20,7 +20,7 @@ use serde_json::json;
 use ureq;
 
 use crate::orchestrator::resolve_ato_binary;
-use crate::source_import_session::{ImportRecipe, ImportRun, ImportSource};
+use crate::source_import_session::{ImportRun, ImportSource, SubmitPayload};
 
 const TIMEOUT_SECS: u64 = 30;
 
@@ -151,22 +151,48 @@ impl ApiClient {
     }
 
     /// POST /v1/source-imports/:id/submit-working-recipe.
+    ///
+    /// Body fields:
+    /// - `origin`: mapped to the API's `z.enum(["in_repo", "inference",
+    ///   "manual"])` schema via [`map_origin_to_api`] — the Desktop's
+    ///   richer `"registry"` / `"edited_local"` tags would otherwise fail
+    ///   validation. Recipe de-duplication on the API side is keyed on
+    ///   `recipe_hash`, not on `origin`, so a verbatim verified-remote
+    ///   recipe still reuses the existing row when its hash matches.
+    /// - `recipe_hash`: sent explicitly so the API doesn't have to
+    ///   re-hash the TOML before de-duping (also serves as a forward-
+    ///   compatible hint).
+    /// - `base_recipe_hash`, `base_recipe_resolution_source`,
+    ///   `edited_locally`: forward-compatible provenance fields. The
+    ///   current API schema (`source_imports.ts` `submitWorkingRecipeSchema`)
+    ///   does not declare them, and zod's default behaviour strips
+    ///   unknown keys silently — they are accepted (no 400) but not yet
+    ///   acted on. A follow-up PR on the API side can pick them up to
+    ///   attach the submission to the originating verified binding.
     pub(crate) fn submit_working_recipe(
         &self,
         source_import_id: &str,
-        recipe: &ImportRecipe,
+        payload: &SubmitPayload,
         editable_recipe_toml: &str,
     ) -> Result<()> {
         let url = format!(
             "{}/v1/source-imports/{}/submit-working-recipe",
             self.creds.api_base_url, source_import_id
         );
+        let base_resolution_source = payload
+            .base_recipe_resolution
+            .as_ref()
+            .map(|r| r.source.as_str());
         let body = json!({
             "recipe_toml": editable_recipe_toml,
-            "origin": recipe.origin,
-            "target_label": recipe.target_label,
-            "platform_os": optional(&recipe.platform_os),
-            "platform_arch": optional(&recipe.platform_arch),
+            "recipe_hash": payload.recipe.recipe_hash,
+            "origin": map_origin_to_api(&payload.recipe.origin),
+            "target_label": payload.recipe.target_label,
+            "platform_os": optional(&payload.recipe.platform_os),
+            "platform_arch": optional(&payload.recipe.platform_arch),
+            "base_recipe_hash": payload.base_recipe_hash,
+            "base_recipe_resolution_source": base_resolution_source,
+            "edited_locally": payload.edited_locally,
         });
         let _: SubmitResponse = self.post_json(&url, &body)?;
         Ok(())
@@ -216,6 +242,62 @@ fn optional(s: &str) -> Option<&str> {
 
 fn head_lines(text: &str, n: usize) -> String {
     text.lines().take(n).collect::<Vec<_>>().join("\n")
+}
+
+/// Map the Desktop session's richer recipe origin tag to one the API's
+/// `submitWorkingRecipeSchema` accepts (`z.enum(["in_repo", "inference",
+/// "manual"])`). The Desktop's `"registry"` / `"edited_local"` variants
+/// would otherwise trip a 400 validation_error from the API.
+///
+/// Mapping rationale:
+/// - `"registry"`     → `"inference"`. The recipe came from the verified
+///   binding lookup; the API rows it as if Desktop had inferred it
+///   locally. Recipe-row de-duplication is keyed on `recipe_hash`, so
+///   the existing verified row is still reused.
+/// - `"edited_local"` → `"manual"`. The user edited the TOML; treat it
+///   the same way the API treats a hand-authored recipe.
+/// - `"inference"`    → `"inference"`. Unchanged.
+/// - `"in_repo"` / `"manual"` → pass through (forward-compat when the
+///   CLI ever surfaces these via the `recipe.origin` field).
+/// - Any other value pass-through; the API will reject it, surfacing the
+///   mismatch loudly instead of silently coercing.
+pub(crate) fn map_origin_to_api(desktop_origin: &str) -> &str {
+    match desktop_origin {
+        "registry" => "inference",
+        "edited_local" => "manual",
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod origin_mapping_tests {
+    use super::map_origin_to_api;
+
+    #[test]
+    fn registry_maps_to_inference_for_api_compat() {
+        assert_eq!(map_origin_to_api("registry"), "inference");
+    }
+
+    #[test]
+    fn edited_local_maps_to_manual_for_api_compat() {
+        assert_eq!(map_origin_to_api("edited_local"), "manual");
+    }
+
+    #[test]
+    fn inference_and_manual_pass_through_unchanged() {
+        assert_eq!(map_origin_to_api("inference"), "inference");
+        assert_eq!(map_origin_to_api("manual"), "manual");
+        assert_eq!(map_origin_to_api("in_repo"), "in_repo");
+    }
+
+    #[test]
+    fn unknown_origin_passes_through_so_api_can_reject_loudly() {
+        // We deliberately do not coerce unknowns into a default like
+        // "manual" — the loud 400 surfaces an upstream contract drift
+        // (e.g. CLI starts emitting a brand-new origin tag) instead of
+        // silently mis-classifying a recipe.
+        assert_eq!(map_origin_to_api("something_new"), "something_new");
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

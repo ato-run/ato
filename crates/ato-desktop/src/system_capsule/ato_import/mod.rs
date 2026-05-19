@@ -397,30 +397,38 @@ fn handle_run(cx: &mut App) {
 
 fn handle_submit_intent(cx: &mut App) {
     let session_arc = session_arc(cx);
-    let (creds, source_import_id, recipe, recipe_toml) = {
+    let (creds, source_import_id, payload, recipe_toml) = {
         let session = match session_arc.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        let snap = session.snapshot();
         let Some(creds) = current_creds(cx) else {
             tracing::info!(
                 "ato-import: submit_intent ignored (not signed in — UI should gate this)"
             );
             return;
         };
-        let Some(id) = snap.source_import_id.clone() else {
+        let Some(id) = session.source_import_id().map(str::to_string) else {
             tracing::warn!(
                 "ato-import: submit_intent ignored (no source_import_id — session out of sync)"
             );
             return;
         };
-        let Some(recipe) = snap.recipe.clone() else {
-            tracing::warn!("ato-import: submit_intent ignored (no recipe in snapshot)");
+        // `submit_payload` only returns Some when state==Verified, which is
+        // exactly when we want to allow submit; if it returns None, the
+        // session moved out of Verified between UI dispatch and our lock
+        // (e.g. begin_resolve re-fired).
+        let Some(payload) = session.submit_payload() else {
+            tracing::warn!(
+                "ato-import: submit_intent ignored (no submit payload — session out of Verified)"
+            );
             return;
         };
-        let toml = snap.editable_recipe_toml.unwrap_or_default();
-        (creds, id, recipe, toml)
+        let toml = session
+            .editable_recipe_toml()
+            .map(str::to_string)
+            .unwrap_or_default();
+        (creds, id, payload, toml)
     };
 
     let async_app = cx.to_async();
@@ -433,7 +441,7 @@ fn handle_submit_intent(cx: &mut App) {
             .spawn(async move {
                 ApiClient::new(creds).submit_working_recipe(
                     &source_import_id,
-                    &recipe,
+                    &payload,
                     &recipe_toml,
                 )
             })
