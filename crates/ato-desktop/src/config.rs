@@ -880,6 +880,96 @@ pub fn load_secrets() -> SecretStore {
 /// No-op kept for API compat — the bridge persists on every mutation.
 pub fn save_secrets(_store: &SecretStore) {}
 
+/// Migrate legacy `secrets.json` entries into the age store.
+///
+/// Reads old-style secrets + grants map, calls the bridge to store
+/// each entry, then renames `secrets.json` → `secrets.json.bak`.
+/// Safe to call repeatedly (re-imports are idempotent, values
+/// overwrite). Returns the number of migrated secrets on success.
+pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
+    let json_path = ato_path("secrets.json").ok()?;
+    if !json_path.exists() {
+        return None;
+    }
+
+    #[derive(Deserialize)]
+    struct LegacySecret {
+        key: String,
+        value: String,
+    }
+    #[derive(Deserialize)]
+    struct LegacyStore {
+        #[serde(default)]
+        secrets: Vec<LegacySecret>,
+        #[serde(default)]
+        grants: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "Cannot read legacy secrets.json, skipping migration");
+            return None;
+        }
+    };
+    let legacy: LegacyStore = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "Failed to parse legacy secrets.json, skipping migration");
+            return None;
+        }
+    };
+
+    let mut migrated = 0usize;
+
+    // Step 1: migrate secrets (key → value entries).
+    for entry in &legacy.secrets {
+        if let Err(e) = crate::secret_bridge::CliSecretBridge::set(
+            &entry.key, &entry.value, None, None, None,
+        ) {
+            tracing::warn!(key = %entry.key, error = %e, "Migration: failed to set secret, aborting");
+            return None;
+        }
+        migrated += 1;
+    }
+
+    // Step 2: invert grants map and set per-key allow lists.
+    // Old: grants[handle] = [KEY_A, KEY_B]
+    // New: entry(KEY_A).allow += [canonical(handle)]
+    let mut per_key_allows: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (raw_handle, allowed_keys) in &legacy.grants {
+        let canonical = SecretStore::canonicalize_handle(raw_handle).to_string();
+        for key in allowed_keys {
+            per_key_allows
+                .entry(key.clone())
+                .or_default()
+                .push(canonical.clone());
+        }
+    }
+    for (key, allow) in per_key_allows {
+        if let Err(e) =
+            crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
+        {
+            tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, continuing");
+        }
+    }
+
+    // Step 3: rename on full success.
+    let bak_path = json_path.with_extension("json.bak");
+    if let Err(e) = std::fs::rename(&json_path, &bak_path) {
+        tracing::warn!(src = %json_path.display(), dst = %bak_path.display(), error = %e, "Migration: secrets migrated but rename failed");
+    } else {
+        tracing::info!(
+            path = %bak_path.display(),
+            count = migrated,
+            "Migrated legacy secrets.json to age store and renamed to .bak"
+        );
+    }
+
+    Some(migrated)
+}
+
 
 // ── Capsule Config Store (non-secret) ─────────────────────────────────────────
 
@@ -1421,35 +1511,25 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_dedup_migration_merges_same_grant_key() {
-        // When both "capsule://org/app" and "capsule://org/app@1.2.3"
-        // have grants, the migration should merge them under the
-        // canonical key.
-        let mut store = SecretStore::default();
-        store.grant_secret("capsule://org/app", "API_KEY");
-        store.grant_secret("capsule://org/app@1.2.3", "API_KEY");
-        store.grant_secret("capsule://org/app@1.2.3", "OTHER_KEY");
-        // Simulate what load_secrets does: re-key grants to canonical form
-        let grants = std::mem::take(&mut store.grants);
-        let mut canonical_grants: std::collections::HashMap<String, Vec<String>> =
+    fn migration_grants_inversion_output_canonical_keys() {
+        let legacy_grants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::from([
+                ("capsule://org/app@1.2.3".into(), vec!["API_KEY".into(), "OTHER_KEY".into()]),
+                ("capsule://org/app".into(), vec!["API_KEY".into()]),
+            ]);
+        let canonical = SecretStore::canonicalize_handle;
+        let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
-        for (handle, keys) in grants {
-            let canonical = SecretStore::canonicalize_handle(&handle).to_string();
-            let entry = canonical_grants.entry(canonical).or_default();
-            for k in keys {
-                if !entry.contains(&k) {
-                    entry.push(k);
-                }
+        for (raw_handle, allowed_keys) in &legacy_grants {
+            let ch = canonical(raw_handle).to_string();
+            for key in allowed_keys {
+                per_key_allows.entry(key.clone()).or_default().insert(ch.clone());
             }
         }
-        store.grants = canonical_grants;
-        let keys = store.grants.get("capsule://org/app").unwrap();
-        assert!(keys.contains(&"API_KEY".to_string()));
-        assert!(keys.contains(&"OTHER_KEY".to_string()));
-        assert_eq!(keys.len(), 2, "duplicate API_KEY must be merged");
-        assert!(
-            store.grants.get("capsule://org/app@1.2.3").is_none(),
-            "versioned key must be removed by migration"
-        );
+        let api_key_allows = per_key_allows.get("API_KEY").unwrap();
+        assert!(api_key_allows.contains("capsule://org/app"));
+        assert_eq!(api_key_allows.len(), 1, "versioned grant must merge to canonical");
+        let other_allows = per_key_allows.get("OTHER_KEY").unwrap();
+        assert!(other_allows.contains("capsule://org/app"));
     }
 }

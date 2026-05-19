@@ -1490,7 +1490,10 @@ impl AppState {
             console_logs: Vec::new(),
             network_logs: Vec::new(),
             config: crate::config::load_config(),
-            secret_store: crate::config::load_secrets(),
+            secret_store: {
+                let _ = crate::config::migrate_legacy_secrets_if_present();
+                crate::config::load_secrets()
+            },
             capsule_config_store: crate::config::load_capsule_configs(),
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
