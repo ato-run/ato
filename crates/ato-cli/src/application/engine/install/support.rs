@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rand::Rng;
 
-use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::execution_plan::error::{AtoErrorCode, AtoExecutionError};
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
@@ -714,10 +714,14 @@ pub(crate) fn enforce_sandbox_mode_flags(
 
     if dangerously_skip_permissions {
         if std::env::var(ENV_ALLOW_UNSAFE).ok().as_deref() != Some("1") {
-            anyhow::bail!(
-                "--dangerously-skip-permissions requires {}=1",
-                ENV_ALLOW_UNSAFE
-            );
+            return Err(AtoExecutionError::new(
+                AtoErrorCode::AtoErrSecurityPolicyViolation,
+                format!("--dangerously-skip-permissions requires {ENV_ALLOW_UNSAFE}=1"),
+                None,
+                None,
+                Some("Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks."),
+            )
+            .into());
         }
         futures::executor::block_on(
             reporter.warn(
