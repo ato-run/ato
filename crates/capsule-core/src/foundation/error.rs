@@ -236,6 +236,14 @@ pub enum AtoError {
         hint: Option<String>,
         path: Option<String>,
     },
+    /// E306 — emitted when auto-install requires explicit confirmation
+    /// (`-y/--yes`) but the CLI is running in JSON mode or without a TTY.
+    /// Distinct from E301 (security policy) and E302 (execution plan consent)
+    /// so consumers can route install-gate errors independently.
+    InstallConsentRequired {
+        message: String,
+        hint: Option<String>,
+    },
     SecurityPolicyViolation {
         message: String,
         hint: Option<String>,
@@ -413,6 +421,11 @@ impl AtoError {
                 name: "storage_no_space",
                 phase: AtoErrorPhase::Provisioning,
             },
+            Self::InstallConsentRequired { .. } => ErrorKind {
+                code: "E306",
+                name: "install_consent_required",
+                phase: AtoErrorPhase::Provisioning,
+            },
             Self::SecurityPolicyViolation { .. } => ErrorKind {
                 code: "E301",
                 name: "security_policy_violation",
@@ -483,6 +496,7 @@ impl AtoError {
             | Self::TlsBootstrapRequired { message, .. }
             | Self::TlsBootstrapFailed { message, .. }
             | Self::StorageNoSpace { message, .. }
+            | Self::InstallConsentRequired { message, .. }
             | Self::SecurityPolicyViolation { message, .. }
             | Self::ExecutionContractInvalid { message, .. }
             | Self::ExecutionPlanConsentRequired { message, .. }
@@ -516,6 +530,7 @@ impl AtoError {
             | Self::TlsBootstrapRequired { hint, .. }
             | Self::TlsBootstrapFailed { hint, .. }
             | Self::StorageNoSpace { hint, .. }
+            | Self::InstallConsentRequired { hint, .. }
             | Self::SecurityPolicyViolation { hint, .. }
             | Self::ExecutionContractInvalid { hint, .. }
             | Self::ExecutionPlanConsentRequired { hint, .. }
@@ -664,6 +679,7 @@ impl AtoError {
             Self::TlsBootstrapRequired { binding, .. }
             | Self::TlsBootstrapFailed { binding, .. } => Some(json!({ "binding": binding })),
             Self::StorageNoSpace { path, .. } => Some(json!({ "path": path })),
+            Self::InstallConsentRequired { .. } => None,
             Self::SecurityPolicyViolation {
                 resource,
                 blocked_host,
