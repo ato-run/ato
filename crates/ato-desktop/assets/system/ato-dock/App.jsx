@@ -34,10 +34,10 @@ const CURRENT_USER_EMAIL = CURRENT_IDENTITY?.email ?? "koh0920@example.com";
 const CURRENT_USER_HANDLE = CURRENT_IDENTITY?.github ?? "Koh0920";
 
 const INPUT_CLASS =
-  "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition-all duration-150 placeholder:text-slate-400 focus:border-rose-500 focus:ring-2 focus:ring-rose-500/10";
+  "h-10 w-full rounded-lg border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none transition-all duration-150 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10";
 
 const TEXTAREA_CLASS =
-  "min-h-[120px] w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition-all duration-150 placeholder:text-slate-400 focus:border-rose-500 focus:ring-2 focus:ring-rose-500/10";
+  "min-h-[120px] w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm text-gray-900 outline-none transition-all duration-150 placeholder:text-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10";
 
 function cn(...parts) {
   return parts.filter(Boolean).join(" ");
@@ -604,7 +604,7 @@ function CompactCard({ capsule, index, selected, onSelect }) {
 
 function CompactSidebar({ capsules, selectedId, onSelect, onBack, onCollapse }) {
   return (
-    <div className="dock-slide-in flex w-60 shrink-0 flex-col border-r border-slate-200 bg-white">
+    <div className="dock-slide-in flex w-60 shrink-0 flex-col border-r border-gray-200 bg-white">
       <div className="flex items-center justify-between px-3 py-3">
         <button
           type="button"
@@ -708,18 +708,18 @@ function CapsuleDetail({ capsule, contentKey, onOpenActions }) {
     <div key={contentKey} className="dock-content-enter mx-auto max-w-3xl px-10 py-8">
       <div className="mb-8 flex items-start justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight text-slate-900">{capsule.name}</h2>
-          <p className="mt-2 text-sm leading-relaxed text-slate-500">{capsule.tagline || "No overview has been written yet."}</p>
+          <h2 className="text-2xl font-bold tracking-tight text-gray-900">{capsule.name}</h2>
+          <p className="mt-2 text-sm leading-relaxed text-gray-500">{capsule.tagline || "No overview has been written yet."}</p>
           <div className="mt-3 flex items-center gap-2">
-            <Github className="h-3.5 w-3.5 text-slate-400" />
-            <span className="text-xs font-medium text-rose-500">{capsule.sourceUrl}</span>
+            <Github className="h-3.5 w-3.5 text-gray-400" />
+            <span className="text-xs font-medium text-blue-600">{capsule.sourceUrl}</span>
             <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-500">v{capsule.version}</span>
           </div>
         </div>
         <button
           type="button"
           onClick={onOpenActions}
-          className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
+          className="inline-flex h-9 items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50"
         >
           <Rocket className="h-4 w-4" />
           Actions
@@ -731,12 +731,12 @@ function CapsuleDetail({ capsule, contentKey, onOpenActions }) {
       </div>
 
       <div className="mb-8">
-        <h3 className="text-base font-semibold text-slate-900 mb-2">Overview</h3>
-        <p className="text-sm leading-7 text-slate-600">{capsule.description || "No overview has been written yet."}</p>
+        <h3 className="text-base font-semibold text-gray-900 mb-2">Overview</h3>
+        <p className="text-sm leading-7 text-gray-600">{capsule.description || "No overview has been written yet."}</p>
       </div>
 
       <div className="mb-8">
-        <h3 className="text-base font-semibold text-slate-900 mb-2">Install</h3>
+        <h3 className="text-base font-semibold text-gray-900 mb-2">Install</h3>
         <div className="flex items-center justify-between rounded-lg bg-[#1F2937] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
           <span className="font-mono text-[13px] text-gray-100">{capsule.installCommand}</span>
           <Copy className="h-4 w-4 text-gray-500" />
@@ -746,10 +746,10 @@ function CapsuleDetail({ capsule, contentKey, onOpenActions }) {
       {capsule.latestRelease?.notes?.length > 0 && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-base font-semibold text-slate-900">What&apos;s new in v{capsule.latestRelease.version}</h3>
-            <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-slate-500">Latest</span>
+            <h3 className="text-base font-semibold text-gray-900">What&apos;s new in v{capsule.latestRelease.version}</h3>
+            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-500">Latest</span>
           </div>
-          <div className="space-y-1 text-sm leading-7 text-slate-600">
+          <div className="space-y-1 text-sm leading-7 text-gray-600">
             {capsule.latestRelease.notes.map((note) => <p key={note}>&#8226; {note}</p>)}
           </div>
         </div>
@@ -762,11 +762,11 @@ function ActionsPanel({ capsule, copied, onCopy, onEdit, onSubmit, onSubmitLabel
   const missingItems = capsule ? getMissingSubmissionItems(capsule) : [];
 
   return (
-    <div className="dock-panel-enter flex w-[320px] shrink-0 flex-col border-l border-slate-200 bg-white">
+    <div className="dock-panel-enter flex w-[320px] shrink-0 flex-col border-l border-gray-200 bg-white">
       <div className="dock-scrollbar flex-1 overflow-y-auto px-6 py-6">
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-sm font-bold text-slate-900">Actions</h3>
-          <button type="button" onClick={onClose} className="grid h-7 w-7 place-items-center rounded-md text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" aria-label="Close panel">
+          <h3 className="text-sm font-bold text-gray-900">Actions</h3>
+          <button type="button" onClick={onClose} className="grid h-7 w-7 place-items-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600" aria-label="Close panel">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -854,18 +854,18 @@ function ActionsPanel({ capsule, copied, onCopy, onEdit, onSubmit, onSubmitLabel
 
 function DockHeader({ search, onSearchChange, onImport, onNew, profileOpen, onToggleProfile, onLogin }) {
   return (
-    <header className="relative flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5">
+    <header className="relative flex h-14 shrink-0 items-center justify-between border-b border-gray-200 bg-white px-5">
       <div className="flex items-center gap-3">
-          <h1 className="text-base font-extrabold tracking-tight text-slate-900">
-            <span className="text-rose-500">Ato</span> Dock
-          </h1>
+        <h1 className="text-base font-extrabold tracking-tight text-gray-900">
+          <span className="text-blue-600">Ato</span> Dock
+        </h1>
       </div>
 
       <div className="mx-4 w-full max-w-sm">
         <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
           <input
-            className="h-9 w-full rounded-lg border border-slate-200 bg-slate-50 pl-9 pr-3 text-sm outline-none transition-all placeholder:text-slate-400 focus:border-rose-500 focus:bg-white focus:ring-2 focus:ring-rose-500/10"
+            className="h-9 w-full rounded-lg border border-gray-200 bg-gray-50 pl-9 pr-3 text-sm outline-none transition-all placeholder:text-gray-400 focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/10"
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder="Search capsules..."
@@ -874,25 +874,25 @@ function DockHeader({ search, onSearchChange, onImport, onNew, profileOpen, onTo
       </div>
 
       <div className="flex items-center gap-2">
-        <button type="button" onClick={onImport} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50">
+        <button type="button" onClick={onImport} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50">
           <Download className="h-4 w-4" />Import
         </button>
-        <button type="button" onClick={onNew} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#FF905A] to-[#F43F5E] px-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 shadow-sm shadow-rose-500/25">
+        <button type="button" onClick={onNew} className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-gray-900 px-3 text-sm font-semibold text-white transition-colors hover:bg-gray-700">
           <Plus className="h-4 w-4" />New Capsule
         </button>
         <div className="relative" data-profile-menu>
-          <button type="button" onClick={onToggleProfile} className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-xs font-bold text-slate-600 transition-colors hover:bg-slate-200">
+          <button type="button" onClick={onToggleProfile} className="flex h-9 w-9 items-center justify-center rounded-full bg-gray-100 text-xs font-bold text-gray-600 transition-colors hover:bg-gray-200">
             {iconTextFrom(CURRENT_USER_NAME)}
           </button>
           {profileOpen && (
-            <div data-profile-menu className="dock-fade-in absolute right-0 top-11 z-30 w-56 rounded-lg border border-slate-200 bg-white py-1 shadow-[0_12px_40px_rgba(0,0,0,0.12)]">
-              <div className="border-b border-slate-100 px-3 py-2.5">
-                <div className="text-sm font-semibold text-slate-900">{CURRENT_USER_NAME}</div>
-                <div className="mt-0.5 text-xs text-slate-500">{CURRENT_USER_EMAIL}</div>
-                <div className="mt-0.5 text-xs text-slate-500">@{CURRENT_USER_HANDLE}</div>
+            <div data-profile-menu className="dock-fade-in absolute right-0 top-11 z-30 w-56 rounded-lg border border-gray-200 bg-white py-1 shadow-[0_12px_40px_rgba(0,0,0,0.12)]">
+              <div className="border-b border-gray-100 px-3 py-2.5">
+                <div className="text-sm font-semibold text-gray-900">{CURRENT_USER_NAME}</div>
+                <div className="mt-0.5 text-xs text-gray-500">{CURRENT_USER_EMAIL}</div>
+                <div className="mt-0.5 text-xs text-gray-500">@{CURRENT_USER_HANDLE}</div>
               </div>
-              <button type="button" onClick={onLogin} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-slate-700 transition-colors hover:bg-slate-50">
-                <UserRound className="h-4 w-4 text-slate-400" />Sign in with Ato
+              <button type="button" onClick={onLogin} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50">
+                <UserRound className="h-4 w-4 text-gray-400" />Sign in with Ato
               </button>
             </div>
           )}
@@ -1111,7 +1111,7 @@ function MyCapsulesPage() {
   const submitDisabled = selectedCapsule?.storeStatus === "in_review";
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-white text-slate-900">
+    <div className="flex h-screen flex-col overflow-hidden bg-[#F9FAFB] text-gray-900">
       <DockHeader
         search={search}
         onSearchChange={setSearch}
@@ -1128,16 +1128,16 @@ function MyCapsulesPage() {
             <div className="mx-auto max-w-5xl px-6 py-8">
               {filteredCapsules.length === 0 ? (
                 <div className="dock-fade-in flex flex-col items-center py-20 text-center">
-                  <div className="mx-auto grid h-14 w-14 place-items-center rounded-xl bg-slate-100">
-                    <Package className="h-6 w-6 text-slate-400" />
+                  <div className="mx-auto grid h-14 w-14 place-items-center rounded-xl bg-gray-100">
+                    <Package className="h-6 w-6 text-gray-400" />
                   </div>
-                  <p className="mt-4 text-base font-semibold text-slate-600">No capsules found</p>
-                  <p className="mt-1 text-sm text-slate-400">Import a repo or create a new capsule to get started.</p>
+                  <p className="mt-4 text-base font-semibold text-gray-600">No capsules found</p>
+                  <p className="mt-1 text-sm text-gray-400">Import a repo or create a new capsule to get started.</p>
                   <div className="mt-5 flex gap-3">
-                    <button type="button" onClick={() => openEditor("import")} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50">
+                    <button type="button" onClick={() => openEditor("import")} className="inline-flex h-10 items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50">
                       <Download className="h-4 w-4" />Import
                     </button>
-                    <button type="button" onClick={() => openEditor("new")} className="inline-flex h-10 items-center gap-2 rounded-lg bg-gradient-to-r from-[#FF905A] to-[#F43F5E] px-4 text-sm font-semibold text-white transition-opacity hover:opacity-90 shadow-sm shadow-rose-500/25">
+                    <button type="button" onClick={() => openEditor("new")} className="inline-flex h-10 items-center gap-2 rounded-lg bg-gray-900 px-4 text-sm font-semibold text-white transition-colors hover:bg-gray-700">
                       <Plus className="h-4 w-4" />New Capsule
                     </button>
                   </div>

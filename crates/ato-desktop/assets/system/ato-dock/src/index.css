@@ -1,20 +1,19 @@
 @import "tailwindcss";
-@import "../../shared/design-tokens.css";
 
 :root {
   color-scheme: light;
-  --font-body: var(--ds-font-sans);
-  --font-mono: var(--ds-font-mono);
-  --c-bg: var(--ds-bg);
-  --c-surface: var(--ds-surface);
-  --c-primary: var(--ds-text);
+  --font-body: "Plus Jakarta Sans", "Geist", "Avenir Next", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Roboto Mono", monospace;
+  --c-bg: #F9FAFB;
+  --c-surface: #FFFFFF;
+  --c-primary: #111827;
   --c-primary-hover: #374151;
-  --c-success: var(--ds-green);
-  --c-link: var(--ds-accent);
-  --c-border: var(--ds-border);
-  --c-text: var(--ds-text);
-  --c-text-secondary: var(--ds-text-secondary);
-  --c-text-muted: var(--ds-text-tertiary);
+  --c-success: #10B981;
+  --c-link: #2563EB;
+  --c-border: #E5E7EB;
+  --c-text: #111827;
+  --c-text-secondary: #6B7280;
+  --c-text-muted: #9CA3AF;
 }
 
 html,
@@ -33,8 +32,8 @@ body {
 }
 
 ::selection {
-  background: rgba(244, 63, 94, 0.14);
-  color: #0F172A;
+  background: rgba(37, 99, 235, 0.14);
+  color: #111827;
 }
 
 * {

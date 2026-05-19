@@ -9,7 +9,7 @@ import { BRIDGE } from './bridge'
 const ONBOARDING_VERSION = 1
 
 const orbitColors = {
-  1: 'rgba(244, 63, 94, 0.25)',
+  1: 'rgba(37, 99, 235, 0.25)',
   2: 'rgba(244, 63, 94, 0.25)',
   3: 'rgba(139, 92, 246, 0.25)',
   4: 'rgba(251, 191, 36, 0.35)',
@@ -41,8 +41,8 @@ export default function App() {
   }, [step])
 
   return (
-    <div className="w-screen h-screen bg-white font-sans selection:bg-rose-100 selection:text-rose-900">
-      <div className="w-full h-full overflow-hidden relative">
+    <div className="w-screen h-screen bg-slate-100 font-sans selection:bg-rose-100 selection:text-rose-900">
+      <div className="w-full h-full bg-[#F8FAFC] overflow-hidden relative">
         <OrbitBackground color={orbitColors[step]} />
         <div key={step} className="w-full h-full relative z-10 animate-[fadeIn_0.4s_ease-out]">
           {step === 1 && <Step1 onNext={nextStep} />}
