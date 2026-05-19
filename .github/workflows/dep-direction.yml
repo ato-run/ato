@@ -26,6 +26,9 @@ on:
       - "crates/**/Cargo.toml"
       - ".github/workflows/dep-direction.yml"
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Dependency direction
