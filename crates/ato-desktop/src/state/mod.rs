@@ -1,5 +1,6 @@
 mod app_window;
 pub(crate) mod persistence;
+pub(crate) mod session;
 
 // `ShellSurface` is re-exported now so #169 can flip the renderer over to it
 // without churning the public path. It is intentionally unused in this PR.

@@ -1706,8 +1706,12 @@ where
                 &capsule_toml,
                 validation_mode,
             ) {
+                let raw = reconcile_compat_manifest_targets(
+                    &loaded.raw,
+                    decision.plan.selected_target_label(),
+                );
                 if let Ok(bridge) =
-                    capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
+                    capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
                 {
                     decision.plan.compat_manifest = Some(bridge);
                 }
@@ -1964,8 +1968,12 @@ where
                     &capsule_toml,
                     validation_mode,
                 ) {
+                    let raw = reconcile_compat_manifest_targets(
+                        &loaded.raw,
+                        decision.plan.selected_target_label(),
+                    );
                     if let Ok(bridge) =
-                        capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
+                        capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
                     {
                         decision.plan.compat_manifest = Some(bridge);
                     }
@@ -2744,6 +2752,31 @@ fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspac
     }
 }
 
+/// Resolve `{{deps.<alias>.runtime_exports.<key>}}` templates using the
+/// dependency orchestrator's resolved exports. If the value is not a
+/// template, it is returned unchanged.
+fn resolve_dep_template_inner(
+    value: &str,
+    graph: &RunningGraph,
+) -> String {
+    if !value.contains("deps.") || !value.contains("runtime_exports.") {
+        return value.to_string();
+    }
+    let re = regex::Regex::new(r"\{\{deps\.(\w+)\.runtime_exports\.(\w+)\}\}").unwrap();
+    let mut result = value.to_string();
+    for cap in re.captures_iter(value) {
+        let alias = &cap[1];
+        let export_key = &cap[2];
+        if let Some(exports) = graph.runtime_exports(alias) {
+            if let Some(resolved) = exports.get(export_key) {
+                let pattern = format!("{{{{deps.{}.runtime_exports.{}}}}}", alias, export_key);
+                result = result.replace(&pattern, resolved);
+            }
+        }
+    }
+    result
+}
+
 pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -3181,6 +3214,55 @@ where
     {
         crate::progressive_ui::show_cancel("Preview cancelled.")?;
         return Ok(());
+    }
+
+    // Run prestart_command after provider readiness and consent, before
+    // the main process launch (e.g., Prisma database migrations).
+    if let Some(command) = decision
+        .plan
+        .prestart_command_string()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        let prestart_cwd = crate::adapters::runtime::provisioning::dependency_root(&decision.plan);
+        tracing::info!(%command, cwd=%prestart_cwd.display(), "running prestart command");
+        let target_env: Vec<(String, String)> = decision.plan.execution_env().into_iter().collect();
+        // Resolve {{deps.X.runtime_exports.Y}} templates from the running dep graph.
+        let resolved_env: Vec<(String, String)> = {
+            let graph = dep_contracts.as_ref().and_then(DependencyContractGuard::graph);
+            target_env.into_iter().map(|(key, value)| {
+                let resolved = if let Some(g) = graph {
+                    resolve_dep_template_inner(&value, g)
+                } else {
+                    value.to_string()
+                };
+                (key, resolved)
+            }).collect()
+        };
+        tracing::info!(%command, cwd=%prestart_cwd.display(), env_count=%resolved_env.len(), has_graph=%dep_contracts.as_ref().and_then(DependencyContractGuard::graph).is_some(), "running prestart command");
+        // Debug: log DATABASE_URL value
+        if let Some((_, db_url)) = resolved_env.iter().find(|(k, _)| k == "DATABASE_URL") {
+            tracing::info!(%db_url, "prestart DATABASE_URL resolved");
+        }
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(&command)
+            .current_dir(&prestart_cwd)
+            .stdin(std::process::Stdio::null());
+        for (key, value) in &resolved_env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd
+            .spawn()
+            .context("failed to spawn prestart command")?;
+        let status = child.wait().context("prestart command wait failed")?;
+        if !status.success() {
+            anyhow::bail!(
+                "prestart command exited with status {}: {}",
+                status,
+                command
+            );
+        }
     }
 
     match guard_result.executor_kind {
@@ -3906,14 +3988,64 @@ fn build_port_identity(
     }
 }
 
+/// Reconcile a capsule.toml `toml::Value` so that the lock's selected-target
+/// label can be used to look up lifecycle fields (build, runtime_tools, install)
+/// that the manifest declares under a different target name.
+///
+/// Source inference always assigns `label = "default"` to the inferred lock
+/// target regardless of the capsule.toml `default_target` value.  When the
+/// two labels differ (e.g. lock has `"default"` but capsule.toml declares
+/// `[targets.main]`), all `compat_str(&["targets", "default", …])` lookups
+/// return `None` and the lifecycle steps are silently skipped.
+///
+/// This function inserts `[targets.<lock_target>]` as an alias of the
+/// capsule.toml target so that both the lock-label path and the manifest-label
+/// path resolve correctly.  The alias is only added in-memory; the file on
+/// disk is never touched.
+fn reconcile_compat_manifest_targets(raw: &toml::Value, lock_target: &str) -> toml::Value {
+    let mut value = raw.clone();
+
+    // Determine the capsule.toml's intended target label: prefer explicit
+    // default_target, then fall back to the sole entry in [targets] if there
+    // is exactly one.
+    let capsule_target = value
+        .get("default_target")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("targets")
+                .and_then(toml::Value::as_table)
+                .filter(|t| t.len() == 1)
+                .and_then(|t| t.keys().next())
+                .map(|s| s.to_string())
+        });
+
+    if let Some(ref capsule_target) = capsule_target {
+        if capsule_target != lock_target {
+            if let Some(targets) = value.get_mut("targets").and_then(toml::Value::as_table_mut) {
+                if let Some(real_target) = targets.get(capsule_target.as_str()).cloned() {
+                    // Only add the alias if the lock-label slot is not already occupied.
+                    targets
+                        .entry(lock_target.to_string())
+                        .or_insert(real_target);
+                }
+            }
+        }
+    }
+
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_existing_path, normalize_write_path, parent_package_id,
         parse_external_service_contracts, parse_reuse_if_present_service_preflights,
-        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
-        ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
-        ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
+        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
+        validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
+        ExternalServiceContract, ExternalServiceHealthcheck, ExternalServiceHealthcheckKind,
+        ExternalServiceMode,
         PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
@@ -4567,5 +4699,175 @@ url = "http://127.0.0.1:8787/health"
             "Resolved against effective cwd: {}",
             effective.path().display()
         )));
+    }
+
+    // ── reconcile_compat_manifest_targets tests ──────────────────────────────
+
+    /// When capsule.toml declares `default_target = "main"` but the lock's
+    /// selected target is `"default"`, the helper must add `[targets.default]`
+    /// as an alias of `[targets.main]` so that build/runtime_tools lookups
+    /// succeed through the lock-label path.
+    #[test]
+    fn reconcile_adds_alias_when_lock_and_manifest_target_differ() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "demo"
+schema_version = "0.3"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "python"
+build = "npm install && npm run build"
+
+[targets.main.runtime_tools]
+node = "20"
+"#,
+        )
+        .expect("parse");
+
+        let reconciled = reconcile_compat_manifest_targets(&raw, "default");
+
+        // [targets.default] must be present after aliasing
+        let targets = reconciled
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .expect("targets table");
+        assert!(
+            targets.contains_key("default"),
+            "alias [targets.default] should have been inserted"
+        );
+        let default_target = targets.get("default").and_then(toml::Value::as_table).unwrap();
+        assert_eq!(
+            default_target.get("build").and_then(toml::Value::as_str),
+            Some("npm install && npm run build")
+        );
+        let node = default_target
+            .get("runtime_tools")
+            .and_then(toml::Value::as_table)
+            .and_then(|rt| rt.get("node"))
+            .and_then(toml::Value::as_str);
+        assert_eq!(node, Some("20"));
+        // Original [targets.main] must still be present
+        assert!(targets.contains_key("main"));
+    }
+
+    /// When capsule.toml `default_target` already matches the lock target, the
+    /// helper must be a no-op (no spurious alias added).
+    #[test]
+    fn reconcile_is_noop_when_labels_match() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "demo"
+schema_version = "0.3"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+build = "pip install -r requirements.txt"
+"#,
+        )
+        .expect("parse");
+
+        let reconciled = reconcile_compat_manifest_targets(&raw, "default");
+
+        let targets = reconciled
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .expect("targets table");
+        assert_eq!(targets.len(), 1, "no extra alias should be added");
+        assert!(targets.contains_key("default"));
+    }
+
+    /// When capsule.toml has no explicit `default_target` but has a single
+    /// named target (e.g. `[targets.app]`), the helper infers it as the
+    /// capsule target and adds the alias.
+    #[test]
+    fn reconcile_infers_single_target_when_no_default_target_field() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "demo"
+schema_version = "0.3"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+build = "npm run build"
+"#,
+        )
+        .expect("parse");
+
+        let reconciled = reconcile_compat_manifest_targets(&raw, "default");
+
+        let targets = reconciled
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .expect("targets table");
+        assert!(
+            targets.contains_key("default"),
+            "alias [targets.default] should be inferred from the sole target"
+        );
+        let build = targets
+            .get("default")
+            .and_then(toml::Value::as_table)
+            .and_then(|t| t.get("build"))
+            .and_then(toml::Value::as_str);
+        assert_eq!(build, Some("npm run build"));
+    }
+
+    /// After reconciliation, a `CompatManifestBridge` built from the aliased
+    /// manifest correctly exposes the build command via `build_lifecycle_build`
+    /// when the execution descriptor uses the lock target label.
+    #[test]
+    fn reconcile_enables_build_lifecycle_build_via_lock_target() {
+        use capsule_core::router::{execution_descriptor_from_manifest_parts, ExecutionProfile};
+        use std::path::PathBuf;
+
+        let tmp = workspace_tempdir("reconcile-build-test-");
+        let manifest_dir = tmp.path().to_path_buf();
+
+        // Raw capsule.toml: target is named "main", not "default"
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "myapp"
+version = "0.1.0"
+type = "app"
+schema_version = "0.3"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "python"
+run_command = "uvicorn app:main"
+build = "npm install && npm run build"
+
+[targets.main.runtime_tools]
+node = "20"
+"#,
+        )
+        .expect("parse manifest");
+
+        // Build a plan using the lock target label "default"
+        let plan = execution_descriptor_from_manifest_parts(
+            reconcile_compat_manifest_targets(&raw, "default"),
+            manifest_dir.join("capsule.toml"),
+            manifest_dir.clone(),
+            ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("build plan");
+
+        assert_eq!(
+            plan.build_lifecycle_build().as_deref(),
+            Some("npm install && npm run build"),
+            "build command should be visible via the aliased target label"
+        );
+        assert_eq!(
+            plan.execution_runtime_tool_version("node").as_deref(),
+            Some("20"),
+            "node runtime_tools should be visible via the aliased target label"
+        );
     }
 }
