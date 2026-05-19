@@ -184,7 +184,7 @@ pub fn begin_open(cx: &mut App, url: String) {
     .detach();
 }
 
-fn handle_confirm_unsafe(cx: &mut App) {
+pub(crate) fn handle_confirm_unsafe(cx: &mut App) {
     let session_arc = session_arc(cx);
     {
         let mut session = match session_arc.lock() {
@@ -267,7 +267,7 @@ fn handle_retry_inference(cx: &mut App) {
     .detach();
 }
 
-fn handle_run(cx: &mut App) {
+pub(crate) fn handle_run(cx: &mut App) {
     let session_arc = session_arc(cx);
     let (repo_url, recipe_toml, allow_unsafe) = {
         let mut session = match session_arc.lock() {

@@ -16,7 +16,7 @@ use capsule_wire::handle::{
     normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
     ResolvedSnapshot,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
@@ -863,6 +863,142 @@ pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
     }
 
     Ok(notes)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CleanupPreview {
+    pub(crate) postgres_pids: Vec<u32>,
+    pub(crate) bun_server_pids: Vec<u32>,
+    pub(crate) port_1111_pids: Vec<u32>,
+    pub(crate) shm_segments: usize,
+    pub(crate) needs_cleanup: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CleanupReport {
+    pub(crate) postgres_killed: usize,
+    pub(crate) bun_servers_killed: usize,
+    pub(crate) port_1111_killed: usize,
+    pub(crate) shm_freed: usize,
+}
+
+fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
+    // Safety: only use `-f` patterns that match specific process names.
+    if pattern.is_empty() || pattern.len() < 4 {
+        return Vec::new();
+    }
+    let output = match Command::new("pgrep")
+        .arg("-f")
+        .arg(pattern)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn kill_pids(pids: &[u32]) -> usize {
+    let mut killed = 0usize;
+    let current = std::process::id();
+    for &pid in pids {
+        if pid == current {
+            continue;
+        }
+        // Use TERM only — no SIGKILL.
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        killed += 1;
+    }
+    killed
+}
+
+/// Preview what would be cleaned up. Does not modify anything.
+pub(crate) fn preview_host_cleanup() -> CleanupPreview {
+    let postgres_pids = find_pids_by_pattern("postgres.*ato");
+    let bun_server_pids = find_pids_by_pattern("bun.*dist/index");
+    let port_1111_pids = find_port_pids(1111);
+    let shm_segments = count_owned_shm();
+    CleanupPreview {
+        needs_cleanup: !postgres_pids.is_empty()
+            || !bun_server_pids.is_empty()
+            || !port_1111_pids.is_empty()
+            || shm_segments > 0,
+        postgres_pids,
+        bun_server_pids,
+        port_1111_pids,
+        shm_segments,
+    }
+}
+
+/// Execute host resource cleanup. Kills stale provider processes (TERM only)
+/// and frees SysV shared memory owned by the current user.
+pub(crate) fn cleanup_host_resources() -> CleanupReport {
+    let preview = preview_host_cleanup();
+
+    let postgres_killed = kill_pids(&preview.postgres_pids);
+    let bun_servers_killed = kill_pids(&preview.bun_server_pids);
+    let port_1111_killed = kill_pids(&preview.port_1111_pids);
+    let shm_freed = free_owned_shm();
+
+    CleanupReport {
+        postgres_killed,
+        bun_servers_killed,
+        port_1111_killed,
+        shm_freed,
+    }
+}
+
+fn find_port_pids(port: u16) -> Vec<u32> {
+    let output = match Command::new("lsof").arg("-ti").arg(format!(":{port}")).output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn count_owned_shm() -> usize {
+    let output = match Command::new("ipcs").arg("-m").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let current_user = std::env::var("USER").unwrap_or_default();
+    text.lines().filter(|line| line.contains(&current_user)).count()
+}
+
+fn free_owned_shm() -> usize {
+    let output = match Command::new("ipcs").arg("-m").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let current_user = std::env::var("USER").unwrap_or_default();
+    let mut freed = 0usize;
+    for line in text.lines() {
+        if !line.contains(&current_user) {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(id_str) = parts.get(1) {
+            if let Ok(id) = id_str.parse::<u32>() {
+                let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
+                freed += 1;
+            }
+        }
+    }
+    freed
 }
 
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {

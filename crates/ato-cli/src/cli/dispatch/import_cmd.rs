@@ -830,6 +830,11 @@ fn import_run_from_output(output: &Output) -> ImportRun {
 
 fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
     let lowered = text.to_ascii_lowercase();
+    if lowered.contains("could not create shared memory segment")
+        || (lowered.contains("shmget") && lowered.contains("no space left on device"))
+    {
+        return ("install", "postgres_shared_memory_exhausted");
+    }
     if lowered.contains("distutils") {
         return ("install", "node_gyp_missing_distutils");
     }
@@ -853,12 +858,36 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
     if lowered.contains("module not found") || lowered.contains("cannot find module") {
         return ("run", "module_not_found");
     }
-    if lowered.contains("prisma")
-        && (lowered.contains("migration") || lowered.contains("migrate deploy"))
-        && (lowered.contains("fail") || lowered.contains("error"))
-        && !lowered.contains("build successful")
-    {
-        return ("prestart", "prisma_migration_failed");
+    if lowered.contains("prisma") {
+        // Finer-grained Prisma error classification, ordered most-specific-first.
+        if lowered.contains("environment variable not found: database_url") {
+            return ("prestart", "prisma_database_url_missing");
+        }
+        if lowered.contains("can't reach database server") || lowered.contains("p1001") {
+            return ("prestart", "prisma_database_connection_failed");
+        }
+        if lowered.contains("failed migrations") || lowered.contains("p3009") {
+            return ("prestart", "prisma_failed_migration_state");
+        }
+        if lowered.contains("query engine") && (lowered.contains("could not locate") || lowered.contains("not found"))
+        {
+            return ("run", "prisma_query_engine_not_found");
+        }
+        if lowered.contains("schema.prisma") && (lowered.contains("not found") || lowered.contains("does not exist"))
+        {
+            return ("prestart", "prisma_schema_not_found");
+        }
+        if (lowered.contains("command not found") || lowered.contains("no such file"))
+            && !lowered.contains("query engine")
+        {
+            return ("prestart", "prisma_cli_not_found");
+        }
+        if (lowered.contains("migration") || lowered.contains("migrate deploy"))
+            && (lowered.contains("fail") || lowered.contains("error"))
+            && !lowered.contains("build successful")
+        {
+            return ("prestart", "prisma_migration_sql_failed");
+        }
     }
     if lowered.contains("missing_required_env")
         || lowered.contains("missing required env")
@@ -1079,6 +1108,79 @@ mod tests {
             classify_run_failure("ModuleNotFoundError: No module named 'distutils'");
         assert_eq!(phase, "install");
         assert_eq!(class, "node_gyp_missing_distutils");
+    }
+
+    #[test]
+    fn postgres_shmget_failure_classified_as_postgres_shared_memory_exhausted() {
+        let (phase, class) = classify_run_failure(
+            "FATAL:  could not create shared memory segment: No space left on device\nDETAIL:  Failed system call was shmget(key=411762501, size=56, 03600).\ninitdb: removing data directory",
+        );
+        assert_eq!(phase, "install");
+        assert_eq!(class, "postgres_shared_memory_exhausted");
+    }
+
+    #[test]
+    fn postgres_shmget_failure_lowercase_classified() {
+        let (phase, class) = classify_run_failure(
+            "fatal:  could not create shared memory segment: no space left on device",
+        );
+        assert_eq!(phase, "install");
+        assert_eq!(class, "postgres_shared_memory_exhausted");
+    }
+
+    #[test]
+    fn unknown_provider_failure_falls_through_to_unknown() {
+        let (phase, class) =
+            classify_run_failure("some completely unfamiliar error text that does not match any known pattern");
+        assert_eq!(class, "unknown");
+    }
+
+    #[test]
+    fn prisma_query_engine_not_found_classified() {
+        let (phase, class) = classify_run_failure(
+            "prisma:error Invalid `prisma.config.findFirst()` Prisma Client could not locate the Query Engine for runtime \"darwin-arm64\".",
+        );
+        assert_eq!(class, "prisma_query_engine_not_found");
+    }
+
+    #[test]
+    fn prisma_database_url_missing_classified() {
+        let (phase, class) = classify_run_failure(
+            "prisma:error Environment variable not found: DATABASE_URL",
+        );
+        assert_eq!(class, "prisma_database_url_missing");
+    }
+
+    #[test]
+    fn prisma_database_connection_failed_classified() {
+        let (phase, class) = classify_run_failure(
+            "prisma:error Can't reach database server at `localhost:5432`",
+        );
+        assert_eq!(class, "prisma_database_connection_failed");
+    }
+
+    #[test]
+    fn prisma_failed_migration_state_classified() {
+        let (phase, class) = classify_run_failure(
+            "prisma P3009: found failed migrations in the target database, new migrations cannot be applied",
+        );
+        assert_eq!(class, "prisma_failed_migration_state");
+    }
+
+    #[test]
+    fn prisma_schema_not_found_classified() {
+        let (phase, class) = classify_run_failure(
+            "Prisma schema file prisma/schema.prisma not found",
+        );
+        assert_eq!(class, "prisma_schema_not_found");
+    }
+
+    #[test]
+    fn prisma_migration_sql_still_caught_as_fallback() {
+        let (phase, class) = classify_run_failure(
+            "prisma error: migration 20251231140909_add_fonts_table failed to apply",
+        );
+        assert_eq!(class, "prisma_migration_sql_failed");
     }
 
     #[test]

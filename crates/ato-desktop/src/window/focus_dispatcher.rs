@@ -261,6 +261,40 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 );
                                                 Ok(())
                                             }
+                                            "OpenImportBlinko" => {
+                                                let url = "https://github.com/blinkospace/blinko".to_string();
+                                                if let Err(err) = crate::window::import_window::open_with_url(
+                                                    cx,
+                                                    url,
+                                                ) {
+                                                    tracing::error!(?err, "OpenImportBlinko: open_with_url failed");
+                                                }
+                                                Ok(())
+                                            }
+                                            "RunImportBlinko" => {
+                                                crate::system_capsule::ato_import::handle_confirm_unsafe(cx);
+                                                Ok(())
+                                            }
+                                            "CheckImportState" => {
+                                                let session_arc = crate::window::import_window::session_arc(cx);
+                                                match session_arc.lock() {
+                                                    Ok(session) => {
+                                                        let snapshot = session.snapshot();
+                                                        tracing::info!(
+                                                            state = ?snapshot.state,
+                                                            recipe_origin = ?snapshot.recipe.as_ref().map(|r| &r.origin),
+                                                            recipe_hash = ?snapshot.recipe.as_ref().map(|r| &r.recipe_hash),
+                                                            recipe_source = ?snapshot.recipe_resolution.as_ref().map(|r| &r.source),
+                                                            signed_in = snapshot.signed_in,
+                                                            "ImportSession state check"
+                                                        );
+                                                    }
+                                                    Err(_) => {
+                                                        tracing::warn!("CheckImportState: session mutex poisoned");
+                                                    }
+                                                }
+                                                Ok(())
+                                            }
                                             // Stage B AODD negative test:
                                             // ato-windows requests SettingsWrite.
                                             // Per the inline manifest, ato-windows
@@ -447,6 +481,16 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                             }
                         };
                         req.send(Ok(serde_json::json!({ "sessions": sessions_json })));
+                    AutomationCommand::AuthStatus => {
+                        let status = crate::webview::signed_out_auth_status();
+                        match serde_json::to_value(status) {
+                            Ok(json) => req.send(Ok(json)),
+                            Err(_) => req.send(Ok(serde_json::json!({
+                                "signed_in": false,
+                                "api_base_url": "https://api.ato.run",
+                                "account_hint": serde_json::Value::Null,
+                            }))),
+                        };
                     }
                     other => {
                         // Non-dock browser_* and other commands with no
