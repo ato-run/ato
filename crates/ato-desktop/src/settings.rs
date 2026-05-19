@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::config::{
     CapsuleOpenMode, CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode,
     ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore,
-    StartupSurface, ThemeConfig, UpdateChannel,
+    StartupSurface, ThemeConfig, UpdateChannel, WindowCloseBehavior,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -328,6 +328,7 @@ fn desktop_settings_resolved(config: &DesktopConfig) -> Value {
         "contentWindowDefaultPresentation": setting(d.content_window_default_presentation, SettingSource::Global, false, None, SafetyClass::Immediate),
         "capsuleOpenMode": setting(d.capsule_open_mode, SettingSource::Global, false, None, SafetyClass::Immediate),
         "restoreWindowFrames": setting(d.restore_window_frames, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "windowCloseBehavior": setting(d.window_close_behavior, SettingSource::Global, false, None, SafetyClass::Immediate),
         "controlBar": {
             "mode": setting(cb.mode, SettingSource::Global, false, None, SafetyClass::Immediate),
             "alwaysOnTop": setting(cb.always_on_top, SettingSource::Global, false, None, SafetyClass::Immediate),
@@ -994,6 +995,12 @@ fn apply_desktop_patch_immediate(
         config.desktop.restore_window_frames = v;
         changed.push("restoreWindowFrames".to_string());
     }
+    if let Some(v) = patch.get("windowCloseBehavior").and_then(Value::as_str) {
+        if let Some(behavior) = parse_window_close_behavior(v) {
+            config.desktop.window_close_behavior = behavior;
+            changed.push("windowCloseBehavior".to_string());
+        }
+    }
     if let Some(v) = patch.get("controlBarAlwaysOnTop").and_then(Value::as_bool) {
         config.desktop.control_bar.always_on_top = v;
         changed.push("controlBarAlwaysOnTop".to_string());
@@ -1143,7 +1150,15 @@ fn parse_capsule_open_mode(v: &str) -> Option<CapsuleOpenMode> {
     match v {
         "window" => Some(CapsuleOpenMode::Window),
         "webviewer" => Some(CapsuleOpenMode::Webviewer),
-        "os-browser" => Some(CapsuleOpenMode::OsBrowser),
+        "os-browser" | "os-default-browser" => Some(CapsuleOpenMode::OsBrowser),
+        _ => None,
+    }
+}
+
+fn parse_window_close_behavior(v: &str) -> Option<WindowCloseBehavior> {
+    match v {
+        "keep-session-running" => Some(WindowCloseBehavior::KeepSessionRunning),
+        "stop-session" => Some(WindowCloseBehavior::StopSession),
         _ => None,
     }
 }
@@ -1230,6 +1245,7 @@ mod tests {
         assert!(desktop.get("focusViewEnabled").is_some());
         assert!(desktop.get("startupSurface").is_some());
         assert!(desktop.get("capsuleOpenMode").is_some());
+        assert!(desktop.get("windowCloseBehavior").is_some());
         assert!(desktop.get("controlBar").is_some());
         let cb = desktop.get("controlBar").unwrap();
         assert!(cb.get("mode").is_some());
@@ -1393,6 +1409,10 @@ mod tests {
             .expect("resolved.desktop.capsuleOpenMode must be present");
         assert_eq!(entry["declared"].as_str(), Some("window"));
         assert_eq!(entry["effective"].as_str(), Some("window"));
+        let wcb = desktop
+            .get("windowCloseBehavior")
+            .expect("resolved.desktop.windowCloseBehavior must be present");
+        assert_eq!(wcb["declared"].as_str(), Some("keep-session-running"));
     }
 
     #[test]
@@ -1423,5 +1443,38 @@ mod tests {
         assert_eq!(config.desktop.capsule_open_mode, original);
         let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
         assert!(!changed.contains(&"capsuleOpenMode".to_string()));
+    }
+
+    #[test]
+    fn patch_window_close_behavior_stop_session() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"windowCloseBehavior": "stop-session"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(
+            config.desktop.window_close_behavior,
+            WindowCloseBehavior::StopSession
+        );
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(changed.contains(&"windowCloseBehavior".to_string()));
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn window_close_behavior_not_in_next_launch_keys() {
+        assert!(
+            !NEXT_LAUNCH_KEYS.contains(&"windowCloseBehavior"),
+            "windowCloseBehavior must not be in NEXT_LAUNCH_KEYS"
+        );
+    }
+
+    #[test]
+    fn patch_window_close_behavior_unknown_ignored() {
+        let mut config = default_config();
+        let original = config.desktop.window_close_behavior;
+        let patch = serde_json::json!({"windowCloseBehavior": "unknown-behavior"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.window_close_behavior, original);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(!changed.contains(&"windowCloseBehavior".to_string()));
     }
 }

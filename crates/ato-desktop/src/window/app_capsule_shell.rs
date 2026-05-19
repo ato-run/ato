@@ -31,6 +31,10 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::orchestrator::{GuestLaunchSession, LaunchError};
+use crate::state::session::{
+    CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession, SessionClient, SessionClientId,
+    SessionClientKind, SessionClientState, SessionRegistry,
+};
 use crate::window::content_windows::{
     CapsuleWindowContext, CapsuleWindowStatus, OpenContentWindows,
 };
@@ -305,12 +309,41 @@ impl AppCapsuleShell {
 
     /// Process a result that arrived from the background thread.
     /// Called from `render` when `pending_result` is `Some`.
-    fn process_pending_result(&mut self, window: &mut gpui::Window) {
+    fn process_pending_result(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(result) = self.pending_result.take() else {
             return;
         };
         match result {
             Ok(session) => {
+                // Register the session in the SessionRegistry before creating
+                // the WebView, so the session record exists even if WebView
+                // creation fails (the process is already running).
+                let launch_context = CapsuleLaunchContext {
+                    handle_or_url: self.handle.clone(),
+                    target: None,
+                    requested_client: SessionClientKind::AtoWindow,
+                    source: CapsuleOpenSource::NavigateToUrl,
+                };
+                let capsule_session =
+                    CapsuleSession::from_launch_session(&session, launch_context);
+                let mut registry = cx.global_mut::<SessionRegistry>();
+                registry.register_session(capsule_session);
+                let client = SessionClient {
+                    client_id: SessionClientId::next(),
+                    session_id: session.session_id.clone(),
+                    client_kind: SessionClientKind::AtoWindow,
+                    window_id: self.content_window_id,
+                    pane_id: None,
+                    state: SessionClientState::Attached,
+                    attached_at: std::time::SystemTime::now(),
+                    last_seen_at: std::time::SystemTime::now(),
+                };
+                registry.attach_client(client);
+
                 let url = session_current_url(&session);
                 let win_size = window.bounds().size;
                 let w = f32::from(win_size.width) as u32;
@@ -385,42 +418,29 @@ impl Drop for AppCapsuleShell {
         // Signal the background thread to not display the session if it
         // arrives after the entity is gone.
         self.abort_flag.store(true, Ordering::Release);
+
+        // Session lifecycle is now owned by the SessionRegistry.
+        // on_window_closed in app.rs handles detach_client / stop_session_once
+        // based on windowCloseBehavior. Drop is only a safety net: log
+        // if a session exists but was NOT stopped by the close handler.
         if let Some(Ok(session)) = &self.pending_result {
-            let sid = session.session_id.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::orchestrator::stop_guest_session(&sid) {
-                    tracing::warn!(
-                        session_id = %sid,
-                        error = %err,
-                        "AppCapsuleShell drop: pending session stop failed"
-                    );
-                }
-            });
+            tracing::warn!(
+                session_id = %session.session_id,
+                "AppCapsuleShell drop: pending session was not consumed by close handler"
+            );
         }
-        // If a session was already running, stop it.
         if let CapsuleBootState::Ready { session } = &self.boot_state {
-            let sid = session.session_id.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::orchestrator::stop_guest_session(&sid) {
-                    tracing::warn!(
-                        session_id = %sid,
-                        error = %err,
-                        "AppCapsuleShell drop: stop_guest_session failed"
-                    );
-                } else {
-                    tracing::info!(
-                        session_id = %sid,
-                        "AppCapsuleShell drop: session stopped"
-                    );
-                }
-            });
+            tracing::warn!(
+                session_id = %session.session_id,
+                "AppCapsuleShell drop: ready session was not detached by close handler"
+            );
         }
     }
 }
 
 impl Render for AppCapsuleShell {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.process_pending_result(window);
+        self.process_pending_result(window, cx);
         self.sync_webview_bounds(window);
         publish_content_window_context(window, self, cx);
         let inner = match &self.boot_state {
