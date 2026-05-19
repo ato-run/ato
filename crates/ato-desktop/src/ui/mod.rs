@@ -22,7 +22,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 
 use self::chrome::render_command_chrome;
-use self::panels::{render_settings_overlay, render_stage};
+use self::panels::render_stage;
 use self::sidebar::{
     favicon_candidate_urls, parse_link_icon_candidates, render_task_rail, FaviconState,
 };
@@ -653,7 +653,6 @@ impl DesktopShell {
     }
 
     fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.settings_panel_open = false;
         self.state.open_settings_task();
         crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, true);
@@ -1942,32 +1941,9 @@ impl Render for DesktopShell {
             || self.state.pending_consent.is_some()
             || self.state.active_permission_prompt().is_some()
             || self.state.pending_quit_confirmation
-            || self.state.route_metadata_popover_open
-            || self.state.settings_panel_open;
+            || self.state.route_metadata_popover_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
-        let route_metadata_overlay_route = if self.state.route_metadata_popover_open {
-            self.state
-                .active_capsule_detail_host_panel_route()
-                .map(|route| route.url())
-        } else {
-            None
-        };
-        let route_metadata_overlay_bounds = route_metadata_overlay_route
-            .as_ref()
-            .map(|_| route_metadata_overlay_webview_bounds(stage_bounds));
-        let route_metadata_overlay_payload = if self.state.route_metadata_popover_open {
-            crate::webview::overlay_host_panel_payload(&self.state)
-        } else {
-            None
-        };
-        self.webviews.sync_overlay_host_panel(
-            window,
-            route_metadata_overlay_route,
-            route_metadata_overlay_bounds,
-            route_metadata_overlay_payload,
-            &mut self.state,
-        );
         let theme = Theme::from_mode(self.state.theme_mode);
 
         let body = div()
@@ -2045,9 +2021,6 @@ impl Render for DesktopShell {
                     )
                     .when(self.state.route_metadata_popover_open, |this| {
                         this.child(render_route_metadata_popover(&self.state, &theme))
-                    })
-                    .when(self.state.settings_panel_open, |this| {
-                        this.child(render_settings_overlay(&self.state, &theme))
                     }),
             );
 
@@ -2957,19 +2930,6 @@ fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBound
     }
 }
 
-fn inset_bounds(bounds: PaneBounds, inset: f32) -> PaneBounds {
-    PaneBounds {
-        x: bounds.x + inset,
-        y: bounds.y + inset,
-        width: (bounds.width - inset * 2.0).max(1.0),
-        height: (bounds.height - inset * 2.0).max(1.0),
-    }
-}
-
-fn route_metadata_overlay_webview_bounds(stage_bounds: PaneBounds) -> PaneBounds {
-    stage_bounds
-}
-
 fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement {
     // 2px strip flush against the chrome's bottom border. Filled
     // section uses theme.accent; track uses surface_hover so the
@@ -3070,10 +3030,6 @@ fn render_capsule_update_section(
 }
 
 fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement {
-    if let Some(route) = state.active_capsule_detail_host_panel_route() {
-        return render_route_metadata_host_panel_overlay(&route, theme).into_any_element();
-    }
-
     let active_web = state.active_web_pane();
     let active = state.active_capsule_pane().or_else(|| {
         active_web
@@ -3196,44 +3152,6 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
         })
         .child(panel)
         .into_any_element()
-}
-
-fn render_route_metadata_host_panel_overlay(
-    route: &crate::state::HostPanelRoute,
-    theme: &Theme,
-) -> impl IntoElement {
-    div()
-        .id("route-metadata-backdrop")
-        .absolute()
-        .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.0))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
-        })
-        .child(
-            div()
-                .id("route-metadata-panel")
-                .size_full()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .flex()
-                .items_start()
-                .justify_end()
-                .p(px(14.0))
-                .child(
-                    div()
-                        .rounded(px(999.0))
-                        .bg(theme.panel_bg)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_secondary)
-                        .child(route.label()),
-                ),
-        )
 }
 
 fn render_capsule_detail_header(
