@@ -36,6 +36,15 @@ Ato treats execution as a **first-class artifact**, not an afterthought:
 
 > *Software execution is not just a command — it is a **launch graph**.*
 
+A source repository is only the raw material. A **recipe** is the executable
+interpretation of that source.
+
+The same repository can have multiple recipes: one for a web app, one for a CLI,
+one for a desktop shell, one for a demo with a local database, and one for a
+safer no-network mode.
+
+Ato shares recipes, not opaque images.
+
 That graph includes your source, runtimes, tools, dependencies, environment, filesystem view, network policy, and entrypoint. Ato resolves that graph automatically and launches the project in a controlled local session — **without requiring you to install Docker, learn Nix, or read the README first.**
 
 ---
@@ -73,19 +82,22 @@ The same handle works whether the target is a local checkout, a remote repositor
 
 ## How it works
 
-Ato turns a project into a **launch graph**.
+Ato turns source inputs plus a recipe into a **launch graph**.
 
 ```text
-project or capsule handle
+source inputs
   │
   ▼
-construct launch graph
+select or infer recipe
   │
   ▼
-resolve tools, runtimes, dependencies, and policy
+project into the user's environment
   │
   ▼
-materialize an isolated session
+resolve tools, runtimes, dependencies, services, and policy
+  │
+  ▼
+materialize a managed session
   │
   ▼
 record execution identity and receipt
@@ -155,11 +167,12 @@ The public surface of this directory is **topic-first, with roles separated insi
 
 ### Topics
 
-- [Run](run.md) — the front door for executing a project
+- [Recipes](recipe.md) — the unit Ato shares, stores, and runs
+- [Run](run.md) — the front door for executing source with a recipe
 - [Capsule](capsule.md) — the unit Ato can identify and ship
 - [Sandbox](sandbox.md) — isolation, filesystem, and network model
 - [Execution Identity](execution-identity.md) — launch-envelope identity
-- [Desktop](desktop.md) — graphical session shell for managed projects
+- [Desktop](desktop.md) — focused session shell for managed recipe executions
 
 ### Reference
 
