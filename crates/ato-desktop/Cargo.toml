@@ -16,7 +16,6 @@ edition = "2021"
 authors = ["ato-run"]
 description = "The universal user plane for executing and orchestrating sandboxed app capsules."
 license = "MPL-2.0"
-build = "build.rs"
 # Not published to crates.io. ato-desktop pulls in non-published git deps
 # (gpui, wry, gpui-component, ...) that crates.io packaging cannot resolve,
 # and the desktop bundle ships via DMG/MSI/AppImage rather than `cargo install`.
@@ -50,6 +49,7 @@ gpui-inspector = ["gpui-component/inspector"]
 anyhow = "1.0"
 ato-session-core = { path = "../ato-session-core", version = "0.1.0" }
 base64 = "0.22"
+include_dir = "0.7"
 capsule-core = { path = "../capsule-core", version = "0.11.0" }
 capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
 cookie = "0.18"
@@ -75,7 +75,6 @@ http = "1.4.0"
 #    and lenient, supporting both PNG-encoded and DIB-encoded entries.
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
-include_dir = "0.7"
 resvg = "0.45"
 tiny-skia = "0.11"
 usvg = "0.45"

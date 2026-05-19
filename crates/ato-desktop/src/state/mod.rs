@@ -167,25 +167,6 @@ impl HostPanelRoute {
             }
         }
     }
-
-    pub fn url(&self) -> Url {
-        let value = match self {
-            Self::Launcher => "capsule-host://panel/launcher".to_string(),
-            Self::Settings { section: None } => "capsule-host://panel/settings".to_string(),
-            Self::Settings {
-                section: Some(section),
-            } => format!(
-                "capsule-host://panel/settings/{}",
-                settings_tab_route_segment(*section)
-            ),
-            Self::CapsuleDetail { pane_id, tab } => format!(
-                "capsule-host://panel/capsule/{}/{}",
-                pane_id,
-                capsule_detail_tab_route_segment(*tab)
-            ),
-        };
-        Url::parse(&value).expect("host panel route should always be a valid URL")
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,13 +539,9 @@ pub struct AuthSession {
 pub enum PaneSurface {
     Web(WebPane),
     HostPanel(HostPanelRoute),
-    Native {
-        body: String,
-    },
     CapsuleStatus(CapsuleStatusPane),
     Inspector,
     DevConsole,
-    Launcher,
     AuthHandoff {
         session_id: String,
         origin: String,
@@ -1160,10 +1137,6 @@ pub struct AppState {
     /// fields that previously cluttered the chrome as inline tags.
     pub route_metadata_popover_open: bool,
     pub route_metadata_active_tab: CapsuleDetailTab,
-    /// Whether the settings overlay panel is currently visible.
-    /// Managed by `show_settings_panel()` (toggle). No sidebar tab
-    /// is created — the overlay is rendered on top of the stage.
-    pub settings_panel_open: bool,
     pub settings_active_tab: SettingsTab,
     /// Status of the most recent GitHub-release version check. Drives
     /// the Updates card in the settings panel — the actual fetch is
@@ -1188,8 +1161,6 @@ pub struct AppState {
     pub auth_policy_registry: AuthPolicyRegistry,
     pub console_logs: Vec<ConsoleLogEntry>,
     pub network_logs: Vec<NetworkLogEntry>,
-    pub host_panel_payload_revision: u64,
-    pub host_panel_last_response: Option<serde_json::Value>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
     /// Per-capsule plaintext configuration (model name, port, etc.)
@@ -1243,7 +1214,7 @@ impl AppState {
                 role: PaneRole::Primary,
                 visible: true,
                 bounds: PaneBounds::empty(),
-                surface: PaneSurface::Launcher,
+                surface: PaneSurface::HostPanel(HostPanelRoute::Launcher),
             }],
             split_ratio: 0.5,
             route_candidates: vec![],
@@ -1319,10 +1290,8 @@ impl AppState {
             },
             pending_quit_confirmation: false,
             cleanup_preview: None,
-                // route_metadata_popover_open
-                route_metadata_popover_open: false,
+            route_metadata_popover_open: false,
             route_metadata_active_tab: CapsuleDetailTab::Overview,
-            settings_panel_open: false,
             settings_active_tab: SettingsTab::General,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
@@ -1332,8 +1301,195 @@ impl AppState {
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             console_logs: Vec::new(),
             network_logs: Vec::new(),
-            host_panel_payload_revision: 0,
-            host_panel_last_response: None,
+            config: crate::config::load_config(),
+            secret_store: crate::config::load_secrets(),
+            capsule_config_store: crate::config::load_capsule_configs(),
+            capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
+            capsule_search_results: Vec::new(),
+            capsule_search_query: String::new(),
+            app_windows: AppWindowRegistry::default(),
+            pending_host_actions: VecDeque::new(),
+            next_task_id: 2,
+            next_pane_id: 2,
+            next_new_tab_index: 1,
+        };
+        state.sync_theme_from_config();
+        state
+    }
+
+    pub fn demo() -> Self {
+        // The demo graph intentionally mixes local capsules, a bundled welcome page, and remote URLs
+        // so the shell exercises every rendering path on boot.
+        let local_tauri = GuestRoute::CapsuleHandle {
+            handle: demo_local_capsule("ato-desktop-real-tauri"),
+            label: demo_local_capsule("ato-desktop-real-tauri"),
+        };
+        let local_electron = GuestRoute::CapsuleHandle {
+            handle: demo_local_capsule("ato-desktop-real-electron"),
+            label: demo_local_capsule("ato-desktop-real-electron"),
+        };
+        let local_wails = GuestRoute::CapsuleHandle {
+            handle: demo_local_capsule("ato-desktop-real-wails"),
+            label: demo_local_capsule("ato-desktop-real-wails"),
+        };
+        let welcome = GuestRoute::Capsule {
+            session: "welcome".to_string(),
+            entry_path: "/index.html".to_string(),
+        };
+        let store = GuestRoute::ExternalUrl(Url::parse("https://ato.run").expect("valid url"));
+        let wry = GuestRoute::ExternalUrl(
+            Url::parse("https://github.com/tauri-apps/wry").expect("valid url"),
+        );
+
+        let launcher_task = TaskSet {
+            id: 1,
+            title: "New Tab".to_string(),
+            focused_pane: 1,
+            pane_tree: PaneTree::Leaf(1),
+            panes: vec![Pane {
+                id: 1,
+                title: "New Tab".to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            }],
+            split_ratio: 0.5,
+            route_candidates: vec![],
+            route_index: 0,
+            preview: "Launchpad".to_string(),
+        };
+
+        let welcome_task = TaskSet {
+            id: 2,
+            title: "Guest surfaces".to_string(),
+            focused_pane: 2,
+            pane_tree: PaneTree::Leaf(2),
+            panes: vec![Pane {
+                id: 2,
+                title: local_tauri.to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::Web(WebPane {
+                    route: local_tauri.clone(),
+                    partition_id: "local-real-tauri".to_string(),
+                    session: WebSessionState::Launching,
+                    capabilities: vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                    profile: route_profile(&local_tauri).to_string(),
+                    source_label: Some("local".to_string()),
+                    trust_state: Some("local".to_string()),
+                    restricted: true,
+                    snapshot_label: None,
+                    canonical_handle: Some(local_tauri.to_string()),
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
+                    runtime_label: None,
+                    display_strategy: None,
+                    log_path: None,
+                    local_url: None,
+                    healthcheck_url: None,
+                    invoke_url: None,
+                    served_by: None,
+                    auth_flow: false,
+                }),
+            }],
+            split_ratio: 0.68,
+            route_candidates: vec![
+                local_tauri,
+                local_electron,
+                local_wails,
+                welcome,
+                store.clone(),
+                wry.clone(),
+            ],
+            route_index: 0,
+            preview: "ato-cli resolve/session start across tauri/electron/wails guests".to_string(),
+        };
+
+        let store_task = TaskSet {
+            id: 3,
+            title: "Ato".to_string(),
+            focused_pane: 3,
+            pane_tree: PaneTree::Leaf(3),
+            panes: vec![Pane {
+                id: 3,
+                title: store.to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::Web(WebPane {
+                    route: store.clone(),
+                    partition_id: "store".to_string(),
+                    session: WebSessionState::Launching,
+                    capabilities: vec![CapabilityGrant::OpenExternal],
+                    profile: "electron".to_string(),
+                    source_label: Some("web".to_string()),
+                    trust_state: None,
+                    restricted: false,
+                    snapshot_label: None,
+                    canonical_handle: None,
+                    session_id: None,
+                    adapter: None,
+                    manifest_path: None,
+                    runtime_label: None,
+                    display_strategy: None,
+                    log_path: None,
+                    local_url: None,
+                    healthcheck_url: None,
+                    invoke_url: None,
+                    served_by: None,
+                    auth_flow: false,
+                }),
+            }],
+            split_ratio: 0.68,
+            route_candidates: vec![store, wry],
+            route_index: 0,
+            preview: "ato.run landing page".to_string(),
+        };
+
+        let mut state = Self {
+            shell_mode: ShellMode::Focus,
+            active_workspace: 1,
+            workspaces: vec![Workspace {
+                id: 1,
+                title: "Rust host".to_string(),
+                active_task: 3,
+                tasks: vec![launcher_task, welcome_task, store_task],
+            }],
+            command_bar_text: "https://ato.run/".to_string(),
+            activity: vec![ActivityEntry {
+                tone: ActivityTone::Info,
+                message: "Phase 3 shell bootstrapped with ato-cli guest orchestration".to_string(),
+            }],
+            retention_count: 0,
+            capsule_logs: HashMap::new(),
+            browser_commands: VecDeque::new(),
+            pending_permission_prompt: None,
+            pending_resolution: None,
+            pending_config: None,
+            pending_consent: None,
+            consent_retry_consumed: HashSet::new(),
+            cleanup_preview: None,
+            theme_mode: ThemeMode::Light, // synced below from config
+            desktop_auth: DesktopAuthState {
+                status: DesktopAuthStatus::SignedOut,
+                publisher_handle: None,
+                last_login_origin: None,
+            },
+            pending_quit_confirmation: false,
+            route_metadata_popover_open: false,
+            route_metadata_active_tab: CapsuleDetailTab::Overview,
+            settings_active_tab: SettingsTab::General,
+            update_check: UpdateCheck::Idle,
+            pane_icons: HashMap::new(),
+            capsule_updates: HashMap::new(),
+            pending_post_login_target: None,
+            auth_sessions: Vec::new(),
+            auth_policy_registry: AuthPolicyRegistry::default_third_party(),
+            console_logs: Vec::new(),
+            network_logs: Vec::new(),
             config: crate::config::load_config(),
             secret_store: crate::config::load_secrets(),
             capsule_config_store: crate::config::load_capsule_configs(),
@@ -1704,36 +1860,6 @@ impl AppState {
         self.update_active_capsule_detail_host_panel_route();
     }
 
-    fn apply_host_panel_route_path(&mut self, path: &str) {
-        let segments: Vec<&str> = path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect();
-        let Some(first) = segments.first().copied() else {
-            return;
-        };
-
-        match first {
-            "settings" => {
-                if let Some(section) = segments
-                    .get(1)
-                    .and_then(|value| parse_settings_tab_route_segment(value))
-                {
-                    self.set_settings_tab(section);
-                }
-            }
-            "capsule" => {
-                if let Some(tab) = segments
-                    .get(2)
-                    .and_then(|value| parse_capsule_detail_tab_route_segment(value))
-                {
-                    self.set_route_metadata_tab(tab);
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub fn active_capsule_detail_host_panel_route(&self) -> Option<HostPanelRoute> {
         let active = self.active_capsule_pane()?;
         Some(HostPanelRoute::CapsuleDetail {
@@ -1922,7 +2048,6 @@ impl AppState {
         }
 
         if let Some(title) = selected_title {
-            self.settings_panel_open = false;
             self.sync_command_bar_with_active_route();
             self.push_activity(ActivityTone::Info, format!("Switched task to {title}"));
         }
@@ -2213,7 +2338,10 @@ impl AppState {
         self.command_bar_text = start_url;
 
         self.update_pane(pane_id, |pane| {
-            let original_surface = std::mem::replace(&mut pane.surface, PaneSurface::Launcher);
+            let original_surface = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            );
             pane.title = "Sign in to ato.run".to_string();
             pane.surface = PaneSurface::AuthHandoff {
                 session_id: session_id.clone(),
@@ -2331,10 +2459,6 @@ impl AppState {
                 );
             }
         }
-    }
-
-    pub fn show_settings_panel(&mut self) {
-        self.settings_panel_open = !self.settings_panel_open;
     }
 
     pub fn set_settings_tab(&mut self, tab: SettingsTab) {
@@ -2628,22 +2752,6 @@ impl AppState {
                         ActivityTone::Info,
                         "Capsule frontend mounted",
                     );
-                }
-                ShellEvent::HostPanelRouteChanged { pane_id: _, path } => {
-                    self.apply_host_panel_route_path(&path);
-                }
-                ShellEvent::HostPanelCommand {
-                    pane_id,
-                    command,
-                    payload,
-                    request_id,
-                } => {
-                    let response = crate::settings::handle_host_panel_command(
-                        self, pane_id, &command, payload, request_id,
-                    );
-                    self.host_panel_payload_revision =
-                        self.host_panel_payload_revision.saturating_add(1);
-                    self.host_panel_last_response = Some(response);
                 }
                 ShellEvent::PermissionDenied {
                     pane_id,
@@ -2959,39 +3067,10 @@ impl AppState {
                 auth_flow: web.auth_flow,
                 bounds: pane.bounds,
             }),
-            PaneSurface::HostPanel(route) => Some(ActiveWebPane {
-                workspace_id: workspace.id,
-                task_id: task.id,
-                pane_id: pane.id,
-                title: pane.title.clone(),
-                route: GuestRoute::ExternalUrl(route.url()),
-                partition_id: format!("host-panel-{}", pane.id),
-                profile: "host-panel".to_string(),
-                capabilities: Vec::new(),
-                session: WebSessionState::Launching,
-                source_label: Some("host-panel".to_string()),
-                trust_state: Some("host".to_string()),
-                restricted: false,
-                snapshot_label: None,
-                canonical_handle: None,
-                session_id: None,
-                adapter: None,
-                manifest_path: None,
-                runtime_label: None,
-                display_strategy: None,
-                log_path: None,
-                local_url: None,
-                healthcheck_url: None,
-                invoke_url: None,
-                served_by: None,
-                auth_flow: false,
-                bounds: pane.bounds,
-            }),
-            PaneSurface::Native { .. }
+            PaneSurface::HostPanel(_)
             | PaneSurface::CapsuleStatus(_)
             | PaneSurface::DevConsole
             | PaneSurface::Inspector
-            | PaneSurface::Launcher
             | PaneSurface::AuthHandoff { .. } => None,
             PaneSurface::Terminal(terminal) => Some(ActiveWebPane {
                 workspace_id: workspace.id,
@@ -3473,11 +3552,9 @@ impl AppState {
             .map(|pane| match &pane.surface {
                 PaneSurface::Web(web) => web.route.to_string(),
                 PaneSurface::HostPanel(route) => route.label(),
-                PaneSurface::Native { .. } => pane.title.clone(),
                 PaneSurface::CapsuleStatus(capsule) => capsule.route.to_string(),
                 PaneSurface::DevConsole => "Developer console".to_string(),
                 PaneSurface::Inspector => "Capsule inspector".to_string(),
-                PaneSurface::Launcher => "Launchpad".to_string(),
                 PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
                 PaneSurface::Terminal(terminal) => {
                     format!("terminal://{}/", terminal.session_id)
@@ -3764,7 +3841,10 @@ impl AppState {
             created_at: std::time::SystemTime::now(),
         });
         self.update_pane(pane_id, |pane| {
-            let original_surface = std::mem::replace(&mut pane.surface, PaneSurface::Launcher);
+            let original_surface = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            );
             if matches!(original_surface, PaneSurface::Web(_)) {
                 pane.surface = PaneSurface::AuthHandoff {
                     session_id: session_id.clone(),
@@ -3785,8 +3865,10 @@ impl AppState {
         self.update_pane(pane_id, |pane| {
             if let PaneSurface::AuthHandoff {
                 original_surface, ..
-            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
-            {
+            } = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            ) {
                 pane.surface = *original_surface;
             }
         });
@@ -3814,8 +3896,10 @@ impl AppState {
         self.update_pane(pane_id, |pane| {
             if let PaneSurface::AuthHandoff {
                 original_surface, ..
-            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
-            {
+            } = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            ) {
                 pane.surface = *original_surface;
             }
         });
@@ -4104,14 +4188,11 @@ fn sidebar_icon_for_task(
         },
         PaneSurface::DevConsole => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Console),
         PaneSurface::Terminal(_) => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal),
-        PaneSurface::Launcher => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Launcher),
         PaneSurface::Inspector => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Inspector),
         PaneSurface::CapsuleStatus(_) => {
             SidebarTaskIconSpec::SystemIcon(SystemPageIcon::CapsuleStatus)
         }
-        PaneSurface::Native { .. } | PaneSurface::AuthHandoff { .. } => {
-            SidebarTaskIconSpec::Monogram(short_label(&task.title))
-        }
+        PaneSurface::AuthHandoff { .. } => SidebarTaskIconSpec::Monogram(short_label(&task.title)),
     }
 }
 
@@ -4134,11 +4215,9 @@ fn task_route_label(task: &TaskSet) -> String {
     match &pane.surface {
         PaneSurface::Web(web) => web.route.to_string(),
         PaneSurface::HostPanel(route) => route.label(),
-        PaneSurface::Native { .. } => "Native settings panel".to_string(),
         PaneSurface::CapsuleStatus(capsule) => capsule.route.to_string(),
         PaneSurface::DevConsole => "Developer console".to_string(),
         PaneSurface::Inspector => "Capsule inspector".to_string(),
-        PaneSurface::Launcher => "Launchpad".to_string(),
         PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
         PaneSurface::Terminal(terminal) => format!("terminal://{}/", terminal.session_id),
     }
@@ -4150,56 +4229,6 @@ fn demo_local_capsule(name: &str) -> String {
         .join(name)
         .display()
         .to_string()
-}
-
-fn settings_tab_route_segment(tab: SettingsTab) -> &'static str {
-    match tab {
-        SettingsTab::General => "general",
-        SettingsTab::Account => "account",
-        SettingsTab::Runtime => "runtime",
-        SettingsTab::Sandbox => "sandbox",
-        SettingsTab::Trust => "trust",
-        SettingsTab::Registry => "registry",
-        SettingsTab::Projection => "projection",
-        SettingsTab::Developer => "developer",
-        SettingsTab::About => "about",
-    }
-}
-
-fn parse_settings_tab_route_segment(value: &str) -> Option<SettingsTab> {
-    match value {
-        "general" => Some(SettingsTab::General),
-        "account" => Some(SettingsTab::Account),
-        "runtime" => Some(SettingsTab::Runtime),
-        "sandbox" => Some(SettingsTab::Sandbox),
-        "trust" => Some(SettingsTab::Trust),
-        "registry" => Some(SettingsTab::Registry),
-        "projection" => Some(SettingsTab::Projection),
-        "developer" => Some(SettingsTab::Developer),
-        "about" => Some(SettingsTab::About),
-        _ => None,
-    }
-}
-
-fn capsule_detail_tab_route_segment(tab: CapsuleDetailTab) -> &'static str {
-    match tab {
-        CapsuleDetailTab::Overview => "overview",
-        CapsuleDetailTab::Permissions => "permissions",
-        CapsuleDetailTab::Logs => "logs",
-        CapsuleDetailTab::Update => "update",
-        CapsuleDetailTab::Api => "api",
-    }
-}
-
-fn parse_capsule_detail_tab_route_segment(value: &str) -> Option<CapsuleDetailTab> {
-    match value {
-        "overview" => Some(CapsuleDetailTab::Overview),
-        "permissions" => Some(CapsuleDetailTab::Permissions),
-        "logs" => Some(CapsuleDetailTab::Logs),
-        "update" => Some(CapsuleDetailTab::Update),
-        "api" => Some(CapsuleDetailTab::Api),
-        _ => None,
-    }
 }
 
 impl AppState {
@@ -4607,32 +4636,6 @@ mod tests {
     }
 
     #[test]
-    fn show_settings_panel_toggles_open_flag() {
-        let mut state = AppState::demo();
-        let original_task_count = state.active_workspace().expect("workspace").tasks.len();
-
-        assert!(!state.settings_panel_open);
-
-        state.show_settings_panel();
-
-        // Flag toggled on; no new tab was created
-        assert!(state.settings_panel_open);
-        assert_eq!(
-            state.active_workspace().expect("workspace").tasks.len(),
-            original_task_count,
-        );
-
-        state.show_settings_panel();
-
-        // Toggled off again
-        assert!(!state.settings_panel_open);
-        assert_eq!(
-            state.active_workspace().expect("workspace").tasks.len(),
-            original_task_count,
-        );
-    }
-
-    #[test]
     fn settings_tab_defaults_to_general_and_updates() {
         let mut state = AppState::demo();
 
@@ -4771,30 +4774,6 @@ mod tests {
     }
 
     #[test]
-    fn host_panel_route_change_updates_capsule_detail_tab() {
-        let mut state = AppState::demo();
-
-        state.apply_shell_events(vec![ShellEvent::HostPanelRouteChanged {
-            pane_id: 999,
-            path: "/capsule/2/logs".to_string(),
-        }]);
-
-        assert_eq!(state.route_metadata_active_tab, CapsuleDetailTab::Logs);
-    }
-
-    #[test]
-    fn host_panel_route_change_updates_settings_tab() {
-        let mut state = AppState::demo();
-
-        state.apply_shell_events(vec![ShellEvent::HostPanelRouteChanged {
-            pane_id: 999,
-            path: "/settings/developer".to_string(),
-        }]);
-
-        assert_eq!(state.settings_active_tab, SettingsTab::Developer);
-    }
-
-    #[test]
     fn select_task_updates_active_task_and_command_bar() {
         let mut state = AppState::demo();
 
@@ -4802,17 +4781,6 @@ mod tests {
 
         assert_eq!(state.active_task().expect("task").id, 3);
         assert_eq!(state.command_bar_text, "https://ato.run/");
-    }
-
-    #[test]
-    fn select_task_closes_settings_panel() {
-        let mut state = AppState::demo();
-        state.show_settings_panel();
-
-        state.select_task(3);
-
-        assert_eq!(state.active_task().expect("task").id, 3);
-        assert!(!state.settings_panel_open);
     }
 
     #[test]
@@ -4831,7 +4799,7 @@ mod tests {
     }
 
     #[test]
-    fn create_new_tab_projects_launcher_host_panel_to_capsule_host_url() {
+    fn create_new_tab_uses_native_launcher_host_panel() {
         let mut state = AppState::demo();
 
         state.create_new_tab();
@@ -4844,9 +4812,7 @@ mod tests {
             pane.surface,
             PaneSurface::HostPanel(HostPanelRoute::Launcher)
         ));
-        let active = state.active_web_pane().expect("pane");
-        assert_eq!(active.profile, "host-panel");
-        assert_eq!(active.route.to_string(), "capsule-host://panel/launcher");
+        assert!(state.active_web_pane().is_none());
     }
 
     #[test]
