@@ -318,16 +318,30 @@ impl ControlBarShellPlaceholder {
     }
 
     /// Normalize the omnibar display value into a stable pin key.
-    fn current_pin_key(cx: &App, omnibar_value: &str) -> Option<String> {
+    /// When the omnibar is focused, the user's explicit input always wins.
+    /// Otherwise the frontmost managed capsule is preferred because the
+    /// display value may be a decorated `capsule://{handle} → {url}` form.
+    fn current_pin_key(&self, cx: &App) -> Option<String> {
+        let value = self.omnibar.read(cx).value().trim().to_string();
+        if self.omnibar_focused {
+            return Self::parse_pin_key_from_value(&value);
+        }
         if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
             if let Some(capsule) = &entry.capsule {
                 return Some(format!("capsule://{}", capsule.active_handle()));
             }
         }
-        let raw = omnibar_value.trim();
-        raw.strip_prefix("capsule://")
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("capsule://{}", s.trim_end_matches('/')))
+        Self::parse_pin_key_from_value(&value)
+    }
+
+    fn parse_pin_key_from_value(value: &str) -> Option<String> {
+        let raw = value.trim();
+        let stripped = raw.strip_prefix("capsule://").filter(|s| !s.is_empty())?;
+        let handle = match stripped.find(" → ") {
+            Some(pos) => &stripped[..pos],
+            None => stripped,
+        };
+        Some(format!("capsule://{}", handle.trim_end_matches('/')))
     }
 
     fn focus_omnibar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -375,11 +389,7 @@ impl ControlBarShellPlaceholder {
 
     /// Toggle star/pin state for the current omnibar URL.
     pub(crate) fn toggle_star(&mut self, cx: &mut Context<Self>) {
-        let current = self.omnibar.read(cx).value().trim_start().to_string();
-        if current.is_empty() {
-            return;
-        }
-        let key = match Self::current_pin_key(cx, &current) {
+        let key = match self.current_pin_key(cx) {
             Some(k) => k,
             None => return,
         };
@@ -443,7 +453,8 @@ impl Render for ControlBarShellPlaceholder {
         let expanded = cx.global::<ControlBarController>().should_render_expanded();
         let omnibar_focused = self.omnibar_focused;
 
-        let is_starred = Self::current_pin_key(cx, &self.omnibar.read(cx).value())
+        let is_starred = self
+            .current_pin_key(cx)
             .map(|key| self.starred_handles.contains(&key))
             .unwrap_or(false);
 
