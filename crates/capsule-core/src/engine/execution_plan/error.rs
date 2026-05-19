@@ -23,6 +23,8 @@ pub enum AtoErrorCode {
     AtoErrArtifactIntegrityFailure,
     AtoErrRuntimeLaunchFailed,
     AtoErrLockfileTampered,
+    AtoErrInstallConsentRequired,
+    AtoErrPermissionGatesRequired,
     AtoErrInternal,
 }
 
@@ -48,6 +50,8 @@ impl AtoErrorCode {
             Self::AtoErrArtifactIntegrityFailure => "ATO_ERR_ARTIFACT_INTEGRITY_FAILURE",
             Self::AtoErrRuntimeLaunchFailed => "ATO_ERR_RUNTIME_LAUNCH_FAILED",
             Self::AtoErrLockfileTampered => "ATO_ERR_LOCKFILE_TAMPERED",
+            Self::AtoErrInstallConsentRequired => "ATO_ERR_INSTALL_CONSENT_REQUIRED",
+            Self::AtoErrPermissionGatesRequired => "ATO_ERR_PERMISSION_GATES_REQUIRED",
             Self::AtoErrInternal => "ATO_ERR_INTERNAL",
         }
     }
@@ -71,6 +75,8 @@ impl AtoErrorCode {
             Self::AtoErrArtifactIntegrityFailure => "artifact_integrity_failure",
             Self::AtoErrRuntimeLaunchFailed => "runtime_launch_failed",
             Self::AtoErrLockfileTampered => "lockfile_tampered",
+            Self::AtoErrInstallConsentRequired => "install_consent_required",
+            Self::AtoErrPermissionGatesRequired => "permission_gates_required",
             Self::AtoErrInternal => "internal_error",
         }
     }
@@ -87,8 +93,10 @@ impl AtoErrorCode {
             | Self::AtoErrEngineMissing
             | Self::AtoErrSkillNotFound
             | Self::AtoErrArtifactIntegrityFailure
-            | Self::AtoErrLockfileTampered => "provisioning",
-            Self::AtoErrCompatHardware
+            | Self::AtoErrLockfileTampered
+            | Self::AtoErrInstallConsentRequired => "provisioning",
+            Self::AtoErrPermissionGatesRequired
+            | Self::AtoErrCompatHardware
             | Self::AtoErrRuntimeLaunchFailed
             | Self::AtoErrPolicyViolation
             | Self::AtoErrSecurityPolicyViolation
@@ -520,6 +528,8 @@ fn map_ato_error_code(error: &AtoError) -> AtoErrorCode {
         }
         AtoError::TlsBootstrapFailed { .. } => AtoErrorCode::AtoErrProvisioningTlsTrust,
         AtoError::StorageNoSpace { .. } => AtoErrorCode::AtoErrStorageNoSpace,
+        AtoError::InstallConsentRequired { .. } => AtoErrorCode::AtoErrInstallConsentRequired,
+        AtoError::PermissionGatesRequired { .. } => AtoErrorCode::AtoErrPermissionGatesRequired,
         AtoError::ArtifactIntegrityFailure { .. } => AtoErrorCode::AtoErrArtifactIntegrityFailure,
         AtoError::SecurityPolicyViolation { .. } => AtoErrorCode::AtoErrSecurityPolicyViolation,
         AtoError::ExecutionContractInvalid { .. }

@@ -17,6 +17,7 @@
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
+use crate::state::session::SessionRegistry;
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::card_switcher::CardSwitcherWindowSlot;
 use crate::window::content_windows::OpenContentWindows;
@@ -48,6 +49,11 @@ pub enum WindowsCommand {
     },
     /// Open a fresh StartWindow + dismiss the calling switcher.
     OpenStart,
+    /// Stop a capsule session by session_id.
+    StopSession {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
 }
 
 impl WindowsCommand {
@@ -59,6 +65,7 @@ impl WindowsCommand {
             WindowsCommand::ActivateWindow { .. } => Capability::WindowsActivate,
             WindowsCommand::CloseWindow { .. } => Capability::WindowsCloseTarget,
             WindowsCommand::OpenStart => Capability::LaunchSystemCapsule,
+            WindowsCommand::StopSession { .. } => Capability::WindowsCloseTarget,
         }
     }
 }
@@ -121,6 +128,14 @@ pub fn dispatch(
             // The Card Switcher stays open; the frontend already removed
             // the card from the DOM. `on_window_closed` in app.rs handles
             // registry cleanup when the OS close event fires.
+        }
+        WindowsCommand::StopSession { session_id } => {
+            let mut registry = cx.global_mut::<SessionRegistry>();
+            registry.stop_session_once(&session_id);
+            tracing::info!(
+                session_id = %session_id,
+                "ato_windows: StopSession dispatched"
+            );
         }
     }
     Ok(())

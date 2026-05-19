@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,13 +8,14 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use capsule_core::foundation::types::command_spec::contains_shell_operators;
 use crate::cli::ImportArgs;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "ato-cli-source-import";
 const IMPORT_ROOT_DIR: &str = ".tmp/ato-import";
 const CAPSULE_TOML: &str = "capsule.toml";
-const MAX_ERROR_EXCERPT_BYTES: usize = 1200;
+const MAX_ERROR_EXCERPT_BYTES: usize = 4000;
 const LOCAL_SOURCE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_SOURCE_OVERRIDE";
 const LOCAL_REVISION_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_REVISION_ID";
 const LOCAL_TREE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_TREE_HASH";
@@ -53,6 +55,16 @@ struct ImportRun {
     phase: Option<String>,
     error_class: Option<String>,
     error_excerpt: Option<String>,
+    /// `"shell"` when the run command was executed through a shell
+    /// interpreter (e.g., `sh -c`). Absent for direct argv execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_mode: Option<String>,
+    /// `true` when the run command depends on a host shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requires_host_shell: Option<bool>,
+    /// Shell kind used when `command_mode` is `"shell"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shell_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +72,49 @@ struct ImportOutput {
     source: ImportSource,
     recipe: ImportRecipe,
     run: ImportRun,
+    /// How the recipe was resolved. Present when remote lookup was attempted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recipe_resolution: Option<RecipeResolution>,
+}
+
+#[derive(Debug, Serialize)]
+struct RecipeResolution {
+    /// "remote_binding" | "remote_binding_failed" | "inference" | "skipped"
+    source: String,
+    /// Present when source is "remote_binding_failed"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback: Option<String>,
+    /// Present when source is "remote_binding_failed" or "remote_binding"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_class: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveBindingResponse {
+    binding: Option<ResolveBindingItem>,
+    recipe: Option<ResolveRecipeItem>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveBindingItem {
+    #[allow(dead_code)]
+    id: String,
+    #[allow(dead_code)]
+    binding_status: String,
+    #[allow(dead_code)]
+    smoke_status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveRecipeItem {
+    origin: String,
+    trust_level: String,
+    target_label: Option<String>,
+    platform_os: String,
+    platform_arch: String,
+    recipe_toml: String,
+    recipe_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,11 +168,54 @@ impl Drop for ImportWorkspace {
 pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
     let input = normalize_github_import_input(&args.repo)?;
     let materialized = materialize_source(&input)?;
-    let (recipe_toml, origin) =
-        load_or_infer_recipe(&args, &materialized.checkout_dir, &input.repo)?;
+
+    // Try remote recipe binding resolution before falling back to local inference.
+    let mut recipe_resolution: Option<RecipeResolution> = None;
+    let (recipe_toml, origin) = if args.recipe.is_some() || args.no_remote_recipe {
+        // User provided an explicit recipe, or disabled remote lookup — use local logic.
+        load_or_infer_recipe(&args, &materialized.checkout_dir, &input.repo)?
+    } else {
+        // Attempt remote binding resolution.
+        let remote = resolve_remote_recipe(&materialized.source);
+        match remote {
+            Ok(Some((toml, _hash))) => {
+                recipe_resolution = Some(RecipeResolution {
+                    source: "remote_binding".to_string(),
+                    fallback: None,
+                    error_class: None,
+                });
+                (toml, "registry".to_string())
+            }
+            Ok(None) => {
+                // No remote binding found — fallback to local inference.
+                let (toml, origin) =
+                    load_or_infer_recipe(&args, &materialized.checkout_dir, &input.repo)?;
+                recipe_resolution = Some(RecipeResolution {
+                    source: "remote_binding_failed".to_string(),
+                    fallback: Some(origin.clone()),
+                    error_class: Some("no_verified_binding".to_string()),
+                });
+                (toml, origin)
+            }
+            Err(error) => {
+                // API unavailable — fallback to local inference.
+                let (toml, origin) =
+                    load_or_infer_recipe(&args, &materialized.checkout_dir, &input.repo)?;
+                recipe_resolution = Some(RecipeResolution {
+                    source: "remote_binding_failed".to_string(),
+                    fallback: Some(origin.clone()),
+                    error_class: Some("api_unavailable".to_string()),
+                });
+                tracing::debug!(?error, "remote recipe resolution failed; falling back to inference");
+                (toml, origin)
+            }
+        }
+    };
     let recipe_hash = blake3_label(recipe_toml.as_bytes());
     let target_label = infer_target_label(&recipe_toml);
-    let run = if args.run {
+    let mut run = if args.run && args.readiness_only {
+        run_shadow_workspace_readiness_only(&materialized, &recipe_toml)?
+    } else if args.run {
         run_shadow_workspace(&materialized, &recipe_toml)?
     } else {
         ImportRun {
@@ -125,8 +223,12 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
             phase: None,
             error_class: None,
             error_excerpt: None,
+            command_mode: None,
+            requires_host_shell: None,
+            shell_kind: None,
         }
     };
+    apply_shell_info(&mut run, &recipe_toml);
 
     let output = ImportOutput {
         source: materialized.source,
@@ -139,6 +241,7 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
             recipe_hash,
         },
         run,
+        recipe_resolution,
     };
 
     if args.emit_json {
@@ -486,6 +589,113 @@ fn run_shadow_workspace(materialized: &MaterializedSource, recipe_toml: &str) ->
     Ok(import_run_from_output(&output))
 }
 
+/// Run the shadow workspace in background mode, wait for the readiness probe
+/// to pass, then return success. The server process continues running.
+fn run_shadow_workspace_readiness_only(
+    materialized: &MaterializedSource,
+    recipe_toml: &str,
+) -> Result<ImportRun> {
+    let shadow_manifest = materialized.shadow_dir.join(CAPSULE_TOML);
+    fs::write(&shadow_manifest, recipe_toml)
+        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
+
+    // Extract port from recipe for readiness waiting
+    let port = infer_port(recipe_toml).unwrap_or(1111);
+    let ready_url = format!("http://127.0.0.1:{}/health", port);
+
+    // Spawn ato run in background (detached, process lives on)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("run")
+        .arg(&materialized.shadow_dir)
+        .arg("--yes")
+        .current_dir(&materialized.shadow_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
+        command.arg("--dangerously-skip-permissions");
+    }
+    let mut child = command.spawn().context("failed to spawn shadow workspace")?;
+
+    // Poll readiness for up to 120s
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = client.get(&ready_url).send() {
+            if resp.status().is_success() {
+                ready = true;
+                break;
+            }
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            // Process exited before readiness
+            let stdout = read_all(child.stdout.take());
+            let stderr = read_all(child.stderr.take());
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+            let (phase, error_class) = classify_run_failure(&combined);
+            return Ok(ImportRun {
+                status: "failed".to_string(),
+                phase: Some(phase.to_string()),
+                error_class: Some(error_class.to_string()),
+                error_excerpt: Some(redact_error_excerpt(&combined)),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+
+    if !ready {
+        let _ = child.kill();
+        let stderr = read_all(child.stderr.take());
+        anyhow::bail!(
+            "readiness probe {} did not pass within 120s\n{}",
+            ready_url,
+            String::from_utf8_lossy(&stderr).lines().take(20).collect::<Vec<_>>().join("\n"),
+        );
+    }
+
+    Ok(ImportRun {
+        status: "passed".to_string(),
+        phase: Some("readiness".to_string()),
+        error_class: None,
+        error_excerpt: None,
+        command_mode: None,
+        requires_host_shell: None,
+        shell_kind: None,
+    })
+}
+
+fn infer_port(recipe_toml: &str) -> Option<u16> {
+    let parsed = recipe_toml.parse::<toml::Value>().ok()?;
+    // Check top-level port
+    if let Some(p) = parsed.get("port").and_then(|v| v.as_integer()) {
+        if p > 0 && p <= u16::MAX as i64 {
+            return Some(p as u16);
+        }
+    }
+    // Check target-level port
+    let targets = parsed.get("targets").and_then(|v| v.as_table())?;
+    for (_label, target) in targets {
+        if let Some(p) = target.get("port").and_then(|v| v.as_integer()) {
+            if p > 0 && p <= u16::MAX as i64 {
+                return Some(p as u16);
+            }
+        }
+    }
+    None
+}
+
 fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -493,14 +703,97 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
         .arg(shadow_dir)
         .arg("--yes")
         .current_dir(shadow_dir)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if std::env::var_os(LOCAL_SOURCE_OVERRIDE_ENV).is_some() {
         command.arg("--no-build");
     }
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
-    Ok(command.output().context("failed to run shadow workspace")?)
+    let mut child = command.spawn().context("failed to spawn shadow workspace")?;
+    // Wait up to 120s for the run to complete, then time out gracefully.
+    // Foreground servers (e.g. Bun) will keep running; we collect their
+    // exit status or timeout output.
+    let timeout = std::time::Duration::from_secs(120);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let stdout = read_all(child.stdout.take());
+                let stderr = read_all(child.stderr.take());
+                return Ok(Output { status, stdout, stderr });
+            }
+            None if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let stdout = read_all(child.stdout.take());
+                let stderr = read_all(child.stderr.take());
+                bail!(
+                    "shadow workspace run timed out after {}s\n---stdout---\n{}\n---stderr---\n{}",
+                    timeout.as_secs(),
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr).lines().take(80).collect::<Vec<_>>().join("\n"),
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+}
+
+/// Attempt to resolve a verified recipe binding from the ato-api.
+fn resolve_remote_recipe(source: &ImportSource) -> Result<Option<(String, String)>> {
+    let api_base = std::env::var("ATO_STORE_API_URL")
+        .unwrap_or_else(|_| "https://api.ato.run".to_string());
+    let api_base = api_base.trim_end_matches('/');
+    let mut url = reqwest::Url::parse(&format!("{}/v1/source-imports/bindings/resolve", api_base))
+        .context("invalid API base URL")?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("source_url_normalized", &source.source_url_normalized);
+        q.append_pair("revision_id", &source.revision_id);
+        q.append_pair("platform_os", platform_os_label());
+        q.append_pair("platform_arch", platform_arch_label());
+        q.append_pair("subdir", &source.subdir);
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let response = client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .context("remote recipe API request failed")?;
+
+    if !response.status().is_success() {
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        anyhow::bail!("remote recipe API returned {}", response.status());
+    }
+
+    let resolved: ResolveBindingResponse = response
+        .json()
+        .context("failed to parse remote recipe response")?;
+
+    match resolved.recipe {
+        Some(recipe) if !recipe.recipe_toml.is_empty() => {
+            Ok(Some((recipe.recipe_toml, recipe.recipe_hash)))
+        }
+        Some(_) => Ok(None),
+        None => Ok(None),
+    }
+}
+
+fn read_all(reader: Option<impl std::io::Read>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(mut r) = reader {
+        let _ = r.read_to_end(&mut buf);
+    }
+    buf
 }
 
 fn import_run_from_output(output: &Output) -> ImportRun {
@@ -510,6 +803,9 @@ fn import_run_from_output(output: &Output) -> ImportRun {
             phase: None,
             error_class: None,
             error_excerpt: None,
+            command_mode: None,
+            requires_host_shell: None,
+            shell_kind: None,
         };
     }
 
@@ -526,6 +822,9 @@ fn import_run_from_output(output: &Output) -> ImportRun {
         phase: Some(phase.to_string()),
         error_class: Some(error_class.to_string()),
         error_excerpt: Some(redact_error_excerpt(&combined)),
+        command_mode: None,
+        requires_host_shell: None,
+        shell_kind: None,
     }
 }
 
@@ -533,6 +832,33 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
     let lowered = text.to_ascii_lowercase();
     if lowered.contains("distutils") {
         return ("install", "node_gyp_missing_distutils");
+    }
+    if lowered.contains("gyp err") || lowered.contains("gypERR") || lowered.contains("gyp:") {
+        return ("install", "native_dependency_build_failed");
+    }
+    if lowered.contains("no loader") && lowered.contains(".node") {
+        return ("build", "esbuild_native_loader");
+    }
+    if lowered.contains("missing_required_env")
+        || lowered.contains("missing required env")
+        || lowered.contains("required environment")
+        || lowered.contains("missing:")
+    {
+        return ("run", "missing_required_env");
+    }
+    if lowered.contains("database_url") && (lowered.contains("not set") || lowered.contains("missing") || lowered.contains("undefined"))
+    {
+        return ("run", "database_url_missing");
+    }
+    if lowered.contains("module not found") || lowered.contains("cannot find module") {
+        return ("run", "module_not_found");
+    }
+    if lowered.contains("prisma")
+        && (lowered.contains("migration") || lowered.contains("migrate deploy"))
+        && (lowered.contains("fail") || lowered.contains("error"))
+        && !lowered.contains("build successful")
+    {
+        return ("prestart", "prisma_migration_failed");
     }
     if lowered.contains("missing_required_env")
         || lowered.contains("missing required env")
@@ -553,7 +879,7 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
     if lowered.contains("port") && lowered.contains("detect") {
         return ("readiness", "port_not_detected");
     }
-    if lowered.contains("build") {
+    if lowered.contains("build") && !lowered.contains("build successful") {
         return ("build", "build_failed");
     }
     if lowered.contains("install")
@@ -576,7 +902,7 @@ fn redact_error_excerpt(text: &str) -> String {
     }
     output
         .lines()
-        .take(40)
+        .take(100)
         .collect::<Vec<_>>()
         .join("\n")
         .chars()
@@ -613,6 +939,49 @@ fn infer_target_label(recipe_toml: &str) -> Option<String> {
                 .and_then(toml::Value::as_table)
                 .and_then(|targets| targets.keys().next().cloned())
         })
+}
+
+/// Detect whether the recipe's run/build commands require shell execution.
+/// Sets `command_mode`, `requires_host_shell`, and `shell_kind` on `ImportRun`
+/// if any of the commands contain shell operators.
+fn apply_shell_info(run: &mut ImportRun, recipe_toml: &str) {
+    let commands = extract_command_strings(recipe_toml);
+    let has_shell = commands.iter().any(|c| contains_shell_operators(c));
+    if has_shell {
+        run.command_mode = Some("shell".to_string());
+        run.requires_host_shell = Some(true);
+        run.shell_kind = Some("posix-sh".to_string());
+    }
+}
+
+/// Extract `run`, `build`, `install`, and `prestart` string values from a
+/// recipe TOML document. Handles both top-level and `[targets.<name>]` forms.
+fn extract_command_strings(recipe_toml: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let parsed = match recipe_toml.parse::<toml::Value>() {
+        Ok(v) => v,
+        Err(_) => return commands,
+    };
+
+    // Top-level commands
+    for key in &["run", "build", "install", "prestart"] {
+        if let Some(v) = parsed.get(key).and_then(toml::Value::as_str) {
+            commands.push(v.to_string());
+        }
+    }
+
+    // Target-level commands
+    if let Some(targets) = parsed.get("targets").and_then(toml::Value::as_table) {
+        for (_label, target) in targets {
+            for key in &["run", "build", "install", "prestart"] {
+                if let Some(v) = target.get(key).and_then(toml::Value::as_str) {
+                    commands.push(v.to_string());
+                }
+            }
+        }
+    }
+
+    commands
 }
 
 fn platform_os_label() -> &'static str {

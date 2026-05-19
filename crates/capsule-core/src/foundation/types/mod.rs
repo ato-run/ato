@@ -2,6 +2,7 @@
 // This module provides UARC V1.1.0 compliant types used by both nacelle and CLI.
 
 pub mod bridge;
+pub mod command_spec;
 pub mod error;
 pub mod identity;
 pub mod license;
@@ -14,6 +15,7 @@ pub mod utils;
 
 // Re-export commonly used types
 pub use bridge::*;
+pub use command_spec::*;
 pub use error::*;
 pub use identity::*;
 pub use license::*;

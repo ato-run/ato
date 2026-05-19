@@ -1,7 +1,8 @@
 //! Card Switcher — Wry-hosted HTML overlay. The visual layer lives in
 //! `assets/launcher/switcher.html` (single-file: inline CSS + JS) and
-//! receives the open-windows snapshot via a `window.__ATO_WINDOWS`
-//! initialization script. User interaction (card click, dock click,
+//! receives open-windows + session snapshots via
+//! `window.__ATO_WINDOWS` / `window.__ATO_SESSIONS`
+//! initialization scripts. User interaction (card click, dock click,
 //! Escape, backdrop click, new-window tile) is signalled back over
 //! `window.ipc.postMessage(...)` and routed through `web_bridge` to
 //! the `&mut App` dispatcher below.
@@ -22,6 +23,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
+use crate::state::session::SessionRegistry;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -243,8 +245,13 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         .collect();
     let cards_json = serde_json::to_string(&cards).unwrap_or_else(|_| "[]".to_string());
     let windows_script = format!("window.__ATO_WINDOWS = {};", cards_json);
+    let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
+        .unwrap_or_else(|_| "[]".to_string());
+    let combined_script = format!(
+        "{windows_script}\nwindow.__ATO_SESSIONS = {sessions_json};"
+    );
     let locale = resolve_locale(crate::config::load_config().general.language);
-    let init_script = compose_init_script(locale, Some(&windows_script));
+    let init_script = compose_init_script(locale, Some(&combined_script));
 
     let bounds = Bounds::centered(None, size(px(1200.0), px(700.0)), cx);
     let options = WindowOptions {
