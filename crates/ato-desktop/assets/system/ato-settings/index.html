@@ -3,17 +3,18 @@
 <head>
 <meta charset="utf-8">
 <title>設定</title>
+<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
   :root {
-    --bg-base:    #f5f3ff;
-    --card:       #ffffff;
-    --card-soft:  #fafafa;
-    --border:     #e4e4e7;
-    --text:       #18181b;
-    --muted:      #71717a;
-    --soft:       #a1a1aa;
-    --accent:     #4f46e5;
-    --accent-bg:  #eef2ff;
+    --bg-base:    var(--ds-bg);
+    --card:       var(--ds-surface);
+    --card-soft:  var(--ds-surface-subtle);
+    --border:     var(--ds-border);
+    --text:       var(--ds-text);
+    --muted:      var(--ds-text-secondary);
+    --soft:       var(--ds-text-tertiary);
+    --accent:     var(--ds-accent);
+    --accent-bg:  var(--ds-accent-subtle);
     --badge-bg:   #fef9c3;
     --badge-text: #92400e;
   }
@@ -21,8 +22,7 @@
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg-base);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    font-family: "Hiragino Sans", "Yu Gothic UI", var(--ds-font-sans);
     color: var(--text);
     display: flex;
     -webkit-user-select: none;
@@ -52,11 +52,11 @@
   .nav-item {
     height: 36px; padding: 0 12px;
     display: flex; align-items: center;
-    border-radius: 6px;
-    color: #52525b; font-size: 14px; font-weight: 500;
+    border-radius: var(--ds-radius-sm);
+    color: var(--ds-text-secondary); font-size: 14px; font-weight: 500;
     cursor: pointer;
   }
-  .nav-item:hover { background: #f4f4f5; }
+  .nav-item:hover { background: var(--ds-surface-hover); }
   .nav-item.active {
     background: var(--accent-bg);
     color: var(--accent);
@@ -83,7 +83,7 @@
     padding: 16px;
     background: var(--card-soft);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: var(--ds-radius-md);
     display: flex; flex-direction: column; gap: 12px;
   }
   .block-title { font-size: 13px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -109,8 +109,8 @@
   /* TOGGLE */
   .toggle-track {
     width: 36px; height: 20px;
-    background: #d4d4d8;
-    border-radius: 999px;
+    background: var(--ds-border-hover);
+    border-radius: var(--ds-radius-full);
     padding: 2px;
     display: flex; align-items: center; justify-content: flex-start;
     cursor: pointer;
@@ -146,8 +146,8 @@
 
   /* ERROR BANNER */
   .error-banner {
-    background: #fef2f2; border: 1px solid #fca5a5;
-    color: #991b1b; border-radius: 8px; padding: 10px 14px;
+    background: var(--ds-surface-accent); border: 1px solid var(--ds-border-accent);
+    color: var(--ds-red); border-radius: var(--ds-radius-sm); padding: 10px 14px;
     font-size: 13px;
   }
 
@@ -155,21 +155,21 @@
   .btn {
     font-size: 13px; font-weight: 500;
     border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 12px;
+    border-radius: var(--ds-radius-sm); padding: 5px 12px;
     cursor: pointer; background: var(--card);
     color: var(--text); white-space: nowrap;
   }
-  .btn:hover { background: #f4f4f5; }
+  .btn:hover { background: var(--ds-surface-hover); }
   .btn-primary {
-    background: var(--accent); color: #fff;
+    background: var(--accent); color: var(--ds-text-inverse);
     border-color: var(--accent);
   }
-  .btn-primary:hover { background: #4338ca; border-color: #4338ca; }
+  .btn-primary:hover { background: var(--ds-accent-hover); border-color: var(--ds-accent-hover); }
   .btn-danger {
-    background: #fff; color: #b91c1c;
-    border-color: #fca5a5;
+    background: var(--ds-surface); color: var(--ds-red);
+    border-color: var(--ds-border-accent);
   }
-  .btn-danger:hover { background: #fef2f2; }
+  .btn-danger:hover { background: var(--ds-surface-accent); }
   .btn:disabled { opacity: 0.5; cursor: default; }
 
   /* SECRETS TABLE */
@@ -235,8 +235,8 @@
     z-index: 999;
   }
   .confirm-box {
-    background: var(--card); border-radius: 12px;
-    padding: 24px; width: 300px; box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    background: var(--card); border-radius: var(--ds-radius-md);
+    padding: 24px; width: 300px; box-shadow: var(--ds-shadow-lg);
     display: flex; flex-direction: column; gap: 16px;
   }
   .confirm-title { font-size: 15px; font-weight: 700; margin: 0; }
