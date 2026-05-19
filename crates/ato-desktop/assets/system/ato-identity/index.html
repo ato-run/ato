@@ -3,24 +3,24 @@
 <head>
 <meta charset="utf-8">
 <title data-i18n="identity.title">アカウント</title>
-<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
   :root {
-    --bg:        var(--ds-bg);
-    --border:    var(--ds-border);
-    --soft-bg:   var(--ds-surface-subtle);
-    --text:      var(--ds-text);
-    --muted:     var(--ds-text-secondary);
-    --soft:      var(--ds-text-tertiary);
-    --accent:    var(--ds-accent);
-    --accent-bg: var(--ds-accent-subtle);
+    --bg:        #ffffff;
+    --border:    #ececf1;
+    --soft-bg:   #f6f6fa;
+    --text:      #1a1a1f;
+    --muted:     #6b6b78;
+    --soft:      #a3a3b0;
+    --accent:    #6366f1;
+    --accent-bg: #eef2ff;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; }
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: "Hiragino Sans", "Yu Gothic UI", var(--ds-font-sans);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
     -webkit-user-select: none;
     user-select: none;
   }
@@ -38,12 +38,12 @@
   }
   .avatar {
     width: 44px; height: 44px; border-radius: 50%;
-    background: var(--ds-gradient-accent);
-    color: var(--ds-text-inverse);
+    background: linear-gradient(135deg, #c4b5fd 0%, #6366f1 100%);
+    color: #fff;
     display: flex; align-items: center; justify-content: center;
     font-size: 17px; font-weight: 700;
     flex-shrink: 0;
-    box-shadow: var(--ds-shadow-accent-btn);
+    box-shadow: 0 4px 10px rgba(99, 102, 241, 0.30);
   }
   .avatar.muted {
     background: var(--soft-bg);
@@ -64,7 +64,7 @@
   .row {
     display: flex; align-items: center; gap: 10px;
     padding: 8px 10px;
-    border-radius: var(--ds-radius-sm);
+    border-radius: 8px;
     font-size: 12.5px;
     cursor: pointer;
     color: var(--text);
@@ -86,7 +86,7 @@
     font-size: 10px; font-weight: 600;
     background: var(--soft-bg);
     color: var(--muted);
-    border-radius: var(--ds-radius-full);
+    border-radius: 999px;
     padding: 2px 8px;
   }
 
@@ -108,11 +108,11 @@
     border: 1px solid var(--border);
     color: var(--text);
     font-size: 11.5px; font-weight: 600;
-    border-radius: var(--ds-radius-sm);
+    border-radius: 8px;
     padding: 6px 12px;
     cursor: pointer;
   }
-  .footer button.close:hover { background: var(--ds-border); }
+  .footer button.close:hover { background: #ececf1; }
 </style>
 </head>
 <body>

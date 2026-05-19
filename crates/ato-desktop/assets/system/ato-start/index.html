@@ -4,37 +4,36 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>新しいウィンドウ</title>
-<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg: var(--ds-bg);
-    --surface: var(--ds-surface);
-    --surface-hover: var(--ds-surface-hover);
-    --border: var(--ds-border);
-    --border-hover: var(--ds-border-hover);
-    --text-primary: var(--ds-text);
-    --text-secondary: var(--ds-text-secondary);
-    --text-tertiary: var(--ds-text-tertiary);
-    --accent: var(--ds-accent);
-    --accent-hover: var(--ds-accent-hover);
-    --accent-dim: var(--ds-accent-dim);
-    --green: var(--ds-green);
+    --bg: #f0f2f7;
+    --surface: #ffffff;
+    --surface-hover: #f7f8fb;
+    --border: rgba(0,0,0,0.07);
+    --border-hover: rgba(0,0,0,0.13);
+    --text-primary: #1a1a2e;
+    --text-secondary: #6b7280;
+    --text-tertiary: #9ca3af;
+    --accent: #6c60f0;
+    --accent-hover: #7c6af5;
+    --accent-dim: rgba(108,96,240,0.1);
+    --green: #10b981;
     --card-dark: #1a1b2e;
     --card-dark2: #231e3a;
-    --radius-sm: var(--ds-radius-sm);
-    --radius-md: var(--ds-radius-md);
-    --radius-lg: var(--ds-radius-lg);
-    --radius-xl: var(--ds-radius-xl);
-    --drag-h: var(--ds-drag-h);
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 24px;
+    --drag-h: 28px;
   }
 
   html, body {
     height: 100%;
     background: var(--bg);
     color: var(--text-primary);
-    font-family: var(--ds-font-sans);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     font-size: 14px;
     line-height: 1.5;
     overflow: hidden;
@@ -65,10 +64,10 @@
   }
   .hero-icon {
     width: 56px; height: 56px; border-radius: 14px;
-    background: var(--ds-gradient-accent);
+    background: linear-gradient(135deg, #6c60f0 0%, #9b8ff8 100%);
     display: flex; align-items: center; justify-content: center;
     margin-bottom: 4px;
-    box-shadow: var(--ds-shadow-accent-btn);
+    box-shadow: 0 4px 16px rgba(108,96,240,0.3);
   }
   .hero-icon svg { width: 28px; height: 28px; }
   .hero-title {
@@ -113,7 +112,7 @@
   .search-hint {
     position: absolute; right: 16px; top: 50%; transform: translateY(-50%);
     font-size: 11px; color: var(--text-tertiary);
-    background: var(--ds-surface-hover); border: 1px solid var(--border);
+    background: #eef0f5; border: 1px solid var(--border);
     border-radius: 5px; padding: 2px 6px;
     pointer-events: none;
   }
@@ -168,10 +167,10 @@
     flex-shrink: 0;
   }
   .tile-icon svg { width: 18px; height: 18px; }
-  .tile-icon.github { background: var(--ds-gradient-rose); }
-  .tile-icon.local  { background: var(--ds-gradient-orange); }
-  .tile-icon.store  { background: var(--ds-gradient-blue); }
-  .tile-icon.workspace { background: var(--ds-gradient-indigo); }
+  .tile-icon.github { background: linear-gradient(135deg, #6c60f0, #9b8ff8); }
+  .tile-icon.local  { background: linear-gradient(135deg, #f97316, #fb923c); }
+  .tile-icon.store  { background: linear-gradient(135deg, #0ea5e9, #38bdf8); }
+  .tile-icon.workspace { background: linear-gradient(135deg, #8b5cf6, #a78bfa); }
   .tile-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
   .tile-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.45; }
   .tile-badge {
@@ -261,7 +260,7 @@
   .featured-card::before {
     content: ''; position: absolute; top: 0; right: 0;
     width: 180px; height: 160px;
-    background: radial-gradient(circle at top right, rgba(244,63,94,0.15) 0%, transparent 70%);
+    background: radial-gradient(circle at top right, rgba(108,96,240,0.15) 0%, transparent 70%);
     pointer-events: none;
   }
   .fc-head { display: flex; align-items: flex-start; gap: 12px; }
@@ -294,11 +293,11 @@
   .fc-actions { display: flex; gap: 8px; }
   .btn-open {
     flex: 1; padding: 8px 0; border-radius: 7px;
-    background: var(--ds-gradient-accent-btn); color: #fff; border: none; cursor: pointer;
+    background: var(--accent); color: #fff; border: none; cursor: pointer;
     font-size: 12.5px; font-weight: 600; font-family: inherit;
-    transition: opacity 0.1s;
+    transition: background 0.1s;
   }
-  .btn-open:hover { opacity: 0.9; }
+  .btn-open:hover { background: var(--accent-hover); }
   .btn-detail {
     flex: 1; padding: 8px 0; border-radius: 7px;
     background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.8);
