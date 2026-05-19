@@ -763,10 +763,6 @@ fn render_settings_nav_item(active: bool, theme: &Theme) -> Div {
 }
 
 fn settings_nav_active(state: &crate::state::AppState) -> bool {
-    if state.settings_panel_open {
-        return true;
-    }
-
     state
         .active_task()
         .map(|task| {

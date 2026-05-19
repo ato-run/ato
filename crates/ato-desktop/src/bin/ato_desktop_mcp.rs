@@ -109,6 +109,7 @@ fn discover_socket() -> PathBuf {
     // Fallback: enumerate `ato-desktop-<pid>.sock` and pick the first whose
     // pid is alive. This rules out orphan sockets left behind by crashed
     // instances (#68).
+    let mut legacy_socket = None;
     if let Ok(entries) = std::fs::read_dir(&run_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -120,13 +121,17 @@ fn discover_socket() -> PathBuf {
                 .strip_prefix("ato-desktop-")
                 .and_then(|s| s.strip_suffix(".sock"));
             let pid = stem.and_then(|s| s.parse::<u32>().ok());
-            // Filenames without an embedded pid (e.g. legacy
-            // `ato-desktop.sock`) are kept; canonical `ato-desktop-<pid>.sock`
-            // entries are filtered by liveness.
-            if pid.map(pid_is_alive).unwrap_or(true) {
-                return entry.path();
+            match pid {
+                Some(pid) if pid_is_alive(pid) => return entry.path(),
+                Some(_) => {}
+                None => {
+                    legacy_socket.get_or_insert_with(|| entry.path());
+                }
             }
         }
+    }
+    if let Some(path) = legacy_socket {
+        return path;
     }
     // Last resort default.
     run_dir.join("ato-desktop.sock")
