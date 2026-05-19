@@ -2,32 +2,32 @@
 
 ## Overview
 
-A capsule is the execution unit that gives Ato one model for apps, tools, and
-services. In the current implementation, `capsule.toml` schema v0.3 is the main
-authoring surface, but routing still includes compatibility bridges and
-lock-derived manifests.
+A capsule is the runnable unit produced by resolving a recipe over source inputs.
+
+Historically, Ato documentation used "capsule" as the main authoring and sharing
+unit. In the current model, the authoring, sharing, and review unit is the
+**recipe**. `capsule.toml` remains the local recipe file format for compatibility.
+
+See [Recipes](recipe.md) for the current authoring and Store model.
 
 ## How it works
 
-A capsule is described around `capsule.toml`.
+A capsule is what Ato materializes when it resolves a recipe against source
+inputs and a user environment. In that sense, a capsule is the runtime
+instantiation of a recipe — the concrete, runnable thing that results from
+applying a recipe to inputs.
 
-- Top-level fields declare the name, type, default target, metadata,
-  requirements, build, isolation, dependencies, contracts, and workspace setup
-- `[targets.<label>]` defines the runtime-specific launch contract
+- `capsule.toml` remains the local file format for defining a recipe
+- routing still includes compatibility bridges and lock-derived manifests
 - `route_manifest*()` loads a manifest, resolves the effective target, and
   synthesizes a runtime model for routing
-- lock-backed runs can rebuild a compatibility manifest bridge from `ato.lock.json`
-
-The router also supports flat v0.3 surfaces without a `[targets]` table by
-normalizing them through the v0.3 compatibility path before execution.
 
 ## Specification
 
-- a capsule is primarily declared through `capsule.toml`
+- a capsule is materialized from a recipe and source inputs
+- `capsule.toml` is a recipe file; it is not necessarily one-to-one with a repository
 - the current manifest model centers on `schema_version = "0.3"`
 - a manifest MUST resolve a non-empty `default_target` that exists under `[targets]`
-- `version` may be empty in the current struct model, but `name`, `type`, and
-  target selection still drive routing
 - runtime-specific fields MUST route into one of the current runtime kinds:
   `source`, `wasm`, `oci`, or `web`
 - current capsule types include `app`, `tool`, `inference`, `job`, and `library`
@@ -37,11 +37,17 @@ References:
 - [`rfcs/accepted/CAPSULE_SPEC.md`](rfcs/accepted/CAPSULE_SPEC.md)
 - [`rfcs/accepted/CAPSULE_FORMAT_V2.md`](rfcs/accepted/CAPSULE_FORMAT_V2.md)
 - [`rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md`](rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md)
+- [Recipes](recipe.md)
 
 ## Design Notes
 
-Keeping the capsule as the unit means growing a shared model instead of adding
-feature-specific exceptions. Declaration, resolution, execution, and sharing all
-stay inside the same shape. The compatibility bridge in the router exists to
-preserve that single shape even when the raw input comes from a flat v0.3 draft
-surface or a lock-derived execution descriptor.
+The capsule model gives Ato a single shape for apps, tools, and services.
+Declaration, resolution, execution, and sharing all stay inside the same shape.
+The compatibility bridge in the router exists to preserve that single shape even
+when the raw input comes from a flat v0.3 draft surface or a lock-derived
+execution descriptor.
+
+In the 0.6.0 model, "capsule" refers to the materialized runtime unit, while
+"recipe" refers to the authored, shareable declaration. The file name
+`capsule.toml` is preserved for compatibility; the mental model treats it as a
+recipe file.

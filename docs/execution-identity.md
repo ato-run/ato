@@ -13,14 +13,16 @@ view.
 Execution identity is computed before launch. It covers the full launch
 condition, not only the source tree:
 
-- source tree
-- dependency derivation
+- recipe snapshot
+- source input snapshots
+- dependency outputs
 - runtime identity
 - environment closure
 - filesystem view
 - network policy
 - capability policy
-- entry point / argv / working directory
+- entrypoint / argv / working directory
+- state bindings
 
 The receipt builder now composes this in one place:
 
@@ -47,6 +49,39 @@ References:
 
 - [`rfcs/draft/beyond-reproducible-build.ja.md`](rfcs/draft/beyond-reproducible-build.ja.md)
 - [`crates/ato-desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/ato-desktop/src/orchestrator.rs)
+
+## Same source is not same execution
+
+The same source repository can produce different executions when the recipe
+changes.
+
+The same recipe can also produce different executions when source revisions,
+runtime resolution, environment, filesystem grants, network policy, capability
+policy, or state bindings change.
+
+Execution Identity identifies the resolved launch world — not merely the source
+repository and not merely the recipe. All of the following are distinct
+executions:
+
+```text
+Same source + recipe A → execution X
+Same source + recipe B → execution Y
+
+Recipe A + source v1 → execution X
+Recipe A + source v2 → execution Z
+
+Recipe A + source v1 + network allowed  → execution P
+Recipe A + source v1 + network denied   → execution Q
+```
+
+## Desktop display
+
+Ato Desktop shows the execution identity for the current managed session so the
+user can see which resolved recipe execution is running.
+
+If the launch graph is unchanged and the previous session is still healthy,
+Desktop may reattach to it. If the recipe or any other part of the launch graph
+changes, Desktop must materialize a new session.
 
 ## Design Notes
 

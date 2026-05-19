@@ -2,9 +2,13 @@
 
 ## Overview
 
-Ato Desktop is the graphical session shell for Ato.
+Ato Desktop is the focused graphical shell for managed recipe executions.
 
-It is not a separate execution engine and it is not a replacement for the CLI. Desktop uses the same launch model as `ato run` and `ato session start`: Ato constructs a launch graph, materializes it as a managed session, records session state, and presents the running project through a desktop-native surface.
+It is not a separate execution engine and it is not a replacement for the CLI.
+Desktop uses the same launch model as `ato run` and `ato session start`: Ato
+constructs a launch graph from a recipe and its source inputs, materializes it
+as a managed session, records session state, and presents the running execution
+through a desktop-native surface.
 
 **The CLI remains the execution worker. Desktop provides the user plane.**
 
@@ -15,24 +19,59 @@ Ato Desktop
 ato CLI
   │
   ▼
+recipe + source inputs
+  │
+  ▼
 launch graph
   │
   ▼
 managed session
   │
   ▼
-WebView / logs / bridge / lifecycle
+app view / logs / execution identity / lifecycle controls
 ```
+
+## What changed in 0.6.0
+
+Ato Desktop is no longer a dock-first or window-list-first interface.
+
+The main Desktop surface is the running recipe execution itself: app view,
+session status, logs, lifecycle controls, capsule/recipe details, and execution
+identity are shown in one focused surface.
+
+**Removed / replaced:**
+
+- dock-first capsule management screen
+- separate open-window management as the main Desktop model
+- window lifecycle as the owner of process lifecycle
+
+**Added / emphasized:**
+
+- focused app surface centered on the current recipe execution
+- execution identity display
+- session status and readiness
+- logs and diagnostics
+- restart / stop controls
+- capsule and recipe details
+- attach/reuse of existing healthy sessions
+- window close independent from session stop
+
+A window presents a managed session. It does not necessarily own the process
+lifecycle. Closing a window may detach from a session; stopping a session
+explicitly terminates the managed process.
+
+> **This is a breaking change for Desktop UX.** The previous dock-first model is
+> replaced by a focused session shell.
 
 ## Why Desktop?
 
 Many source-native projects are not just terminal commands. They become local web apps, tools, dashboards, editors, agents, notebooks, or small services.
 
-The CLI is the best interface for trying and automating those projects. Desktop is the best interface for **keeping them open, inspecting them, stopping them, and interacting with them as local applications**.
+The CLI is the best interface for trying and automating those projects. Desktop is the best interface for **keeping a recipe execution open, inspecting it, stopping it, and interacting with it as a local application**.
 
 Desktop makes Ato sessions feel like apps without changing the underlying execution model.
 
-> *Desktop is not a second runtime. It is a graphical shell over the same execution graph.*
+> *Desktop is not a second runtime. It is a focused graphical shell over the same execution graph.*
 
 ## How it works
 
