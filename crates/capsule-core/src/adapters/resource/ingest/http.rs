@@ -138,13 +138,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_https_url_handles_lowercase_scheme_only() {
-        let err = validate_https_url("HTTPS://example.com/model.bin").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("only HTTPS URLs are allowed"),
-            "RFC 3986 scheme is case-insensitive but 'url' normalises to lowercase: {msg}",
-        );
+    fn validate_https_url_accepts_uppercase_scheme() {
+        assert!(validate_https_url("HTTPS://example.com/model.bin").is_ok());
     }
 
     // ── https_only_client redirect policy ───────────────────────────
