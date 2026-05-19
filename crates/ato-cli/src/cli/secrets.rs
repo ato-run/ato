@@ -106,4 +106,12 @@ pub(crate) enum SecretsCommands {
         #[arg(long, value_name = "PATH")]
         new_identity: Option<PathBuf>,
     },
+
+    /// Operate secrets via stdin/stdout JSON bridge (for Desktop / automation)
+    #[command(name = "bridge")]
+    Bridge {
+        /// Output responses as JSON (required)
+        #[arg(long, default_value_t = true)]
+        json: bool,
+    },
 }
