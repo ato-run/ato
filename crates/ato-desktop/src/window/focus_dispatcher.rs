@@ -481,6 +481,7 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                             }
                         };
                         req.send(Ok(serde_json::json!({ "sessions": sessions_json })));
+                    }
                     AutomationCommand::AuthStatus => {
                         let status = crate::webview::signed_out_auth_status();
                         match serde_json::to_value(status) {
