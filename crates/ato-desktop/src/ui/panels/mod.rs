@@ -2,23 +2,22 @@ mod auth_handoff;
 mod capsule_runtime;
 mod devtools;
 mod inspector;
-mod launcher;
 mod launcher_v2;
 mod settings;
 
 use gpui::prelude::*;
 use gpui::{
-    div, hsla, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, Entity,
-    FontWeight, IntoElement, MouseButton,
+    div, linear_color_stop, linear_gradient, point, px, AnyElement, BoxShadow, Entity, FontWeight,
+    IntoElement,
 };
 use gpui_component::input::InputState;
 use gpui_component::resizable::h_resizable;
-use gpui_component::skeleton::Skeleton;
 use gpui_component::spinner::Spinner;
 use gpui_component::{Sizable, Size};
 
 use crate::state::{
-    ActivityTone, AppState, GuestRoute, PaneBounds, PaneSurface, WebPane, WebSessionState,
+    ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneBounds, PaneSurface, WebPane,
+    WebSessionState,
 };
 
 use super::theme::{task_hue, Theme};
@@ -26,7 +25,7 @@ use super::STAGE_PADDING;
 use auth_handoff::render_auth_handoff_panel;
 use capsule_runtime::render_capsule_runtime_panel;
 use devtools::render_dev_console_panel;
-use inspector::render_capsule_inspector_panel;
+use inspector::{render_capsule_inspector_panel, render_capsule_inspector_panel_for_pane};
 use launcher_v2::render_launcher_panel_v2;
 use settings::render_settings_panel;
 
@@ -95,35 +94,6 @@ pub(super) fn render_stage(
         .child(content)
 }
 
-/// Renders the settings panel as a full-height overlay anchored to the left
-/// edge of the stage (just right of the sidebar). Clicking the backdrop
-/// dismisses the panel by dispatching `ShowSettings` again (toggle off).
-pub(super) fn render_settings_overlay(state: &AppState, theme: &Theme) -> impl IntoElement {
-    use crate::app::ShowSettings;
-
-    let backdrop = hsla(0.0, 0.0, 0.0, 0.0);
-
-    div()
-        .id("settings-overlay")
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_row()
-        .bg(backdrop)
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(ShowSettings), cx);
-        })
-        .child(
-            div()
-                .id("settings-panel-container")
-                .size_full()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(render_settings_panel("", state, theme)),
-        )
-}
-
 fn render_stage_pane(
     pane: &crate::state::Pane,
     state: &AppState,
@@ -132,10 +102,15 @@ fn render_stage_pane(
 ) -> AnyElement {
     match &pane.surface {
         PaneSurface::Web(web) => render_web_pane(web, state, theme).into_any_element(),
-        PaneSurface::HostPanel(_route) => render_host_panel_pane(theme).into_any_element(),
-        PaneSurface::Native { body } => {
-            render_settings_panel(body, state, theme).into_any_element()
-        }
+        PaneSurface::HostPanel(route) => match route {
+            HostPanelRoute::Launcher => render_launcher_shell(state, theme, launcher_search),
+            HostPanelRoute::Settings { .. } => {
+                render_settings_panel("", state, theme).into_any_element()
+            }
+            HostPanelRoute::CapsuleDetail { pane_id, .. } => {
+                render_capsule_inspector_panel_for_pane(state, *pane_id, theme).into_any_element()
+            }
+        },
         PaneSurface::DevConsole => render_dev_console_panel(state, theme).into_any_element(),
         PaneSurface::CapsuleStatus(capsule) => {
             render_capsule_runtime_panel(capsule, theme).into_any_element()
@@ -152,25 +127,6 @@ fn render_stage_pane(
                 div().flex_1().into_any_element()
             }
         }
-        PaneSurface::Launcher => div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .size_full()
-            .min_w(px(240.0))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(theme.pane_bg_top, 0.),
-                linear_color_stop(theme.pane_bg_bottom, 1.),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .relative()
-                    .size_full()
-                    .child(render_launcher_panel_v2(state, theme, launcher_search)),
-            )
-            .into_any_element(),
         PaneSurface::Terminal(_terminal) => div()
             .flex_1()
             .size_full()
@@ -184,6 +140,32 @@ fn render_stage_pane(
             )
             .into_any_element(),
     }
+}
+
+fn render_launcher_shell(
+    state: &AppState,
+    theme: &Theme,
+    launcher_search: &Entity<InputState>,
+) -> AnyElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .size_full()
+        .min_w(px(240.0))
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(theme.pane_bg_top, 0.),
+            linear_color_stop(theme.pane_bg_bottom, 1.),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .relative()
+                .size_full()
+                .child(render_launcher_panel_v2(state, theme, launcher_search)),
+        )
+        .into_any_element()
 }
 
 fn render_web_pane(web: &WebPane, state: &AppState, theme: &Theme) -> gpui::Div {
@@ -225,20 +207,6 @@ fn render_web_pane(web: &WebPane, state: &AppState, theme: &Theme) -> gpui::Div 
                     this.child(render_launch_failed_overlay(web, state, theme))
                 }),
         )
-}
-
-fn render_host_panel_pane(theme: &Theme) -> gpui::Div {
-    div()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .min_w(px(240.0))
-        .bg(linear_gradient(
-            180.,
-            linear_color_stop(theme.pane_bg_top, 0.),
-            linear_color_stop(theme.pane_bg_bottom, 1.),
-        ))
-        .child(div().flex_1().relative().size_full())
 }
 
 fn render_share_loading_overlay(web: &WebPane, theme: &Theme) -> impl IntoElement {
