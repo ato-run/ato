@@ -4713,4 +4713,22 @@ mod fast_path_tests {
         // app_root is derived from manifest_path.parent().
         assert_eq!(session.app_root, PathBuf::from("/tmp"));
     }
+
+    #[test]
+    fn resolve_ato_binary_prefers_ato_desktop_ato_bin() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+        std::env::set_var("ATO_DESKTOP_ATO_BIN", &path);
+        let resolved = resolve_ato_binary().expect("resolve");
+        assert_eq!(resolved, path);
+        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+    }
+
+    #[test]
+    fn resolve_ato_binary_errors_on_missing_env_path() {
+        std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
+        let err = resolve_ato_binary().unwrap_err();
+        assert!(format!("{err:#}").contains("missing ato helper"));
+        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+    }
 }
