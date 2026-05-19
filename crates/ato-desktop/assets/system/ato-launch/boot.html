@@ -3,23 +3,23 @@
 <head>
 <meta charset="utf-8">
 <title>Capsule を起動中…</title>
-<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
   :root {
-    --bg-base:   var(--ds-bg);
-    --card:      var(--ds-surface);
-    --border:    var(--ds-border);
-    --text:      var(--ds-text);
-    --muted:     var(--ds-text-secondary);
-    --soft:      var(--ds-text-tertiary);
-    --accent:    var(--ds-accent);
-    --emerald:   var(--ds-emerald);
+    --bg-base:   #f7f4ff;
+    --card:      #ffffff;
+    --border:    #ececf1;
+    --text:      #1a1a1f;
+    --muted:     #6b6b78;
+    --soft:      #a3a3b0;
+    --accent:    #6366f1;
+    --emerald:   #10b981;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; }
   body {
     background: var(--card);
-    font-family: "Hiragino Sans", "Yu Gothic UI", var(--ds-font-sans);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                 "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
     color: var(--text);
     -webkit-user-select: none;
     user-select: none;
@@ -50,9 +50,9 @@
   }
   .badge-inner .capsule {
     width: 44px; height: 24px; border-radius: 999px;
-    background: var(--ds-gradient-indigo);
+    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
     position: relative;
-    box-shadow: var(--ds-shadow-accent-btn);
+    box-shadow: 0 4px 10px rgba(99,102,241,0.40);
   }
   .badge-inner .capsule::after {
     content: ""; position: absolute;
@@ -75,7 +75,7 @@
     font-size: 12.5px;
   }
   .step.done    { color: var(--text); }
-  .step.active  { color: var(--text); background: var(--ds-accent-subtle); }
+  .step.active  { color: var(--text); background: #eef2ff; }
   .step.pending { color: var(--muted); }
 
   .step-tick {
@@ -83,7 +83,7 @@
     display: flex; align-items: center; justify-content: center;
   }
   .step.done .step-tick {
-    background: var(--emerald); color: var(--ds-text-inverse);
+    background: var(--emerald); color: #fff;
     border-radius: 50%;
   }
   .step.done .step-tick svg { width: 11px; height: 11px; }
@@ -110,22 +110,46 @@
     height: 30px;
     padding: 0 12px;
     border: 1px solid var(--border);
-    border-radius: var(--ds-radius-sm);
-    background: var(--ds-surface-hover);
+    border-radius: 8px;
+    background: #fafafd;
     color: var(--muted);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
   }
   .toggle-btn.on {
-    border-color: var(--ds-accent-border);
-    background: var(--ds-accent-subtle);
-    color: var(--ds-accent);
+    border-color: #c7c9ff;
+    background: #eef2ff;
+    color: #4f46e5;
   }
   .detail-panel {
     border: 1px solid var(--border);
-    border-radius: var(--ds-radius-sm);
-    background: var(--ds-surface);
+    border-radius: 10px;
+    background: #fbfbfe;
+    padding: 10px;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .detail-panel.open { display: flex; }
+  .detail-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .detail-panel-title {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .detail-copy-btn {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
     color: var(--muted);
     font-size: 11px;
     font-weight: 600;
@@ -134,7 +158,7 @@
   .detail-copy-btn:hover { color: var(--text); }
   .detail-log {
     margin: 0;
-    border: 1px solid var(--ds-border);
+    border: 1px solid #e7e7ef;
     border-radius: 8px;
     background: #ffffff;
     padding: 9px 10px;
@@ -145,7 +169,7 @@
     font-family: "SF Mono", ui-monospace, monospace;
     font-size: 11.5px;
     line-height: 1.5;
-    color: var(--ds-text);
+    color: #444456;
     -webkit-user-select: text;
     user-select: text;
   }
@@ -156,9 +180,9 @@
   }
 
   .error-banner {
-    border: 1px solid var(--ds-border-accent);
-    border-radius: var(--ds-radius-md);
-    background: var(--ds-surface-accent);
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    background: #fff1f2;
     padding: 10px 12px;
     display: none;
     flex-direction: column;
@@ -167,7 +191,7 @@
   .error-banner.on { display: flex; }
   .error-banner-title {
     margin: 0;
-    color: var(--ds-red);
+    color: #b91c1c;
     font-size: 12.5px;
     font-weight: 700;
   }
@@ -179,7 +203,7 @@
     word-break: break-word;
     font-size: 12px;
     line-height: 1.5;
-    color: var(--ds-accent-hover);
+    color: #7f1d1d;
     -webkit-user-select: text;
     user-select: text;
   }
