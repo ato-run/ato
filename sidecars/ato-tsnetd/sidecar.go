@@ -393,6 +393,9 @@ func proxyConn(conn net.Conn, target string) {
 }
 
 func startGrpcServer(ctx context.Context, controlURL, authKey, hostname string, socksPort int) (*grpc.Server, net.Listener, error) {
+	if socksPort < 0 || socksPort > 65535 {
+		return nil, nil, fmt.Errorf("invalid socks port: %d", socksPort)
+	}
 	socketPath := strings.TrimSpace(os.Getenv(envGrpcSocket))
 	if socketPath == "" {
 		return nil, nil, fmt.Errorf("missing %s", envGrpcSocket)
@@ -407,9 +410,6 @@ func startGrpcServer(ctx context.Context, controlURL, authKey, hostname string, 
 	}
 
 	server := grpc.NewServer(grpc.Creds(insecure.NewCredentials()))
-	if socksPort < 0 || socksPort > 65535 {
-		return nil, nil, fmt.Errorf("invalid socks port: %d", socksPort)
-	}
 	baseCfg := &StartRequest{
 		ControlUrl: controlURL,
 		AuthKey:    authKey,
