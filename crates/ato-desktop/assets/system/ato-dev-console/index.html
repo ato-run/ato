@@ -4,30 +4,29 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Ato Developer Console</title>
-<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
 /* ── Design tokens ─────────────────────────────────────────── */
 :root {
-  --bg:         var(--ds-bg);
-  --bg-subtle:  var(--ds-surface-subtle);
-  --border:     var(--ds-border);
-  --border-mid: var(--ds-border-hover);
-  --text:       var(--ds-text);
-  --text-mid:   var(--ds-text-secondary);
-  --text-muted: var(--ds-text-tertiary);
-  --accent:     var(--ds-accent);
-  --accent-lite:var(--ds-accent-subtle);
-  --accent-mid: var(--ds-accent-border);
-  --green:      var(--ds-green);
+  --bg:         #ffffff;
+  --bg-subtle:  #f8f9fb;
+  --border:     #e8eaed;
+  --border-mid: #d1d5db;
+  --text:       #111827;
+  --text-mid:   #4b5563;
+  --text-muted: #9ca3af;
+  --accent:     #4f46e5;
+  --accent-lite:#eef2ff;
+  --accent-mid: #c7d2fe;
+  --green:      #16a34a;
   --green-bg:   #dcfce7;
   --amber:      #d97706;
   --amber-bg:   #fef3c7;
-  --radius-sm:  var(--ds-radius-sm);
-  --radius-md:  var(--ds-radius-md);
-  --radius-lg:  var(--ds-radius-lg);
-  --shadow-sm:  var(--ds-shadow-sm);
-  --shadow-md:  var(--ds-shadow-md);
-  font-family: var(--ds-font-sans);
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  14px;
+  --shadow-sm:  0 1px 3px rgba(0,0,0,.07);
+  --shadow-md:  0 4px 16px rgba(0,0,0,.10);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 14px;
   color: var(--text);
 }
@@ -92,12 +91,12 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
 .step-dot.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--ds-text-inverse);
+  color: #fff;
 }
 .step-dot.done {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--ds-text-inverse);
+  color: #fff;
 }
 .step-label {
   font-size: 13px;
@@ -141,12 +140,12 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
   width: 40px;
   height: 40px;
   border-radius: 10px;
-  background: var(--ds-gradient-accent);
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 18px;
-  color: var(--ds-text-inverse);
+  color: #fff;
   flex-shrink: 0;
 }
 .onb-panel-title { font-size: 16px; font-weight: 700; }
@@ -297,18 +296,18 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
   justify-content: center;
   font-size: 22px;
   font-weight: 700;
-  color: var(--ds-text-inverse);
+  color: #fff;
   flex-shrink: 0;
 }
 .preview-dock-info { flex: 1; }
-.preview-dock-name { font-size: 16px; font-weight: 700; color: var(--ds-text-inverse); margin-bottom: 2px; }
+.preview-dock-name { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 2px; }
 .preview-dock-handle { font-size: 12px; color: rgba(255,255,255,.7); }
 .preview-dock-status {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 99px;
   background: rgba(255,255,255,.15);
-  color: var(--ds-text-inverse);
+  color: #fff;
   margin-top: 6px;
   display: inline-block;
 }
@@ -343,12 +342,12 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
   width: 22px;
   height: 22px;
   border-radius: 5px;
-  background: var(--ds-gradient-accent);
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 10px;
-  color: var(--ds-text-inverse);
+  color: #fff;
 }
 .preview-chip-name { font-weight: 600; }
 .preview-chip-desc { color: var(--text-muted); font-size: 11px; }
@@ -404,10 +403,10 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
 .btn-ghost:hover { background: var(--bg-subtle); }
 .btn-primary {
   background: var(--accent);
-  color: var(--ds-text-inverse);
+  color: #fff;
 }
-.btn-primary:hover { background: var(--ds-accent-hover); }
-.btn-primary:disabled { background: var(--border-mid); color: var(--ds-text-inverse); cursor: not-allowed; }
+.btn-primary:hover { background: #4338ca; }
+.btn-primary:disabled { background: var(--border-mid); color: #fff; cursor: not-allowed; }
 
 /* ══════════════════════════════════════════════════════════════
    MAIN CONSOLE PAGE
@@ -434,11 +433,11 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
   width: 30px;
   height: 30px;
   border-radius: 7px;
-  background: var(--ds-gradient-accent);
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--ds-text-inverse);
+  color: #fff;
   font-size: 14px;
   flex-shrink: 0;
 }
@@ -488,7 +487,7 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
   gap: 6px;
   padding: 7px 14px;
   background: var(--accent);
-  color: var(--ds-text-inverse);
+  color: #fff;
   border-radius: var(--radius-sm);
   font-size: 13px;
   font-weight: 600;
@@ -497,12 +496,12 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
   transition: background .15s;
   -webkit-app-region: no-drag;
 }
-.new-capsule-btn:hover { background: var(--ds-accent-hover); }
+.new-capsule-btn:hover { background: #4338ca; }
 .avatar-btn {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: var(--ds-border);
+  background: #e5e7eb;
   border: 2px solid var(--border);
   display: flex;
   align-items: center;
@@ -606,7 +605,7 @@ html, body { height: 100%; background: var(--bg); overflow: hidden; }
 .filter-tab.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--ds-text-inverse);
+  color: #fff;
 }
 .filter-tab:not(.active):hover { background: var(--bg-subtle); }
 
