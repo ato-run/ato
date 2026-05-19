@@ -5,10 +5,34 @@ import {
   Play, ArrowRight, Box, Activity, Store
 } from 'lucide-react';
 
+function postIpc(message: unknown): boolean {
+  const w = window as unknown as {
+    __ATO_IPC__?: { postMessage: (m: string) => void };
+    ipc?: { postMessage: (m: string) => void };
+  };
+  const bridge = w.__ATO_IPC__ ?? w.ipc;
+  if (!bridge || typeof bridge.postMessage !== 'function') {
+    console.log('[ato-start bridge missing]', message);
+    return false;
+  }
+  bridge.postMessage(JSON.stringify(message));
+  return true;
+}
+
+function submitQuery(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return;
+  // Route through ato-start's OpenQuery dispatch, which already
+  // classifies the input and forwards GitHub repo inputs to the
+  // GitHub Import review surface.
+  postIpc({ capsule: 'ato-start', command: { kind: 'open_query', value: trimmed } });
+}
+
 export default function App() {
+  const [query, setQuery] = React.useState('');
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 sm:p-8 font-sans selection:bg-rose-100 selection:text-rose-900">
-      
+
       {/* Main App Window */}
       <div className="w-full max-w-[1024px] h-[740px] bg-white rounded-2xl shadow-2xl overflow-hidden relative flex flex-col ring-1 ring-slate-900/5">
         
@@ -36,10 +60,17 @@ export default function App() {
             {/* Search Bar */}
             <div className="w-full max-w-[640px] flex items-center gap-2 px-4 py-3 bg-white border border-rose-200 rounded-full shadow-[0_4px_20px_rgba(244,63,94,0.06)] mb-4 transition-shadow focus-within:shadow-[0_4px_25px_rgba(244,63,94,0.12)] focus-within:border-rose-300">
               <Search size={18} className="text-slate-400" />
-              <input 
-                type="text" 
-                placeholder="GitHub repo, local path, capsule, URL, or command" 
+              <input
+                type="text"
+                placeholder="GitHub repo, local path, capsule, URL, or command"
                 className="flex-1 outline-none text-[13px] text-slate-700 placeholder:text-slate-400 font-medium bg-transparent"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    submitQuery(query);
+                  }
+                }}
               />
               <kbd className="text-[10px] font-sans font-medium text-slate-400 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded">⌘K</kbd>
             </div>

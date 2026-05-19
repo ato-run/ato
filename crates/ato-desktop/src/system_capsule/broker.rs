@@ -14,8 +14,8 @@
 use gpui::{AnyWindowHandle, App};
 
 use super::{
-    ato_dock, ato_identity, ato_launch, ato_onboarding, ato_settings, ato_start, ato_store,
-    ato_web_viewer, ato_windows, manifest,
+    ato_dock, ato_identity, ato_import, ato_launch, ato_onboarding, ato_settings, ato_start,
+    ato_store, ato_web_viewer, ato_windows, manifest,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -37,6 +37,8 @@ pub enum SystemCapsuleId {
     AtoDock,
     /// First-run onboarding flow. `ato-onboarding/index.html`.
     AtoOnboarding,
+    /// GitHub Import review surface. `ato-import/index.html`.
+    AtoImport,
 }
 
 /// Vocabulary of system-capability tokens. Each per-capsule command
@@ -89,6 +91,7 @@ pub enum SystemCommand {
     AtoStart(ato_start::AtoStartCommand),
     AtoDock(ato_dock::DockCommand),
     AtoOnboarding(ato_onboarding::OnboardingCommand),
+    AtoImport(ato_import::ImportCommand),
 }
 
 impl SystemCommand {
@@ -105,6 +108,7 @@ impl SystemCommand {
             SystemCommand::AtoStart(c) => c.required_capability(),
             SystemCommand::AtoDock(c) => c.required_capability(),
             SystemCommand::AtoOnboarding(c) => c.required_capability(),
+            SystemCommand::AtoImport(c) => c.required_capability(),
         }
     }
 }
@@ -179,6 +183,7 @@ impl CapabilityBroker {
                 ato_dock::dispatch(cx, host, c).map_err(|e| BrokerError::Internal(e.to_string()))
             }
             SystemCommand::AtoOnboarding(c) => ato_onboarding::dispatch(cx, host, c),
+            SystemCommand::AtoImport(c) => ato_import::dispatch(cx, host, c),
         }
     }
 }

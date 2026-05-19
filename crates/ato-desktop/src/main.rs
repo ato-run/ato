@@ -11,6 +11,8 @@ mod logging;
 mod orchestrator;
 mod retention;
 mod settings;
+mod source_import_api;
+mod source_import_runner;
 mod source_import_session;
 mod stable_origin_proxy;
 mod state;
@@ -37,6 +39,11 @@ fn main() {
         pid = std::process::id(),
         "ato-desktop starting",
     );
+
+    match crate::orchestrator::resolve_ato_binary() {
+        Ok(path) => tracing::info!(?path, "resolved ato binary"),
+        Err(error) => tracing::warn!(?error, "could not resolve ato binary at startup"),
+    }
 
     app::run();
 }
