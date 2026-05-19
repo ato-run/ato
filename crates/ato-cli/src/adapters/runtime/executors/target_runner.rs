@@ -265,6 +265,62 @@ pub fn prepare_target_execution(
     // hit by ato-desktop's `capsule://` flow when `defer_consent = true`).
     let guard_manifest_dir = runtime_decision.plan.execution_working_directory();
     let has_authoritative_lock = has_execution_lock_authority(&runtime_decision.plan, prepared);
+
+    // Gate aggregation (#193): when both sandbox opt-in (E301) and execution-plan
+    // consent (E302) are pending, emit a single E307 so the user sees all required
+    // approvals at once instead of discovering them one run at a time.
+    if !options.preview_mode && !options.dangerously_skip_permissions {
+        let preview_guard = guard::evaluate_for_mode_with_authority(
+            &execution_plan,
+            &guard_manifest_dir,
+            &options.enforcement,
+            options.sandbox_mode,
+            options.dangerously_skip_permissions,
+            RuntimeGuardMode::Preview,
+            has_authoritative_lock,
+        )?;
+        let sandbox_gate_pending =
+            preview_guard.requires_sandbox_opt_in && !options.sandbox_mode;
+        let consent_gate_pending =
+            !(options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan))
+                && !crate::consent_store::has_consent(&execution_plan)?;
+
+        if sandbox_gate_pending && consent_gate_pending {
+            return Err(AtoExecutionError::from_ato_error(
+                capsule_core::AtoError::PermissionGatesRequired {
+                    message: "This capsule requires permission approvals before it can run."
+                        .to_string(),
+                    hint: Some(
+                        "Re-run with --sandbox. You will then be prompted to review and \
+                         approve the execution plan."
+                            .to_string(),
+                    ),
+                    pending_gates: vec![
+                        capsule_core::PendingPermissionGate {
+                            code: "E301".to_string(),
+                            name: "sandbox_opt_in".to_string(),
+                            message: "This capsule runs source code that requires explicit \
+                                      sandbox opt-in."
+                                .to_string(),
+                            resolution: "Re-run with --sandbox to enable sandboxed execution."
+                                .to_string(),
+                        },
+                        capsule_core::PendingPermissionGate {
+                            code: "E302".to_string(),
+                            name: "execution_plan_consent".to_string(),
+                            message: "This capsule's execution plan has not been approved yet."
+                                .to_string(),
+                            resolution: "When you re-run with --sandbox you will be prompted \
+                                         to review and approve the execution plan."
+                                .to_string(),
+                        },
+                    ],
+                },
+            )
+            .into());
+        }
+    }
+
     let guard_result = guard::evaluate_for_mode_with_authority(
         &execution_plan,
         &guard_manifest_dir,
