@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "../../shared/design-tokens.css";
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(10px); }

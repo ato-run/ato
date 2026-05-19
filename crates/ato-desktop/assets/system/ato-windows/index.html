@@ -3,22 +3,21 @@
 <head>
 <meta charset="utf-8">
 <title>開いているウィンドウ</title>
+<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
   :root {
-    /* Dark Mission-Control-like backdrop — system-mode feel that
-       distinguishes the switcher from regular content windows. */
     --bg-base: #1f1f23;
     --bg-blob: #2a2a31;
-    --card-bg: #ffffff;
-    --border:  #e4e4e7;
-    --text:    #18181b;       /* used on white cards */
+    --card-bg: var(--ds-surface);
+    --border:  var(--ds-border);
+    --text:    var(--ds-text);
     --text-on-dark: #f4f4f5;
-    --muted:   #71717a;
+    --muted:   var(--ds-text-secondary);
     --muted-on-dark: #a1a1aa;
-    --soft:    #a1a1aa;
+    --soft:    var(--ds-text-tertiary);
     --soft-on-dark: #71717a;
-    --accent:  #818cf8;       /* indigo-400 — readable on dark */
-    --accent-bg: #eef2ff;
+    --accent:  var(--ds-accent);
+    --accent-bg: var(--ds-accent-subtle);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -27,7 +26,7 @@
       radial-gradient(1200px 600px at 18% 8%,  var(--bg-blob) 0%, transparent 60%),
       radial-gradient(900px 500px at 82% 92%,  #25252b 0%, transparent 65%),
       var(--bg-base);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    font-family: "Hiragino Sans", "Yu Gothic UI", var(--ds-font-sans);
     color: var(--text-on-dark);
     display: flex;
     flex-direction: column;
@@ -43,8 +42,8 @@
   .header { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   .header-puck {
     width: 44px; height: 44px; border-radius: 12px;
-    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
-    color: #fff;
+    background: var(--ds-gradient-indigo);
+    color: var(--ds-text-inverse);
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 6px 18px rgba(99, 102, 241, 0.35);
   }
@@ -82,7 +81,7 @@
   }
   .card-icon {
     width: 26px; height: 26px; border-radius: 7px;
-    color: #fff; font-weight: 700; font-size: 12px;
+    color: var(--ds-text-inverse); font-weight: 700; font-size: 12px;
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
     box-shadow: 0 1px 2px rgba(0,0,0,0.1);
@@ -100,7 +99,7 @@
     border-radius: 10px;
     overflow: hidden;
     position: relative;
-    background: #fafafa;
+    background: var(--ds-surface-subtle);
   }
   .card-foot {
     padding: 10px 12px;
@@ -200,7 +199,7 @@
   }
   .dock-tile {
     width: 42px; height: 42px; border-radius: 12px;
-    color: #fff; font-weight: 700; font-size: 14px;
+    color: var(--ds-text-inverse); font-weight: 700; font-size: 14px;
     display: flex; align-items: center; justify-content: center;
     cursor: pointer;
     transition: transform 0.12s ease;
@@ -252,8 +251,8 @@
   }
   .pv-store-icon { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
   .pv-store-text { flex: 1; display: flex; flex-direction: column; gap: 1px; }
-  .pv-store-name { height: 4px; border-radius: 2px; background: #d4d4d8; width: 70%; }
-  .pv-store-sub  { height: 3px; border-radius: 2px; background: #e4e4e7; width: 50%; }
+  .pv-store-name { height: 4px; border-radius: 2px; background: var(--ds-border-hover); width: 70%; }
+  .pv-store-sub  { height: 3px; border-radius: 2px; background: var(--ds-border); width: 50%; }
   .pv-store-arrow { width: 6px; height: 6px; border-right: 1px solid var(--soft); border-top: 1px solid var(--soft); transform: rotate(45deg); }
 
   /* Start — mini start page mock */
@@ -270,7 +269,7 @@
     display: flex; align-items: center; gap: 3px;
   }
   .pv-start-search-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--soft); }
-  .pv-start-search-line { height: 2px; flex: 1; background: #e4e4e7; border-radius: 1px; }
+  .pv-start-search-line { height: 2px; flex: 1; background: var(--ds-border); border-radius: 1px; }
   .pv-start-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 4px; }
   .pv-start-tile {
     height: 28px;
@@ -281,7 +280,7 @@
     display: flex; flex-direction: column; gap: 2px;
   }
   .pv-start-tile-puck { width: 9px; height: 9px; border-radius: 2px; }
-  .pv-start-tile-label { height: 2.5px; border-radius: 1px; background: #d4d4d8; width: 70%; }
+  .pv-start-tile-label { height: 2.5px; border-radius: 1px; background: var(--ds-border-hover); width: 70%; }
   .pv-start-list {
     display: flex; flex-direction: column; gap: 3px; margin-top: 2px;
   }
@@ -293,7 +292,7 @@
     padding: 0 5px;
   }
   .pv-start-list-icon { width: 6px; height: 6px; border-radius: 1.5px; }
-  .pv-start-list-text { flex: 1; height: 2px; background: #e4e4e7; border-radius: 1px; }
+  .pv-start-list-text { flex: 1; height: 2px; background: var(--ds-border); border-radius: 1px; }
 
   /* Settings (ato-settings) — left nav + main rows */
   .pv-launcher {
@@ -496,20 +495,20 @@
             <div class="pv-launcher-card-icon" style="background:${accent};border-radius:50%"></div>
             <div class="pv-launcher-card-bars">
               <div class="pv-launcher-card-bar" style="background:${accent};width:60%;opacity:.8"></div>
-              <div class="pv-launcher-card-bar" style="background:#d4d4d8;width:35%"></div>
+              <div class="pv-launcher-card-bar" style="background:var(--ds-border-hover);width:35%"></div>
             </div>
           </div>
           <div class="pv-launcher-card">
             <div class="pv-launcher-card-bars" style="gap:3px;">
-              <div class="pv-launcher-card-bar" style="background:#d4d4d8;width:80%"></div>
-              <div class="pv-launcher-card-bar" style="background:#e4e4e7;width:55%"></div>
-              <div class="pv-launcher-card-bar" style="background:#e4e4e7;width:70%"></div>
+              <div class="pv-launcher-card-bar" style="background:var(--ds-border-hover);width:80%"></div>
+              <div class="pv-launcher-card-bar" style="background:var(--ds-border);width:55%"></div>
+              <div class="pv-launcher-card-bar" style="background:var(--ds-border);width:70%"></div>
             </div>
           </div>
           <div class="pv-launcher-card">
             <div class="pv-launcher-card-icon" style="background:${withAlpha(accent,0.5)}"></div>
             <div class="pv-launcher-card-bars">
-              <div class="pv-launcher-card-bar" style="background:#d4d4d8;width:50%"></div>
+              <div class="pv-launcher-card-bar" style="background:var(--ds-border-hover);width:50%"></div>
             </div>
           </div>
         </div>

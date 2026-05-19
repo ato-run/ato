@@ -3,21 +3,19 @@
 <head>
 <meta charset="utf-8">
 <title>新しいウィンドウ</title>
+<link rel="stylesheet" href="./shared/design-tokens.css">
 <style>
   :root {
-    /* White-based palette — matches the Store / AppWindow tone. The
-       only colour outside black/white is a tiny indigo accent for
-       the header puck and the keyboard hints. */
-    --bg-base:    #ffffff;
-    --bg-tint:    #fafafa;      /* used for very subtle surface accents */
-    --card:       #ffffff;
-    --border:     #ececf1;
-    --border-soft:#f4f4f7;
-    --text:       #18181b;
-    --muted:      #6b6b78;
-    --soft:       #a3a3b0;
-    --accent:     #6366f1;
-    --accent-2:   #7c3aed;
+    --bg-base:    var(--ds-bg);
+    --bg-tint:    var(--ds-surface-subtle);
+    --card:       var(--ds-surface);
+    --border:     var(--ds-border);
+    --border-soft:var(--ds-border-subtle);
+    --text:       var(--ds-text);
+    --muted:      var(--ds-text-secondary);
+    --soft:       var(--ds-text-tertiary);
+    --accent:     var(--ds-accent);
+    --accent-2:   var(--ds-accent);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -25,7 +23,7 @@
     /* Single near-white surface — no wash blobs. The accent comes
        only from the indigo header puck and the per-tile glyph pucks. */
     background: var(--bg-base);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    font-family: "Hiragino Sans", "Yu Gothic UI", var(--ds-font-sans);
     color: var(--text);
     display: flex;
     justify-content: center;
@@ -43,10 +41,10 @@
   .header { display: flex; flex-direction: column; align-items: center; gap: 12px; }
   .header-puck {
     width: 56px; height: 56px; border-radius: 14px;
-    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
-    color: #fff;
+    background: var(--ds-gradient-indigo);
+    color: var(--ds-text-inverse);
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 10px 24px rgba(99, 102, 241, 0.32);
+    box-shadow: var(--ds-shadow-accent-btn);
   }
   .header-puck svg { width: 26px; height: 26px; }
   .header h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.012em; }
@@ -58,8 +56,8 @@
     display: flex; align-items: center; gap: 12px;
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 999px;
-    box-shadow: 0 6px 22px rgba(28, 25, 65, 0.06);
+    border-radius: var(--ds-radius-full);
+    box-shadow: var(--ds-shadow-tile);
   }
   .search-globe { width: 20px; height: 20px; color: var(--soft); flex-shrink: 0; }
   .search input {
@@ -73,8 +71,8 @@
     padding: 4px 10px;
     background: var(--border-soft);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    font-family: "SF Mono", ui-monospace, monospace;
+    border-radius: var(--ds-radius-sm);
+    font-family: var(--ds-font-mono);
   }
 
   /* QUICK ACTIONS — LARGE, SPACIOUS */
@@ -83,16 +81,16 @@
     padding: 22px 20px;
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 18px;
+    border-radius: var(--ds-radius-lg);
     display: flex; flex-direction: column; align-items: flex-start; gap: 16px;
     cursor: pointer;
     transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
-    box-shadow: 0 4px 14px rgba(28, 25, 65, 0.04);
+    box-shadow: var(--ds-shadow-tile);
   }
   .qa-tile:hover {
     transform: translateY(-3px);
     border-color: rgba(99, 102, 241, 0.4);
-    box-shadow: 0 14px 30px rgba(99, 102, 241, 0.12);
+    box-shadow: var(--ds-shadow-accent-lg);
   }
   .qa-puck {
     width: 52px; height: 52px; border-radius: 14px;
@@ -114,9 +112,9 @@
   .panel {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 16px;
+    border-radius: var(--ds-radius-lg);
     padding: 16px 16px 12px;
-    box-shadow: 0 4px 14px rgba(28, 25, 65, 0.04);
+    box-shadow: var(--ds-shadow-tile);
   }
   .panel-head {
     display: flex; align-items: center; justify-content: space-between;
@@ -129,7 +127,7 @@
     height: 56px;
     padding: 0 6px;
     display: flex; align-items: center; gap: 12px;
-    border-radius: 10px;
+    border-radius: var(--ds-radius-md);
     cursor: pointer;
     transition: background 0.12s ease;
   }
@@ -149,7 +147,7 @@
 
   /* Row icon backgrounds */
   .ic-blue    { background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); color: #2563eb; }
-  .ic-zinc    { background: linear-gradient(135deg, #e5e5ea 0%, #d4d4d8 100%); color: #18181b; }
+  .ic-zinc    { background: linear-gradient(135deg, var(--ds-border) 0%, var(--ds-border-hover) 100%); color: var(--ds-text); }
   .ic-emerald { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); color: #059669; }
   .ic-violet  { background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%); color: #7c3aed; }
   .ic-indigo  { background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%); color: #4f46e5; }
@@ -164,14 +162,14 @@
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border: 1px solid var(--border);
-    border-radius: 22px;
-    box-shadow: 0 10px 30px rgba(28, 25, 65, 0.10);
+    border-radius: var(--ds-radius-xl);
+    box-shadow: var(--ds-shadow-md);
   }
   .dock-cell { display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; }
   .dock-icon {
     width: 56px; height: 56px; border-radius: 14px;
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 6px 14px rgba(28, 25, 65, 0.18);
+    box-shadow: var(--ds-shadow-md);
     transition: transform 0.14s ease;
     position: relative;
   }
@@ -182,7 +180,7 @@
     background: var(--card);
     border: 1px dashed var(--border);
     color: var(--accent);
-    box-shadow: 0 4px 10px rgba(99,102,241,0.10);
+    box-shadow: var(--ds-shadow-accent);
   }
   .dock-icon.plus svg { width: 26px; height: 26px; }
   .dock-icon.plus .dot {
