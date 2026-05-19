@@ -32,7 +32,8 @@ use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, ApproveConsentForm, BrowserBack,
     BrowserForward, BrowserReload, CancelAuthHandoff, CancelConfigForm, CancelConsentForm,
     CancelQuit, CancelResolutionForm, CheckForUpdates, CloseTask, ConfirmQuitClear,
-    ConfirmQuitKeep, CycleHandle, DenyPermissionPrompt, DismissTransient, ExpandSplit,
+    ConfirmQuitKeep, ConfirmQuitWithCleanup, CycleHandle, DenyPermissionPrompt, DismissTransient,
+    ExpandSplit,
     FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
     NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
     OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
@@ -879,13 +880,15 @@ impl DesktopShell {
     fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
         // Surface the keep-or-clear dialog instead of quitting
         // straight away; ConfirmQuitKeep / ConfirmQuitClear /
-        // CancelQuit resolve the prompt.
+        // CancelQuit / ConfirmQuitWithCleanup resolve the prompt.
         self.state.pending_quit_confirmation = true;
+        self.state.cleanup_preview = Some(crate::orchestrator::preview_host_cleanup());
         cx.notify();
     }
 
     fn on_cancel_quit(&mut self, _: &CancelQuit, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.pending_quit_confirmation = false;
+        self.state.cleanup_preview = None;
         cx.notify();
     }
 
@@ -2141,17 +2144,26 @@ impl Render for DesktopShell {
             })
             .child(body)
             .when(self.state.pending_quit_confirmation, |this| {
-                this.child(render_quit_dialog(&theme))
+                let preview = self.state.cleanup_preview.as_ref();
+                this.child(render_quit_dialog(&theme, preview))
             })
     }
 }
 
-fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
+fn render_quit_dialog(
+    theme: &theme::Theme,
+    cleanup_preview: Option<&crate::orchestrator::CleanupPreview>,
+) -> impl IntoElement {
     let backdrop = hsla(0.0, 0.0, 0.0, 0.45);
     let panel_bg = theme.settings_panel_bg;
     let panel_border = theme.panel_border;
     let text_primary = theme.text_primary;
     let text_secondary = theme.text_secondary;
+    let warn_color = theme.traffic_amber;
+
+    let show_cleanup = cleanup_preview
+        .map(|p| p.needs_cleanup)
+        .unwrap_or(false);
 
     div()
         .id("quit-confirm-overlay")
@@ -2168,7 +2180,7 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
         .child(
             div()
                 .id("quit-confirm-dialog")
-                .w(px(420.0))
+                .w(px(440.0))
                 .p(px(24.0))
                 .rounded(px(12.0))
                 .bg(panel_bg)
@@ -2192,6 +2204,57 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
                 .child(div().text_size(px(13.0)).text_color(text_secondary).child(
                     "Keep your current tabs for the next launch, or clear them and start fresh?",
                 ))
+                .when(show_cleanup, |outer| {
+                    outer.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .p(px(10.0))
+                            .rounded(px(8.0))
+                            .bg(theme.settings_card_bg)
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(warn_color)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Stale resources found:"),
+                            )
+                            .child({
+                                let mut lines = div().flex().flex_col().gap(px(2.0)).text_size(px(12.0)).text_color(text_secondary);
+                                if let Some(p) = cleanup_preview {
+                                    if !p.postgres_pids.is_empty() {
+                                        lines = lines.child(format!(
+                                            "  • {} postgres worker process{}",
+                                            p.postgres_pids.len(),
+                                            if p.postgres_pids.len() > 1 { "es" } else { "" },
+                                        ));
+                                    }
+                                    if !p.bun_server_pids.is_empty() {
+                                        lines = lines.child(format!(
+                                            "  • {} bun server process{}",
+                                            p.bun_server_pids.len(),
+                                            if p.bun_server_pids.len() > 1 { "es" } else { "" },
+                                        ));
+                                    }
+                                    if !p.port_1111_pids.is_empty() {
+                                        lines = lines.child(format!(
+                                            "  • port 1111 in use (pid{})",
+                                            if p.port_1111_pids.len() > 1 { "s" } else { "" },
+                                        ));
+                                    }
+                                    if p.shm_segments > 0 {
+                                        lines = lines.child(format!(
+                                            "  • {} System V shared memory segment{}",
+                                            p.shm_segments,
+                                            if p.shm_segments > 1 { "s" } else { "" },
+                                        ));
+                                    }
+                                }
+                                lines
+                            }),
+                    )
+                })
                 .child(
                     div()
                         .flex()
@@ -2220,7 +2283,20 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
                             |window, cx| {
                                 window.dispatch_action(Box::new(ConfirmQuitKeep), cx);
                             },
-                        )),
+                        ))
+                        .when(show_cleanup, |r| {
+                            r.child(quit_dialog_button(
+                                "Clean up & Quit",
+                                theme,
+                                QuitDialogButtonKind::Danger,
+                                |window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(ConfirmQuitWithCleanup),
+                                        cx,
+                                    );
+                                },
+                            ))
+                        }),
                 ),
         )
 }

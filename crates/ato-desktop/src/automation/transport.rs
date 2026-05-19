@@ -621,6 +621,7 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
             action: s("action")?,
         }),
         "list_sessions" => Ok(AutomationCommand::ListSessions),
+        "auth_status" => Ok(AutomationCommand::AuthStatus),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")

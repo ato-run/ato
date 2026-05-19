@@ -151,6 +151,9 @@ pub enum AutomationCommand {
     /// Returns a JSON array of `SessionViewEntry` objects suitable
     /// for the Open Windows / Card Switcher UI.
     ListSessions,
+    /// Returns the current ato-desktop sign-in state for AODD agents.
+    /// Does NOT expose the session token.
+    AuthStatus,
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────
