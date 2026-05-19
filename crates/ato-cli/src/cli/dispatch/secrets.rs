@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
 use capsule_core::common::paths::nacelle_home_dir;
-use std::io::IsTerminal;
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 
 use age::secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::application::credential::backend::age_file::load_identity_bytes;
 use crate::application::secrets::store::{SecretEntry, SecretScope};
@@ -145,6 +147,8 @@ pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
         }
 
         SecretsCommands::RotateIdentity { new_identity } => cmd_rotate_identity(new_identity),
+
+        SecretsCommands::Bridge { .. } => cmd_bridge(),
     }
 }
 
@@ -288,4 +292,321 @@ fn print_secrets_table(entries: &[SecretEntry]) {
             .unwrap_or(&entry.updated_at);
         eprintln!("{:<30} {:<18} {}", entry.key, scope, updated);
     }
+}
+
+// ── Bridge types ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op")]
+enum BridgeRequest {
+    #[serde(rename = "status")]
+    Status,
+    #[serde(rename = "list")]
+    List {
+        #[serde(default)]
+        namespace: Option<String>,
+    },
+    #[serde(rename = "set")]
+    Set {
+        key: String,
+        value: String,
+        #[serde(default)]
+        namespace: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        allow: Option<Vec<String>>,
+        #[serde(default)]
+        deny: Option<Vec<String>>,
+    },
+    #[serde(rename = "delete")]
+    Delete {
+        key: String,
+        #[serde(default)]
+        namespace: Option<String>,
+    },
+    #[serde(rename = "update_acl")]
+    UpdateAcl {
+        key: String,
+        #[serde(default)]
+        allow: Option<Vec<String>>,
+        #[serde(default)]
+        deny: Option<Vec<String>>,
+        #[serde(default)]
+        namespace: Option<String>,
+    },
+    #[serde(rename = "resolve_for_capsule")]
+    ResolveForCapsule {
+        capsule_handle: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status")]
+enum BridgeResponse {
+    #[serde(rename = "ok")]
+    Ok {
+        #[serde(default)]
+        data: Value,
+    },
+    #[serde(rename = "error")]
+    Error {
+        code: String,
+        message: String,
+    },
+}
+
+impl BridgeResponse {
+    fn ok_data(data: impl Serialize) -> Self {
+        Self::Ok {
+            data: serde_json::to_value(data).unwrap_or(Value::Null),
+        }
+    }
+
+    fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Error {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+// ── Bridge handler ────────────────────────────────────────────────────────────
+
+fn cmd_bridge() -> Result<()> {
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut line = String::new();
+
+    let bytes_read = reader
+        .read_line(&mut line)
+        .context("failed to read bridge request from stdin")?;
+    if bytes_read == 0 {
+        let resp = BridgeResponse::error("empty_request", "no request received");
+        serde_json::to_writer(std::io::stdout(), &resp)
+            .context("failed to write bridge response")?;
+        return Ok(());
+    }
+
+    let request: BridgeRequest = match serde_json::from_str(line.trim()) {
+        Ok(req) => req,
+        Err(e) => {
+            let resp = BridgeResponse::error("malformed_request", format!("{}", e));
+            serde_json::to_writer(std::io::stdout(), &resp)
+                .context("failed to write bridge response")?;
+            return Ok(());
+        }
+    };
+
+    let response = handle_bridge_request(request);
+    let mut stdout = std::io::stdout();
+    serde_json::to_writer(&mut stdout, &response).context("failed to write bridge response")?;
+    stdout.write_all(b"\n").ok();
+    stdout.flush().ok();
+    Ok(())
+}
+
+fn handle_bridge_request(req: BridgeRequest) -> BridgeResponse {
+    match req {
+        BridgeRequest::Status => bridge_status(),
+        BridgeRequest::List { namespace } => bridge_list(namespace),
+        BridgeRequest::Set {
+            key,
+            value,
+            namespace,
+            description,
+            allow,
+            deny,
+        } => bridge_set(key, value, namespace, description, allow, deny),
+        BridgeRequest::Delete { key, namespace } => bridge_delete(key, namespace),
+        BridgeRequest::UpdateAcl {
+            key,
+            allow,
+            deny,
+            namespace,
+        } => bridge_update_acl(key, allow, deny, namespace),
+        BridgeRequest::ResolveForCapsule { capsule_handle } => {
+            bridge_resolve_for_capsule(capsule_handle)
+        }
+    }
+}
+
+fn open_store() -> std::result::Result<SecretStore, BridgeResponse> {
+    SecretStore::open().map_err(|e| {
+        BridgeResponse::error("store_open_failed", format!("{}", e))
+    })
+}
+
+fn bridge_status() -> BridgeResponse {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let identity_loaded = store.age().is_some();
+    BridgeResponse::ok_data(serde_json::json!({
+        "identity_loaded": identity_loaded,
+    }))
+}
+
+fn bridge_list(namespace: Option<String>) -> BridgeResponse {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match store.list() {
+        Ok(entries) => {
+            let view: Vec<Value> = entries
+                .into_iter()
+                .map(|e| {
+                    let scope = match &e.scope {
+                        SecretScope::Global => "global".to_string(),
+                        SecretScope::Capsule(id) => format!("capsule:{}", id),
+                    };
+                    serde_json::json!({
+                        "key": e.key,
+                        "scope": scope,
+                        "description": e.description,
+                        "allow": e.allow,
+                        "deny": e.deny,
+                        "created_at": e.created_at,
+                        "updated_at": e.updated_at,
+                    })
+                })
+                .collect();
+            BridgeResponse::ok_data(serde_json::json!(view))
+        }
+        Err(e) => BridgeResponse::error("list_failed", format!("{}", e)),
+    }
+}
+
+fn bridge_set(
+    key: String,
+    value: String,
+    namespace: Option<String>,
+    description: Option<String>,
+    allow: Option<Vec<String>>,
+    deny: Option<Vec<String>>,
+) -> BridgeResponse {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let ns = namespace.as_deref().unwrap_or("default");
+    match store.set_in_namespace(
+        &key,
+        ns,
+        &value,
+        description.as_deref(),
+        allow,
+        deny,
+    ) {
+        Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
+        Err(e) => BridgeResponse::error("set_failed", format!("{}", e)),
+    }
+}
+
+fn bridge_delete(key: String, namespace: Option<String>) -> BridgeResponse {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let ns = namespace.as_deref().unwrap_or("default");
+    if ns == "default" {
+        match store.delete(&key) {
+            Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
+            Err(e) => BridgeResponse::error("delete_failed", format!("{}", e)),
+        }
+    } else {
+        match store.age() {
+            Some(age) => {
+                use crate::application::credential::backend::traits::{
+                    CredentialBackend, CredentialKey,
+                };
+                let ns_full =
+                    crate::application::secrets::store::secrets_ns(ns);
+                let ck = CredentialKey::new(ns_full, &key);
+                match age.delete(&ck) {
+                    Ok(()) => {
+                        BridgeResponse::ok_data(serde_json::json!({"key": key}))
+                    }
+                    Err(e) => {
+                        BridgeResponse::error("delete_failed", format!("{}", e))
+                    }
+                }
+            }
+            None => BridgeResponse::error(
+                "identity_not_loaded",
+                "run `ato secrets init` first",
+            ),
+        }
+    }
+}
+
+fn bridge_update_acl(
+    key: String,
+    allow: Option<Vec<String>>,
+    deny: Option<Vec<String>>,
+    namespace: Option<String>,
+) -> BridgeResponse {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let ns = namespace.as_deref().unwrap_or("default");
+    if ns == "default" {
+        match store.update_acl(&key, allow, deny) {
+            Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
+            Err(e) => BridgeResponse::error("update_acl_failed", format!("{}", e)),
+        }
+    } else {
+        match store.age() {
+            Some(age) => {
+                use crate::application::credential::backend::traits::{
+                    CredentialBackend, CredentialKey,
+                };
+                let ns_full =
+                    crate::application::secrets::store::secrets_ns(ns);
+                let ck = CredentialKey::new(ns_full, &key);
+                match age.update_acl(&ck, allow, deny) {
+                    Ok(()) => {
+                        BridgeResponse::ok_data(serde_json::json!({"key": key}))
+                    }
+                    Err(e) => BridgeResponse::error(
+                        "update_acl_failed",
+                        format!("{}", e),
+                    ),
+                }
+            }
+            None => BridgeResponse::error(
+                "identity_not_loaded",
+                "run `ato secrets init` first",
+            ),
+        }
+    }
+}
+
+fn bridge_resolve_for_capsule(capsule_handle: String) -> BridgeResponse {
+    let store = match open_store() {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let entries = match store.list() {
+        Ok(e) => e,
+        Err(e) => return BridgeResponse::error("list_failed", format!("{}", e)),
+    };
+    let mut resolved: Vec<Value> = Vec::new();
+    for entry in &entries {
+        let allowed = match store.load(&entry.key, Some(&capsule_handle)) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
+            Err(e) => {
+                return BridgeResponse::error(
+                    "resolve_failed",
+                    format!("failed to load '{}': {}", entry.key, e),
+                )
+            }
+        };
+        resolved.push(serde_json::json!({"key": entry.key, "value": allowed}));
+    }
+    BridgeResponse::ok_data(serde_json::json!(resolved))
 }
