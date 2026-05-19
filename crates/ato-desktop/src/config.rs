@@ -164,6 +164,10 @@ pub struct DesktopSettings {
     /// Controls whether closing a window stops the capsule process.
     #[serde(default)]
     pub window_close_behavior: WindowCloseBehavior,
+    /// Capsule handles that the user has starred (pinned) in the Control Bar.
+    /// Keys are stored as `capsule://{handle}` and sorted on save for diff stability.
+    #[serde(default)]
+    pub pinned_capsules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,6 +315,7 @@ impl Default for DesktopSettings {
             restore_window_frames: false,
             onboarding: OnboardingSettings::default(),
             control_bar: ControlBarSettings::default(),
+            pinned_capsules: Vec::new(),
             window_close_behavior: WindowCloseBehavior::KeepSessionRunning,
         }
     }
@@ -1264,6 +1269,7 @@ mod tests {
         assert!(!d.onboarding.completed);
         assert!(!d.onboarding.skipped);
         assert_eq!(d.onboarding.version, 0);
+        assert!(d.pinned_capsules.is_empty());
     }
 
     #[test]
