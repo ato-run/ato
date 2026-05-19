@@ -71,6 +71,17 @@ jobs:
           # don't trample each other's incremental artifacts.
           key: desktop-release-${{ matrix.target }}
 
+      - name: Build system capsule dists
+        run: |
+          set -euxo pipefail
+          for capsule in ato-onboarding ato-start ato-dock; do
+            cd crates/ato-desktop/assets/system/$capsule
+            npm install
+            npm run build
+            test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
+            cd -
+          done
+
       - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
         # MAC_DEVELOPER_ID_NAME is unset (v0.5 default), Developer ID
@@ -121,6 +132,18 @@ jobs:
         with:
           key: desktop-release-${{ matrix.target }}
 
+      - name: Build system capsule dists
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for capsule in ato-onboarding ato-start ato-dock; do
+            cd crates/ato-desktop/assets/system/$capsule
+            npm install
+            npm run build
+            test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
+            cd -
+          done
+
       - name: Install WiX Toolset 3.x
         # candle/light are required by xtask::package_msi. WiX 3.14 is
         # the v0.5 baseline. windows-2022 runners ship WiX 3.14.x
@@ -170,6 +193,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: desktop-release-${{ matrix.target }}
+
+      - name: Build system capsule dists
+        run: |
+          set -euxo pipefail
+          for capsule in ato-onboarding ato-start ato-dock; do
+            cd crates/ato-desktop/assets/system/$capsule
+            npm install
+            npm run build
+            test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
+            cd -
+          done
 
       - name: Install AppImage build deps
         # appimagetool is shipped as a single AppImage; we drop it on
