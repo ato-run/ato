@@ -407,6 +407,9 @@ func startGrpcServer(ctx context.Context, controlURL, authKey, hostname string, 
 	}
 
 	server := grpc.NewServer(grpc.Creds(insecure.NewCredentials()))
+	if socksPort < 0 || socksPort > 65535 {
+		return nil, nil, fmt.Errorf("invalid socks port: %d", socksPort)
+	}
 	baseCfg := &StartRequest{
 		ControlUrl: controlURL,
 		AuthKey:    authKey,
