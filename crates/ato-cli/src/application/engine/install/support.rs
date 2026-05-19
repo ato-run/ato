@@ -6,7 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rand::Rng;
 
-use capsule_core::execution_plan::error::{AtoErrorCode, AtoExecutionError};
+use capsule_core::execution_plan::error::AtoExecutionError;
+use capsule_core::AtoError;
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
@@ -618,15 +619,21 @@ pub(crate) fn ensure_run_auto_install_allowed(
     stdout_is_tty: bool,
 ) -> Result<()> {
     if json_mode && !yes {
-        anyhow::bail!(
-            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::InstallConsentRequired {
+                message: "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules".to_string(),
+                hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+            },
+        )));
     }
 
     if !yes && !can_prompt_interactively(stdin_is_tty, stdout_is_tty) {
-        anyhow::bail!(
-            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::InstallConsentRequired {
+                message: "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments.".to_string(),
+                hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+            },
+        )));
     }
 
     Ok(())
@@ -714,14 +721,19 @@ pub(crate) fn enforce_sandbox_mode_flags(
 
     if dangerously_skip_permissions {
         if std::env::var(ENV_ALLOW_UNSAFE).ok().as_deref() != Some("1") {
-            return Err(AtoExecutionError::new(
-                AtoErrorCode::AtoErrSecurityPolicyViolation,
-                format!("--dangerously-skip-permissions requires {ENV_ALLOW_UNSAFE}=1"),
-                None,
-                None,
-                Some("Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks."),
-            )
-            .into());
+            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                AtoError::SecurityPolicyViolation {
+                    message: format!(
+                        "--dangerously-skip-permissions requires {}=1",
+                        ENV_ALLOW_UNSAFE
+                    ),
+                    hint: Some(
+                        "Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks.".to_string()
+                    ),
+                    resource: None,
+                    blocked_host: None,
+                },
+            )));
         }
         futures::executor::block_on(
             reporter.warn(
@@ -825,9 +837,12 @@ pub(crate) async fn resolve_run_target_or_install(
                 crate::progressive_ui::begin_flow_without_logo()?;
             }
             if json_mode && !yes {
-                anyhow::bail!(
-                    "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-                );
+                return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                    AtoError::InstallConsentRequired {
+                        message: "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules".to_string(),
+                        hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+                    },
+                )));
             }
 
             if !yes
@@ -836,9 +851,12 @@ pub(crate) async fn resolve_run_target_or_install(
                     std::io::stdout().is_terminal(),
                 )
             {
-                anyhow::bail!(
-                    "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-                );
+                return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                    AtoError::InstallConsentRequired {
+                        message: "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments.".to_string(),
+                        hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+                    },
+                )));
             }
 
             if yes {

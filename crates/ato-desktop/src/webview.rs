@@ -49,9 +49,9 @@ use crate::orchestrator::{
 };
 use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::state::{
-    ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId, PendingConfigRequest,
-    PendingConsentRequest, ShellMode, WebSessionState,
+    session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
+    AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
+    PendingConfigRequest, PendingConsentRequest, ShellMode, WebSessionState,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
 use crate::ui::share::{resolve_share_icon, web_favicon_origin, ShareIconSource};
@@ -1107,6 +1107,20 @@ impl WebViewManager {
                         "ok": true,
                         "queued_action": action,
                     })));
+                    continue;
+                }
+                ListSessions => {
+                    let entries = self
+                        .async_app
+                        .update(|cx| cx.global::<SessionRegistry>().view_entries());
+                    match serde_json::to_value(&entries) {
+                        Ok(sessions) => {
+                            req.send(Ok(serde_json::json!({ "sessions": sessions })));
+                        }
+                        Err(e) => {
+                            req.send(Err(format!("serialize sessions failed: {e}")));
+                        }
+                    }
                     continue;
                 }
                 _ => {}
@@ -5371,7 +5385,8 @@ pub(crate) fn dispatch_automation_command(
         | SetCapsuleSecrets { .. }
         | ApproveExecutionPlanConsent { .. }
         | StopActiveSession
-        | HostDispatchAction { .. } => {
+        | HostDispatchAction { .. }
+        | ListSessions => {
             unreachable!()
         }
     }

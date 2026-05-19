@@ -44,6 +44,7 @@ pub mod web_link_view;
 // UI-framework dependencies.
 impl gpui::Global for crate::state::AppWindowRegistry {}
 impl gpui::Global for content_windows::OpenContentWindows {}
+impl gpui::Global for crate::state::session::SessionRegistry {}
 
 pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{

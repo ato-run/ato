@@ -104,7 +104,7 @@ pub use config::schema_registry;
 pub use config::smoke;
 
 // ── Re-exports (public API — unchanged) ───────────────────────────────────
-pub use error::{AtoError, AtoErrorPhase, CapsuleError, Result};
+pub use error::{AtoError, AtoErrorPhase, CapsuleError, PendingPermissionGate, Result};
 pub use metrics::{MetricsSession, ResourceStats, RuntimeMetadata, UnifiedMetrics};
 pub use reporter::{CapsuleReporter, NoOpReporter, UsageReporter};
 pub use runner::{SessionRunner, SessionRunnerConfig};

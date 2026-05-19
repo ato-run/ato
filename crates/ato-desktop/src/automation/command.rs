@@ -147,6 +147,10 @@ pub enum AutomationCommand {
     /// Accessibility permission, which would otherwise be required to
     /// synthesise keystrokes via osascript.
     HostDispatchAction { action: String },
+    /// List all tracked capsule sessions from the SessionRegistry.
+    /// Returns a JSON array of `SessionViewEntry` objects suitable
+    /// for the Open Windows / Card Switcher UI.
+    ListSessions,
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────
