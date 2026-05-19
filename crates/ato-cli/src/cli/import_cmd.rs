@@ -18,4 +18,14 @@ pub(crate) struct ImportArgs {
     /// Emit machine-readable JSON output.
     #[arg(long = "emit-json", default_value_t = false)]
     pub(crate) emit_json: bool,
+
+    /// Skip API lookup for verified remote recipe bindings. Falls back to
+    /// local inference immediately.
+    #[arg(long = "no-remote-recipe", default_value_t = false)]
+    pub(crate) no_remote_recipe: bool,
+
+    /// Run and exit after readiness probe passes, leaving the server
+    /// running in the background.
+    #[arg(long = "readiness-only", default_value_t = false)]
+    pub(crate) readiness_only: bool,
 }
