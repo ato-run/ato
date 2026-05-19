@@ -7,6 +7,8 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::command_spec::CommandSpec;
+
 // `ConfigField` / `ConfigKind` were extracted to `capsule-wire` in N2 so
 // `ato-desktop` can consume them without linking capsule-core's heavy
 // runtime deps. They are re-exported here so existing
@@ -1342,8 +1344,18 @@ pub struct NamedTarget {
     pub package_type: Option<String>,
 
     /// Package-specific build command preserved from schema v0.3.
-    #[serde(default)]
+    #[serde(default, alias = "build")]
     pub build_command: Option<String>,
+
+    /// Install command — runs once before building (e.g., package manager install).
+    /// Supports string (legacy) and structured `CommandSpec` forms.
+    #[serde(default, alias = "install")]
+    pub install_command: Option<CommandSpec>,
+
+    /// Pre-start command — runs after build and provider readiness, before main run
+    /// (e.g., database migrations). Supports string (legacy) and structured forms.
+    #[serde(default, alias = "prestart")]
+    pub prestart_command: Option<CommandSpec>,
 
     /// CHML build cache output globs preserved on the normalized target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
