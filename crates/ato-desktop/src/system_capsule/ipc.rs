@@ -30,6 +30,7 @@ use serde::Deserialize;
 
 use super::ato_dock::DockCommand;
 use super::ato_identity::IdentityCommand;
+use super::ato_import::ImportCommand;
 use super::ato_launch::LaunchCommand;
 use super::ato_onboarding::OnboardingCommand;
 use super::ato_settings::SettingsCommand;
@@ -102,6 +103,7 @@ fn capsule_id_from_slug(slug: &str) -> Option<SystemCapsuleId> {
         "ato-start" => Some(SystemCapsuleId::AtoStart),
         "ato-dock" => Some(SystemCapsuleId::AtoDock),
         "ato-onboarding" => Some(SystemCapsuleId::AtoOnboarding),
+        "ato-import" => Some(SystemCapsuleId::AtoImport),
         _ => None,
     }
 }
@@ -137,6 +139,9 @@ fn parse_system_command(
         }
         SystemCapsuleId::AtoOnboarding => {
             serde_json::from_value::<OnboardingCommand>(command).map(SystemCommand::AtoOnboarding)
+        }
+        SystemCapsuleId::AtoImport => {
+            serde_json::from_value::<ImportCommand>(command).map(SystemCommand::AtoImport)
         }
     }
 }
