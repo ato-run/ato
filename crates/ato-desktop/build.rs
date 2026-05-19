@@ -21,18 +21,15 @@ fn main() {
 }
 
 fn check_onboarding_dist(manifest_dir: &PathBuf) {
-    let dist_dir = manifest_dir
-        .join("assets")
-        .join("system")
-        .join("ato-onboarding")
-        .join("dist");
+    let capsule_dir = manifest_dir.join("assets").join("system").join("ato-onboarding");
+    let dist_dir = capsule_dir.join("dist");
+    let entrypoint = dist_dir.join("index.html");
 
     println!("cargo:rerun-if-changed={}", dist_dir.display());
     println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_ONBOARDING_BUILD");
 
-    let skip_requested = env_truthy("ATO_DESKTOP_SKIP_ONBOARDING_BUILD");
-    if dist_dir.exists() {
-        if skip_requested {
+    if entrypoint.exists() {
+        if env_truthy("ATO_DESKTOP_SKIP_ONBOARDING_BUILD") {
             println!(
                 "cargo:warning=ATO_DESKTOP_SKIP_ONBOARDING_BUILD=1 set; using existing onboarding dist at {}",
                 dist_dir.display()
@@ -41,8 +38,23 @@ fn check_onboarding_dist(manifest_dir: &PathBuf) {
         return;
     }
 
+    if env_truthy("ATO_DESKTOP_SKIP_ONBOARDING_BUILD") {
+        println!(
+            "cargo:warning=ATO_DESKTOP_SKIP_ONBOARDING_BUILD=1 set; onboarding dist check skipped"
+        );
+        return;
+    }
+
+    if !capsule_dir.join("node_modules").exists() {
+        run_command("npm", &["install"], &capsule_dir, "ato-onboarding npm install");
+    }
+    run_command("npm", &["run", "build"], &capsule_dir, "ato-onboarding vite build");
+    if entrypoint.exists() {
+        return;
+    }
+
     panic!(
-        "ato-onboarding dist missing at {}. Run `npm install && npm run build` in assets/system/ato-onboarding/ first.",
+        "ato-onboarding dist/index.html missing at {}. Set ATO_DESKTOP_SKIP_ONBOARDING_BUILD=1 to skip or run `npm run build` in assets/system/ato-onboarding/.",
         dist_dir.display()
     );
 }
@@ -89,9 +101,9 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
     );
     println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_DOCK_BUILD");
 
-    let skip_requested = env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD");
-    if skip_requested {
-        if dist_dir.exists() {
+    let entrypoint = dist_dir.join("index.html");
+    if env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD") {
+        if entrypoint.exists() {
             println!(
                 "cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; using existing dock dist at {}",
                 dist_dir.display()
@@ -99,10 +111,10 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
             return;
         }
 
-        panic!(
-            "ATO_DESKTOP_SKIP_DOCK_BUILD=1 was set but dock dist is missing at {}. Unset the variable or build dist first.",
-            dist_dir.display()
+        println!(
+            "cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; dock dist check skipped"
         );
+        return;
     }
 
     if !dock_dir.join("node_modules").exists() {
@@ -116,12 +128,12 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
 
     run_command("npm", &["run", "build"], &dock_dir, "ato-dock build");
 
-    if dist_dir.exists() {
+    if entrypoint.exists() {
         return;
     }
 
     panic!(
-        "ato-dock dist missing at {} after build. Run `npm install && npm run build` in assets/system/ato-dock/ first.",
+        "ato-dock dist/index.html missing at {} after build. Run `npm install && npm run build` in assets/system/ato-dock/.",
         dist_dir.display()
     );
 }
@@ -151,18 +163,15 @@ fn run_command(binary: &str, args: &[&str], cwd: &PathBuf, label: &str) {
 }
 
 fn check_start_dist(manifest_dir: &PathBuf) {
-    let dist_dir = manifest_dir
-        .join("assets")
-        .join("system")
-        .join("ato-start")
-        .join("dist");
+    let capsule_dir = manifest_dir.join("assets").join("system").join("ato-start");
+    let dist_dir = capsule_dir.join("dist");
+    let entrypoint = dist_dir.join("index.html");
 
     println!("cargo:rerun-if-changed={}", dist_dir.display());
     println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_START_BUILD");
 
-    let skip_requested = env_truthy("ATO_DESKTOP_SKIP_START_BUILD");
-    if dist_dir.exists() {
-        if skip_requested {
+    if entrypoint.exists() {
+        if env_truthy("ATO_DESKTOP_SKIP_START_BUILD") {
             println!(
                 "cargo:warning=ATO_DESKTOP_SKIP_START_BUILD=1 set; using existing start dist at {}",
                 dist_dir.display()
@@ -171,8 +180,23 @@ fn check_start_dist(manifest_dir: &PathBuf) {
         return;
     }
 
+    if env_truthy("ATO_DESKTOP_SKIP_START_BUILD") {
+        println!(
+            "cargo:warning=ATO_DESKTOP_SKIP_START_BUILD=1 set; start dist check skipped"
+        );
+        return;
+    }
+
+    if !capsule_dir.join("node_modules").exists() {
+        run_command("npm", &["install"], &capsule_dir, "ato-start npm install");
+    }
+    run_command("npm", &["run", "build"], &capsule_dir, "ato-start astro build");
+    if entrypoint.exists() {
+        return;
+    }
+
     panic!(
-        "ato-start dist missing at {}. Run `npm install && npm run build` in assets/system/ato-start/ first.",
+        "ato-start dist/index.html missing at {}. Set ATO_DESKTOP_SKIP_START_BUILD=1 to skip or run `npm run build` in assets/system/ato-start/.",
         dist_dir.display()
     );
 }
@@ -183,13 +207,13 @@ fn check_store_dist(manifest_dir: &PathBuf) {
         .join("system")
         .join("ato-store")
         .join("dist");
+    let entrypoint = dist_dir.join("index.html");
 
     println!("cargo:rerun-if-changed={}", dist_dir.display());
     println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_STORE_BUILD");
 
-    let skip_requested = env_truthy("ATO_DESKTOP_SKIP_STORE_BUILD");
-    if dist_dir.exists() {
-        if skip_requested {
+    if entrypoint.exists() {
+        if env_truthy("ATO_DESKTOP_SKIP_STORE_BUILD") {
             println!(
                 "cargo:warning=ATO_DESKTOP_SKIP_STORE_BUILD=1 set; using existing store dist at {}",
                 dist_dir.display()
@@ -198,9 +222,16 @@ fn check_store_dist(manifest_dir: &PathBuf) {
         return;
     }
 
+    if env_truthy("ATO_DESKTOP_SKIP_STORE_BUILD") {
+        println!(
+            "cargo:warning=ATO_DESKTOP_SKIP_STORE_BUILD=1 set; store dist check skipped"
+        );
+        return;
+    }
+
     panic!(
-        "ato-store dist missing at {}. Run `cargo run --manifest-path xtask/Cargo.toml -- store build` first.",
-        dist_dir.display()
+        "ato-store dist/index.html missing at {}. Set ATO_DESKTOP_SKIP_STORE_BUILD=1 to skip or build ato-web with `pnpm run build:desktop-store` and copy dist to assets/system/ato-store/dist/.",
+        entrypoint.display()
     );
 }
 
