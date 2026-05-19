@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use capsule_core::capsule::manifest::blake3_digest;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -123,6 +124,24 @@ pub(crate) struct GitHubImportSession {
     unsafe_execution_confirmed: bool,
     /// Metadata about how the recipe was resolved (remote binding, inference, or fallback).
     recipe_resolution: Option<RecipeResolution>,
+    /// Hash of the recipe TOML as first obtained from inference (whether
+    /// the remote verified binding lookup or local inference). Captured in
+    /// `apply_inferred_output` and used by `apply_run_result` to tell
+    /// whether the post-run CLI output is the verbatim recipe or a
+    /// user-edited variant. Without this, the runner's `--recipe <tmp.toml>`
+    /// round-trip flips `recipe.origin` to "manual" even when the bytes are
+    /// unchanged, destroying the verified-remote provenance.
+    base_recipe_hash: Option<String>,
+    /// Origin tag captured at inference time ("registry" / "inference").
+    /// Restored onto `recipe.origin` after a same-hash run.
+    base_recipe_origin: Option<String>,
+    /// `RecipeResolution` captured at inference time. Preserved across a
+    /// same-hash run for the same reason as `base_recipe_origin`.
+    base_recipe_resolution: Option<RecipeResolution>,
+    /// True when `edit_recipe` has been called with a TOML whose blake3
+    /// hash differs from `base_recipe_hash`. The UI uses this to surface
+    /// "Edited locally" alongside the base provenance.
+    editable_recipe_dirty: bool,
 }
 
 impl Default for GitHubImportSession {
@@ -142,6 +161,10 @@ impl Default for GitHubImportSession {
             submit_error_excerpt: None,
             unsafe_execution_confirmed: false,
             recipe_resolution: None,
+            base_recipe_hash: None,
+            base_recipe_origin: None,
+            base_recipe_resolution: None,
+            editable_recipe_dirty: false,
         }
     }
 }
@@ -163,6 +186,10 @@ impl GitHubImportSession {
     }
 
     /// Apply the CLI `ato import --emit-json` output (without `--run`).
+    ///
+    /// Captures the recipe's hash, origin, and resolution as the *base*
+    /// provenance so that `apply_run_result` can later distinguish "user
+    /// ran the verbatim recipe" from "user edited it before running".
     pub(crate) fn apply_inferred_output(&mut self, output: ImportOutput) -> Result<()> {
         if output.run.status != "not_run" {
             bail!(
@@ -171,6 +198,11 @@ impl GitHubImportSession {
             );
         }
         self.editable_recipe_toml = Some(output.recipe.recipe_toml.clone());
+        self.base_recipe_hash = Some(output.recipe.recipe_hash.clone());
+        self.base_recipe_origin = Some(output.recipe.origin.clone());
+        self.base_recipe_resolution = output.recipe_resolution.clone();
+        self.editable_recipe_dirty = false;
+        self.recipe_resolution = output.recipe_resolution;
         self.source = Some(output.source);
         self.recipe = Some(output.recipe);
         self.last_run = Some(output.run);
@@ -180,10 +212,20 @@ impl GitHubImportSession {
     }
 
     /// Replace the textarea TOML with user-edited content.
+    ///
+    /// Side-effect: re-computes `editable_recipe_dirty` against
+    /// `base_recipe_hash`. Pure-whitespace or no-op edits that hash back to
+    /// the verified-base recipe leave the dirty flag false, so the next Run
+    /// still preserves the original `registry` provenance.
     pub(crate) fn edit_recipe(&mut self, toml: String) -> Result<()> {
         match self.state {
             GitHubImportSessionState::AwaitingTomlConfirmation
             | GitHubImportSessionState::FailedAwaitingRecipeEdit => {
+                let new_hash = blake3_digest(toml.as_bytes());
+                self.editable_recipe_dirty = match self.base_recipe_hash.as_deref() {
+                    Some(base) => base != new_hash,
+                    None => true,
+                };
                 self.editable_recipe_toml = Some(toml);
                 Ok(())
             }
@@ -208,27 +250,71 @@ impl GitHubImportSession {
     /// Updates `source` / `recipe` / `last_run` to reflect the latest run.
     /// `editable_recipe_toml` is preserved so the user's textarea content
     /// survives a server round-trip (the CLI may normalize whitespace).
+    ///
+    /// Recipe provenance:
+    /// - If the post-run `recipe.recipe_hash` equals `base_recipe_hash` (the
+    ///   hash captured at inference time), the verified-base origin and
+    ///   resolution are restored. Without this, the runner's
+    ///   `--recipe <tmp.toml>` round-trip would flip `recipe.origin` to
+    ///   "manual" even for the verbatim verified recipe.
+    /// - Otherwise the recipe is treated as edited locally: origin becomes
+    ///   `"edited_local"` and `recipe_resolution` is replaced with a
+    ///   `RecipeResolution { source: "edited_local", .. }` marker so the
+    ///   UI can show "Edited locally — based on: <base>".
     pub(crate) fn apply_run_result(&mut self, output: ImportOutput) -> Result<()> {
-        match output.run.status.as_str() {
+        let ImportOutput {
+            source,
+            mut recipe,
+            run,
+            recipe_resolution: cli_resolution,
+        } = output;
+
+        let hash_matches_base = self
+            .base_recipe_hash
+            .as_deref()
+            .map(|base| base == recipe.recipe_hash)
+            .unwrap_or(false);
+
+        if hash_matches_base {
+            if let Some(base_origin) = self.base_recipe_origin.clone() {
+                recipe.origin = base_origin;
+            }
+            if let Some(base_resolution) = self.base_recipe_resolution.clone() {
+                self.recipe_resolution = Some(base_resolution);
+            } else if let Some(cli_resolution) = cli_resolution {
+                self.recipe_resolution = Some(cli_resolution);
+            }
+            self.editable_recipe_dirty = false;
+        } else {
+            recipe.origin = "edited_local".to_string();
+            self.recipe_resolution = Some(RecipeResolution {
+                source: "edited_local".to_string(),
+                fallback: None,
+                error_class: None,
+            });
+            self.editable_recipe_dirty = true;
+        }
+
+        match run.status.as_str() {
             "passed" => {
-                self.source = Some(output.source);
-                self.recipe = Some(output.recipe);
-                self.last_run = Some(output.run);
+                self.source = Some(source);
+                self.recipe = Some(recipe);
+                self.last_run = Some(run);
                 self.submit_enabled = true;
                 self.state = GitHubImportSessionState::Verified;
                 Ok(())
             }
             "failed" => {
-                self.source = Some(output.source);
-                self.recipe = Some(output.recipe);
-                self.last_run = Some(output.run);
+                self.source = Some(source);
+                self.recipe = Some(recipe);
+                self.last_run = Some(run);
                 self.submit_enabled = false;
                 self.state = GitHubImportSessionState::FailedAwaitingRecipeEdit;
                 Ok(())
             }
             other => bail!(
                 "apply_run_result expects run.status passed|failed, got {:?}",
-                other
+                other.to_string()
             ),
         }
     }
@@ -253,6 +339,9 @@ impl GitHubImportSession {
             source,
             recipe,
             last_run,
+            base_recipe_hash: self.base_recipe_hash.clone(),
+            base_recipe_resolution: self.base_recipe_resolution.clone(),
+            edited_locally: self.editable_recipe_dirty,
         })
     }
 
@@ -272,6 +361,10 @@ impl GitHubImportSession {
             submit_error_excerpt: self.submit_error_excerpt.clone(),
             unsafe_execution_confirmed: self.unsafe_execution_confirmed,
             recipe_resolution: self.recipe_resolution.clone(),
+            base_recipe_hash: self.base_recipe_hash.clone(),
+            base_recipe_origin: self.base_recipe_origin.clone(),
+            base_recipe_resolution: self.base_recipe_resolution.clone(),
+            edited_locally: self.editable_recipe_dirty,
         }
     }
 
@@ -371,6 +464,32 @@ impl GitHubImportSession {
     pub(crate) fn confirm_unsafe_execution(&mut self) {
         self.unsafe_execution_confirmed = true;
     }
+
+    /// Hash of the recipe TOML as first obtained from inference. `None`
+    /// until `apply_inferred_output` runs.
+    pub(crate) fn base_recipe_hash(&self) -> Option<&str> {
+        self.base_recipe_hash.as_deref()
+    }
+
+    /// Origin tag captured at inference time ("registry" / "inference").
+    /// Restored onto `recipe.origin` after a same-hash run.
+    pub(crate) fn base_recipe_origin(&self) -> Option<&str> {
+        self.base_recipe_origin.as_deref()
+    }
+
+    /// `RecipeResolution` captured at inference time. `None` when the CLI
+    /// did not emit one (older CLI, or `--no-remote-recipe` skipped lookup).
+    pub(crate) fn base_recipe_resolution(&self) -> Option<&RecipeResolution> {
+        self.base_recipe_resolution.as_ref()
+    }
+
+    /// True when the editable TOML's blake3 hash diverges from
+    /// `base_recipe_hash`. The Submit payload uses this to mark the row
+    /// `edited_locally=true` even when the recipe coincidentally fails to
+    /// run; the UI uses it to render the "Edited locally" badge.
+    pub(crate) fn edited_locally(&self) -> bool {
+        self.editable_recipe_dirty
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -378,6 +497,21 @@ pub(crate) struct SubmitPayload {
     pub(crate) source: ImportSource,
     pub(crate) recipe: ImportRecipe,
     pub(crate) last_run: ImportRun,
+    /// Recipe hash captured at inference time. When this equals
+    /// `recipe.recipe_hash`, the API can short-circuit recipe insert and
+    /// reuse the existing verified binding instead of creating a new
+    /// `manual` recipe row.
+    pub(crate) base_recipe_hash: Option<String>,
+    /// Provenance of the inferred-time recipe (`remote_binding` /
+    /// `inference` / `remote_binding_failed`). Sent so the API has the same
+    /// context as the Desktop UI when accepting the submission.
+    pub(crate) base_recipe_resolution: Option<RecipeResolution>,
+    /// True when the user edited the TOML between inference and submit
+    /// (the editable TOML hashes to something different from
+    /// `base_recipe_hash`). The API uses this to decide whether to record
+    /// a fresh manual recipe row or attach the attempt to the existing
+    /// verified binding.
+    pub(crate) edited_locally: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,6 +536,17 @@ pub(crate) struct SessionSnapshot {
     pub(crate) submit_error_excerpt: Option<String>,
     pub(crate) unsafe_execution_confirmed: bool,
     pub(crate) recipe_resolution: Option<RecipeResolution>,
+    /// Hash of the recipe TOML captured at inference time. Used by the
+    /// Import UI to show "Based on: Verified remote recipe" after the user
+    /// has edited the TOML, and by the submit payload as the provenance
+    /// pointer back to the verified binding.
+    pub(crate) base_recipe_hash: Option<String>,
+    /// Origin tag captured at inference time ("registry" / "inference").
+    pub(crate) base_recipe_origin: Option<String>,
+    /// `RecipeResolution` captured at inference time.
+    pub(crate) base_recipe_resolution: Option<RecipeResolution>,
+    /// True when the editable TOML diverges from the inferred base.
+    pub(crate) edited_locally: bool,
 }
 
 pub(crate) fn normalize_github_import_input(input: &str) -> Result<NormalizedGitHubRepo> {
@@ -1179,5 +1324,366 @@ mod tests {
         assert!(!session.submit_enabled());
         let snap = session.snapshot();
         assert_eq!(snap.state, GitHubImportSessionState::Submitted);
+    }
+
+    // ─── Recipe provenance preservation across Run ─────────────────────────
+    //
+    // The desktop runner shells out to
+    //   `ato import <repo> --recipe <tmp.toml> --run --emit-json`
+    // and the CLI tags `--recipe`-driven runs as origin="manual" regardless
+    // of whether the user actually edited the TOML. Without provenance
+    // tracking here, a verbatim run of the verified remote recipe would
+    // silently downgrade origin and recipe_resolution. These tests pin the
+    // behaviour described in FINDING-04 of
+    // .tmp/aodd-receipt-desktop-blinko-canonical.yaml.
+
+    fn remote_recipe_resolution() -> RecipeResolution {
+        RecipeResolution {
+            source: "remote_binding".to_string(),
+            fallback: None,
+            error_class: None,
+        }
+    }
+
+    fn registry_inferred_output() -> ImportOutput {
+        let mut output = inferred_output();
+        output.recipe.origin = "registry".to_string();
+        output.recipe_resolution = Some(remote_recipe_resolution());
+        output
+    }
+
+    fn registry_passed_output_returned_by_cli() -> ImportOutput {
+        // The CLI re-tags --recipe-driven runs as origin="manual" and drops
+        // the resolution (the runner does not pass --no-remote-recipe; it
+        // passes --recipe, which forces the local branch in import_cmd.rs).
+        // recipe_hash matches the inferred recipe because the runner writes
+        // the verbatim TOML to a temp file.
+        let mut output = passed_output();
+        output.recipe.origin = "manual".to_string();
+        output.recipe_resolution = None;
+        output
+    }
+
+    #[test]
+    fn apply_inferred_output_captures_base_provenance_and_clears_dirty() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session.begin_inference();
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+
+        let snap = session.snapshot();
+        assert_eq!(snap.recipe.as_ref().unwrap().origin, "registry");
+        assert_eq!(
+            snap.recipe_resolution.as_ref().unwrap().source,
+            "remote_binding"
+        );
+        assert_eq!(snap.base_recipe_hash.as_deref(), Some("blake3:recipehash"));
+        assert_eq!(snap.base_recipe_origin.as_deref(), Some("registry"));
+        assert_eq!(
+            snap.base_recipe_resolution.as_ref().unwrap().source,
+            "remote_binding"
+        );
+        assert!(!snap.edited_locally);
+    }
+
+    #[test]
+    fn run_result_preserves_registry_origin_when_hash_matches() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+
+        // Same recipe_hash as the inferred output — the CLI re-tags
+        // origin to "manual" because --recipe was used, but the session
+        // restores "registry" from base_recipe_origin.
+        session
+            .apply_run_result(registry_passed_output_returned_by_cli())
+            .expect("apply passed");
+
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::Verified);
+        assert_eq!(snap.recipe.as_ref().unwrap().origin, "registry");
+        assert_eq!(
+            snap.recipe_resolution.as_ref().unwrap().source,
+            "remote_binding"
+        );
+        assert!(!snap.edited_locally);
+    }
+
+    #[test]
+    fn remote_recipe_resolution_survives_failed_run_when_hash_matches() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+
+        // Failed run with the verbatim recipe (host shmget, dep failure,
+        // etc.). origin and resolution must still survive — the user has
+        // not touched the TOML, so a retry would still be a remote-binding
+        // run.
+        let mut failed = failed_output("provider_failed");
+        failed.recipe.origin = "manual".to_string();
+        failed.recipe_resolution = None;
+        session
+            .apply_run_result(failed)
+            .expect("apply failed");
+
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::FailedAwaitingRecipeEdit);
+        assert_eq!(snap.recipe.as_ref().unwrap().origin, "registry");
+        assert_eq!(
+            snap.recipe_resolution.as_ref().unwrap().source,
+            "remote_binding"
+        );
+        assert!(!snap.edited_locally);
+    }
+
+    #[test]
+    fn run_result_marks_edited_local_when_recipe_hash_changes() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+
+        // User edits the TOML. The dirty flag flips because the new TOML
+        // hashes to a different value than the base.
+        session
+            .edit_recipe("schema_version = \"0.3\"\n# edited\n".to_string())
+            .expect("edit");
+        assert!(session.edited_locally());
+
+        session.start_run().expect("run starts");
+
+        // CLI emits the edited TOML's hash, which won't match the base.
+        // The session swaps origin to "edited_local" and overrides the
+        // resolution.
+        let mut edited = passed_output();
+        edited.recipe.origin = "manual".to_string();
+        edited.recipe.recipe_hash = "blake3:edited-hash".to_string();
+        edited.recipe_resolution = None;
+        session.apply_run_result(edited).expect("apply edited");
+
+        let snap = session.snapshot();
+        assert_eq!(snap.state, GitHubImportSessionState::Verified);
+        assert_eq!(snap.recipe.as_ref().unwrap().origin, "edited_local");
+        assert_eq!(
+            snap.recipe_resolution.as_ref().unwrap().source,
+            "edited_local"
+        );
+        assert!(snap.edited_locally);
+    }
+
+    #[test]
+    fn edit_recipe_does_not_mark_dirty_when_hash_unchanged() {
+        // Build an inferred output whose recipe_hash actually matches the
+        // blake3 of its recipe_toml — `sample_recipe` uses a fixed
+        // placeholder hash, which is fine for the other tests but breaks
+        // any test that round-trips through `edit_recipe`'s hash check.
+        let base_toml = "schema_version = \"0.3\"\nname = \"blinko\"\n".to_string();
+        let base_hash = blake3_digest(base_toml.as_bytes());
+        let inferred = ImportOutput {
+            source: sample_source(),
+            recipe: ImportRecipe {
+                origin: "registry".to_string(),
+                target_label: Some("web".to_string()),
+                platform_os: "darwin".to_string(),
+                platform_arch: "arm64".to_string(),
+                recipe_toml: base_toml.clone(),
+                recipe_hash: base_hash.clone(),
+            },
+            run: ImportRun {
+                status: "not_run".to_string(),
+                phase: None,
+                error_class: None,
+                error_excerpt: None,
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+            },
+            recipe_resolution: Some(remote_recipe_resolution()),
+        };
+
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session.apply_inferred_output(inferred).expect("apply inferred");
+        assert_eq!(session.base_recipe_hash(), Some(base_hash.as_str()));
+        assert!(!session.edited_locally());
+
+        // "Edit" to the exact same bytes — this happens when the UI fires
+        // an edit on blur even though the user did not change anything.
+        // The base hash must match and the dirty flag must stay false.
+        session
+            .edit_recipe(base_toml.clone())
+            .expect("edit");
+        assert!(!session.edited_locally());
+
+        // Now actually edit.
+        let edited = format!("{base_toml}# real edit\n");
+        session.edit_recipe(edited).expect("edit");
+        assert!(session.edited_locally());
+
+        // Revert back to base content — dirty flag should clear.
+        session.edit_recipe(base_toml).expect("edit");
+        assert!(!session.edited_locally());
+    }
+
+    #[test]
+    fn submit_payload_preserves_verified_binding_context_for_same_hash() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(registry_passed_output_returned_by_cli())
+            .expect("apply passed");
+
+        let payload = session.submit_payload().expect("payload available");
+        assert_eq!(payload.recipe.origin, "registry");
+        assert_eq!(payload.recipe.recipe_hash, "blake3:recipehash");
+        assert_eq!(
+            payload.base_recipe_hash.as_deref(),
+            Some("blake3:recipehash"),
+            "verified base hash must be in payload so API can reuse the binding"
+        );
+        assert_eq!(
+            payload.base_recipe_resolution.as_ref().map(|r| r.source.as_str()),
+            Some("remote_binding"),
+        );
+        assert!(
+            !payload.edited_locally,
+            "verbatim verified recipe must not be marked edited"
+        );
+    }
+
+    #[test]
+    fn submit_payload_marks_edited_locally_when_user_changed_toml() {
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+        session
+            .edit_recipe("schema_version = \"0.3\"\n# edited\n".to_string())
+            .expect("edit");
+        session.start_run().expect("run starts");
+
+        let mut edited = passed_output();
+        edited.recipe.origin = "manual".to_string();
+        edited.recipe.recipe_hash = "blake3:edited-hash".to_string();
+        session.apply_run_result(edited).expect("apply edited");
+
+        let payload = session.submit_payload().expect("payload available");
+        assert_eq!(payload.recipe.origin, "edited_local");
+        assert_eq!(payload.recipe.recipe_hash, "blake3:edited-hash");
+        assert_eq!(
+            payload.base_recipe_hash.as_deref(),
+            Some("blake3:recipehash"),
+            "base hash still points back to the original verified recipe",
+        );
+        assert!(
+            payload.edited_locally,
+            "user-edited recipe must be marked so API records it as a new manual row",
+        );
+        assert_eq!(
+            payload.base_recipe_resolution.as_ref().map(|r| r.source.as_str()),
+            Some("remote_binding"),
+            "API still gets the original provenance for the audit trail",
+        );
+    }
+
+    #[test]
+    fn snapshot_json_exposes_provenance_keys_to_import_ui() {
+        // The ato-import HTML reads these keys verbatim:
+        //   snapshot.recipe_resolution.{source,fallback,error_class}
+        //   snapshot.base_recipe_hash
+        //   snapshot.base_recipe_origin
+        //   snapshot.base_recipe_resolution.source
+        //   snapshot.edited_locally
+        // Pin them here so a serde rename or struct rearrangement breaks
+        // this test instead of silently breaking the UI.
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(registry_inferred_output())
+            .expect("apply inferred");
+
+        let snap = session.snapshot();
+        let json = serde_json::to_value(&snap).expect("snapshot serializes");
+
+        assert_eq!(
+            json["recipe_resolution"]["source"].as_str(),
+            Some("remote_binding"),
+        );
+        assert_eq!(
+            json["base_recipe_hash"].as_str(),
+            Some("blake3:recipehash"),
+        );
+        assert_eq!(json["base_recipe_origin"].as_str(), Some("registry"));
+        assert_eq!(
+            json["base_recipe_resolution"]["source"].as_str(),
+            Some("remote_binding"),
+        );
+        assert_eq!(json["edited_locally"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn submit_payload_carries_no_base_context_when_inference_was_local() {
+        // Local inference (origin="inference", recipe_resolution=None)
+        // should still produce a payload — just without the verified-base
+        // pointers.
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output()) // origin="inference", no resolution
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session
+            .apply_run_result(passed_output())
+            .expect("apply passed");
+
+        let payload = session.submit_payload().expect("payload available");
+        assert_eq!(payload.recipe.origin, "inference");
+        assert_eq!(payload.base_recipe_hash.as_deref(), Some("blake3:recipehash"));
+        assert!(
+            payload.base_recipe_resolution.is_none(),
+            "no resolution emitted by CLI → no base resolution in payload",
+        );
+        assert!(!payload.edited_locally);
+    }
+
+    #[test]
+    fn edit_recipe_keeps_dirty_true_when_base_hash_absent() {
+        let mut session = GitHubImportSession::default();
+        // No inference has been applied yet; base_recipe_hash is None.
+        // Force the session into an editable state by faking a snapshot
+        // through the public API: begin_resolve + begin_inference +
+        // record_inference_failure → InferenceFailed (still not editable).
+        // For this test, we go through apply_inferred_output (which sets
+        // base hash) and then null it out by hand-rolling the state. We
+        // just want to verify edit_recipe handles the None branch.
+        session.begin_resolve("owner/repo").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply");
+        // Erase the base so we are testing the None branch.
+        session.base_recipe_hash = None;
+        session.editable_recipe_dirty = false;
+
+        session
+            .edit_recipe("schema_version = \"0.3\"\n".to_string())
+            .expect("edit");
+        assert!(
+            session.edited_locally(),
+            "edit_recipe must default dirty=true when no base recipe is known"
+        );
     }
 }
