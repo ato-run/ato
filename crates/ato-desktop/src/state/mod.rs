@@ -150,7 +150,6 @@ pub enum HostPanelRoute {
     },
     CapsuleDetail {
         pane_id: PaneId,
-        tab: CapsuleDetailTab,
     },
 }
 
@@ -162,8 +161,8 @@ impl HostPanelRoute {
             Self::Settings {
                 section: Some(section),
             } => format!("Settings · {}", section.label()),
-            Self::CapsuleDetail { pane_id, tab } => {
-                format!("Capsule detail · pane {} · {}", pane_id, tab.label())
+            Self::CapsuleDetail { pane_id } => {
+                format!("Capsule detail · pane {}", pane_id)
             }
         }
     }
@@ -1864,7 +1863,6 @@ impl AppState {
         let active = self.active_capsule_pane()?;
         Some(HostPanelRoute::CapsuleDetail {
             pane_id: active.pane_id,
-            tab: self.route_metadata_active_tab,
         })
     }
 
@@ -4713,7 +4711,6 @@ mod tests {
             route,
             HostPanelRoute::CapsuleDetail {
                 pane_id: 2,
-                tab: CapsuleDetailTab::Permissions,
             }
         );
     }
@@ -4738,12 +4735,11 @@ mod tests {
         let workspace = state.active_workspace().expect("workspace");
         assert_eq!(workspace.tasks.len(), original_count + 1);
         let task = workspace.active_task().expect("task");
-        assert_eq!(task.title, "Capsule detail · pane 2 · Overview");
+        assert_eq!(task.title, "Capsule detail · pane 2");
         assert!(task.panes.iter().any(|pane| matches!(
             pane.surface,
             PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
                 pane_id: 2,
-                tab: CapsuleDetailTab::Overview,
             })
         )));
     }
@@ -4763,12 +4759,11 @@ mod tests {
             .iter()
             .find(|task| task.title.contains("Capsule detail"))
             .expect("capsule detail task");
-        assert_eq!(task.title, "Capsule detail · pane 2 · Logs");
+        assert_eq!(task.title, "Capsule detail · pane 2");
         assert!(task.panes.iter().any(|pane| matches!(
             pane.surface,
             PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
                 pane_id: 2,
-                tab: CapsuleDetailTab::Logs,
             })
         )));
     }
