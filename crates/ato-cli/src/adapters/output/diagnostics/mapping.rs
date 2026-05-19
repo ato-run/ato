@@ -301,7 +301,7 @@ pub fn from_anyhow(err: &AnyhowError, command_context: CommandContext) -> CliDia
     CliDiagnostic::new(
         CliDiagnosticCode::E999,
         message,
-        Some("再実行時に `RUST_BACKTRACE=1` を付けて詳細ログを確認してください。"),
+        Some("Run with RUST_BACKTRACE=1 for a full trace. If this problem persists, please file a bug."),
         None,
         None,
         None,
@@ -488,7 +488,7 @@ fn from_capsule_error(core_err: &capsule_core::CapsuleError, causes: Vec<String>
         other => CliDiagnostic::new(
             CliDiagnosticCode::E999,
             other.to_string(),
-            Some("再実行時に `RUST_BACKTRACE=1` を付けて詳細ログを確認してください。"),
+            Some("Run with RUST_BACKTRACE=1 for a full trace. If this problem persists, please file a bug."),
             None,
             None,
             None,
