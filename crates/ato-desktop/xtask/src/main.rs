@@ -17,37 +17,22 @@ fn main() -> Result<()> {
     };
 
     match cmd {
-        "frontend" => {
-            let subcommand = all.get(1).map(String::as_str);
-            let forwarded = normalize_passthrough_args(all[2..].to_vec());
-            match subcommand {
-                Some("build") => frontend_build(&forwarded),
-                Some("dev") => frontend_dev(&forwarded),
-                Some("help") | Some("--help") | Some("-h") | None => {
-                    print_frontend_help();
-                    Ok(())
-                }
-                Some(other) => bail!("unsupported frontend command: {}", other),
-            }
-        }
-        "store" => {
-            let forwarded = normalize_passthrough_args(all[1..].to_vec());
-            let do_install = forwarded.iter().any(|a| a == "--install");
-            store_build(do_install)
-        }
         "bundle" => {
+            let forwarded = &all[1..];
+
             let mut target = DEFAULT_TARGET.to_string();
             let mut sign = false;
             let mut do_notarize = false;
             let mut do_zip = false;
             let mut do_msi = false;
             let mut do_appimage = false;
-            let mut i = 1;
-            while let Some(arg) = all.get(i) {
+            let mut i = 0;
+            while i < forwarded.len() {
+                let arg = &forwarded[i];
                 i += 1;
                 match arg.as_str() {
                     "--target" => {
-                        target = all
+                        target = forwarded
                             .get(i)
                             .context("--target requires a value such as darwin-arm64")?
                             .clone();
@@ -158,14 +143,11 @@ fn print_help() {
     println!(
         "ato-desktop xtask\n\n\
          Commands:\n  \
-                     frontend build [-- <vite-args...>]\n  \
-                     frontend dev   [-- <vite-args...>]\n  \
-                     store build [--install]\n  \
-            bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
-            notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
-            zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
-            msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
-            appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
+           bundle [--target TARGET] [--sign] [--notarize] [--zip] [--msi] [--appimage]\n  \
+           notarize <bundle>     Submit an .app to Apple notary (no-op without APPLE_* env)\n  \
+           zip      <path>       Wrap a .app bundle (macOS) or staging dir (Windows) in a .zip\n  \
+           msi      <staging>    Wrap a Windows staging tree in an .msi via WiX (candle/light)\n  \
+           appimage <staging>    Wrap a Linux staging tree in an .AppImage via appimagetool\n\n\
          Targets:\n  \
             darwin-arm64 (default), darwin-x86_64, windows-x86_64, linux-x86_64, linux-arm64\n\n\
          macOS code-signing modes (resolved at runtime):\n  \
@@ -175,106 +157,6 @@ fn print_help() {
     );
 }
 
-fn store_build(do_install: bool) -> Result<()> {
-    let paths = WorkspacePaths::discover()?;
-    let store_root = &paths.store_root;
-
-    if !store_root.join("node_modules").exists() || do_install {
-        println!("Installing store dependencies…");
-        let status = Command::new("pnpm")
-            .args(["install", "--frozen-lockfile"])
-            .current_dir(store_root)
-            .status()
-            .context("failed to run pnpm install in apps/ato-web")?;
-        if !status.success() {
-            bail!("pnpm install failed with status {}", status);
-        }
-    }
-
-    println!("Building desktop-store…");
-    let status = Command::new("pnpm")
-        .args(["run", "build:desktop-store"])
-        .current_dir(store_root)
-        .status()
-        .context("failed to run pnpm build:desktop-store in apps/ato-web")?;
-    if !status.success() {
-        bail!("pnpm build:desktop-store failed with status {}", status);
-    }
-
-    let src = &paths.store_dist_source;
-    let dest = &paths.store_dist_dest;
-    if dest.exists() {
-        fs::remove_dir_all(dest)
-            .with_context(|| format!("failed to remove old store dist at {}", dest.display()))?;
-    }
-    copy_dir_recursive(src, dest)?;
-    println!(
-        "Copied desktop-store dist to {}",
-        dest.display()
-    );
-    Ok(())
-}
-
-fn print_frontend_help() {
-    println!(
-        "ato-desktop xtask frontend\n\n\
-         Subcommands:\n  \
-           build [-- <vite-args...>]  Install dependencies with pnpm and build frontend/dist\n  \
-           dev   [-- <vite-args...>]  Install dependencies with pnpm and start the Vite dev server\n\n\
-         Examples:\n  \
-           cargo run --manifest-path xtask/Cargo.toml -- frontend build\n  \
-           cargo run --manifest-path xtask/Cargo.toml -- frontend dev -- --host 127.0.0.1 --port 4174\n"
-    );
-}
-
-fn frontend_build(forwarded_args: &[String]) -> Result<()> {
-    let paths = WorkspacePaths::discover()?;
-    install_frontend_dependencies(&paths)?;
-    run_frontend_pnpm(&paths, &["run", "build"], forwarded_args)
-}
-
-fn frontend_dev(forwarded_args: &[String]) -> Result<()> {
-    let paths = WorkspacePaths::discover()?;
-    install_frontend_dependencies(&paths)?;
-    run_frontend_pnpm(&paths, &["run", "dev"], forwarded_args)
-}
-
-fn install_frontend_dependencies(paths: &WorkspacePaths) -> Result<()> {
-    run_frontend_pnpm(paths, &["install", "--frozen-lockfile"], &[])
-}
-
-fn run_frontend_pnpm(
-    paths: &WorkspacePaths,
-    args: &[&str],
-    forwarded_args: &[String],
-) -> Result<()> {
-    let mut command = Command::new("pnpm");
-    command.current_dir(&paths.frontend_root);
-    for arg in args {
-        command.arg(arg);
-    }
-    for arg in forwarded_args {
-        command.arg(arg);
-    }
-    let status = command
-        .status()
-        .with_context(|| format!("failed to invoke pnpm in {}", paths.frontend_root.display()))?;
-    if !status.success() {
-        bail!(
-            "pnpm command failed in {} with status {}",
-            paths.frontend_root.display(),
-            status
-        );
-    }
-    Ok(())
-}
-
-fn normalize_passthrough_args(mut args: Vec<String>) -> Vec<String> {
-    if matches!(args.first().map(String::as_str), Some("--")) {
-        args.remove(0);
-    }
-    args
-}
 
 /// Build the `ato-desktop` and `ato` binaries for a given Rust target.
 /// Returns the *target staging root*, populated as either:
@@ -1133,7 +1015,6 @@ fn render_info_plist(version: &str) -> String {
 struct WorkspacePaths {
     desktop_root: PathBuf,
     desktop_manifest: PathBuf,
-    frontend_root: PathBuf,
     ato_manifest: PathBuf,
     nacelle_manifest: PathBuf,
     target_root: PathBuf,
@@ -1178,7 +1059,6 @@ impl WorkspacePaths {
             }
         };
         let desktop_manifest = desktop_root.join("Cargo.toml");
-        let frontend_root = desktop_root.join("frontend");
         let ato_manifest = ato_root.join("Cargo.toml");
         // nacelle lives at <repo>/crates/nacelle in the monorepo.
         let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
@@ -1199,7 +1079,6 @@ impl WorkspacePaths {
         Ok(Self {
             desktop_root,
             desktop_manifest,
-            frontend_root,
             ato_manifest,
             nacelle_manifest,
             target_root,
@@ -1235,7 +1114,7 @@ impl MacTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_passthrough_args, render_info_plist, MacTarget};
+    use super::{render_info_plist, MacTarget};
 
     #[test]
     fn parses_supported_targets() {
@@ -1251,15 +1130,4 @@ mod tests {
         assert!(plist.contains("1.2.3"));
     }
 
-    #[test]
-    fn normalize_passthrough_args_strips_delimiter() {
-        assert_eq!(
-            normalize_passthrough_args(vec![
-                "--".to_string(),
-                "--host".to_string(),
-                "127.0.0.1".to_string(),
-            ]),
-            vec!["--host".to_string(), "127.0.0.1".to_string()]
-        );
-    }
 }
