@@ -11,6 +11,22 @@ pub(super) fn render_capsule_inspector_panel(state: &AppState, theme: &Theme) ->
         return render_empty_state(theme);
     };
 
+    render_capsule_inspector_view(&inspector, theme)
+}
+
+pub(super) fn render_capsule_inspector_panel_for_pane(
+    state: &AppState,
+    pane_id: usize,
+    theme: &Theme,
+) -> Div {
+    let Some(inspector) = state.capsule_inspector_by_pane_id(pane_id) else {
+        return render_empty_state(theme);
+    };
+
+    render_capsule_inspector_view(&inspector, theme)
+}
+
+fn render_capsule_inspector_view(inspector: &CapsuleInspectorView, theme: &Theme) -> Div {
     div()
         .w(px(380.0))
         .min_w(px(280.0))
@@ -26,8 +42,8 @@ pub(super) fn render_capsule_inspector_panel(state: &AppState, theme: &Theme) ->
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(render_metadata_card(&inspector, theme))
-                .child(render_log_card(&inspector, theme)),
+                .child(render_metadata_card(inspector, theme))
+                .child(render_log_card(inspector, theme)),
         )
 }
 
