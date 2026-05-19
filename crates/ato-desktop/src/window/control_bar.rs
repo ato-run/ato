@@ -33,10 +33,10 @@ use crate::app::{
     OpenIdentityMenu, OpenStoreWindow, RestartContentWindow, ShowSettings, StopContentWindow,
     ToggleControlBarInfoPopup, ToggleStarCapsule,
 };
-use crate::config::ControlBarMode;
+use crate::config::{load_config, save_config, ControlBarMode};
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
-use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+use crate::window::content_windows::OpenContentWindows;
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
@@ -308,8 +308,26 @@ impl ControlBarShellPlaceholder {
             locale,
             omnibar_focused: false,
             info_popup_open: false,
-            starred_handles: HashSet::new(),
+            starred_handles: load_config()
+                .desktop
+                .pinned_capsules
+                .iter()
+                .cloned()
+                .collect(),
         }
+    }
+
+    /// Normalize the omnibar display value into a stable pin key.
+    fn current_pin_key(cx: &App, omnibar_value: &str) -> Option<String> {
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
+            if let Some(capsule) = &entry.capsule {
+                return Some(format!("capsule://{}", capsule.active_handle()));
+            }
+        }
+        let raw = omnibar_value.trim();
+        raw.strip_prefix("capsule://")
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("capsule://{}", s.trim_end_matches('/')))
     }
 
     fn focus_omnibar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -349,7 +367,7 @@ impl ControlBarShellPlaceholder {
                 }
             });
         self.info_popup_open = true;
-        if let Err(err) = open_info_popup(cx, model) {
+        if let Err(err) = open_info_popup(cx, model, self.locale) {
             tracing::error!(error = %err, "Failed to open info popup");
             self.info_popup_open = false;
         }
@@ -358,51 +376,24 @@ impl ControlBarShellPlaceholder {
     /// Toggle star/pin state for the current omnibar URL.
     pub(crate) fn toggle_star(&mut self, cx: &mut Context<Self>) {
         let current = self.omnibar.read(cx).value().trim_start().to_string();
-        if !current.is_empty() {
-            if self.starred_handles.contains(&current) {
-                self.starred_handles.remove(&current);
-            } else {
-                self.starred_handles.insert(current);
-            }
-            cx.notify();
+        if current.is_empty() {
+            return;
         }
-    }
-
-    /// Get the frontmost capsule window ID if a managed capsule window exists.
-    fn frontmost_capsule_window_id(cx: &App) -> Option<u64> {
-        cx.global::<OpenContentWindows>()
-            .mru_order()
-            .into_iter()
-            .find(|entry| {
-                matches!(
-                    &entry.kind,
-                    ContentWindowKind::AppWindow {
-                        route: GuestRoute::CapsuleHandle { .. }
-                            | GuestRoute::CapsuleUrl { .. }
-                            | GuestRoute::Capsule { .. }
-                    }
-                )
-            })
-            .map(|entry| entry.handle.window_id().as_u64())
-    }
-
-    /// Get the current capsule handle string from the frontmost window.
-    fn frontmost_capsule_handle(cx: &App) -> Option<String> {
-        cx.global::<OpenContentWindows>()
-            .mru_order()
-            .into_iter()
-            .find(|entry| {
-                matches!(
-                    &entry.kind,
-                    ContentWindowKind::AppWindow {
-                        route: GuestRoute::CapsuleHandle { .. }
-                            | GuestRoute::CapsuleUrl { .. }
-                            | GuestRoute::Capsule { .. }
-                    }
-                )
-            })
-            .and_then(|entry| entry.capsule)
-            .map(|ctx| ctx.active_handle().to_string())
+        let key = match Self::current_pin_key(cx, &current) {
+            Some(k) => k,
+            None => return,
+        };
+        if self.starred_handles.contains(&key) {
+            self.starred_handles.remove(&key);
+        } else {
+            self.starred_handles.insert(key);
+        }
+        let mut config = load_config();
+        let mut sorted: Vec<String> = self.starred_handles.iter().cloned().collect();
+        sorted.sort();
+        config.desktop.pinned_capsules = sorted;
+        save_config(&config);
+        cx.notify();
     }
 }
 
@@ -452,9 +443,9 @@ impl Render for ControlBarShellPlaceholder {
         let expanded = cx.global::<ControlBarController>().should_render_expanded();
         let omnibar_focused = self.omnibar_focused;
 
-        let is_starred = self
-            .starred_handles
-            .contains(&self.omnibar.read(cx).value().trim_start().to_string());
+        let is_starred = Self::current_pin_key(cx, &self.omnibar.read(cx).value())
+            .map(|key| self.starred_handles.contains(&key))
+            .unwrap_or(false);
 
         div()
             .id("control-bar-hover-zone")
@@ -560,17 +551,13 @@ fn bar_pill(
 
 /// Left group: [Settings]
 fn left_action_group(locale: LocaleCode) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .child(pill_button(
-            "settings",
-            Some(PillIcon::Builtin(IconName::Settings)),
-            Some(tr(locale, "control_bar.settings").into()),
-            ActionTarget::Settings,
-            None,
-        ))
+    div().flex().items_center().gap(px(2.0)).child(pill_button(
+        "settings",
+        Some(PillIcon::Builtin(IconName::Settings)),
+        Some(tr(locale, "control_bar.settings").into()),
+        ActionTarget::Settings,
+        None,
+    ))
 }
 
 /// Right group: [Windows/Tray+badge] [Store] [Profile]
@@ -733,8 +720,12 @@ fn url_pill(omnibar: Entity<InputState>, is_capsule: bool, is_starred: bool) -> 
             .cursor_pointer()
             .hover(|s| s.opacity(0.7))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                if let Some(window_id) = ControlBarShellPlaceholder::frontmost_capsule_window_id(cx)
-                {
+                let target_id = cx
+                    .global::<OpenContentWindows>()
+                    .frontmost()
+                    .filter(|entry| entry.capsule.is_some())
+                    .map(|entry| entry_handle_to_window_id(&entry));
+                if let Some(window_id) = target_id {
                     window.dispatch_action(Box::new(OpenContentWindowSettings { window_id }), cx);
                 }
             })
@@ -855,11 +846,13 @@ enum InfoPopupModel {
 
 struct InfoPopupWindow {
     model: InfoPopupModel,
+    locale: LocaleCode,
 }
 
 impl Render for InfoPopupWindow {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.model.clone();
+        let locale = self.locale;
         div()
             .w(px(300.0))
             .flex()
@@ -891,11 +884,12 @@ impl Render for InfoPopupWindow {
                     current_url,
                     local_url,
                     log_path,
+                    locale,
                     cx,
                 )
                 .into_any_element(),
                 InfoPopupModel::Unmanaged { title, url } => {
-                    info_popup_unmanaged(title, url).into_any_element()
+                    info_popup_unmanaged(title, url, locale).into_any_element()
                 }
             })
     }
@@ -908,55 +902,59 @@ fn info_popup_managed(
     _current_url: &str,
     local_url: &Option<String>,
     log_path: &Option<String>,
+    locale: LocaleCode,
     _cx: &mut App,
 ) -> impl IntoElement {
     let show_logs = log_path.is_some();
-    let local_url_display = local_url.clone().unwrap_or_else(|| "—".to_string());
+    let has_local_url = local_url.is_some();
     let capsule_url = format!("capsule://{handle}");
 
     div()
         .flex()
         .flex_col()
-        .child(info_popup_header(title, handle))
+        .child(info_popup_header(title, handle, locale))
         .child(info_popup_divider())
-        .child(info_popup_item("Open in OS browser", "open-browser", {
-            let url = local_url.clone();
-            move |_cx| {
-                if let Some(ref url) = url {
-                    let _ = crate::ui::open_external_url(url);
+        .child(info_popup_item_enabled(
+            &tr(locale, "control_bar.info.open_in_browser"),
+            "open-browser",
+            has_local_url,
+            {
+                let url = local_url.clone();
+                move |_win, cx| {
+                    if let Some(ref url) = url {
+                        let _ = crate::ui::open_external_url(url);
+                    }
                 }
-            }
-        }))
-        .child(info_popup_item(
-            "Open headless",
-            "open-headless",
-            move |_cx| {
-                // TODO: wire headless launch via orchestrator
-            },
-        ))
-        .child(info_popup_divider())
-        .child(info_popup_item("Copy capsule URL", "copy-capsule-url", {
-            let url = capsule_url.clone();
-            move |cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-            }
-        }))
-        .child(info_popup_item("Copy local URL", "copy-local-url", {
-            let url = local_url_display.clone();
-            move |cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-            }
-        }))
-        .child(info_popup_item(
-            "Show execution identity",
-            "show-identity",
-            move |_cx| {
-                // TODO: open identity window for this capsule
             },
         ))
         .child(info_popup_divider())
         .child(info_popup_item_enabled(
-            "View logs",
+            &tr(locale, "control_bar.info.copy_capsule_url"),
+            "copy-capsule-url",
+            true,
+            {
+                let url = capsule_url.clone();
+                move |_win, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                }
+            },
+        ))
+        .child(info_popup_item_enabled(
+            &tr(locale, "control_bar.info.copy_local_url"),
+            "copy-local-url",
+            has_local_url,
+            {
+                let url = local_url.clone();
+                move |_win, cx| {
+                    if let Some(ref url) = url {
+                        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                    }
+                }
+            },
+        ))
+        .child(info_popup_divider())
+        .child(info_popup_item_enabled(
+            &tr(locale, "control_bar.info.view_logs"),
             "view-logs",
             show_logs,
             move |win, cx| {
@@ -964,7 +962,7 @@ fn info_popup_managed(
             },
         ))
         .child(info_popup_item_enabled(
-            "Open capsule settings",
+            &tr(locale, "control_bar.info.open_settings"),
             "open-settings",
             true,
             move |win, cx| {
@@ -973,7 +971,7 @@ fn info_popup_managed(
         ))
         .child(info_popup_divider())
         .child(info_popup_item_enabled(
-            "Restart",
+            &tr(locale, "control_bar.info.restart"),
             "info-restart",
             true,
             move |win, cx| {
@@ -981,7 +979,7 @@ fn info_popup_managed(
             },
         ))
         .child(info_popup_item_enabled(
-            "Stop",
+            &tr(locale, "control_bar.info.stop"),
             "info-stop",
             true,
             move |win, cx| {
@@ -990,22 +988,22 @@ fn info_popup_managed(
         ))
 }
 
-fn info_popup_unmanaged(title: &str, url: &str) -> impl IntoElement {
+fn info_popup_unmanaged(title: &str, url: &str, locale: LocaleCode) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .child(info_popup_header(title, url))
+        .child(info_popup_header(title, url, locale))
         .child(info_popup_divider())
         .child(
             div()
                 .p(px(14.0))
                 .text_size(px(12.0))
                 .text_color(rgb(0x6b7280))
-                .child("This page is not managed by a capsule."),
+                .child(tr(locale, "control_bar.info.unmanaged_desc")),
         )
 }
 
-fn info_popup_header(title: &str, subtitle: &str) -> impl IntoElement {
+fn info_popup_header(title: &str, subtitle: &str, locale: LocaleCode) -> impl IntoElement {
     div()
         .p(px(14.0))
         .flex()
@@ -1016,7 +1014,7 @@ fn info_popup_header(title: &str, subtitle: &str) -> impl IntoElement {
                 .text_size(px(11.0))
                 .text_color(rgb(0x6b7280))
                 .font_weight(FontWeight(600.0))
-                .child("Current Capsule"),
+                .child(tr(locale, "control_bar.info.current_capsule")),
         )
         .child(
             div()
@@ -1040,14 +1038,6 @@ fn info_popup_header(title: &str, subtitle: &str) -> impl IntoElement {
 
 fn info_popup_divider() -> impl IntoElement {
     div().w_full().h(px(1.0)).bg(hsla(0.0, 0.0, 0.0, 0.06))
-}
-
-fn info_popup_item(
-    label: &str,
-    _id: &str,
-    on_click: impl Fn(&mut App) + 'static,
-) -> impl IntoElement {
-    info_popup_item_enabled(label, _id, true, move |_, cx| on_click(cx))
 }
 
 fn info_popup_item_enabled(
@@ -1074,11 +1064,10 @@ fn info_popup_item_enabled(
         } else {
             FontWeight(300.0)
         })
-        .cursor_pointer()
         .when(enabled, |this| {
-            this.hover(|s| s.bg(rgb(0xf4f4f5))).on_mouse_down(
-                MouseButton::Left,
-                move |_, window, cx| {
+            this.cursor_pointer()
+                .hover(|s| s.bg(rgb(0xf4f4f5)))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     on_click(window, cx);
                     close_info_popup(cx);
                     if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
@@ -1086,13 +1075,16 @@ fn info_popup_item_enabled(
                             shell.info_popup_open = false;
                         });
                     }
-                },
-            )
+                })
         })
         .child(label.to_string())
 }
 
-fn open_info_popup(cx: &mut App, model: InfoPopupModel) -> Result<AnyWindowHandle> {
+fn open_info_popup(
+    cx: &mut App,
+    model: InfoPopupModel,
+    locale: LocaleCode,
+) -> Result<AnyWindowHandle> {
     close_info_popup(cx);
 
     let popup_size = size(px(300.0), px(440.0));
@@ -1104,7 +1096,7 @@ fn open_info_popup(cx: &mut App, model: InfoPopupModel) -> Result<AnyWindowHandl
 
     let popup_bounds = match control_bar.update(cx, |_, window, _| window.bounds()) {
         Ok(bar_bounds) => {
-            let left = bar_bounds.origin.x + (bar_bounds.size.width - popup_size.width) / 2.0;
+            let left = bar_bounds.origin.x + bar_bounds.size.width - popup_size.width - px(156.0);
             let top = bar_bounds.origin.y + bar_bounds.size.height + px(6.0);
             Bounds {
                 origin: point(left, top),
@@ -1130,6 +1122,7 @@ fn open_info_popup(cx: &mut App, model: InfoPopupModel) -> Result<AnyWindowHandl
     let handle = cx.open_window(options, move |window, cx| {
         let shell = cx.new(|_cx| InfoPopupWindow {
             model: model.clone(),
+            locale,
         });
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
