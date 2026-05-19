@@ -182,6 +182,11 @@
     inference_error_excerpt: null,
     submit_error_excerpt: null,
     unsafe_execution_confirmed: false,
+    recipe_resolution: null,
+    base_recipe_hash: null,
+    base_recipe_origin: null,
+    base_recipe_resolution: null,
+    edited_locally: false,
   };
   let submitModalOpen = false;
   let submitPending = false;
@@ -258,13 +263,59 @@
   function recipeCard() {
     if (!snapshot.recipe) return null;
     const r = snapshot.recipe;
-    return el('div', { className: 'card' }, [
+    const rows = [
       el('h2', null, 'Launch recipe'),
+      row('Recipe source', recipeSourceLabel()),
+    ];
+    const basedOn = recipeBasedOnLabel();
+    if (basedOn) rows.push(row('Based on', basedOn));
+    rows.push(
       row('Origin', r.origin),
       row('Target', r.target_label || '—'),
       row('Platform', r.platform_os + ' · ' + r.platform_arch),
       row('Recipe hash', r.recipe_hash),
-    ]);
+    );
+    return el('div', { className: 'card' }, rows);
+  }
+
+  // Map snapshot.recipe_resolution.source (and snapshot.edited_locally) to a
+  // short, human-readable label. Mirrors the cases the Rust session
+  // produces:
+  //   - remote_binding         → "Verified remote recipe"
+  //   - remote_binding_failed  → "Inferred locally (registry lookup failed: …)"
+  //   - inference              → "Inferred locally"
+  //   - edited_local           → "Edited locally"
+  // Falls back to recipe.origin when no resolution metadata is present
+  // (e.g. an older CLI build that doesn't emit recipe_resolution).
+  function recipeSourceLabel() {
+    if (snapshot.edited_locally) return 'Edited locally';
+    const rr = snapshot.recipe_resolution;
+    if (rr && rr.source === 'remote_binding') return 'Verified remote recipe';
+    if (rr && rr.source === 'remote_binding_failed') {
+      const reason = rr.fallback || rr.error_class || 'unknown reason';
+      return 'Inferred locally (registry lookup failed: ' + reason + ')';
+    }
+    if (rr && rr.source === 'inference') return 'Inferred locally';
+    if (rr && rr.source === 'edited_local') return 'Edited locally';
+    const origin = snapshot.recipe && snapshot.recipe.origin;
+    if (origin === 'registry') return 'Verified remote recipe';
+    if (origin === 'inference') return 'Inferred locally';
+    if (origin === 'edited_local') return 'Edited locally';
+    return origin || '—';
+  }
+
+  // When the user edits a recipe that originated from a verified remote
+  // binding (or any base resolution), surface a secondary "Based on:
+  // <original source>" row so the audit story stays visible. Returns null
+  // when there's nothing useful to show.
+  function recipeBasedOnLabel() {
+    if (!snapshot.edited_locally) return null;
+    const base = snapshot.base_recipe_resolution;
+    if (base && base.source === 'remote_binding') return 'Verified remote recipe';
+    if (base && base.source === 'inference') return 'Inferred locally';
+    if (snapshot.base_recipe_origin === 'registry') return 'Verified remote recipe';
+    if (snapshot.base_recipe_origin === 'inference') return 'Inferred locally';
+    return null;
   }
 
   function row(label, value) {
