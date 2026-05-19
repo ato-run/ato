@@ -11,6 +11,9 @@ on:
       - "crates/ato-cli/src/**"
       - ".github/workflows/pollution-lint.yml"
 
+permissions:
+  contents: read
+
 jobs:
   source-boundary:
     name: Source pollution lint
