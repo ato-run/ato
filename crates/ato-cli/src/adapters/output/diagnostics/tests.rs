@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use capsule_core::execution_plan::error::{
-    AtoErrorClassification, AtoExecutionError, CleanupActionRecord, CleanupActionStatus,
-    CleanupStatus, ManifestSuggestion,
+    AtoErrorClassification, AtoErrorCode, AtoExecutionError, CleanupActionRecord,
+    CleanupActionStatus, CleanupStatus, ManifestSuggestion,
 };
 
 use super::{from_anyhow, CliDiagnosticCode, CommandContext, JsonErrorEnvelopeV1};
@@ -431,4 +431,39 @@ fn json_envelope_snapshot_internal_fallback() {
     let err = anyhow!("unexpected failure");
     let diagnostic = from_anyhow(&err, CommandContext::Other);
     assert_json_envelope_snapshot("internal_fallback", &diagnostic.to_json_envelope());
+}
+
+/// Regression test for issue #194: `--dangerously-skip-permissions` without
+/// `CAPSULE_ALLOW_UNSAFE=1` must produce E301 (security_policy_violation),
+/// not E999. The typed `AtoExecutionError` must flow through `from_anyhow`
+/// and reach the E301 branch before the E999 fallback.
+#[test]
+fn maps_unsafe_gate_missing_env_to_e301_not_e999() {
+    let err = anyhow!(AtoExecutionError::new(
+        AtoErrorCode::AtoErrSecurityPolicyViolation,
+        "--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1",
+        None,
+        None,
+        Some("Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks."),
+    ));
+    let diagnostic = from_anyhow(&err, CommandContext::Run);
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E301, "must be E301, not E999");
+    assert_eq!(diagnostic.phase, "execution");
+    assert!(
+        diagnostic.message.contains("CAPSULE_ALLOW_UNSAFE=1"),
+        "message should contain CAPSULE_ALLOW_UNSAFE=1"
+    );
+    let hint = diagnostic.hint.as_deref().unwrap_or_default();
+    assert!(
+        hint.contains("CAPSULE_ALLOW_UNSAFE=1"),
+        "hint must reference CAPSULE_ALLOW_UNSAFE=1"
+    );
+    assert!(
+        hint.contains("bypass Ato permission"),
+        "hint must describe what CAPSULE_ALLOW_UNSAFE bypasses"
+    );
+    assert!(
+        !hint.contains("RUST_BACKTRACE"),
+        "E301 hint must not contain RUST_BACKTRACE — that belongs only on E999"
+    );
 }

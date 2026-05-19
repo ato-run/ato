@@ -1016,6 +1016,31 @@ fn dangerous_skip_permissions_requires_explicit_opt_in_env() {
     assert!(err
         .to_string()
         .contains("--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1"));
+    // Regression for issue #194: the error must be a typed AtoExecutionError so
+    // the diagnostic mapper reaches E301, not the E999 fallback.
+    assert!(
+        err.downcast_ref::<AtoExecutionError>().is_some(),
+        "error must be a typed AtoExecutionError (not plain anyhow), so the diagnostic \
+         mapper can produce E301 instead of E999"
+    );
+    let diagnostic = crate::adapters::output::diagnostics::from_anyhow(
+        &err,
+        crate::adapters::output::diagnostics::CommandContext::Run,
+    );
+    assert_eq!(
+        diagnostic.code,
+        crate::adapters::output::diagnostics::CliDiagnosticCode::E301,
+        "diagnostic must be E301 (security_policy_violation), not E999"
+    );
+    let hint = diagnostic.hint.as_deref().unwrap_or_default();
+    assert!(
+        hint.contains("CAPSULE_ALLOW_UNSAFE=1"),
+        "E301 hint must reference CAPSULE_ALLOW_UNSAFE=1, got: {hint:?}"
+    );
+    assert!(
+        !hint.contains("RUST_BACKTRACE"),
+        "E301 hint must not contain RUST_BACKTRACE — that belongs only on E999"
+    );
 }
 
 #[test]
