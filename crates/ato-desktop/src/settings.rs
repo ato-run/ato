@@ -81,41 +81,6 @@ impl SettingsError {
     }
 }
 
-pub fn host_panel_payload(state: &AppState, route: Option<&HostPanelRoute>) -> Value {
-    let capsule_settings = match route {
-        Some(HostPanelRoute::CapsuleDetail { pane_id, .. }) => {
-            Some(capsule_snapshot(state, Some(*pane_id)))
-        }
-        _ => None,
-    };
-
-    json!({
-        "revision": state.host_panel_payload_revision,
-        "globalSettings": global_settings_snapshot(state),
-        "capsuleSettings": capsule_settings,
-        "launcherData": launcher_snapshot(state),
-        "commandResponse": state.host_panel_last_response,
-    })
-}
-
-pub fn host_panel_payload_for_url(state: &AppState, url: &str) -> Value {
-    let pane_id = url
-        .split("/capsule/")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|value| value.parse::<usize>().ok());
-
-    let capsule_settings = pane_id.map(|id| capsule_snapshot(state, Some(id)));
-
-    json!({
-        "revision": state.host_panel_payload_revision,
-        "globalSettings": global_settings_snapshot(state),
-        "capsuleSettings": capsule_settings,
-        "launcherData": launcher_snapshot(state),
-        "commandResponse": state.host_panel_last_response,
-    })
-}
-
 pub fn handle_host_panel_command(
     state: &mut AppState,
     pane_id: PaneId,
