@@ -839,7 +839,7 @@ pub fn load_secrets() -> SecretStore {
     };
 
     match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str(&content) {
+        Ok(content) => match serde_json::from_str::<SecretStore>(&content) {
             Ok(mut store) => {
                 // One-shot migration: deduplicate grants that differ only by
                 // @version suffix, merging their allowed-key lists under the
