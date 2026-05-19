@@ -1130,6 +1130,8 @@ impl WebViewManager {
                             req.send(Err(format!("serialize sessions failed: {e}")));
                         }
                     }
+                    continue;
+                }
                 AuthStatus => {
                     let status = match crate::orchestrator::resolve_ato_binary() {
                         Ok(ato_bin) => {
@@ -5440,7 +5442,7 @@ pub(crate) fn dispatch_automation_command(
         | ApproveExecutionPlanConsent { .. }
         | StopActiveSession
         | HostDispatchAction { .. }
-        | ListSessions => {
+        | ListSessions
         | AuthStatus => {
             unreachable!()
         }
