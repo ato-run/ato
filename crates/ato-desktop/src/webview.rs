@@ -27,7 +27,7 @@ use objc2::{msg_send, sel, ClassType};
 use objc2_app_kit::NSView;
 #[cfg(target_os = "macos")]
 use objc2_foundation::MainThreadMarker;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wry::http::{Request, Response};
 #[cfg(target_os = "macos")]
@@ -233,6 +233,15 @@ struct DesktopAuthHandoff {
     session_token: String,
     site_base_url: String,
     api_base_url: String,
+    #[serde(default)]
+    publisher_handle: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct AuthStatusResponse {
+    signed_in: bool,
+    api_base_url: String,
+    account_hint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1121,6 +1130,26 @@ impl WebViewManager {
                             req.send(Err(format!("serialize sessions failed: {e}")));
                         }
                     }
+                AuthStatus => {
+                    let status = match crate::orchestrator::resolve_ato_binary() {
+                        Ok(ato_bin) => {
+                            match Command::new(&ato_bin)
+                                .arg("desktop-auth-handoff")
+                                .output()
+                            {
+                                Ok(output) if output.status.success() => {
+                                    auth_status_from_handoff_stdout(&output.stdout)
+                                }
+                                _ => signed_out_auth_status(),
+                            }
+                        }
+                        Err(_) => signed_out_auth_status(),
+                    };
+                    match serde_json::to_value(status) {
+                        Ok(json) => req.send(Ok(json)),
+                        Err(_) => req.send(Ok(serde_json::to_value(signed_out_auth_status())
+                            .unwrap_or_default())),
+                    };
                     continue;
                 }
                 _ => {}
@@ -3547,6 +3576,31 @@ fn should_install_ato_auth_cookies(url: &str) -> bool {
     parsed.host_str() == Some("ato.run") && parsed.path().starts_with("/dock")
 }
 
+pub(crate) fn default_api_base_url() -> String {
+    std::env::var("ATO_API_BASE_URL")
+        .or_else(|_| std::env::var("ATO_STORE_API_URL"))
+        .unwrap_or_else(|_| "https://api.ato.run".to_string())
+}
+
+pub(crate) fn signed_out_auth_status() -> AuthStatusResponse {
+    AuthStatusResponse {
+        signed_in: false,
+        api_base_url: default_api_base_url(),
+        account_hint: None,
+    }
+}
+
+pub(crate) fn auth_status_from_handoff_stdout(stdout: &[u8]) -> AuthStatusResponse {
+    match serde_json::from_slice::<DesktopAuthHandoff>(stdout) {
+        Ok(handoff) => AuthStatusResponse {
+            signed_in: true,
+            api_base_url: handoff.api_base_url,
+            account_hint: handoff.publisher_handle,
+        },
+        Err(_) => signed_out_auth_status(),
+    }
+}
+
 fn load_desktop_auth_handoff() -> Result<DesktopAuthHandoff> {
     let ato_bin = crate::orchestrator::resolve_ato_binary()
         .context("failed to locate ato binary for desktop auth handoff")?;
@@ -5387,6 +5441,7 @@ pub(crate) fn dispatch_automation_command(
         | StopActiveSession
         | HostDispatchAction { .. }
         | ListSessions => {
+        | AuthStatus => {
             unreachable!()
         }
     }
@@ -5480,6 +5535,7 @@ mod tests {
             session_token: "secret".to_string(),
             site_base_url: "https://ato.run".to_string(),
             api_base_url: "https://api.ato.run".to_string(),
+            publisher_handle: Some("koh".to_string()),
         };
 
         assert_eq!(
@@ -6460,5 +6516,58 @@ mod tests {
                 "awaiting pre-launch requirements: config:app, consent:app, consent:web"
             );
         }
+    }
+
+    #[test]
+    fn auth_status_sanitizes_handoff_without_exposing_session_token() {
+        let stdout = br#"{
+            "session_token": "secret-token",
+            "site_base_url": "https://ato.run",
+            "api_base_url": "https://api.ato.run",
+            "publisher_handle": "koh"
+        }"#;
+
+        let status = auth_status_from_handoff_stdout(stdout);
+        let json = serde_json::to_value(&status).unwrap();
+
+        assert_eq!(json["signed_in"], true);
+        assert_eq!(json["api_base_url"], "https://api.ato.run");
+        assert_eq!(json["account_hint"], "koh");
+        assert!(json.get("session_token").is_none());
+        assert!(!json.to_string().contains("secret-token"));
+    }
+
+    #[test]
+    fn auth_status_returns_signed_out_on_handoff_failure() {
+        let status = auth_status_from_handoff_stdout(b"not json");
+        assert!(!status.signed_in);
+        assert_eq!(status.api_base_url, default_api_base_url());
+        assert!(status.account_hint.is_none());
+    }
+
+    #[test]
+    fn auth_status_returns_signed_out_on_missing_publisher_handle() {
+        let stdout = br#"{
+            "session_token": "secret-token",
+            "site_base_url": "https://ato.run",
+            "api_base_url": "https://api.ato.run"
+        }"#;
+
+        let status = auth_status_from_handoff_stdout(stdout);
+        assert!(status.signed_in);
+        assert_eq!(status.api_base_url, "https://api.ato.run");
+        assert!(status.account_hint.is_none());
+    }
+
+    #[test]
+    fn auth_status_response_does_not_contain_token_field() {
+        let status = AuthStatusResponse {
+            signed_in: true,
+            api_base_url: "https://api.ato.run".to_string(),
+            account_hint: Some("koh".to_string()),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(json.get("session_token").is_none());
+        assert!(json.get("token").is_none());
     }
 }

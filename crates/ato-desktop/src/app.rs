@@ -79,6 +79,7 @@ actions!(
         Quit,
         ConfirmQuitKeep,
         ConfirmQuitClear,
+        ConfirmQuitWithCleanup,
         CancelQuit,
         // RFC: SURFACE_CLOSE_SEMANTICS §6 — explicit Stop UI. The
         // shortcut on `StopActiveSession` is provisional; if a
@@ -476,6 +477,11 @@ pub fn run() {
             if let Ok(path) = ato_path("desktop-tabs.json") {
                 let _ = std::fs::remove_file(&path);
             }
+            cx.quit();
+        });
+        cx.on_action(|_: &ConfirmQuitWithCleanup, cx| {
+            let report = crate::orchestrator::cleanup_host_resources();
+            tracing::info!(?report, "Host resource cleanup completed on quit");
             cx.quit();
         });
         cx.on_window_closed(|cx, window_id| {
