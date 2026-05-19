@@ -48,7 +48,7 @@ use capsule_core::types::CapsuleManifest;
 use capsule_core::{router, CapsuleReporter};
 
 mod background;
-mod preflight;
+pub(crate) mod preflight;
 mod watch;
 
 use background::*;
