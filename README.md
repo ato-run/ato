@@ -2,25 +2,29 @@
 
 [![Rust CI](https://github.com/ato-run/ato/actions/workflows/rust-ci.yml/badge.svg?branch=main)](https://github.com/ato-run/ato/actions/workflows/rust-ci.yml)
 
-Run a project before you set it up.
+Run software from recipes.
 
-`ato` is a command-line tool for trying local projects, GitHub repositories,
-and shared app links in a controlled runtime. It detects what the project needs,
-prepares the missing tools, and runs it without asking you to manually install
-Python, Node, Rust, or other project-specific dependencies first.
+`ato` is a source-native runtime for running local projects, GitHub repositories,
+and shared recipes in a controlled local environment.
+
+A recipe describes how source inputs become an execution: which source tree to
+use, which tools and runtimes to prepare, what to build, what services to start,
+what environment to expose, what filesystem and network access to allow, and
+which command to launch.
 
 ```bash
-ato run .                      # run the current project
+ato run .                      # run the current source with its local recipe
 ato run github.com/owner/repo  # try a GitHub repository
-ato run https://ato.run/s/demo # open a shared ato app
+ato run https://ato.run/s/demo # open a shared recipe
 ```
 
 `ato` is useful when you want to:
 
-- try a repository without reading its setup instructions first
-- share a runnable project with someone else
-- run a project with a repeatable setup
-- keep the project's runtime separate from your machine as much as possible
+- try a repository without reconstructing its setup by hand
+- share a runnable interpretation of source code
+- run the same source in different ways: web app, CLI, desktop app, demo, or service
+- keep runtimes, dependencies, and state separate from your machine
+- compare launch conditions through execution identity
 
 > ato is still pre-1.0. Some sandboxing and network controls are still being
 > completed. See [Known limitations](crates/ato-cli/docs/known-limitations.md)
@@ -75,7 +79,8 @@ cd my-project
 ato run .
 ```
 
-ato will inspect the project, prepare what it needs, and start it.
+Ato looks for a local recipe such as `capsule.toml`. If one is not present, it
+can infer a basic recipe from the source tree.
 
 ### Run a GitHub Repository
 
@@ -83,8 +88,8 @@ ato will inspect the project, prepare what it needs, and start it.
 ato run github.com/owner/repo
 ```
 
-This is useful for trying examples, demos, small tools, or projects you do not
-want to install globally.
+Ato resolves the source, finds or infers a compatible recipe, prepares the needed
+tools and runtimes, and launches it in a controlled session.
 
 ### Create a Lock File
 
@@ -92,58 +97,146 @@ want to install globally.
 ato lock .
 ```
 
-A lock file records the resolved runtime setup for the project. Commit it when
-you want other people or CI to run the project the same way.
+A lock file records the resolved setup for a recipe. Commit it when you want
+other people or CI to resolve the same launch conditions.
 
-### Share a Project
+### Share a Recipe
 
 ```bash
 ato encap .
 ```
 
-`encap` captures the project into a shareable description.
+`encap` captures a runnable description of the current source and recipe.
 
 ```bash
 ato decap https://ato.run/s/demo --into ./demo
 ```
 
-`decap` materializes a shared project into a local directory.
+`decap` materializes a shared recipe into a local directory.
 
-## How It Works
+## Recipes
 
-ato turns a project into a runnable plan.
+A recipe is the unit Ato shares, stores, reviews, and runs.
 
-```text
-project files
-  |
-  v
-detect what the project needs
-  |
-  v
-resolve tools and runtimes
-  |
-  v
-write a lock file
-  |
-  v
-run in a controlled environment
-```
+A source repository is only the raw material. A recipe is the executable
+interpretation of that source. The same repository can have multiple recipes:
+one for the web app, one for the CLI, one for a desktop shell, one for a demo
+with a local database, and one for a safer no-network mode.
 
-In practice, this means ato tries to answer these questions for you:
-
-1. What kind of project is this?
-2. What tools or runtimes are needed?
-3. Can the result be recorded so the next run is repeatable?
-4. What access should the running project have to the host machine?
-
-The main file ato looks for is:
+In local projects, a recipe is usually written as:
 
 ```text
 capsule.toml
 ```
 
-A `capsule.toml` describes how a project should run. If a project does not have
-one, ato can try to infer a basic setup.
+Despite the file name, `capsule.toml` is not a one-to-one description of a
+repository. A repository may contain zero, one, or many recipes. Recipes may also
+live outside the repository and be shared through the Ato Store.
+
+```text
+source inputs
+  + recipe
+  + user environment
+  = execution
+```
+
+This is why Ato shares recipes rather than opaque images. Different recipes can
+turn the same source into different runnable forms.
+
+## How It Works
+
+Ato turns source plus recipe into a launch graph.
+
+```text
+source inputs
+  |
+  v
+select or infer recipe
+  |
+  v
+project into the user's environment
+  |
+  v
+resolve tools, runtimes, dependencies, services, and policy
+  |
+  v
+materialize a managed session
+  |
+  v
+record execution identity and receipt
+```
+
+In practice, Ato tries to answer these questions:
+
+1. What source inputs are being used?
+2. Which recipe interprets those inputs?
+3. What tools, runtimes, services, and build outputs are needed?
+4. What environment, filesystem, network, and host capabilities are allowed?
+5. Can the resolved launch be recorded and compared later?
+6. Should this launch attach to an existing healthy session or start a new one?
+
+The local recipe file is usually:
+
+```text
+capsule.toml
+```
+
+A `capsule.toml` describes how source inputs should be arranged, built,
+configured, and launched. It is a recipe, not a permanent one-to-one identity
+for the repository.
+
+## Execution Identity
+
+Ato does not only identify source code. It identifies launches.
+
+An execution identity is a stable fingerprint of the resolved launch world:
+the recipe snapshot, source input snapshots, dependency outputs, runtime identity,
+environment closure, filesystem view, network policy, capability policy,
+entrypoint, arguments, working directory, and state bindings.
+
+This lets you ask:
+
+```text
+Did we launch the same world?
+```
+
+That is different from asking whether two users cloned the same repository.
+The same source can produce different executions when the recipe, environment,
+policy, runtime, or state changes.
+
+Execution receipts are stored by `execution_id` and can be used by collaborators,
+CI, Desktop, and agents to compare launch conditions.
+
+## Ato Desktop
+
+Ato Desktop is the graphical shell for managed Ato sessions.
+
+In 0.6.0, Desktop is centered on the running recipe execution: the app view,
+session status, logs, lifecycle controls, capsule details, and execution identity
+are shown in one focused surface.
+
+Desktop is not a separate execution engine. It delegates execution to the same
+CLI launch pipeline as `ato run` and `ato session start`.
+
+```text
+Desktop
+  |
+  v
+ato CLI
+  |
+  v
+recipe + source inputs
+  |
+  v
+launch graph
+  |
+  v
+managed session
+```
+
+A window presents a session; it does not necessarily own the process lifecycle.
+Closing a window can detach from a session, while stopping a session explicitly
+terminates the managed process.
 
 ## Examples
 
@@ -165,7 +258,7 @@ ato run ./examples/web
 ato run ./crates/my-tool
 ```
 
-### Shared App
+### Shared Recipe
 
 ```bash
 ato run https://ato.run/s/demo
@@ -222,31 +315,59 @@ See [`docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md`](docs/rfcs/accepted/CA
 for the full grammar and safety model. Provider authoring for
 `service@1` is documented in the same RFC, §11.2.
 
-## What ato Is Not
+## Store and Shared Recipes
 
-ato is not a full replacement for every tool in your stack.
+The Ato Store shares recipes.
 
-- It is not Docker. It does not require writing a Dockerfile first.
-- It is not Nix. It focuses on running and sharing projects, not replacing your whole system environment.
-- It is not just `npx` or `uvx`. It can run whole projects, not only single packages.
+A recipe can target a public GitHub repository, a source snapshot, generated
+build outputs, or other declared inputs. Store entries are not just apps and not
+just source code; they are reviewed ways to run source.
+
+This makes community recipes possible:
+
+```text
+same source repository
+  ├─ web demo recipe
+  ├─ CLI recipe
+  ├─ desktop recipe
+  ├─ local database recipe
+  └─ no-network recipe
+```
+
+Because recipes can request environment variables, filesystem access, network
+access, services, and host capabilities, recipe authorship and requested
+permissions are part of the trust model.
+
+## What Ato Is Not
+
+Ato is not a full replacement for every tool in your stack.
+
+- It is not Docker. It does not ask you to turn source into an opaque image first.
+- It is not Nix. It focuses on source-native launch recipes, not replacing your whole system environment.
+- It is not just `npx` or `uvx`. It can run whole projects, services, and multi-target recipes.
 - It is not a remote development environment. It runs locally.
 
-ato sits between these tools: it gives you a fast way to try, lock, and share a
-project without turning the project into a container image or asking every user
-to reproduce the setup by hand.
+Ato sits in the launch layer. It takes source inputs and recipes, resolves them
+against the user's environment, and records the resulting execution identity.
 
 ## Safety Model
 
-ato is designed to reduce accidental access to your machine, but it should not
-be treated as a perfect security boundary yet.
+Ato is designed to make host access explicit, but it should not be treated as a
+perfect security boundary yet.
+
+A recipe is executable configuration. It can define build commands, run commands,
+services, environment access, filesystem grants, network policy, and host bridge
+capabilities. Treat recipes from other people with the same care you would apply
+to source code.
 
 Current behavior:
 
-- project files are run through ato's runtime path instead of directly on your host
+- project files are run through Ato's runtime path instead of directly on your host
 - common secret files such as `.env`, `.env.*`, private keys, and credentials files
   are excluded from capsule archives by default
 - some OS-level isolation is available for source runtimes
 - deny-all networking is supported for supported runtime paths
+- requested permissions are part of the launch graph and execution identity
 
 Known gaps in the current version:
 
@@ -275,10 +396,10 @@ or inspect the repository first.
 ato run .                  # run a local project
 ato run github.com/o/r     # run a GitHub repository
 ato lock .                 # generate a lock file
-ato encap .                # create a shareable project description
-ato decap <share> --into . # materialize a shared project
-ato ps                     # list running apps
-ato stop --all             # stop running apps
+ato encap .                # create a shareable recipe description
+ato decap <share> --into . # materialize a shared recipe
+ato ps                     # list running sessions
+ato stop --all             # stop running sessions
 ato logs                   # show logs
 ```
 
@@ -291,10 +412,10 @@ tools.
 ato/
 ├── crates/
 │   ├── ato-cli/          # command-line interface
-│   ├── capsule-core/     # project detection, locking, packing, runtime logic
+│   ├── capsule-core/     # recipe parsing, locking, packing, runtime logic
 │   ├── capsule-wire/     # small shared message types
 │   ├── ato-session-core/ # session process and state helpers
-│   ├── ato-desktop/      # desktop app
+│   ├── ato-desktop/      # desktop session shell
 │   └── nacelle/          # source runtime sandbox
 ├── sidecars/
 │   └── ato-tsnetd/       # optional network sidecar
@@ -336,12 +457,16 @@ cargo xtask bundle linux-x86_64
 
 ## Documentation
 
+- [Run](docs/run.md)
+- [Execution Identity](docs/execution-identity.md)
+- [Desktop](docs/desktop.md)
+- [Sandbox](docs/sandbox.md)
 - [Known limitations](crates/ato-cli/docs/known-limitations.md)
 - [Core architecture](docs/core-architecture.md)
 - [Capsule dependency contracts](docs/rfcs/accepted/CAPSULE_DEPENDENCY_CONTRACTS.md) — declaring service deps in `capsule.toml`
 - [Docs site](https://ato-run.github.io/ato/)
-- [RFC sources](docs/rfcs/)
-- [Glossary](docs/GLOSSARY.md)
+- [Design RFCs](docs/rfcs/)
+- [Glossary](docs/glossary-reference.md)
 - [Contributing guidelines](AGENTS.md)
 
 ## License
