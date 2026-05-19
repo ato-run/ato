@@ -23,15 +23,27 @@ pub async fn download_file(url: &str, destination: &str, allowed_paths: &[String
     security::validate_path(destination, allowed_paths)
         .map_err(|e| CapsuleError::Config(format!("Invalid destination path: {}", e)))?;
 
+    // 2. Validate URL scheme — only HTTPS allowed
+    {
+        let parsed = url::Url::parse(url)
+            .map_err(|e| CapsuleError::Config(format!("Invalid URL: {}", e)))?;
+        if parsed.scheme() != "https" {
+            return Err(CapsuleError::Config(format!(
+                "only HTTPS URLs are allowed (got {})",
+                parsed.scheme()
+            )));
+        }
+    }
+
     info!("Starting download from {} to {}", url, destination);
 
-    // 2. Create destination directory if it doesn't exist
+    // 3. Create destination directory if it doesn't exist
     let dest_path = Path::new(destination);
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // 3. Perform Download
+    // 4. Perform Download
     let response = reqwest::get(url).await.map_err(CapsuleError::Network)?;
     let status = response.status();
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -69,7 +81,7 @@ mod tests {
     async fn test_download_file_security_check() {
         let allowed_paths = vec!["/opt/models".to_string()];
         // Should fail because path is not in allowlist
-        let result = download_file("http://example.com", "/tmp/malicious", &allowed_paths).await;
+        let result = download_file("https://example.com", "/tmp/malicious", &allowed_paths).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Invalid destination path") || err_msg.contains("path traversal"));
