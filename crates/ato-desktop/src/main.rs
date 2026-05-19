@@ -40,10 +40,12 @@ fn main() {
         "ato-desktop starting",
     );
 
+    let skip_onboarding = std::env::args().any(|a| a == "--skip-onboarding");
+
     match crate::orchestrator::resolve_ato_binary() {
         Ok(path) => tracing::info!(?path, "resolved ato binary"),
         Err(error) => tracing::warn!(?error, "could not resolve ato binary at startup"),
     }
 
-    app::run();
+    app::run(skip_onboarding);
 }

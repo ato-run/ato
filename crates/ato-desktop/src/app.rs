@@ -336,7 +336,7 @@ impl AssetSource for LocalAssetSource {
     }
 }
 
-pub fn run() {
+pub fn run(skip_onboarding: bool) {
     let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
     let open_url_bridge = Arc::new(OpenUrlBridge::default());
     let application = gpui_platform::application().with_assets(LocalAssetSource(assets_dir));
@@ -1084,7 +1084,8 @@ pub fn run() {
             let startup_config = crate::config::load_config();
             let startup_surface = startup_config.desktop.startup_surface;
             let show_onboarding =
-                crate::system_capsule::ato_onboarding::should_show_onboarding(&startup_config);
+                crate::system_capsule::ato_onboarding::should_show_onboarding(&startup_config)
+                    && !skip_onboarding;
             let async_cx = cx.to_async();
             cx.foreground_executor()
                 .spawn(async move {
