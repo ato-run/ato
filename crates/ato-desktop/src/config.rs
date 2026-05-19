@@ -756,11 +756,18 @@ impl SecretStore {
     /// Strip the `@<version>` suffix from a capsule handle so that
     /// `publisher/handle@1.2.3` and `publisher/handle` are treated as
     /// the same identity for grant lookups.
+    /// Only the last path segment (after the final `/`) is checked,
+    /// so handles like `git@github.com:owner/repo` are left unchanged.
     fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
-        match handle.rfind('@') {
-            Some(pos) if pos > 0 && !handle[..pos].ends_with("://") => &handle[..pos],
-            _ => handle,
+        let last_sep = handle.rfind('/');
+        let search_start = last_sep.map_or(0, |p| p + 1);
+        if let Some(pos) = handle[search_start..].find('@') {
+            let abs_pos = search_start + pos;
+            if abs_pos > 0 && abs_pos < handle.len() - 1 {
+                return &handle[..abs_pos];
+            }
         }
+        handle
     }
 
     pub fn add_secret(&mut self, key: String, value: String) {
@@ -1476,6 +1483,77 @@ mod tests {
         assert_eq!(
             parsed.desktop.window_close_behavior,
             WindowCloseBehavior::StopSession
+        );
+    }
+
+    // ── canonicalize_handle (#56) ────────────────────────────────
+
+    #[test]
+    fn canonicalize_strips_at_version_from_last_path_segment() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://ato.run/koh0920/app@0.3.4"),
+            "capsule://ato.run/koh0920/app"
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_bare_handle() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://github.com/Koh0920/WasedaP2P"),
+            "capsule://github.com/Koh0920/WasedaP2P"
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_at_in_authority() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("git@github.com:owner/repo"),
+            "git@github.com:owner/repo"
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_simple_handle() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://handle"),
+            "capsule://handle"
+        );
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://handle@1.0"),
+            "capsule://handle"
+        );
+    }
+
+    #[test]
+    fn canonicalize_dedup_migration_merges_same_grant_key() {
+        // When both "capsule://org/app" and "capsule://org/app@1.2.3"
+        // have grants, the migration should merge them under the
+        // canonical key.
+        let mut store = SecretStore::default();
+        store.grant_secret("capsule://org/app", "API_KEY");
+        store.grant_secret("capsule://org/app@1.2.3", "API_KEY");
+        store.grant_secret("capsule://org/app@1.2.3", "OTHER_KEY");
+        // Simulate what load_secrets does: re-key grants to canonical form
+        let grants = std::mem::take(&mut store.grants);
+        let mut canonical_grants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (handle, keys) in grants {
+            let canonical = SecretStore::canonicalize_handle(&handle).to_string();
+            let entry = canonical_grants.entry(canonical).or_default();
+            for k in keys {
+                if !entry.contains(&k) {
+                    entry.push(k);
+                }
+            }
+        }
+        store.grants = canonical_grants;
+        let keys = store.grants.get("capsule://org/app").unwrap();
+        assert!(keys.contains(&"API_KEY".to_string()));
+        assert!(keys.contains(&"OTHER_KEY".to_string()));
+        assert_eq!(keys.len(), 2, "duplicate API_KEY must be merged");
+        assert!(
+            store.grants.get("capsule://org/app@1.2.3").is_none(),
+            "versioned key must be removed by migration"
         );
     }
 }
