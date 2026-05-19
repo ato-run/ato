@@ -493,6 +493,45 @@ mod tests {
 
         assert_eq!(discover_socket(), socket);
     }
+
+    #[test]
+    fn auth_status_does_not_expose_token() {
+        let tools: serde_json::Value =
+            serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
+        let arr = tools.as_array().expect("array");
+        let entry = arr
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("auth_status"))
+            .expect("auth_status registered");
+        let schema = entry.get("inputSchema").expect("inputSchema");
+        let props = schema.get("properties").expect("properties");
+        assert!(props.get("token").is_none(), "auth_status must not expose token field");
+    }
+
+    #[test]
+    fn auth_status_tool_registered_with_empty_input_schema() {
+        let tools: serde_json::Value =
+            serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
+        let arr = tools.as_array().expect("array");
+        let entry = arr
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("auth_status"))
+            .expect("auth_status registered");
+        let required = entry
+            .get("inputSchema")
+            .and_then(|s| s.get("required"))
+            .and_then(|r| r.as_array())
+            .expect("required[]");
+        assert!(required.is_empty(), "auth_status takes no required args");
+    }
+
+    #[test]
+    fn map_auth_status_maps_to_method_with_empty_params() {
+        let (method, params) =
+            super::map_tool_to_command("auth_status", &serde_json::json!({})).expect("map");
+        assert_eq!(method, "auth_status");
+        assert!(params.as_object().is_some(), "params must be object (pane_id injected)");
+    }
 }
 
 fn handle_tools_list(id: serde_json::Value) -> serde_json::Value {
@@ -526,6 +565,9 @@ fn handle_tools_call(
     }
     if tool_name == "host_press_key" {
         return handle_host_press_key(id, &args);
+    }
+    if tool_name == "cleanup_host_resources" {
+        return handle_cleanup_host_resources(id, &args);
     }
 
     let (method, rpc_params) = match map_tool_to_command(tool_name, &args) {
@@ -756,6 +798,149 @@ fn build_modifier_clause(modifiers: &[String]) -> Result<String, String> {
     Ok(format!(" using {{{}}}", parts.join(", ")))
 }
 
+/// `cleanup_host_resources` — kills stale provider processes (TERM only)
+/// and frees System V shared memory owned by the current user.
+fn handle_cleanup_host_resources(
+    id: serde_json::Value,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut report = serde_json::json!({
+        "dry_run": dry_run,
+        "postgres_killed": 0u64,
+        "bun_servers_killed": 0u64,
+        "port_1111_cleared": false,
+        "shm_freed": 0u64,
+    });
+
+    // Find + optionally kill postgres workers
+    let postgres_pids = find_pids("postgres.*ato");
+    report["postgres_found"] = serde_json::json!(postgres_pids.len() as u64);
+    if !dry_run && !postgres_pids.is_empty() {
+        report["postgres_killed"] = serde_json::json!(kill_pids_mcp(&postgres_pids) as u64);
+    }
+
+    // Find + optionally kill bun server processes
+    let bun_pids = find_pids("bun.*dist/index");
+    report["bun_servers_found"] = serde_json::json!(bun_pids.len() as u64);
+    if !dry_run && !bun_pids.is_empty() {
+        report["bun_servers_killed"] = serde_json::json!(kill_pids_mcp(&bun_pids) as u64);
+    }
+
+    // Find + optionally kill port 1111 listeners
+    let port_pids = find_port_pids_mcp(1111);
+    report["port_1111_pids"] = serde_json::json!(port_pids.len() as u64);
+    if !dry_run && !port_pids.is_empty() {
+        let killed = kill_pids_mcp(&port_pids);
+        report["port_1111_killed"] = serde_json::json!(killed as u64);
+    }
+
+    // Count + optionally free SysV shared memory
+    let shm = count_shm_mcp();
+    report["shm_segments"] = serde_json::json!(shm as u64);
+    if !dry_run && shm > 0 {
+        report["shm_freed"] = serde_json::json!(free_shm_mcp() as u64);
+    }
+
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{ "type": "text", "text": report.to_string() }],
+            "isError": false
+        }
+    })
+}
+
+fn find_pids(pattern: &str) -> Vec<u32> {
+    let output = match std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(pattern)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn kill_pids_mcp(pids: &[u32]) -> usize {
+    let current = std::process::id();
+    let mut killed = 0usize;
+    for &pid in pids {
+        if pid == current {
+            continue;
+        }
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        killed += 1;
+    }
+    killed
+}
+
+fn find_port_pids_mcp(port: u16) -> Vec<u32> {
+    let output = match std::process::Command::new("lsof")
+        .arg("-ti")
+        .arg(format!(":{port}"))
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn count_shm_mcp() -> usize {
+    let output = match std::process::Command::new("ipcs").arg("-m").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let user = std::env::var("USER").unwrap_or_default();
+    text.lines().filter(|line| line.contains(&user)).count()
+}
+
+fn free_shm_mcp() -> usize {
+    let output = match std::process::Command::new("ipcs").arg("-m").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let user = std::env::var("USER").unwrap_or_default();
+    let mut freed = 0usize;
+    for line in text.lines() {
+        if !line.contains(&user) {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(id_str) = parts.get(1) {
+            if let Ok(id) = id_str.parse::<u32>() {
+                let _ = std::process::Command::new("ipcrm")
+                    .arg("-m")
+                    .arg(id.to_string())
+                    .output();
+                freed += 1;
+            }
+        }
+    }
+    freed
+}
+
 /// Map either a single character or a named key to the AppleScript
 /// statement that produces it. `keystroke` works for printable
 /// characters; `key code` is required for non-printable keys
@@ -933,6 +1118,7 @@ fn map_tool_to_command(
         // omnibar "stop session" suggestion. We still attach the
         // (default) `pane_id` below for shape-symmetry with browser_*,
         // but `transport::parse_command` discards it.
+        "auth_status" => ("auth_status", serde_json::json!({})),
         "stop_active_session" => ("stop_active_session", serde_json::json!({})),
         "host_dispatch_action" => {
             let action = s("action")?;
@@ -948,6 +1134,9 @@ fn map_tool_to_command(
                 "OpenLaunchConsent",
                 "OpenLaunchConsentConfigPanel",
                 "OpenCapsuleSettingsDemo",
+                "OpenImportBlinko",
+                "RunImportBlinko",
+                "CheckImportState",
                 "OpenStartWindow",
                 "OpenStoreWindow",
                 "SkipOnboarding",
@@ -1080,8 +1269,10 @@ static TOOLS: &str = r#"[
   {"name":"set_capsule_secrets","description":"Persist one or more secrets for a capsule handle, grant them to that handle, and (default) dismiss any open `missing_required_env` (E103) modal so the launch re-arms with the freshly stored secrets. Mirrors the modal Save handler — disk-write failures (e.g. ~/.ato/secrets.json mode/parent-dir errors) are returned as MCP errors instead of being silently swallowed.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_config / launch state (e.g. 'github.com/Koh0920/WasedaP2P')."},"secrets":{"type":"object","description":"Map of env-var-name → secret value (strings only).","additionalProperties":{"type":"string"}},"clear_pending_config":{"type":"boolean","description":"If true (default), clears AppState.pending_config when its handle matches, re-arming the launch."}},"required":["handle","secrets"]}},
   {"name":"approve_execution_plan_consent","description":"Approve the open ExecutionPlan consent modal for `handle`. Goes through the same handler as the UI's Approve button — `apply_capsule_consent` invokes `ato internal consent approve-execution-plan` (CLI owns the JSONL append; desktop never writes the consent file directly), records the per-handle retry-once budget, and clears `pending_consent` so `ensure_pending_local_launch` re-arms the launch on the next render. Errors surface as MCP errors when no matching pending_consent exists or the CLI write fails — the modal is left open so the caller can retry.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_consent (the same handle the user typed in the omnibar / ato-desktop opened, e.g. 'capsule://github.com/Koh0920/WasedaP2P')."}},"required":["handle"]}},
   {"name":"stop_active_session","description":"Stop the active pane's underlying capsule session, mirroring the `Cmd+Shift+W` keybind and the omnibar 'stop session' suggestion. Routes through `WebViewManager::stop_active_session` — the same method `DesktopShell::on_stop_active_session` dispatches — so providers (postgres, etc.) and consumers (uvicorn / vite / ...) shut down via `ato app session stop` exactly as a UI-initiated stop would. Returns `{ok:true, stopped, had_active_session, session_id, handle}`; `stopped:false` with `had_active_session:false` means there was nothing to stop (idempotent), `stopped:false` with `had_active_session:true` means the underlying `stop_guest_session` returned a non-success outcome and the caller should inspect ports/processes (refs #92 AC-step 6).","inputSchema":{"type":"object","properties":{},"required":[]}},
+  {"name":"auth_status","description":"Returns the current ato-desktop sign-in state for AODD agents. Does NOT expose the session token.","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"host_take_screenshot","description":"Captures the full macOS display as PNG (via `screencapture -t png -x`) and writes it to a hermetic temp file under `${ATO_HOME:-~/.ato}/aodd/`. Returns `{ok:true, path:'<abs>'}`. This is the AODD-visual-inspection primitive for ato-desktop's GPUI host surfaces (Control Bar, AppWindow, Launcher, Card Switcher); those surfaces are NOT reachable via the `browser_*` tools because those target WKWebView page content only. macOS only. Requires Screen Recording permission for the terminal running the MCP — the first invocation will trigger a system permission prompt.","inputSchema":{"type":"object","properties":{"region":{"type":"string","description":"Optional region in 'x,y,w,h' format. When omitted captures the whole main display."}},"required":[]}},
   {"name":"host_activate_app","description":"Brings an application to the foreground via osascript + System Events. Required before host_press_key so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success. Requires Accessibility permission for the terminal running the MCP — the first invocation triggers a system prompt.","inputSchema":{"type":"object","properties":{"process_name":{"type":"string","description":"Process name as shown in Activity Monitor (default: 'ato-desktop')."}},"required":[]}},
   {"name":"host_press_key","description":"Sends a keyboard event to the currently focused application via osascript + System Events keystroke. Pair with host_activate_app first. `key` accepts a single character (e.g. 'n', '1') or a named key ('Escape', 'Return', 'Tab', 'Space'). `modifiers` is an array drawn from ['command','shift','option','control']. Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"key":{"type":"string","description":"Single character or named key."},"modifiers":{"type":"array","items":{"type":"string"},"description":"Modifier keys to hold."}},"required":["key"]}},
+  {"name":"cleanup_host_resources","description":"Preview and clean up stale provider processes (postgres, bun) and System V shared memory segments owned by the current user. Uses TERM only — no SIGKILL. Set dry_run=true to only preview without killing.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"If true, only preview without killing (default: false)"}},"required":[]}},
   {"name":"host_dispatch_action","description":"Queues a host-level GPUI action by name (e.g. 'OpenAppWindowExperiment', 'OpenCardSwitcher', 'OpenStoreWindow', 'OpenStartWindow', 'ShowSettings') onto the ato-desktop automation socket. The desktop drains the queue on its next render pass and invokes the matching handler in-process — equivalent to the keybinding the user would press. This is the AODD bypass for macOS Accessibility permission requirements that gate `host_press_key`. Returns `{ok:true, queued_action:'<name>'}`. Unknown action names log a warning on the desktop side but still return ok at the MCP boundary.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"Action name to dispatch."}},"required":["action"]}}
 ]"#;
