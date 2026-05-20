@@ -879,6 +879,7 @@ fn find_pids(pattern: &str) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(unix)]
 fn kill_pids_mcp(pids: &[u32]) -> usize {
     let current = std::process::id();
     let mut killed = 0usize;
@@ -890,6 +891,11 @@ fn kill_pids_mcp(pids: &[u32]) -> usize {
         killed += 1;
     }
     killed
+}
+
+#[cfg(not(unix))]
+fn kill_pids_mcp(_pids: &[u32]) -> usize {
+    0
 }
 
 fn find_port_pids_mcp(port: u16) -> Vec<u32> {
