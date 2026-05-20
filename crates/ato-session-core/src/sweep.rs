@@ -754,6 +754,7 @@ mod tests {
         fs::write(&log_path, "log").expect("log");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-dead".to_string(),
+            launch_key: None,
             handle: "capsule://example/app".to_string(),
             normalized_handle: "capsule://example/app".to_string(),
             canonical_handle: None,
@@ -826,6 +827,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-orch".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: None,
@@ -905,6 +907,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-dep".to_string(),
+            launch_key: None,
             handle: "capsule://example/dep".to_string(),
             normalized_handle: "capsule://example/dep".to_string(),
             canonical_handle: None,

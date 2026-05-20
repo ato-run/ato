@@ -22,7 +22,9 @@
 //! consent flow is real.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use base64::Engine as _;
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
@@ -60,6 +62,13 @@ pub enum LaunchCommand {
     Cancel,
     /// Boot wizard's "Cancel during launch" affordance.
     AbortBoot,
+    /// User pressed "Find candidates" in the GitHub Run wizard.
+    /// `repo` is `owner/repo` (already normalized by the React layer).
+    GithubFindCandidates { repo: String },
+    /// User clicked "起動レビューへ進む" (Proceed to review) in the
+    /// candidate detail screen. Normalizes `repo` into a launchable
+    /// `github.com/{owner}/{repo}` handle and opens the consent wizard.
+    GithubProceedToConsent { repo: String, title: String },
 }
 
 impl LaunchCommand {
@@ -67,6 +76,8 @@ impl LaunchCommand {
         match self {
             LaunchCommand::Approve { .. } => Capability::WebviewCreate,
             LaunchCommand::Cancel | LaunchCommand::AbortBoot => Capability::WindowsClose,
+            LaunchCommand::GithubFindCandidates { .. } => Capability::WebviewCreate,
+            LaunchCommand::GithubProceedToConsent { .. } => Capability::WebviewCreate,
         }
     }
 }
@@ -232,6 +243,154 @@ pub fn dispatch(
                 let _ = boot.update(cx, |_, window, _| window.remove_window());
             }
         }
+        LaunchCommand::GithubFindCandidates { repo } => {
+            tracing::info!(repo = %repo, "ato_launch: github_find_candidates requested");
+
+            let shell_weak = cx
+                .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                .and_then(|s| s.0.clone());
+            let Some(shell_weak) = shell_weak else {
+                tracing::warn!("ato_launch: github_find_candidates — no ActiveGithubRunShell");
+                return Ok(());
+            };
+
+            let async_app = cx.to_async();
+            let fe = cx.foreground_executor().clone();
+            let be = cx.background_executor().clone();
+            let repo_owned = Arc::new(repo);
+
+            fe.spawn(async move {
+                let repo_clone = Arc::clone(&repo_owned);
+                let result: serde_json::Value = be.spawn(async move {
+                    fetch_github_candidates(&repo_clone)
+                }).await;
+
+                let _ = async_app.update(|cx| {
+                    if let Some(shell) = shell_weak.upgrade() {
+                        shell.read(cx).inject_github_candidates(&result);
+                    }
+                });
+            }).detach();
+        }
+        LaunchCommand::GithubProceedToConsent { repo, title } => {
+            tracing::info!(repo = %repo, title = %title, "ato_launch: github_proceed_to_consent");
+
+            let handle = crate::window::launch_window::normalize_github_handle(&repo);
+            let route = GuestRoute::CapsuleHandle {
+                handle: handle.clone(),
+                label: title.clone(),
+            };
+
+            // Close the GitHub Run wizard; the consent wizard takes focus.
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+            cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
+
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            {
+                tracing::error!(
+                    error = %err,
+                    handle = %handle,
+                    "ato_launch: open_consent_window_for_route failed"
+                );
+            }
+        }
     }
     Ok(())
+}
+
+/// Fetch `capsule.toml` candidates for `owner/repo` from the GitHub
+/// contents API. Returns a JSON envelope `{ok:true,candidates:[...]}` or
+/// `{ok:false,error:"..."}`. Runs on a background thread — uses `ureq`
+/// which is synchronous/blocking.
+fn fetch_github_candidates(repo: &str) -> serde_json::Value {
+    let url = format!(
+        "https://api.github.com/repos/{}/contents/capsule.toml",
+        repo
+    );
+    match ureq::get(&url)
+        .set("User-Agent", "ato-desktop")
+        .set("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(resp) => {
+            match resp.into_json::<serde_json::Value>() {
+                Ok(body) => {
+                    // GitHub API returns `{content: "<base64>", ...}` for file contents.
+                    let content_b64 = body.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .replace('\n', "");
+                    let toml_text = match base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &content_b64,
+                    ) {
+                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Err(err) => {
+                            return serde_json::json!({
+                                "ok": false,
+                                "error": format!("base64 decode failed: {err}")
+                            });
+                        }
+                    };
+
+                    // Extract basic metadata from TOML for the candidate row.
+                    let name = extract_toml_str(&toml_text, "name").unwrap_or_else(|| repo.to_string());
+                    let version = extract_toml_str(&toml_text, "version").unwrap_or_else(|| "0.0.0".to_string());
+                    let description = extract_toml_str(&toml_text, "description").unwrap_or_default();
+                    let author = extract_toml_str(&toml_text, "author").unwrap_or_default();
+
+                    serde_json::json!({
+                        "ok": true,
+                        "candidates": [{
+                            "title": name,
+                            "version": version,
+                            "description": description,
+                            "author": author,
+                            "status": "community",
+                            "source": "github",
+                            "toml": toml_text,
+                            "repo": repo,
+                        }]
+                    })
+                }
+                Err(err) => serde_json::json!({
+                    "ok": false,
+                    "error": format!("failed to parse GitHub response: {err}")
+                }),
+            }
+        }
+        Err(ureq::Error::Status(404, _)) => serde_json::json!({
+            "ok": false,
+            "error": "capsule.toml が見つかりませんでした。このリポジトリには capsule.toml がありません。"
+        }),
+        Err(ureq::Error::Status(code, _)) => serde_json::json!({
+            "ok": false,
+            "error": format!("GitHub API エラー (HTTP {code})")
+        }),
+        Err(err) => serde_json::json!({
+            "ok": false,
+            "error": format!("ネットワークエラー: {err}")
+        }),
+    }
+}
+
+/// Minimal single-value extractor for a top-level TOML string key.
+/// Avoids pulling in the full `toml` crate parse for a hot path.
+fn extract_toml_str(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with(key) {
+            if let Some(rest) = line.strip_prefix(key) {
+                let rest = rest.trim();
+                if rest.starts_with('=') {
+                    let value = rest[1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !value.is_empty() {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+    }
+    None
 }

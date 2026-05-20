@@ -14,7 +14,8 @@ use anyhow::{Context, Result};
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
 pub(crate) use ato_session_core::{
-    write_session_record_atomic, GuestSessionDisplay, ServiceBackgroundDisplay,
+    launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
+    GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
     StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
     StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
 };
@@ -27,6 +28,8 @@ use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
+#[cfg(unix)]
+use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::application::pipeline::phases::run::{
     persist_background_dependency_contracts, setup_dependency_contracts_launch_context,
     DependencyContractGuard, DerivedBridgeManifest, PreparedRunContext,
@@ -34,8 +37,6 @@ use crate::application::pipeline::phases::run::{
 use crate::application::session_graph_populate::{
     EDGE_KIND_PROVIDES, NODE_KIND_PROVIDER, NODE_KIND_SERVICE,
 };
-#[cfg(unix)]
-use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
     prepare_target_execution, resolve_launch_context, TargetLaunchOptions,
@@ -197,6 +198,41 @@ impl SessionInfo {
         self.graph_completeness = metadata.graph_completeness.clone();
         self.reproducibility_class = metadata.reproducibility_class.clone();
     }
+
+    pub(crate) fn to_materialized_launch_record(
+        &self,
+        resolution: &super::resolve::HandleResolution,
+        app_root: &Path,
+        launch_key: &str,
+        launch_digest: &str,
+        run_config_hash: &str,
+    ) -> MaterializedLaunchRecord {
+        let created_at_unix_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        MaterializedLaunchRecord {
+            schema_version: ato_session_core::MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION,
+            launch_key: launch_key.to_string(),
+            last_session_id: Some(self.session_id.clone()),
+            handle: self.handle.clone(),
+            normalized_handle: resolution.normalized_handle.clone(),
+            canonical_handle: resolution.canonical_handle.clone(),
+            trust_state: resolution.trust_state.clone(),
+            source: resolution.source.clone(),
+            restricted: resolution.restricted,
+            snapshot: resolution.snapshot.clone(),
+            target_label: self.target_label.clone(),
+            manifest_path: self.manifest_path.clone(),
+            app_root: app_root.display().to_string(),
+            platform: ato_session_core::current_platform_tag(),
+            launch_digest: launch_digest.to_string(),
+            run_config_hash: run_config_hash.to_string(),
+            created_at_unix_ms,
+            execution_id: self.execution_id.clone(),
+            execution_receipt_schema_version: self.execution_receipt_schema_version,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +254,13 @@ pub(crate) struct ExecutionReceiptSessionMetadata {
 // types out so `ato-desktop` can read records without depending on
 // `ato-cli`.
 
-pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
+pub fn start_session(
+    handle: &str,
+    target_label: Option<&str>,
+    from_materialized_record: Option<&str>,
+    run_config_hash: Option<&str>,
+    json: bool,
+) -> Result<()> {
     // Reserve stdout for the SessionStartEnvelope when the caller
     // asked for JSON. Without this, the orchestrator's stream pumper
     // (`adapters/runtime/executors/orchestrator.rs::spawn_prefixed_stream`)
@@ -277,8 +319,30 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         }
     }
 
-    let mut runner =
-        super::session_runner::SessionStartPhaseRunner::new(handle, target_label, json);
+    let mut runner = if let Some(record_path) = from_materialized_record {
+        let path = PathBuf::from(record_path);
+        let record = ato_session_core::read_materialized_launch_record(&path)?;
+        if record.handle != handle && record.normalized_handle != handle {
+            anyhow::bail!(
+                "materialized launch record {} belongs to '{}' not '{}'",
+                path.display(),
+                record.handle,
+                handle
+            );
+        }
+        super::session_runner::SessionStartPhaseRunner::from_materialized_record(
+            record,
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    } else {
+        super::session_runner::SessionStartPhaseRunner::new(
+            handle,
+            target_label,
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    };
     let pipeline = ConsumerRunPipeline::standard();
     // Boundary-level receipt emission (refs #74, #99). On the happy
     // path the pipeline emits its own full v2 receipt before spawn
@@ -464,6 +528,7 @@ pub(super) fn start_guest_session(
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -549,9 +614,7 @@ pub(super) fn start_runtime_session(
     timer.finish_ok();
 
     let session_web_port = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
-        if plan.execution_port().is_some()
-            || runtime_overrides::override_port(None).is_some()
-        {
+        if plan.execution_port().is_some() || runtime_overrides::override_port(None).is_some() {
             // Explicit port declared or ATO_UI_OVERRIDE_PORT set: use normal resolution
             // (which also handles remapping an occupied declared port to a free one).
             Some(resolve_session_web_port(
@@ -756,6 +819,7 @@ pub(super) fn start_runtime_session(
         .or(legacy_dependency_contracts);
     let session = StoredSessionInfo {
         session_id,
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -1072,6 +1136,7 @@ pub(super) fn start_orchestration_session_in_process(
         .or(legacy_dependency_contracts);
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -1288,6 +1353,7 @@ pub(super) fn start_orchestration_session_supervisor(
 
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -1495,9 +1561,7 @@ fn manifest_service_depends_on_map(
         // Also fold in [services.<name>.dependencies.<alias>] keys
         // (service-to-provider).
         let mut targets = depends_on;
-        if let Some(deps_table) =
-            value.get("dependencies").and_then(|v| v.as_table())
-        {
+        if let Some(deps_table) = value.get("dependencies").and_then(|v| v.as_table()) {
             for alias in deps_table.keys() {
                 if !targets.iter().any(|t| t == alias) {
                     targets.push(alias.clone());
@@ -1942,7 +2006,12 @@ fn run_command_uses_port_var(plan: &capsule_core::router::ManifestData) -> bool 
 /// argument; ato injects one at spawn time when none is declared.
 fn run_command_is_known_web_server(plan: &capsule_core::router::ManifestData) -> bool {
     const KNOWN_SERVERS: &[&str] = &[
-        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+        "uvicorn",
+        "gunicorn",
+        "flask",
+        "streamlit",
+        "hypercorn",
+        "daphne",
     ];
     let Some(cmd) = plan.execution_run_command() else {
         return false;
@@ -3083,6 +3152,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-populate".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3162,6 +3232,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-stop".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3279,6 +3350,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-v0_5-stop".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3352,6 +3424,7 @@ mod tests {
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-kill".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3440,6 +3513,7 @@ mod tests {
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-v0_5-kill".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3586,6 +3660,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/demo".to_string(),
                 normalized_handle: "capsule://example/demo".to_string(),
                 canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3712,6 +3787,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/demo".to_string(),
                 normalized_handle: "capsule://example/demo".to_string(),
                 canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3814,6 +3890,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-orch".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -4005,6 +4082,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/orch".to_string(),
                 normalized_handle: "capsule://example/orch".to_string(),
                 canonical_handle: Some("capsule://example/orch".to_string()),
@@ -4187,6 +4265,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-fallback".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -4449,6 +4528,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-pgroup".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
