@@ -56,6 +56,7 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) cache_strategy: CacheStrategyArg,
     pub(crate) deprecation_warning: Option<&'static str>,
+    pub(crate) plan_only: bool,
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
 
@@ -168,6 +169,7 @@ fn execute_standard_run_with_env_assistance(
             args.inject.clone(),
             args.build_policy,
             args.cache_strategy,
+            args.plan_only,
             args.reporter.clone(),
         )
     };
@@ -481,9 +483,8 @@ mod tests {
     use crate::install::support::LocalRunManifestStatus;
     use std::sync::Arc;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::env_lock().lock().unwrap()
     }
 
     #[test]
@@ -576,6 +577,7 @@ mod tests {
             cwd: None,
             cache_strategy: crate::cli::shared::CacheStrategyArg::Auto,
             deprecation_warning: None,
+            plan_only: false,
             reporter,
         })
         .expect("canonical handle should normalize");
@@ -656,7 +658,7 @@ mod tests {
 
     #[test]
     fn ato_log_info_enables_verbose_run_output() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("ATO_LOG", "info");
 
         assert!(ato_log_requests_verbose());
@@ -667,7 +669,7 @@ mod tests {
 
     #[test]
     fn explicit_verbose_overrides_silent_ato_log() {
-        let _lock = env_lock().lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("ATO_LOG", "warn");
 
         assert!(!ato_log_requests_verbose());

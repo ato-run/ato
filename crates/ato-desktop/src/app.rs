@@ -109,6 +109,11 @@ actions!(
         // window" surface that the Card Switcher's new-window tile
         // routes to. Always spawns a new window (no slot reuse).
         OpenStartWindow,
+        // Opens the GitHub repository execution wizard — accepts a
+        // GitHub URL or owner/repo shorthand, looks up capsule.toml
+        // candidates (metadata-only, no clone), and walks the user
+        // through candidate review and consent before launching.
+        OpenGithubRunWindow,
         // Identity / Account menu trigger — fired from the Control
         // Bar's right-end Identity button. Phase 1 logs the click;
         // Phase 2 will open a real popover (Profile / Account /
@@ -1043,6 +1048,12 @@ pub fn run(skip_onboarding: bool) {
             }
         });
 
+        cx.on_action(|_: &OpenGithubRunWindow, cx: &mut App| {
+            if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
+                tracing::error!(error = %err, "failed to open github run window");
+            }
+        });
+
         // The two startup modes are mutually exclusive — there is no
         // in-session toggle, only a process-lifetime choice. Focus View
         // (AppWindow + Control Bar) is the default; config key
@@ -1203,13 +1214,54 @@ fn restart_focus_content_window(cx: &mut App, window_id: u64) {
     let Some(entry) = cx.global::<OpenContentWindows>().get(window_id).cloned() else {
         return;
     };
+    let capsule_session_id = entry
+        .capsule
+        .as_ref()
+        .and_then(|capsule| capsule.session_id.clone());
     let ContentWindowKind::AppWindow { route } = entry.kind else {
         return;
     };
+    let launch_configs = capsule_session_id
+        .as_deref()
+        .and_then(|session_id| {
+            cx.global::<crate::state::session::SessionRegistry>()
+                .get_session(session_id)
+                .map(|session| session.launch_context.launch_configs.clone())
+        })
+        .unwrap_or_default();
+    let materialized_record_path =
+        capsule_session_id
+            .as_deref()
+            .and_then(|session_id| match &route {
+                crate::state::GuestRoute::CapsuleHandle { .. }
+                | crate::state::GuestRoute::CapsuleUrl { .. } => {
+                    crate::orchestrator::materialized_record_path_for_session(session_id).ok()
+                }
+                _ => None,
+            });
+    if let Some(session_id) = capsule_session_id.as_deref() {
+        if let Err(err) = crate::orchestrator::stop_guest_session_and_wait(
+            session_id,
+            std::time::Duration::from_secs(3),
+        ) {
+            tracing::error!(error = %err, window_id, "RestartContentWindow stop failed");
+            return;
+        }
+    }
     let _ = entry
         .handle
         .update(cx, |_, window, _| window.remove_window());
-    if let Err(err) = crate::window::open_app_window(cx, route) {
+    let restart_result = if let Some(record_path) = materialized_record_path {
+        crate::window::orchestrator::open_app_window_from_materialized_record_with_configs(
+            cx,
+            route.clone(),
+            record_path,
+            launch_configs,
+        )
+    } else {
+        crate::window::orchestrator::open_app_window_with_configs(cx, route.clone(), launch_configs)
+    };
+    if let Err(err) = restart_result {
         tracing::error!(error = %err, window_id, "RestartContentWindow failed");
     }
 }

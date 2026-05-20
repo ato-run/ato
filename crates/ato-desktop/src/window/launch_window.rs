@@ -48,8 +48,15 @@ use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
-const CONSENT_HTML: &str = include_str!("../../assets/system/ato-launch/consent.html");
-const BOOT_HTML: &str = include_str!("../../assets/system/ato-launch/boot.html");
+/// Single-file React SPA that covers all launch wizard screens
+/// (consent, boot, github_run, candidates, candidate_detail,
+///  no_candidates, create_toml). Built from `assets/system/ato-launch/`
+/// with `vite-plugin-singlefile`; all JS/CSS is inlined.
+const LAUNCH_APP_HTML: &str = include_str!("../../assets/system/ato-launch/dist/index.html");
+
+// Legacy plain-HTML builds kept for reference; no longer loaded into WebViews.
+const _CONSENT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/consent.html");
+const _BOOT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/boot.html");
 
 /// Pending capsule-launch target — set when `open_consent_window_for_route`
 /// opens the consent wizard, consumed by `ato_launch::dispatch` on
@@ -191,6 +198,14 @@ pub struct ActiveConsentShell(pub Option<WeakEntity<LaunchWindowShell>>);
 
 impl gpui::Global for ActiveConsentShell {}
 
+/// Weak handle to the most recently opened GitHub Run wizard shell.
+/// Used by `inject_github_candidates` and AODD automation to deliver
+/// candidate lookup results into the wizard WebView.
+#[derive(Default, Clone)]
+pub struct ActiveGithubRunShell(pub Option<WeakEntity<LaunchWindowShell>>);
+
+impl gpui::Global for ActiveGithubRunShell {}
+
 pub struct LaunchWindowShell {
     _webview: WebView,
     window_size: Size<Pixels>,
@@ -295,6 +310,18 @@ impl LaunchWindowShell {
             "const el=document.getElementById('panel-config-body'); if (el) { el.scrollTop = el.scrollHeight; }",
         );
     }
+
+    /// Deliver candidate lookup results into the GitHub Run wizard WebView.
+    /// `result` is a JSON value shaped as `{ok:true,candidates:[...]}` or
+    /// `{ok:false,error:"..."}`. Guards with `typeof` so a missed call is silent.
+    pub fn inject_github_candidates(&self, result: &serde_json::Value) {
+        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "typeof window.__ato_github_candidates_result==='function'&&window.__ato_github_candidates_result({})",
+            json
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
 }
 
 fn open_wizard(
@@ -357,6 +384,8 @@ const CONSENT_W: f32 = 560.0;
 const CONSENT_H: f32 = 560.0;
 const BOOT_W: f32 = 440.0;
 const BOOT_H: f32 = 520.0;
+const GITHUB_RUN_W: f32 = 520.0;
+const GITHUB_RUN_H: f32 = 480.0;
 
 /// Spawn the consent wizard with no specific target — used for AODD
 /// screenshot generation and standalone MCP testing.
@@ -480,12 +509,12 @@ pub fn open_consent_window_for_route_with_client(
         format!("{ms}-{pid}")
     };
 
-        let stashed = StashedLaunch {
-            route,
-            requested_client,
-        };
-        let mut launches = cx.global_mut::<PendingLaunches>();
-        launches.0.insert(preview_id.clone(), stashed);
+    let stashed = StashedLaunch {
+        route,
+        requested_client,
+    };
+    let mut launches = cx.global_mut::<PendingLaunches>();
+    launches.0.insert(preview_id.clone(), stashed);
 
     // Inject loading-state preview so the wizard renders immediately.
     let loading_preview = serde_json::json!({
@@ -705,6 +734,27 @@ fn is_non_blocking_remote_preflight_error(handle: &str, err: &anyhow::Error) -> 
     message.contains("manifest path does not exist")
 }
 
+/// Normalize a user-supplied GitHub repo input into the canonical
+/// `github.com/{owner}/{repo}` handle format.
+///
+/// Accepts full URLs (`https://github.com/owner/repo`), `github.com/owner/repo`,
+/// and bare `owner/repo` shorthands. Strips trailing slashes and extra path
+/// segments (branch refs, sub-paths) beyond the two-segment owner/repo.
+pub fn normalize_github_handle(repo: &str) -> String {
+    let s = repo.trim();
+    let s = s
+        .strip_prefix("https://github.com/")
+        .or_else(|| s.strip_prefix("http://github.com/"))
+        .or_else(|| s.strip_prefix("github.com/"))
+        .unwrap_or(s);
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        format!("github.com/{}/{}", parts[0], parts[1])
+    } else {
+        format!("github.com/{s}")
+    }
+}
+
 fn looks_like_remote_launch_handle(handle: &str) -> bool {
     let trimmed = handle.trim();
     if trimmed.is_empty()
@@ -742,7 +792,10 @@ fn open_consent_wizard_inner(
     };
 
     let locale = resolve_locale(crate::config::load_config().general.language);
-    let composed = compose_init_script(locale, init_script.as_deref());
+    let composed = format!(
+        "window.__ATO_LAUNCH_SCREEN='consent';\n{}",
+        compose_init_script(locale, init_script.as_deref())
+    );
     let queue = system_ipc::new_queue();
     let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> = Arc::new(Mutex::new(None));
     let shell_slot_inner = Arc::clone(&shell_slot);
@@ -759,7 +812,7 @@ fn open_consent_wizard_inner(
             .into(),
         };
         let webview = WebViewBuilder::new()
-            .with_html(CONSENT_HTML)
+            .with_html(LAUNCH_APP_HTML)
             .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
             .with_bounds(webview_rect)
@@ -848,6 +901,69 @@ pub fn open_boot_window(cx: &mut App, route: Option<&GuestRoute>) -> Result<AnyW
     Ok(handle)
 }
 
+/// Open the `Run from GitHub` wizard window (screen: github_run).
+/// Presents repository input, candidate lookup, detail inspection, and
+/// the create/edit TOML path — all before the consent review step.
+pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
+    let bounds = Bounds::centered(None, size(px(GITHUB_RUN_W), px(GITHUB_RUN_H)), cx);
+    let options = WindowOptions {
+        titlebar: Some(TitleBar::title_bar_options()),
+        focus: true,
+        show: true,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_decorations: Some(WindowDecorations::Client),
+        ..Default::default()
+    };
+
+    let locale = resolve_locale(crate::config::load_config().general.language);
+    let composed = format!(
+        "window.__ATO_LAUNCH_SCREEN='github_run';\n{}",
+        compose_init_script(locale, None)
+    );
+    let queue = system_ipc::new_queue();
+    let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> = Arc::new(Mutex::new(None));
+    let shell_slot_inner = Arc::clone(&shell_slot);
+    let queue_for_closure = queue.clone();
+
+    let handle = cx.open_window(options, move |window, cx| {
+        let win_size = window.bounds().size;
+        let webview_rect = Rect {
+            position: LogicalPosition::new(0i32, 0i32).into(),
+            size: LogicalSize::new(
+                f32::from(win_size.width) as u32,
+                f32::from(win_size.height) as u32,
+            )
+            .into(),
+        };
+        let webview = WebViewBuilder::new()
+            .with_html(LAUNCH_APP_HTML)
+            .with_initialization_script(&composed)
+            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_bounds(webview_rect)
+            .build_as_child(window)
+            .expect("build_as_child must succeed for the github_run WebView");
+        let shell = cx.new(|cx| LaunchWindowShell {
+            _webview: webview,
+            window_size: win_size,
+            paste: WebViewPasteSupport::new(cx),
+        });
+        if let Ok(mut slot) = shell_slot_inner.lock() {
+            *slot = Some(shell.clone());
+        }
+        window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
+        cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+    })?;
+
+    system_ipc::spawn_drain_loop(cx, queue, *handle);
+    let shell = shell_slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("LaunchWindowShell entity must be populated by open_window closure");
+    cx.set_global(ActiveGithubRunShell(Some(shell.downgrade())));
+    Ok(*handle)
+}
+
 pub fn start_boot_launch(
     cx: &mut App,
     route: GuestRoute,
@@ -881,8 +997,8 @@ pub fn start_boot_launch(
     };
 
     let secret_store = crate::config::load_secrets();
-    let secrets: Vec<_> = secret_store
-        .secrets_for_capsule(&handle);
+    let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
+    let launch_configs_for_result = configs.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
     let handle_for_thread = handle.clone();
@@ -997,6 +1113,7 @@ pub fn start_boot_launch(
                                             launch_context: CapsuleLaunchContext {
                                                 handle_or_url: session.handle.clone(),
                                                 target: Some(session.target_label.clone()),
+                                                launch_configs: launch_configs_for_result.clone(),
                                                 requested_client: SessionClientKind::OsBrowser,
                                                 source: CapsuleOpenSource::NavigateToUrl,
                                             },
@@ -1023,6 +1140,7 @@ pub fn start_boot_launch(
                                             cx,
                                             route_for_open.clone(),
                                             session,
+                                            launch_configs_for_result.clone(),
                                         ) {
                                             Ok(app_handle) => {
                                                 close_boot_window_handle(cx, boot_handle);
@@ -1172,7 +1290,10 @@ fn open_boot_wizard_inner(
     };
 
     let locale = resolve_locale(crate::config::load_config().general.language);
-    let composed = compose_init_script(locale, init_script.as_deref());
+    let composed = format!(
+        "window.__ATO_LAUNCH_SCREEN='boot';\n{}",
+        compose_init_script(locale, init_script.as_deref())
+    );
     let queue = system_ipc::new_queue();
     // Arc<Mutex<...>> so the entity can be captured across the Send closure.
     let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> = Arc::new(Mutex::new(None));
@@ -1190,7 +1311,7 @@ fn open_boot_wizard_inner(
             .into(),
         };
         let webview = WebViewBuilder::new()
-            .with_html(BOOT_HTML)
+            .with_html(LAUNCH_APP_HTML)
             .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
             .with_bounds(webview_rect)
@@ -1279,15 +1400,15 @@ mod tests {
 
     #[test]
     fn consent_config_inputs_allow_selection() {
-        assert!(CONSENT_HTML.contains("-webkit-user-select: text;"));
-        assert!(CONSENT_HTML.contains("user-select: text;"));
+        assert!(_CONSENT_HTML_LEGACY.contains("-webkit-user-select: text;"));
+        assert!(_CONSENT_HTML_LEGACY.contains("user-select: text;"));
     }
 
     #[test]
     fn consent_preview_supports_network_identity_allowlists() {
-        assert!(CONSENT_HTML.contains("networkIds"));
-        assert!(CONSENT_HTML.contains("case 'network_ids':"));
-        assert!(CONSENT_HTML.contains("Network IDs"));
+        assert!(_CONSENT_HTML_LEGACY.contains("networkIds"));
+        assert!(_CONSENT_HTML_LEGACY.contains("case 'network_ids':"));
+        assert!(_CONSENT_HTML_LEGACY.contains("Network IDs"));
     }
 
     #[test]
