@@ -56,6 +56,8 @@ pub enum AtoStartCommand {
     OpenSettings,
     /// Open a local directory as a capsule. Requires `WebviewCreate`.
     OpenLocalPath { path: String },
+    /// Open the GitHub Run wizard (`Run from GitHub`). Requires `WebviewCreate`.
+    OpenGithubRun,
     /// Close the start window. Requires `WindowsClose`.
     Close,
 }
@@ -69,6 +71,7 @@ impl AtoStartCommand {
             AtoStartCommand::OpenStore => Capability::LaunchSystemCapsule,
             AtoStartCommand::OpenSettings => Capability::LaunchSystemCapsule,
             AtoStartCommand::OpenLocalPath { .. } => Capability::WebviewCreate,
+            AtoStartCommand::OpenGithubRun => Capability::WebviewCreate,
             AtoStartCommand::Close => Capability::WindowsClose,
         }
     }
@@ -510,6 +513,13 @@ pub fn dispatch(
             if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, "ato_start: open_local_path failed");
+            }
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+
+        AtoStartCommand::OpenGithubRun => {
+            if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
+                tracing::error!(error = %err, "ato_start: open_github_run failed");
             }
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
