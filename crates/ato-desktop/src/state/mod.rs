@@ -1189,6 +1189,10 @@ pub struct AppState {
     /// permission requirements that block osascript-based keystroke
     /// synthesis.
     pub pending_host_actions: VecDeque<String>,
+    /// Pane (content window) IDs queued for close by the automation
+    /// socket (`browser_close_tab`). Drained on every
+    /// `DesktopShell::render` pass with access to the GPUI `cx`.
+    pub pending_close_panes: VecDeque<usize>,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
@@ -1316,6 +1320,7 @@ impl AppState {
             capsule_search_query: String::new(),
             app_windows: AppWindowRegistry::default(),
             pending_host_actions: VecDeque::new(),
+            pending_close_panes: VecDeque::new(),
             next_task_id: 2,
             next_pane_id: 2,
             next_new_tab_index: 1,
@@ -1510,6 +1515,7 @@ impl AppState {
             capsule_search_query: String::new(),
             app_windows: AppWindowRegistry::default(),
             pending_host_actions: VecDeque::new(),
+            pending_close_panes: VecDeque::new(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,

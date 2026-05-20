@@ -1092,6 +1092,24 @@ fn map_tool_to_command(
                 .ok_or("missing required argument 'pane_id'")?;
             ("focus_pane", serde_json::json!({ "pane_id": target }))
         }
+        "browser_click_at" => {
+            let x = args
+                .get("x")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing required argument 'x'")?;
+            let y = args
+                .get("y")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing required argument 'y'")?;
+            ("click_at", serde_json::json!({ "x": x, "y": y }))
+        }
+        "browser_close_tab" => {
+            let pane_id = args
+                .get("pane_id")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument 'pane_id'")?;
+            ("close_pane", serde_json::json!({ "pane_id": pane_id }))
+        }
         "set_capsule_secrets" => {
             let handle = s("handle")?;
             let secrets = args
@@ -1292,6 +1310,8 @@ static TOOLS: &str = r#"[
   {"name":"browser_verify_element_visible","description":"Checks whether the element with the given ref is visible.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref"]}},
   {"name":"browser_tabs","description":"Lists all open WebView panes with their IDs.","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"browser_tab_focus","description":"Focuses a specific WebView pane by ID.","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":["pane_id"]}},
+  {"name":"browser_click_at","description":"Clicks at a specific (x, y) coordinate in the active WebView.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"pane_id":{"type":"integer"}},"required":["x","y"]}},
+  {"name":"browser_close_tab","description":"Closes a WebView pane by ID.","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":["pane_id"]}},
   {"name":"set_capsule_secrets","description":"Persist one or more secrets for a capsule handle, grant them to that handle, and (default) dismiss any open `missing_required_env` (E103) modal so the launch re-arms with the freshly stored secrets. Mirrors the modal Save handler — disk-write failures (e.g. ~/.ato/secrets.json mode/parent-dir errors) are returned as MCP errors instead of being silently swallowed.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_config / launch state (e.g. 'github.com/Koh0920/WasedaP2P')."},"secrets":{"type":"object","description":"Map of env-var-name → secret value (strings only).","additionalProperties":{"type":"string"}},"clear_pending_config":{"type":"boolean","description":"If true (default), clears AppState.pending_config when its handle matches, re-arming the launch."}},"required":["handle","secrets"]}},
   {"name":"approve_execution_plan_consent","description":"Approve the open ExecutionPlan consent modal for `handle`. Goes through the same handler as the UI's Approve button — `apply_capsule_consent` invokes `ato internal consent approve-execution-plan` (CLI owns the JSONL append; desktop never writes the consent file directly), records the per-handle retry-once budget, and clears `pending_consent` so `ensure_pending_local_launch` re-arms the launch on the next render. Errors surface as MCP errors when no matching pending_consent exists or the CLI write fails — the modal is left open so the caller can retry.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_consent (the same handle the user typed in the omnibar / ato-desktop opened, e.g. 'capsule://github.com/Koh0920/WasedaP2P')."}},"required":["handle"]}},
   {"name":"stop_active_session","description":"Stop the active pane's underlying capsule session, mirroring the `Cmd+Shift+W` keybind and the omnibar 'stop session' suggestion. Routes through `WebViewManager::stop_active_session` — the same method `DesktopShell::on_stop_active_session` dispatches — so providers (postgres, etc.) and consumers (uvicorn / vite / ...) shut down via `ato app session stop` exactly as a UI-initiated stop would. Returns `{ok:true, stopped, had_active_session, session_id, handle}`; `stopped:false` with `had_active_session:false` means there was nothing to stop (idempotent), `stopped:false` with `had_active_session:true` means the underlying `stop_guest_session` returned a non-success outcome and the caller should inspect ports/processes (refs #92 AC-step 6).","inputSchema":{"type":"object","properties":{},"required":[]}},
