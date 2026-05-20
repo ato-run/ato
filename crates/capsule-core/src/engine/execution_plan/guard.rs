@@ -92,10 +92,16 @@ pub fn evaluate_for_mode_with_authority(
     let driver = plan.target.driver;
 
     let tier = derive_tier(runtime, driver)?;
+    // capsule.lock.json is required for Tier1 unless:
+    //  - an authoritative (shadow) lock is present, or
+    //  - dangerously_skip_permissions, or
+    //  - sandbox_mode (nacelle provides the isolation boundary; package-level lock
+    //    is still validated separately via NodeDependencyLock below)
     if requires_capsule_lock(runtime, driver)
         && matches!(tier, ExecutionTier::Tier1)
         && !has_authoritative_lock
         && !dangerously_skip_permissions
+        && !sandbox_mode
         && !resolve_capsule_lock_path(manifest_dir).exists()
         && !matches!(mode, RuntimeGuardMode::Preview)
     {
@@ -525,6 +531,25 @@ mod tests {
         let err = evaluate(&plan, tmp.path(), "strict", false, false).expect_err("must reject");
         assert_eq!(err.code, "ATO_ERR_PROVISIONING_LOCK_INCOMPLETE");
         assert!(err.message.contains("capsule.lock"));
+    }
+
+    #[test]
+    fn sandbox_mode_bypasses_capsule_lock_for_tier1() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package-lock");
+        // No capsule.lock — sandbox_mode should bypass the Tier1 capsule.lock requirement.
+        let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Node);
+        let result = evaluate_for_mode_with_authority(
+            &plan,
+            tmp.path(),
+            "strict",
+            true,  // sandbox_mode = true
+            false,
+            RuntimeGuardMode::Strict,
+            false, // no authoritative lock
+        )
+        .expect("guard should pass with sandbox_mode even without capsule.lock");
+        assert_eq!(result.required_lock, Some(RequiredLock::NodeDependencyLock));
     }
 
     #[test]
