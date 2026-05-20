@@ -49,7 +49,44 @@ use super::{EngineInstallResult, EngineManager};
 /// `Send + 'static` futures or pinning a multi_thread tokio runtime
 /// for these sync helpers — is a much larger refactor than the
 /// notification-emission path warrants.
-fn drive_sync_async<F: Future>(future: F) -> F::Output {
+/// Drive an async future to completion synchronously without entering
+/// the futures-executor `LocalPool`.
+///
+/// Why we can't just use `futures::executor::block_on`:
+/// `auto_bootstrap_nacelle` and `download_engine` are reached
+/// transitively from inside a `tokio::runtime::Runtime::block_on(...)`
+/// call on the orchestration session-start path
+/// (`session::start_orchestration_session_in_process` →
+/// `runtime_handle.block_on(execute_until_ready_and_detach)` →
+/// `OrchestratorStartupRuntime::start_service` →
+/// `preflight_native_sandbox` → `auto_bootstrap_nacelle`). Tokio's
+/// `block_on` sets `futures_executor::enter()`'s thread-local guard,
+/// and the legacy `futures::executor::block_on(reporter.notify(...))`
+/// then panics with "cannot execute LocalPool from within another
+/// executor: EnterError". The panic only fires on first-time nacelle
+/// download — cached nacelle short-circuits the notify path entirely,
+/// which is why the regression escaped existing tests.
+///
+/// Why we can't move the future to a fresh thread either:
+/// `CapsuleReporter::notify(&self, ...)` is `async fn` — the returned
+/// future borrows `&self` for an anonymous lifetime, so it's neither
+/// `Send + 'static` nor cloneable. We can't `std::thread::spawn`
+/// it.
+///
+/// What we do instead: hand-roll a single-poll driver with a no-op
+/// waker. `CliReporter::notify` (the only reporter implementation
+/// reachable from the CLI's nacelle bootstrap path) is structurally
+/// synchronous — it serialises the message and `eprintln!`s it, with
+/// no `.await` between. So polling the returned future exactly once
+/// resolves it. Returns `Err` if the future is still `Pending` after
+/// the first poll (which would indicate a reporter implementation that
+/// actually awaits — such an implementation would require making the
+/// engine bootstrap notify path async end-to-end).
+fn drive_sync_async<E, F>(future: F) -> anyhow::Result<()>
+where
+    E: std::error::Error + Send + Sync + 'static,
+    F: Future<Output = Result<(), E>>,
+{
     // `RawWaker` with all-no-op vtable. Constructing a waker by hand
     // sidesteps `futures-executor`'s `enter()` guard entirely — the
     // panic we're avoiding lives inside that crate's `LocalPool`,
@@ -69,13 +106,13 @@ fn drive_sync_async<F: Future>(future: F) -> F::Output {
     // Pin on the stack and poll once.
     let mut future = std::pin::pin!(future);
     match Future::poll(future.as_mut() as Pin<&mut F>, &mut cx) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!(
-            "drive_sync_async: reporter future returned Pending on first poll. \
-             This helper assumes structurally-synchronous reporters; if a \
+        Poll::Ready(output) => output.map_err(anyhow::Error::from),
+        Poll::Pending => Err(anyhow::anyhow!(
+            "drive_sync_async: reporter future returned Pending on first poll; \
+             this helper assumes structurally-synchronous reporters — if a \
              reporter implementation now actually awaits, the engine bootstrap \
-             notify path needs to be made async end-to-end."
-        ),
+             notify path needs to be made async end-to-end"
+        )),
     }
 }
 

@@ -213,9 +213,17 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
     })?;
 
     if path_contains_workspace_internal_subtree(&requested_path) {
+        let name = requested_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("capsule");
         return Err(CapsuleError::Config(format!(
-            "Workspace-local internal state path is not an authoritative input: {}",
-            requested_path.display()
+            "Workspace-local internal state path is not an authoritative input: {path}\n\
+             hint: This path is inside Ato's internal cache. \
+             Copy the capsule to a local directory first:\n\
+             \n  cp -r {path} ./{name}\n  ato run ./{name}",
+            path = requested_path.display(),
+            name = name,
         )));
     }
 
