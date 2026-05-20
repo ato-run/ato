@@ -1036,7 +1036,7 @@ impl WebViewManager {
                     })));
                     continue;
                 }
-                HostDispatchAction { action } => {
+                HostDispatchAction { action, .. } => {
                     // Push onto the queue; `DesktopShell::render` drains
                     // it on the next paint and invokes the matching
                     // window::open_* helper. This bypasses macOS
