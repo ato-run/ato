@@ -647,6 +647,12 @@ pub(super) fn start_runtime_session(
         match ready_result {
             Ok(()) => Some(format!("http://127.0.0.1:{port}/")),
             Err(err) => {
+                // Kill the entire process group so grandchildren (e.g. uvicorn spawned
+                // by `sh -lc`) are reaped and don't orphan on the declared port.
+                #[cfg(unix)]
+                if let Some(pid) = runtime_process.child.id().checked_sub(0) {
+                    let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+                }
                 let _ = runtime_process.child.kill();
                 let _ = runtime_process.child.wait();
                 anyhow::bail!(

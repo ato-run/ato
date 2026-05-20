@@ -599,9 +599,19 @@ fn run_shadow_workspace_readiness_only(
     fs::write(&shadow_manifest, recipe_toml)
         .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
 
-    // Extract port from recipe for readiness waiting
-    let port = infer_port(recipe_toml).unwrap_or(1111);
-    let ready_url = format!("http://127.0.0.1:{}/health", port);
+    // Extract port from recipe for readiness waiting.
+    // If the declared port is already in use, remap to a free port and inform
+    // the child subprocess via ATO_UI_OVERRIDE_PORT so it binds the same port.
+    let declared_port = infer_port(recipe_toml).unwrap_or(1111);
+    let actual_port = if crate::runtime::port_manager::is_port_available(declared_port) {
+        declared_port
+    } else {
+        // Find a free port by scanning upward from a base offset.
+        (declared_port.saturating_add(1)..=u16::MAX)
+            .find(|&p| crate::runtime::port_manager::is_port_available(p))
+            .unwrap_or(declared_port)
+    };
+    let ready_url = format!("http://127.0.0.1:{}/", actual_port);
 
     // Spawn ato run in background (detached, process lives on)
     let mut command = Command::new(std::env::current_exe()?);
@@ -613,6 +623,9 @@ fn run_shadow_workspace_readiness_only(
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if actual_port != declared_port {
+        command.env("ATO_UI_OVERRIDE_PORT", actual_port.to_string());
+    }
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }

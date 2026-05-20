@@ -61,6 +61,15 @@ pub fn execute(
         }
     }
 
+    // Run the shell in its own process group on Unix so that a parent SIGKILL
+    // doesn't orphan grandchildren (e.g. uvicorn spawned by `sh -lc`).
+    // The process group can then be reaped atomically via kill(-pgid, SIGKILL).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
     let child = cmd
         .spawn()
         .with_context(|| format!("Failed to execute shell command: {}", run_command))?;
