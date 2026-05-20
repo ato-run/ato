@@ -99,11 +99,11 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             allow_unverified,
             rebuild,
             no_build,
+            plan_only,
             read,
             write,
             read_write,
             cwd,
-            plan_only,
             args,
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,

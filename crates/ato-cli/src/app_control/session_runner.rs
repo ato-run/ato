@@ -1206,7 +1206,7 @@ mod tests {
     /// from the runner side.
     #[test]
     fn assigning_receipt_graph_id_sink_shares_arc_with_input_sink() {
-        let mut runner = SessionStartPhaseRunner::new("publisher/slug", None, false);
+        let mut runner = SessionStartPhaseRunner::new("publisher/slug", None, None, false);
         assert!(
             runner.receipt_graph_id_sink.is_none(),
             "fixture sanity: a freshly built runner has no sink"
