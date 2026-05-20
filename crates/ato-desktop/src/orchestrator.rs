@@ -986,6 +986,7 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(unix)]
 fn kill_pids(pids: &[u32]) -> usize {
     let mut killed = 0usize;
     let current = std::process::id();
@@ -998,6 +999,11 @@ fn kill_pids(pids: &[u32]) -> usize {
         killed += 1;
     }
     killed
+}
+
+#[cfg(not(unix))]
+fn kill_pids(_pids: &[u32]) -> usize {
+    0
 }
 
 /// Preview what would be cleaned up. Does not modify anything.
