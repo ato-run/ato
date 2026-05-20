@@ -22,16 +22,18 @@ use gpui::prelude::*;
 use gpui::{
     canvas, div, hsla, point, px, rgb, size, svg, AnyElement, AnyWindowHandle, App, Bounds,
     BoxShadow, ClipboardItem, Context, DispatchPhase, Entity, FontWeight, IntoElement, MouseButton,
-    MouseExitEvent, Pixels, Render, SharedString, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions,
+    MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels, Render, ScrollWheelEvent, SharedString,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    NavigateToUrl, OpenCardSwitcher, OpenContentWindowLogs, OpenContentWindowSettings,
-    OpenDockWindow, OpenStoreWindow, ShowSettings, ToggleControlBarInfoPopup, ToggleStarCapsule,
+    FocusNextAppWindow, FocusPrevAppWindow, NavigateToUrl, OpenCardSwitcher,
+    OpenContentWindowLogs, OpenContentWindowSettings, OpenDockWindow, OpenStoreWindow, ShowSettings,
+    ToggleControlBarInfoPopup, ToggleStarCapsule,
 };
+use crate::window::gestures::{GestureAction, GestureState};
 use crate::config::{load_config, save_config, ControlBarMode};
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
@@ -255,6 +257,8 @@ pub struct ControlBarShellPlaceholder {
     pub(crate) info_popup_open: bool,
     /// Track which capsule handles are starred (pinned).
     starred_handles: HashSet<String>,
+    /// Trackpad / mouse gesture recognizer (#174).
+    gesture_state: GestureState,
 }
 
 impl ControlBarShellPlaceholder {
@@ -313,6 +317,7 @@ impl ControlBarShellPlaceholder {
                 .iter()
                 .cloned()
                 .collect(),
+            gesture_state: GestureState::new(),
         }
     }
 
@@ -463,6 +468,44 @@ impl Render for ControlBarShellPlaceholder {
             .flex()
             .items_center()
             .justify_center()
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                let delta = event.delta.pixel_delta(px(20.0));
+                if let Some(action) = this
+                    .gesture_state
+                    .on_scroll_delta(f32::from(delta.x), f32::from(delta.y))
+                {
+                    match action {
+                        GestureAction::FocusPrev => {
+                            window.dispatch_action(Box::new(FocusPrevAppWindow), cx)
+                        }
+                        GestureAction::FocusNext => {
+                            window.dispatch_action(Box::new(FocusNextAppWindow), cx)
+                        }
+                        GestureAction::OpenCardSwitcher => {
+                            window.dispatch_action(Box::new(OpenCardSwitcher), cx)
+                        }
+                    }
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
+                    this.gesture_state.on_mouse_down(
+                        f32::from(event.position.x),
+                        f32::from(event.position.y),
+                    );
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, window, cx| {
+                    if let Some(action) = this.gesture_state.on_mouse_up() {
+                        if matches!(action, GestureAction::OpenCardSwitcher) {
+                            window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+                        }
+                    }
+                }),
+            )
             .on_mouse_move(|_event, window, cx| {
                 let was_expanded = cx.global::<ControlBarController>().expanded;
                 cx.global_mut::<ControlBarController>().expand();
@@ -474,6 +517,16 @@ impl Render for ControlBarShellPlaceholder {
                     shell.update(cx, |_shell, cx| cx.notify());
                 }
             })
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                if let Some(action) = this.gesture_state.on_mouse_move(
+                    f32::from(event.position.x),
+                    f32::from(event.position.y),
+                ) {
+                    if matches!(action, GestureAction::OpenCardSwitcher) {
+                        window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+                    }
+                }
+            }))
             .on_hover(move |hovered, window, cx| {
                 if *hovered {
                     let was_expanded = cx.global::<ControlBarController>().expanded;
@@ -1275,6 +1328,13 @@ fn open_control_bar_inner(
             COMPACT_HEIGHT
         };
         super::macos::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
+        // #168 — attach the Control Bar as a child of the frontmost content
+        // window so macOS orders them correctly and they move together.
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
+            if let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle) {
+                tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
+            }
+        }
     }
     Ok(*handle)
 }
