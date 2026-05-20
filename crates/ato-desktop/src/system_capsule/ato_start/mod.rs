@@ -415,13 +415,9 @@ pub fn dispatch(
                 }
                 let route = GuestRoute::CapsuleHandle {
                     handle: handle.clone(),
-                    label: handle,
+                    label: handle.clone(),
                 };
-                if let Err(err) =
-                    crate::window::launch_window::open_consent_window_for_route(cx, route)
-                {
-                    tracing::error!(error = %err, "ato_start: open_query CapsuleHandle failed");
-                }
+                open_capsule_from_start(cx, route, &handle);
                 let _ = host.update(cx, |_, window, _| window.remove_window());
             }
             QueryIntent::ExternalUrl(url_str) => match url::Url::parse(&url_str) {
@@ -478,12 +474,9 @@ pub fn dispatch(
         AtoStartCommand::OpenCapsule { handle } => {
             let route = GuestRoute::CapsuleHandle {
                 handle: handle.clone(),
-                label: handle,
+                label: handle.clone(),
             };
-            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
-            {
-                tracing::error!(error = %err, "ato_start: open_capsule failed");
-            }
+            open_capsule_from_start(cx, route, &handle);
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
 
@@ -529,6 +522,60 @@ pub fn dispatch(
         }
     }
     Ok(())
+}
+
+/// Try to open an already-running capsule session directly (no consent modal).
+/// If no live session exists, fall back to the consent window.
+///
+/// This is the shared entry point for `OpenCapsule` (Recent Capsules click)
+/// and `OpenQuery::CapsuleHandle` (URL bar handle re-entry) so both surfaces
+/// behave consistently: if the capsule is already running, the window reopens
+/// instantly; if it needs to be launched, the consent flow appears as normal.
+fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
+    use crate::state::session::SessionRegistry;
+
+    match crate::orchestrator::try_reuse_live_session_for_click(handle) {
+        Ok(Some(session)) => {
+            // Recover stored non-secret configs from the existing session so
+            // a subsequent restart still has the correct values (e.g. MODEL=,
+            // PORT=). If the session has not been registered yet (race), we
+            // fall back to empty — the capsule is already running so configs
+            // are already applied.
+            let launch_configs = cx
+                .global::<SessionRegistry>()
+                .get_session(&session.session_id)
+                .map(|s| s.launch_context.launch_configs.clone())
+                .unwrap_or_default();
+
+            if let Err(err) = crate::window::orchestrator::open_ready_capsule_window(
+                cx,
+                route,
+                session,
+                launch_configs,
+            ) {
+                tracing::error!(error = %err, handle, "ato_start: open_capsule ready-window failed");
+            }
+        }
+        Ok(None) => {
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            {
+                tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
+            }
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                handle,
+                "ato_start: session fast-path failed; falling back to consent"
+            );
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            {
+                tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
+            }
+        }
+    }
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
