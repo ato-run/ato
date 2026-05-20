@@ -735,6 +735,27 @@ fn is_non_blocking_remote_preflight_error(handle: &str, err: &anyhow::Error) -> 
     message.contains("manifest path does not exist")
 }
 
+/// Normalize a user-supplied GitHub repo input into the canonical
+/// `github.com/{owner}/{repo}` handle format.
+///
+/// Accepts full URLs (`https://github.com/owner/repo`), `github.com/owner/repo`,
+/// and bare `owner/repo` shorthands. Strips trailing slashes and extra path
+/// segments (branch refs, sub-paths) beyond the two-segment owner/repo.
+pub fn normalize_github_handle(repo: &str) -> String {
+    let s = repo.trim();
+    let s = s
+        .strip_prefix("https://github.com/")
+        .or_else(|| s.strip_prefix("http://github.com/"))
+        .or_else(|| s.strip_prefix("github.com/"))
+        .unwrap_or(s);
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        format!("github.com/{}/{}", parts[0], parts[1])
+    } else {
+        format!("github.com/{s}")
+    }
+}
+
 fn looks_like_remote_launch_handle(handle: &str) -> bool {
     let trimmed = handle.trim();
     if trimmed.is_empty()

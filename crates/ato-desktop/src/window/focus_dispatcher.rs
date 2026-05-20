@@ -212,6 +212,27 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 }
                                                 Ok(())
                                             }
+                                            "GithubRunProceedToConsent" => {
+                                                let repo = action_url.clone()
+                                                    .ok_or_else(|| "GithubRunProceedToConsent requires a `url` (repo) parameter".to_string())?;
+                                                let handle = crate::window::launch_window::normalize_github_handle(&repo);
+                                                let route = crate::state::GuestRoute::CapsuleHandle {
+                                                    handle: handle.clone(),
+                                                    label: repo.clone(),
+                                                };
+                                                // Close the GitHub Run window if still open.
+                                                if let Some(shell_weak) = cx
+                                                    .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                                                    .and_then(|s| s.0.clone())
+                                                {
+                                                    let _ = shell_weak;
+                                                }
+                                                cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
+                                                if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route) {
+                                                    return Err(format!("GithubRunProceedToConsent: {err}"));
+                                                }
+                                                Ok(())
+                                            }
                                             "ShowSettings" => {
                                                 window.dispatch_action(
                                                     Box::new(ShowSettings),
