@@ -124,15 +124,13 @@ pub fn dispatch(
                     let mut store = crate::config::load_secrets();
                     for (key, value) in &secrets {
                         if !value.is_empty() {
-                            store.add_secret(key.clone(), value.clone());
-                            store.grant_secret(handle, key);
+                            if let Err(e) = store.add_secret(key.clone(), value.clone()) {
+                                return Err(BrokerError::Internal(format!("Failed to save secret {key}: {e}")));
+                            }
+                            if let Err(e) = store.grant_secret(handle, key) {
+                                return Err(BrokerError::Internal(format!("Failed to grant secret {key} to {handle}: {e}")));
+                            }
                         }
-                    }
-                    if let Err(err) = crate::config::save_secrets(&store) {
-                        tracing::error!(
-                            error = %err,
-                            "ato_launch: failed to save secrets — proceeding with in-memory values"
-                        );
                     }
                 }
             }
