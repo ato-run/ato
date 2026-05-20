@@ -1127,26 +1127,34 @@ fn map_tool_to_command(
         "stop_active_session" => ("stop_active_session", serde_json::json!({})),
         "host_dispatch_action" => {
             let action = s("action")?;
+            let url = args["url"].as_str().map(|s| s.to_string());
             // Validate against all known host actions so the MCP caller
             // gets an immediate error instead of a silent no-op.
             const KNOWN_ACTIONS: &[&str] = &[
-                "OpenAppWindowExperiment",
+                "BrokerNegativeTest",
+                "CloseAppWindow",
                 "CompleteOnboarding",
+                "FocusControlBarInput",
+                "ForceApprovePending",
+                "NavigateToTestCapsule",
+                "NavigateToTestHttp",
+                "NavigateToUrl",
+                "OpenAppWindowExperiment",
+                "OpenCapsuleSettingsDemo",
                 "OpenCardSwitcher",
                 "OpenDockWindow",
                 "OpenIdentityMenu",
+                "OpenImportBlinko",
                 "OpenLaunchBoot",
                 "OpenLaunchConsent",
                 "OpenLaunchConsentConfigPanel",
-                "OpenCapsuleSettingsDemo",
-                "OpenImportBlinko",
-                "RunImportBlinko",
-                "CheckImportState",
                 "OpenStartWindow",
                 "OpenStoreWindow",
-                "SkipOnboarding",
+                "RunImportBlinko",
+                "CheckImportState",
                 "ScrollLaunchConsentConfigPanelBottom",
                 "ShowSettings",
+                "SkipOnboarding",
             ];
             if !KNOWN_ACTIONS.contains(&action.as_str()) {
                 return Err(format!(
@@ -1154,10 +1162,14 @@ fn map_tool_to_command(
                     action, KNOWN_ACTIONS,
                 ));
             }
-            (
-                "host_dispatch_action",
-                serde_json::json!({ "action": action }),
-            )
+            if action == "NavigateToUrl" && url.is_none() {
+                return Err("NavigateToUrl requires a `url` parameter".into());
+            }
+            let mut params = serde_json::json!({ "action": action });
+            if let Some(ref u) = url {
+                params["url"] = serde_json::Value::String(u.clone());
+            }
+            ("host_dispatch_action", params)
         }
         other => return Err(format!("unknown tool: {other}")),
     };
@@ -1279,5 +1291,5 @@ static TOOLS: &str = r#"[
   {"name":"host_activate_app","description":"Brings an application to the foreground via osascript + System Events. Required before host_press_key so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success. Requires Accessibility permission for the terminal running the MCP — the first invocation triggers a system prompt.","inputSchema":{"type":"object","properties":{"process_name":{"type":"string","description":"Process name as shown in Activity Monitor (default: 'ato-desktop')."}},"required":[]}},
   {"name":"host_press_key","description":"Sends a keyboard event to the currently focused application via osascript + System Events keystroke. Pair with host_activate_app first. `key` accepts a single character (e.g. 'n', '1') or a named key ('Escape', 'Return', 'Tab', 'Space'). `modifiers` is an array drawn from ['command','shift','option','control']. Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"key":{"type":"string","description":"Single character or named key."},"modifiers":{"type":"array","items":{"type":"string"},"description":"Modifier keys to hold."}},"required":["key"]}},
   {"name":"cleanup_host_resources","description":"Preview and clean up stale provider processes (postgres, bun) and System V shared memory segments owned by the current user. Uses TERM only — no SIGKILL. Set dry_run=true to only preview without killing.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"If true, only preview without killing (default: false)"}},"required":[]}},
-  {"name":"host_dispatch_action","description":"Queues a host-level GPUI action by name (e.g. 'OpenAppWindowExperiment', 'OpenCardSwitcher', 'OpenStoreWindow', 'OpenStartWindow', 'ShowSettings') onto the ato-desktop automation socket. The desktop drains the queue on its next render pass and invokes the matching handler in-process — equivalent to the keybinding the user would press. This is the AODD bypass for macOS Accessibility permission requirements that gate `host_press_key`. Returns `{ok:true, queued_action:'<name>'}`. Unknown action names log a warning on the desktop side but still return ok at the MCP boundary.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"Action name to dispatch."}},"required":["action"]}}
+  {"name":"host_dispatch_action","description":"Queues a host-level GPUI action by name onto the ato-desktop automation socket. Valid actions: 'NavigateToUrl' (requires `url` parameter), 'ForceApprovePending', 'FocusControlBarInput', 'OpenStartWindow', 'OpenStoreWindow', 'OpenCardSwitcher', 'CompleteOnboarding', 'SkipOnboarding', 'ShowSettings', and others. The desktop drains the queue on its next render pass and invokes the matching handler in-process. Returns `{ok:true, queued_action:'<name>'}`.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"Action name to dispatch."},"url":{"type":"string","description":"URL parameter required for NavigateToUrl action (e.g. 'capsule://github.com/Koh0920/hello-capsule')."}},"required":["action"]}}
 ]"#;

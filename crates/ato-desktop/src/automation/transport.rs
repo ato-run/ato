@@ -619,6 +619,7 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         "stop_active_session" => Ok(AutomationCommand::StopActiveSession),
         "host_dispatch_action" => Ok(AutomationCommand::HostDispatchAction {
             action: s("action")?,
+            url: params.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
         }),
         "list_sessions" => Ok(AutomationCommand::ListSessions),
         "auth_status" => Ok(AutomationCommand::AuthStatus),
