@@ -442,6 +442,17 @@ fn open_store() -> std::result::Result<SecretStore, BridgeResponse> {
     })
 }
 
+fn normalize_bridge_error(code: &str, msg: &str) -> BridgeResponse {
+    if msg.contains("no age identity loaded") {
+        BridgeResponse::error(
+            "identity_not_loaded",
+            "run `ato secrets init` to create an identity, or `ato session start` to unlock",
+        )
+    } else {
+        BridgeResponse::error(code.to_string(), msg.to_string())
+    }
+}
+
 fn bridge_status() -> BridgeResponse {
     let store = match open_store() {
         Ok(s) => s,
@@ -506,7 +517,7 @@ fn bridge_set(
         deny,
     ) {
         Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
-        Err(e) => BridgeResponse::error("set_failed", format!("{}", e)),
+        Err(e) => normalize_bridge_error("set_failed", &format!("{}", e)),
     }
 }
 
@@ -519,7 +530,7 @@ fn bridge_delete(key: String, namespace: Option<String>) -> BridgeResponse {
     if ns == "default" {
         match store.delete(&key) {
             Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
-            Err(e) => BridgeResponse::error("delete_failed", format!("{}", e)),
+            Err(e) => normalize_bridge_error("delete_failed", &format!("{}", e)),
         }
     } else {
         match store.age() {
@@ -534,9 +545,7 @@ fn bridge_delete(key: String, namespace: Option<String>) -> BridgeResponse {
                     Ok(()) => {
                         BridgeResponse::ok_data(serde_json::json!({"key": key}))
                     }
-                    Err(e) => {
-                        BridgeResponse::error("delete_failed", format!("{}", e))
-                    }
+                    Err(e) => normalize_bridge_error("delete_failed", &format!("{}", e)),
                 }
             }
             None => BridgeResponse::error(
@@ -561,7 +570,7 @@ fn bridge_update_acl(
     if ns == "default" {
         match store.update_acl(&key, allow, deny) {
             Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
-            Err(e) => BridgeResponse::error("update_acl_failed", format!("{}", e)),
+            Err(e) => normalize_bridge_error("update_acl_failed", &format!("{}", e)),
         }
     } else {
         match store.age() {
@@ -576,10 +585,7 @@ fn bridge_update_acl(
                     Ok(()) => {
                         BridgeResponse::ok_data(serde_json::json!({"key": key}))
                     }
-                    Err(e) => BridgeResponse::error(
-                        "update_acl_failed",
-                        format!("{}", e),
-                    ),
+                    Err(e) => normalize_bridge_error("update_acl_failed", &format!("{}", e)),
                 }
             }
             None => BridgeResponse::error(
@@ -605,9 +611,9 @@ fn bridge_resolve_for_capsule(capsule_handle: String) -> BridgeResponse {
             Ok(Some(value)) => value,
             Ok(None) => continue,
             Err(e) => {
-                return BridgeResponse::error(
+                return normalize_bridge_error(
                     "resolve_failed",
-                    format!("failed to load '{}': {}", entry.key, e),
+                    &format!("failed to load '{}': {}", entry.key, e),
                 )
             }
         };
