@@ -281,6 +281,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new(".ato/source-inference/provenance.json")));
@@ -327,6 +328,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new("node_modules/a.js")));
@@ -369,6 +371,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/**".to_string()],
@@ -417,6 +420,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["**/node_modules/**".to_string()],
@@ -463,6 +467,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -516,6 +521,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -563,6 +569,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         })
         .expect("filter")
     }
@@ -642,6 +649,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         m.pack = Some(PackConfig { include, exclude });
         m
