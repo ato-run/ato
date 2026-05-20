@@ -102,15 +102,18 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
     println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_DOCK_BUILD");
 
     let entrypoint = dist_dir.join("index.html");
-    if env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD") {
-        if entrypoint.exists() {
+
+    if entrypoint.exists() {
+        if env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD") {
             println!(
                 "cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; using existing dock dist at {}",
                 dist_dir.display()
             );
-            return;
         }
+        return;
+    }
 
+    if env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD") {
         println!(
             "cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; dock dist check skipped"
         );
