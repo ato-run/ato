@@ -218,8 +218,18 @@ pub fn execute_host(
             force_python_no_bytecode || force_python_server_tool,
         );
 
-        if let Some(port) = injected_port {
+        if let Some(ref port) = injected_port {
             cmd.env("PORT", port);
+            // Auto-inject `--port <N>` for known WSGI/ASGI/web-server invocations
+            // that don't already carry an explicit --port flag.  This lets capsule
+            // authors omit both `port = N` in capsule.toml and `--port $PORT` in
+            // the run command — ato assigns the port and the server receives it.
+            if !has_explicit_port_flag(&launch_spec.args)
+                && (force_python_server_tool
+                    || is_python_module_server_invocation(&launch_spec.args))
+            {
+                cmd.args(["--port", port]);
+            }
         }
 
         if !launch_spec.args.is_empty() {
@@ -590,6 +600,32 @@ fn is_python_server_tool(command: &str) -> bool {
             | "daphne"
             | "waitress-serve"
     )
+}
+
+/// Returns `true` when the args list represents a `python -m <server>` invocation,
+/// e.g. `["-m", "uvicorn", ...]`.  Used to detect web-server launches that ato
+/// should inject `--port <N>` into even when the run command does not contain `$PORT`.
+fn is_python_module_server_invocation(args: &[String]) -> bool {
+    const PYTHON_SERVER_MODULES: &[&str] = &[
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+    ];
+    let mut iter = args.iter();
+    while let Some(token) = iter.next() {
+        if token == "-m" {
+            if let Some(module) = iter.next() {
+                if PYTHON_SERVER_MODULES.contains(&module.to_ascii_lowercase().as_str()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when `args` already contains an explicit `--port` flag,
+/// meaning the user or a previous injection already set the port.
+fn has_explicit_port_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--port" || a.starts_with("--port="))
 }
 
 fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
