@@ -509,6 +509,13 @@ pub async fn launch_with_bubblewrap(
         }
     }
 
+    // Put the bwrap wrapper in its own process group (mirror of macos.rs
+    // `launch_with_sandbox_exec` and `launch_direct`). Without this the
+    // cleanup-scope's `kill(-pgid, sig)` path in ato-cli targets the
+    // wrong pgroup, leaving inner workload processes as orphans after bwrap exits.
+    use std::os::unix::process::CommandExt as _;
+    cmd.process_group(0);
+
     // Spawn the process
     let child = cmd.spawn().map_err(|e| RuntimeError::CommandExecution {
         operation: "bwrap spawn".to_string(),
