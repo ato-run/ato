@@ -170,7 +170,7 @@ fn preferred_port(identity: &str) -> u16 {
 }
 
 /// Check if a port is available by attempting to bind.
-fn is_port_available(port: u16) -> bool {
+pub fn is_port_available(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port))
         .map(|listener| {
             drop(listener);

@@ -125,12 +125,11 @@ impl ToolArtifactManifest {
     /// table can adopt it without an API churn.
     #[allow(dead_code)]
     pub fn from_toml(text: &str) -> Result<Self, ToolArtifactError> {
-        let manifest: Self = toml::from_str(text).map_err(|e| {
-            ToolArtifactError::InvalidArtifactManifest {
+        let manifest: Self =
+            toml::from_str(text).map_err(|e| ToolArtifactError::InvalidArtifactManifest {
                 name: "<unparsed>".to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -157,10 +156,7 @@ impl ToolArtifactManifest {
         if self.name.contains('/') || self.name.contains('\\') {
             return Err(ToolArtifactError::InvalidArtifactManifest {
                 name: self.name.clone(),
-                reason: format!(
-                    "name '{}' must not contain path separators",
-                    self.name
-                ),
+                reason: format!("name '{}' must not contain path separators", self.name),
             });
         }
         if !is_lower_hex(&self.sha256) || self.sha256.len() != 64 {
@@ -380,10 +376,7 @@ share_dir = "share"
 
     #[test]
     fn rejects_jar_txz_without_inner_member() {
-        let toml = VALID_TOML.replace(
-            "inner_member = \"postgres-darwin-arm_64.txz\"\n",
-            "",
-        );
+        let toml = VALID_TOML.replace("inner_member = \"postgres-darwin-arm_64.txz\"\n", "");
         let err = ToolArtifactManifest::from_toml(&toml).unwrap_err();
         match err {
             ToolArtifactError::InvalidArtifactManifest { reason, .. } => {

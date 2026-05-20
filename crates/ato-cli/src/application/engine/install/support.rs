@@ -11,6 +11,7 @@ use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
 use capsule_core::smoke::SmokeFailureClass;
+use capsule_core::AtoError;
 use capsule_core::CapsuleReporter;
 use tracing::debug;
 
@@ -618,15 +619,21 @@ pub(crate) fn ensure_run_auto_install_allowed(
     stdout_is_tty: bool,
 ) -> Result<()> {
     if json_mode && !yes {
-        anyhow::bail!(
-            "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::InstallConsentRequired {
+                message: "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules".to_string(),
+                hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+            },
+        )));
     }
 
     if !yes && !can_prompt_interactively(stdin_is_tty, stdout_is_tty) {
-        anyhow::bail!(
-            "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::InstallConsentRequired {
+                message: "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments.".to_string(),
+                hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+            },
+        )));
     }
 
     Ok(())
@@ -694,7 +701,14 @@ pub(crate) fn enforce_sandbox_mode_flags(
     const ENV_ALLOW_UNSAFE: &str = "CAPSULE_ALLOW_UNSAFE";
 
     if matches!(enforcement, EnforcementMode::BestEffort) {
-        anyhow::bail!("--enforcement best-effort is no longer supported; use --enforcement strict");
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::SecurityPolicyViolation {
+                message: "--enforcement best-effort is no longer supported".to_string(),
+                hint: Some("Use --enforcement strict (the default) instead.".to_string()),
+                resource: None,
+                blocked_host: None,
+            },
+        )));
     }
 
     if matches!(enforcement, EnforcementMode::Strict) && sandbox_requested {
@@ -707,17 +721,31 @@ pub(crate) fn enforce_sandbox_mode_flags(
     }
 
     if dangerously_skip_permissions && compatibility_fallback.is_some() {
-        anyhow::bail!(
-            "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive"
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::SecurityPolicyViolation {
+                message: "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive".to_string(),
+                hint: Some("Remove one of the two flags before retrying.".to_string()),
+                resource: None,
+                blocked_host: None,
+            },
+        )));
     }
 
     if dangerously_skip_permissions {
         if std::env::var(ENV_ALLOW_UNSAFE).ok().as_deref() != Some("1") {
-            anyhow::bail!(
-                "--dangerously-skip-permissions requires {}=1",
-                ENV_ALLOW_UNSAFE
-            );
+            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                AtoError::SecurityPolicyViolation {
+                    message: format!(
+                        "--dangerously-skip-permissions requires {}=1",
+                        ENV_ALLOW_UNSAFE
+                    ),
+                    hint: Some(
+                        "Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks.".to_string()
+                    ),
+                    resource: None,
+                    blocked_host: None,
+                },
+            )));
         }
         futures::executor::block_on(
             reporter.warn(
@@ -791,6 +819,31 @@ pub(crate) async fn resolve_run_target_or_install(
     let raw = path.to_string_lossy().to_string();
     let export_invocation = raw.trim().starts_with('@');
     let expanded_local = crate::local_input::expand_local_path(&raw);
+
+    // Guard: reject paths that point into the Ato home directory.  These are
+    // Ato's own internal state (store, runs, tmp …) and running them directly
+    // would fail with a confusing E999.  Emit a helpful typed error instead.
+    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir() {
+        if expanded_local.starts_with(&ato_home) {
+            let capsule_name = expanded_local
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "my-capsule".to_string());
+            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                AtoError::EntrypointInvalid {
+                    message: format!(
+                        "'{}' is inside Ato's internal state directory and cannot be used as a run target",
+                        raw
+                    ),
+                    hint: Some(format!(
+                        "Copy the capsule to a local directory first:\n  cp -r {} ./{}\n  ato run ./{}",
+                        raw, capsule_name, capsule_name
+                    )),
+                    field: None,
+                },
+            )));
+        }
+    }
     match install::provider_target::classify_run_target(&raw, &expanded_local)? {
         install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
             if provider_toolchain != ProviderToolchain::Auto {
@@ -821,9 +874,12 @@ pub(crate) async fn resolve_run_target_or_install(
                 crate::progressive_ui::begin_flow_without_logo()?;
             }
             if json_mode && !yes {
-                anyhow::bail!(
-                    "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules"
-                );
+                return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                    AtoError::InstallConsentRequired {
+                        message: "Non-interactive JSON mode requires -y/--yes when auto-installing missing capsules".to_string(),
+                        hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+                    },
+                )));
             }
 
             if !yes
@@ -832,9 +888,12 @@ pub(crate) async fn resolve_run_target_or_install(
                     std::io::stdout().is_terminal(),
                 )
             {
-                anyhow::bail!(
-                    "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments."
-                );
+                return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                    AtoError::InstallConsentRequired {
+                        message: "Interactive install confirmation requires a TTY. Re-run with -y/--yes in CI or non-interactive environments.".to_string(),
+                        hint: Some("Re-run with -y/--yes in CI or non-interactive environments.".to_string()),
+                    },
+                )));
             }
 
             if yes {
@@ -2282,6 +2341,7 @@ pub(crate) fn execute_run_command(
     inject: Vec<String>,
     build_policy: crate::application::build_materialization::BuildPolicy,
     cache_strategy_arg: crate::cli::shared::CacheStrategyArg,
+    plan_only: bool,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2331,6 +2391,7 @@ pub(crate) fn execute_run_command(
         cache_strategy: cache_strategy_arg.resolve(),
         reporter,
         preview_mode: false,
+        plan_only,
     }))
 }
 
@@ -2954,5 +3015,52 @@ target = "app"
             .collect::<Vec<_>>()
             .join("\n");
         assert!(details.contains("must reference a source/python target"));
+    }
+
+    #[tokio::test]
+    async fn resolve_run_target_rejects_ato_home_paths_with_helpful_error() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let internal_path = ato_home.path().join("store").join("mycapsule");
+        std::fs::create_dir_all(&internal_path).expect("create internal path");
+
+        let _guard = EnvVarGuard::set_path("ATO_HOME", ato_home.path());
+
+        let reporter = Arc::new(reporters::CliReporter::new(false));
+        let err = resolve_run_target_or_install(
+            internal_path.clone(),
+            true,
+            ProviderToolchain::Auto,
+            None,
+            false,
+            None,
+            false,
+            None,
+            reporter,
+        )
+        .await
+        .expect_err("path under ato home must be rejected");
+
+        let msg = format!(
+            "{}\n{}",
+            err.to_string(),
+            err.chain()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            msg.contains("internal state directory"),
+            "error should mention internal state: {msg}"
+        );
+        // The hint with cp -r is stored in the AtoExecutionError hint field;
+        // verify it via the typed downcast.
+        let exe_err = err
+            .downcast_ref::<capsule_core::engine::execution_plan::error::AtoExecutionError>()
+            .expect("error should downcast to AtoExecutionError");
+        assert!(
+            exe_err.hint.as_deref().unwrap_or("").contains("cp -r"),
+            "hint should suggest cp workaround: {:?}",
+            exe_err.hint
+        );
     }
 }

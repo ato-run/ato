@@ -4,7 +4,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::config::{
-    CapsulePolicyOverride, EgressPolicyMode, LanguageConfig, LogLevel, ThemeConfig, UpdateChannel,
+    CapsuleOpenMode, CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode,
+    ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore,
+    StartupSurface, ThemeConfig, UpdateChannel, WindowCloseBehavior,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -77,41 +79,6 @@ impl SettingsError {
             }),
         }
     }
-}
-
-pub fn host_panel_payload(state: &AppState, route: Option<&HostPanelRoute>) -> Value {
-    let capsule_settings = match route {
-        Some(HostPanelRoute::CapsuleDetail { pane_id, .. }) => {
-            Some(capsule_snapshot(state, Some(*pane_id)))
-        }
-        _ => None,
-    };
-
-    json!({
-        "revision": state.host_panel_payload_revision,
-        "globalSettings": global_settings_snapshot(state),
-        "capsuleSettings": capsule_settings,
-        "launcherData": launcher_snapshot(state),
-        "commandResponse": state.host_panel_last_response,
-    })
-}
-
-pub fn host_panel_payload_for_url(state: &AppState, url: &str) -> Value {
-    let pane_id = url
-        .split("/capsule/")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|value| value.parse::<usize>().ok());
-
-    let capsule_settings = pane_id.map(|id| capsule_snapshot(state, Some(id)));
-
-    json!({
-        "revision": state.host_panel_payload_revision,
-        "globalSettings": global_settings_snapshot(state),
-        "capsuleSettings": capsule_settings,
-        "launcherData": launcher_snapshot(state),
-        "commandResponse": state.host_panel_last_response,
-    })
 }
 
 pub fn handle_host_panel_command(
@@ -223,6 +190,41 @@ fn global_settings_snapshot(state: &AppState) -> Value {
     let config = &state.config;
     let auth = &state.desktop_auth;
     let cache_path = normalize_path_for_display(&config.runtime.cache_location);
+
+    let mut snap = settings_snapshot_from_config(config);
+    // Augment with runtime state that is only available through AppState.
+    snap["runtime"] = json!({
+        "auth": {
+            "status": format!("{:?}", auth.status),
+            "publisherHandle": auth.publisher_handle,
+            "lastLoginOrigin": auth.last_login_origin,
+            "secretValuesExposed": false,
+        },
+        "cache": {
+            "path": cache_path,
+            "usageBytes": null,
+            "reclaimableBytes": null,
+        },
+        "nacelle": {
+            "required": config.sandbox.require_nacelle,
+            "status": "unknown",
+        },
+        "tailnet": {
+            "enabled": config.sandbox.tailnet_sidecar,
+            "status": "unknown",
+        },
+        "hostBridge": {
+            "status": "local",
+        },
+    });
+    snap["diagnostics"] = json!(diagnostics_for_global(state));
+    snap
+}
+
+/// Build a settings snapshot from config alone — used by the
+/// `ato-settings` capsule dispatch which does not have access to AppState.
+pub fn settings_snapshot_from_config(config: &DesktopConfig) -> Value {
+    let cache_path = normalize_path_for_display(&config.runtime.cache_location);
     let workspace_path = normalize_path_for_display(&config.runtime.workspace_root);
 
     json!({
@@ -240,7 +242,7 @@ fn global_settings_snapshot(state: &AppState) -> Value {
                 "automaticUpdates": setting(config.updates.automatic_updates, SettingSource::Global, false, None, SafetyClass::Immediate),
             },
             "runtime": {
-                "cacheLocation": setting(cache_path.clone(), SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                "cacheLocation": setting(cache_path, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "cacheSizeLimitGb": setting(config.runtime.cache_size_limit_gb, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "workspaceRoot": setting(workspace_path, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "watchDebounceMs": setting(config.runtime.watch_debounce_ms, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
@@ -264,37 +266,41 @@ fn global_settings_snapshot(state: &AppState) -> Value {
                 "telemetry": setting(config.developer.telemetry, SettingSource::Global, false, None, SafetyClass::Immediate),
                 "autoOpenDevtools": setting(config.developer.auto_open_devtools, SettingSource::Global, false, None, SafetyClass::Immediate),
             },
+            "desktop": desktop_settings_resolved(config),
         },
         "runtime": {
-            "auth": {
-                "status": format!("{:?}", auth.status),
-                "publisherHandle": auth.publisher_handle,
-                "lastLoginOrigin": auth.last_login_origin,
-                "secretValuesExposed": false,
-            },
-            "cache": {
-                "path": cache_path,
-                "usageBytes": null,
-                "reclaimableBytes": null,
-            },
-            "nacelle": {
-                "required": config.sandbox.require_nacelle,
-                "status": "unknown",
-            },
-            "tailnet": {
-                "enabled": config.sandbox.tailnet_sidecar,
-                "status": "unknown",
-            },
-            "hostBridge": {
-                "status": "local",
-            },
+            "auth": { "status": "unavailable" },
+            "cache": { "path": normalize_path_for_display(&config.runtime.cache_location) },
+            "nacelle": { "required": config.sandbox.require_nacelle, "status": "unknown" },
+            "tailnet": { "enabled": config.sandbox.tailnet_sidecar, "status": "unknown" },
+            "hostBridge": { "status": "local" },
         },
-        "diagnostics": diagnostics_for_global(state),
+        "diagnostics": [],
         "actions": [
             action("clear_cache", SafetyClass::ActionOnly, true),
             action("sign_out", SafetyClass::ActionOnly, true),
             action("sync_revocation_store", SafetyClass::ActionOnly, true)
         ],
+    })
+}
+
+fn desktop_settings_resolved(config: &DesktopConfig) -> Value {
+    let d = &config.desktop;
+    let cb = &d.control_bar;
+    json!({
+        "focusViewEnabled": setting(d.focus_view_enabled, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "startupSurface": setting(d.startup_surface, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "contentWindowDefaultPresentation": setting(d.content_window_default_presentation, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "capsuleOpenMode": setting(d.capsule_open_mode, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "restoreWindowFrames": setting(d.restore_window_frames, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "windowCloseBehavior": setting(d.window_close_behavior, SettingSource::Global, false, None, SafetyClass::Immediate),
+        "controlBar": {
+            "mode": setting(cb.mode, SettingSource::Global, false, None, SafetyClass::Immediate),
+            "alwaysOnTop": setting(cb.always_on_top, SettingSource::Global, false, None, SafetyClass::Immediate),
+            "visibleOnStartup": setting(cb.visible_on_startup, SettingSource::Global, false, None, SafetyClass::Immediate),
+            "position": setting(cb.position, SettingSource::Global, false, None, SafetyClass::Immediate),
+            "autoHide": setting(cb.auto_hide, SettingSource::Global, false, None, SafetyClass::Immediate),
+        },
     })
 }
 
@@ -526,6 +532,8 @@ fn patch_global_settings(state: &mut AppState, payload: Value) -> Result<Value, 
             config.developer.auto_open_devtools = value;
             changed.push("autoOpenDevtools".to_string());
         }
+        // ── Desktop settings ──────────────────────────────────────────────────
+        apply_desktop_patch_immediate(config, patch, &mut changed);
     });
 
     if confirmed {
@@ -912,5 +920,543 @@ fn parse_log_level(value: &str) -> Option<LogLevel> {
         "info" => Some(LogLevel::Info),
         "debug" => Some(LogLevel::Debug),
         _ => None,
+    }
+}
+
+/// Apply the subset of desktop settings that do not require `confirmed=true`.
+/// Called from both `patch_global_settings` (AppState path) and
+/// `patch_config_for_capsule` (config-file-only path).
+fn apply_desktop_patch_immediate(
+    config: &mut DesktopConfig,
+    patch: &Value,
+    changed: &mut Vec<String>,
+) {
+    if let Some(v) = patch.get("focusViewEnabled").and_then(Value::as_bool) {
+        config.desktop.focus_view_enabled = v;
+        changed.push("focusViewEnabled".to_string());
+    }
+    if let Some(v) = patch.get("startupSurface").and_then(Value::as_str) {
+        if let Some(s) = parse_startup_surface(v) {
+            config.desktop.startup_surface = s;
+            changed.push("startupSurface".to_string());
+        }
+    }
+    if let Some(v) = patch
+        .get("contentWindowDefaultPresentation")
+        .and_then(Value::as_str)
+    {
+        if let Some(p) = parse_content_window_presentation(v) {
+            config.desktop.content_window_default_presentation = p;
+            changed.push("contentWindowDefaultPresentation".to_string());
+        }
+    }
+    if let Some(v) = patch.get("capsuleOpenMode").and_then(Value::as_str) {
+        if let Some(mode) = parse_capsule_open_mode(v) {
+            config.desktop.capsule_open_mode = mode;
+            changed.push("capsuleOpenMode".to_string());
+        }
+    }
+    if let Some(v) = patch.get("restoreWindowFrames").and_then(Value::as_bool) {
+        config.desktop.restore_window_frames = v;
+        changed.push("restoreWindowFrames".to_string());
+    }
+    if let Some(v) = patch.get("windowCloseBehavior").and_then(Value::as_str) {
+        if let Some(behavior) = parse_window_close_behavior(v) {
+            config.desktop.window_close_behavior = behavior;
+            changed.push("windowCloseBehavior".to_string());
+        }
+    }
+    if let Some(v) = patch.get("controlBarAlwaysOnTop").and_then(Value::as_bool) {
+        config.desktop.control_bar.always_on_top = v;
+        changed.push("controlBarAlwaysOnTop".to_string());
+    }
+    if let Some(v) = patch.get("controlBarMode").and_then(Value::as_str) {
+        if let Some(mode) = parse_control_bar_mode(v) {
+            let _ = mode;
+            config.desktop.control_bar.mode = ControlBarMode::Floating;
+            config.desktop.control_bar.visible_on_startup = true;
+            config.desktop.control_bar.auto_hide = false;
+            changed.push("controlBarMode".to_string());
+        }
+    }
+    if let Some(v) = patch
+        .get("controlBarVisibleOnStartup")
+        .and_then(Value::as_bool)
+    {
+        let _ = v;
+        config.desktop.control_bar.visible_on_startup = true;
+        config.desktop.control_bar.mode = ControlBarMode::Floating;
+        config.desktop.control_bar.auto_hide = false;
+        changed.push("controlBarVisibleOnStartup".to_string());
+    }
+    if let Some(v) = patch.get("controlBarPosition").and_then(Value::as_str) {
+        if let Some(pos) = parse_control_bar_position(v) {
+            config.desktop.control_bar.position = pos;
+            changed.push("controlBarPosition".to_string());
+        }
+    }
+    if let Some(v) = patch.get("controlBarAutoHide").and_then(Value::as_bool) {
+        let _ = v;
+        config.desktop.control_bar.auto_hide = false;
+        config.desktop.control_bar.mode = ControlBarMode::Floating;
+        config.desktop.control_bar.visible_on_startup = true;
+        changed.push("controlBarAutoHide".to_string());
+    }
+}
+
+/// Next-launch settings keys — changes are saved to disk but only take effect
+/// after the user restarts the app.
+const NEXT_LAUNCH_KEYS: &[&str] = &[
+    "focusViewEnabled",
+    "startupSurface",
+    "contentWindowDefaultPresentation",
+    "restoreWindowFrames",
+    "controlBarVisibleOnStartup",
+];
+
+/// Apply a typed patch to a `DesktopConfig` loaded directly from disk (no
+/// AppState).  Returns `(response_json, applies_on_next_launch)`.
+///
+/// This is the entry point used by the `ato-settings` capsule IPC dispatch.
+pub fn patch_config_for_capsule(
+    config: &mut DesktopConfig,
+    patch: &Value,
+    request_id: Option<&str>,
+) -> Value {
+    let mut changed = Vec::new();
+
+    // General
+    if let Some(v) = patch.get("theme").and_then(Value::as_str) {
+        if let Some(t) = parse_theme(v) {
+            config.general.theme = t;
+            changed.push("theme".to_string());
+        }
+    }
+    if let Some(v) = patch.get("language").and_then(Value::as_str) {
+        if let Some(l) = parse_language(v) {
+            config.general.language = l;
+            changed.push("language".to_string());
+        }
+    }
+    if let Some(v) = patch.get("launchAtLogin").and_then(Value::as_bool) {
+        config.general.launch_at_login = v;
+        changed.push("launchAtLogin".to_string());
+    }
+    if let Some(v) = patch.get("showInTray").and_then(Value::as_bool) {
+        config.general.show_in_tray = v;
+        changed.push("showInTray".to_string());
+    }
+    if let Some(v) = patch.get("showWhatsNew").and_then(Value::as_bool) {
+        config.general.show_whats_new = v;
+        changed.push("showWhatsNew".to_string());
+    }
+    // Updates
+    if let Some(v) = patch.get("updateChannel").and_then(Value::as_str) {
+        if let Some(ch) = parse_update_channel(v) {
+            config.updates.channel = ch;
+            changed.push("updateChannel".to_string());
+        }
+    }
+    if let Some(v) = patch.get("automaticUpdates").and_then(Value::as_bool) {
+        config.updates.automatic_updates = v;
+        changed.push("automaticUpdates".to_string());
+    }
+    // Developer
+    if let Some(v) = patch.get("logLevel").and_then(Value::as_str) {
+        if let Some(l) = parse_log_level(v) {
+            config.developer.log_level = l;
+            changed.push("logLevel".to_string());
+        }
+    }
+    if let Some(v) = patch.get("telemetry").and_then(Value::as_bool) {
+        config.developer.telemetry = v;
+        changed.push("telemetry".to_string());
+    }
+    if let Some(v) = patch.get("autoOpenDevtools").and_then(Value::as_bool) {
+        config.developer.auto_open_devtools = v;
+        changed.push("autoOpenDevtools".to_string());
+    }
+    // Desktop
+    apply_desktop_patch_immediate(config, patch, &mut changed);
+
+    let applies_on_next_launch = changed
+        .iter()
+        .any(|k| NEXT_LAUNCH_KEYS.contains(&k.as_str()));
+
+    json!({
+        "ok": true,
+        "requestId": request_id,
+        "changedKeys": changed,
+        "appliesOnNextLaunch": applies_on_next_launch,
+        "requiresRestart": false,
+    })
+}
+
+fn parse_startup_surface(v: &str) -> Option<StartupSurface> {
+    match v {
+        "store" => Some(StartupSurface::Store),
+        "start" => Some(StartupSurface::Start),
+        "blank" => Some(StartupSurface::Blank),
+        "restore-last" => Some(StartupSurface::RestoreLast),
+        _ => None,
+    }
+}
+
+fn parse_content_window_presentation(v: &str) -> Option<ContentWindowPresentation> {
+    match v {
+        "windowed" => Some(ContentWindowPresentation::Windowed),
+        "maximized" => Some(ContentWindowPresentation::Maximized),
+        "fullscreen" => Some(ContentWindowPresentation::Fullscreen),
+        _ => None,
+    }
+}
+
+fn parse_capsule_open_mode(v: &str) -> Option<CapsuleOpenMode> {
+    match v {
+        "window" => Some(CapsuleOpenMode::Window),
+        "webviewer" => Some(CapsuleOpenMode::Webviewer),
+        "os-browser" | "os-default-browser" => Some(CapsuleOpenMode::OsBrowser),
+        _ => None,
+    }
+}
+
+fn parse_window_close_behavior(v: &str) -> Option<WindowCloseBehavior> {
+    match v {
+        "keep-session-running" => Some(WindowCloseBehavior::KeepSessionRunning),
+        "stop-session" => Some(WindowCloseBehavior::StopSession),
+        _ => None,
+    }
+}
+
+fn parse_control_bar_position(v: &str) -> Option<ControlBarPosition> {
+    match v {
+        "top" => Some(ControlBarPosition::Top),
+        "bottom" => Some(ControlBarPosition::Bottom),
+        _ => None,
+    }
+}
+
+fn parse_control_bar_mode(v: &str) -> Option<ControlBarMode> {
+    match v {
+        "floating" | "auto-hide" | "compact-pill" | "hidden" => Some(ControlBarMode::Floating),
+        _ => None,
+    }
+}
+
+/// Build a JSON snapshot of the current secret store suitable for the settings UI.
+///
+/// **No secret values are ever included.** Only key names, masked indicators,
+/// grant counts, and storage metadata are returned.
+pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
+    let (grant_counts, grants) = match crate::secret_bridge::CliSecretBridge::list() {
+        Ok(entries) => {
+            let mut per_key_count: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut handle_to_keys: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for e in &entries {
+                if let Some(ref allow) = e.allow {
+                    per_key_count.insert(e.key.clone(), allow.len());
+                    for handle in allow {
+                        handle_to_keys
+                            .entry(handle.clone())
+                            .or_default()
+                            .push(e.key.clone());
+                    }
+                }
+            }
+            let key_counts = entries
+                .iter()
+                .map(|e| {
+                    let count = per_key_count.get(&e.key).copied().unwrap_or(0);
+                    json!({
+                        "key": e.key,
+                        "hasValue": true,
+                        "grantCount": count,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let grant_entries: Vec<Value> = handle_to_keys
+                .into_iter()
+                .filter(|(_, keys)| !keys.is_empty())
+                .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
+                .collect();
+            (key_counts, grant_entries)
+        }
+        Err(_) => {
+            let fallback_keys: Vec<Value> = store
+                .secrets
+                .iter()
+                .map(|s| json!({ "key": s.key, "hasValue": false, "grantCount": 0 }))
+                .collect();
+            (fallback_keys, Vec::new())
+        }
+    };
+
+    let path_str = crate::config::secrets_path_display();
+    let mode = if cfg!(unix) { "0600" } else { "platform-acl" };
+
+    json!({
+        "keys": grant_counts,
+        "grants": grants,
+        "storage": {
+            "path": path_str,
+            "mode": mode,
+            "backend": "age-file",
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ControlBarMode, ControlBarPosition, DesktopConfig, StartupSurface};
+
+    fn default_config() -> DesktopConfig {
+        DesktopConfig::default()
+    }
+
+    #[test]
+    fn snapshot_from_config_includes_desktop_section() {
+        let config = default_config();
+        let snap = settings_snapshot_from_config(&config);
+        let desktop = snap
+            .get("resolved")
+            .and_then(|r| r.get("desktop"))
+            .expect("snapshot must contain resolved.desktop");
+        assert!(desktop.get("focusViewEnabled").is_some());
+        assert!(desktop.get("startupSurface").is_some());
+        assert!(desktop.get("capsuleOpenMode").is_some());
+        assert!(desktop.get("windowCloseBehavior").is_some());
+        assert!(desktop.get("controlBar").is_some());
+        let cb = desktop.get("controlBar").unwrap();
+        assert!(cb.get("mode").is_some());
+        assert!(cb.get("alwaysOnTop").is_some());
+        assert!(cb.get("position").is_some());
+    }
+
+    #[test]
+    fn patch_config_for_capsule_theme_change() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"theme": "light"});
+        let resp = patch_config_for_capsule(&mut config, &patch, Some("req-1"));
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["requestId"], "req-1");
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(changed.contains(&"theme".to_string()));
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_startup_surface_applies_on_next_launch() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"startupSurface": "start"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.startup_surface, StartupSurface::Start);
+        assert_eq!(resp["appliesOnNextLaunch"], true);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_control_bar_position_not_next_launch() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"controlBarPosition": "bottom"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(
+            config.desktop.control_bar.position,
+            ControlBarPosition::Bottom
+        );
+        // controlBarPosition is NOT in NEXT_LAUNCH_KEYS
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_control_bar_mode_updates_declaration() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"controlBarMode": "compact-pill"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.control_bar.mode, ControlBarMode::Floating);
+        assert!(config.desktop.control_bar.visible_on_startup);
+        assert!(!config.desktop.control_bar.auto_hide);
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_unknown_key_is_ignored_silently() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"totallyUnknownKey": "some_value"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(resp["ok"], true);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(
+            changed.is_empty(),
+            "unknown key must not appear in changedKeys"
+        );
+    }
+
+    #[test]
+    fn snapshot_includes_general_updates_developer() {
+        let config = default_config();
+        let snap = settings_snapshot_from_config(&config);
+        let resolved = snap.get("resolved").unwrap();
+        assert!(resolved.get("general").is_some());
+        assert!(resolved.get("updates").is_some());
+        assert!(resolved.get("developer").is_some());
+    }
+
+    // --- Secrets snapshot tests ---
+
+    fn make_store_with_secrets() -> crate::config::SecretStore {
+        let mut store = crate::config::SecretStore::default();
+        store.add_secret("API_KEY".to_string(), "super-secret".to_string());
+        store.add_secret("DB_PASS".to_string(), "hunter2".to_string());
+        store.grant_secret("github.com/user/repo", "API_KEY");
+        store
+    }
+
+    #[test]
+    fn secrets_snapshot_has_no_values() {
+        let store = make_store_with_secrets();
+        let snap = secrets_snapshot_from_store(&store);
+        let snap_str = serde_json::to_string(&snap).unwrap();
+        assert!(
+            !snap_str.contains("super-secret"),
+            "secret value must not appear in snapshot"
+        );
+        assert!(
+            !snap_str.contains("hunter2"),
+            "secret value must not appear in snapshot"
+        );
+    }
+
+    #[test]
+    fn secrets_snapshot_keys_have_metadata() {
+        let store = make_store_with_secrets();
+        let snap = secrets_snapshot_from_store(&store);
+        let keys = snap["keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        let api_key_entry = keys
+            .iter()
+            .find(|k| k["key"].as_str() == Some("API_KEY"))
+            .expect("API_KEY must be in snapshot");
+        assert_eq!(api_key_entry["hasValue"], true);
+        assert_eq!(api_key_entry["grantCount"], 1);
+        let db_entry = keys
+            .iter()
+            .find(|k| k["key"].as_str() == Some("DB_PASS"))
+            .expect("DB_PASS must be in snapshot");
+        assert_eq!(db_entry["grantCount"], 0);
+    }
+
+    #[test]
+    fn secrets_snapshot_grants_normalized() {
+        let store = make_store_with_secrets();
+        let snap = secrets_snapshot_from_store(&store);
+        let grants = snap["grants"].as_array().unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0]["handle"].as_str(), Some("github.com/user/repo"));
+        let grant_keys = grants[0]["keys"].as_array().unwrap();
+        assert_eq!(grant_keys.len(), 1);
+        assert_eq!(grant_keys[0].as_str(), Some("API_KEY"));
+    }
+
+    #[test]
+    fn secrets_snapshot_empty_store() {
+        let store = crate::config::SecretStore::default();
+        let snap = secrets_snapshot_from_store(&store);
+        assert_eq!(snap["keys"].as_array().unwrap().len(), 0);
+        assert_eq!(snap["grants"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn secrets_snapshot_storage_metadata_present() {
+        let store = crate::config::SecretStore::default();
+        let snap = secrets_snapshot_from_store(&store);
+        let storage = &snap["storage"];
+        assert_eq!(storage["backend"].as_str(), Some("json-file"));
+        // mode is platform-dependent but must be one of the two values
+        let mode = storage["mode"].as_str().unwrap();
+        assert!(mode == "0600" || mode == "platform-acl");
+    }
+
+    #[test]
+    fn snapshot_includes_capsule_open_mode() {
+        let config = default_config();
+        let snap = settings_snapshot_from_config(&config);
+        let desktop = snap
+            .get("resolved")
+            .and_then(|r| r.get("desktop"))
+            .expect("snapshot must contain resolved.desktop");
+        let entry = desktop
+            .get("capsuleOpenMode")
+            .expect("resolved.desktop.capsuleOpenMode must be present");
+        assert_eq!(entry["declared"].as_str(), Some("window"));
+        assert_eq!(entry["effective"].as_str(), Some("window"));
+        let wcb = desktop
+            .get("windowCloseBehavior")
+            .expect("resolved.desktop.windowCloseBehavior must be present");
+        assert_eq!(wcb["declared"].as_str(), Some("keep-session-running"));
+    }
+
+    #[test]
+    fn patch_capsule_open_mode_webviewer() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"capsuleOpenMode": "webviewer"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(changed.contains(&"capsuleOpenMode".to_string()));
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn capsule_open_mode_not_in_next_launch_keys() {
+        assert!(
+            !NEXT_LAUNCH_KEYS.contains(&"capsuleOpenMode"),
+            "capsuleOpenMode must not be in NEXT_LAUNCH_KEYS"
+        );
+    }
+
+    #[test]
+    fn patch_capsule_open_mode_unknown_ignored() {
+        let mut config = default_config();
+        let original = config.desktop.capsule_open_mode;
+        let patch = serde_json::json!({"capsuleOpenMode": "unknown-mode"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.capsule_open_mode, original);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(!changed.contains(&"capsuleOpenMode".to_string()));
+    }
+
+    #[test]
+    fn patch_window_close_behavior_stop_session() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"windowCloseBehavior": "stop-session"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(
+            config.desktop.window_close_behavior,
+            WindowCloseBehavior::StopSession
+        );
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(changed.contains(&"windowCloseBehavior".to_string()));
+        assert_eq!(resp["appliesOnNextLaunch"], false);
+    }
+
+    #[test]
+    fn window_close_behavior_not_in_next_launch_keys() {
+        assert!(
+            !NEXT_LAUNCH_KEYS.contains(&"windowCloseBehavior"),
+            "windowCloseBehavior must not be in NEXT_LAUNCH_KEYS"
+        );
+    }
+
+    #[test]
+    fn patch_window_close_behavior_unknown_ignored() {
+        let mut config = default_config();
+        let original = config.desktop.window_close_behavior;
+        let patch = serde_json::json!({"windowCloseBehavior": "unknown-behavior"});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(config.desktop.window_close_behavior, original);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert!(!changed.contains(&"windowCloseBehavior".to_string()));
     }
 }

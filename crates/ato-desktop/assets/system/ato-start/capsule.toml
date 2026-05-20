@@ -1,0 +1,12 @@
+schema_version = "0.3"
+name = "ato-start"
+version = "0.1.0"
+type = "app"
+runtime = "web/static"
+run = "dist"
+port = 8080
+
+[metadata]
+description = "Ato start page"
+
+build = "npm install && npm run build"

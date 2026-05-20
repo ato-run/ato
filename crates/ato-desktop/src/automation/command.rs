@@ -1,11 +1,14 @@
+use std::cmp::max;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::policy::MCP_IMPLICIT_PAGE_LOAD_TIMEOUT;
+use super::policy::{
+    AUTOMATION_CONNECTION_IO_TIMEOUT, AUTOMATION_DISPATCH_TIMEOUT, MCP_IMPLICIT_PAGE_LOAD_TIMEOUT,
+};
 
 // ── JSON-RPC 2.0 wire types ──────────────────────────────────────────────────
 
@@ -96,6 +99,10 @@ pub enum AutomationCommand {
     ListPanes,
     /// Focuses a pane by ID (makes it the active pane).
     FocusPane { pane_id: usize },
+    /// Closes a pane (content window) by ID.
+    ClosePane { pane_id: usize },
+    /// Clicks at absolute pixel coordinates within the WebView.
+    ClickAt { x: f64, y: f64 },
     /// Opens a URL via the app-level omnibar (navigate_to_url).
     /// Works even when no pane is currently active; creates a new pane.
     OpenUrl { url: String },
@@ -136,6 +143,21 @@ pub enum AutomationCommand {
     /// at dispatch time, mirroring the keybind. `pane_id` on the
     /// JSON-RPC params is ignored.
     StopActiveSession,
+    /// Dispatch a host-level GPUI action by name (e.g.
+    /// "OpenAppWindowExperiment"). The dispatcher just enqueues the
+    /// name onto `AppState::pending_host_actions`; `DesktopShell::render`
+    /// drains the queue and invokes the corresponding handler the next
+    /// time the shell renders. This is the AODD bypass for macOS
+    /// Accessibility permission, which would otherwise be required to
+    /// synthesise keystrokes via osascript.
+    HostDispatchAction { action: String, url: Option<String> },
+    /// List all tracked capsule sessions from the SessionRegistry.
+    /// Returns a JSON array of `SessionViewEntry` objects suitable
+    /// for the Open Windows / Card Switcher UI.
+    ListSessions,
+    /// Returns the current ato-desktop sign-in state for AODD agents.
+    /// Does NOT expose the session token.
+    AuthStatus,
 }
 
 // ── Pending request queue entry ──────────────────────────────────────────────
@@ -193,7 +215,49 @@ impl PendingAutomationRequest {
         Arc::clone(&self.response_tx)
     }
 
+    pub fn response_timeout(&self) -> Duration {
+        match &self.command {
+            AutomationCommand::WaitFor { timeout_ms, .. } => max(
+                AUTOMATION_DISPATCH_TIMEOUT,
+                Duration::from_millis(*timeout_ms).saturating_add(AUTOMATION_CONNECTION_IO_TIMEOUT),
+            ),
+            _ => AUTOMATION_DISPATCH_TIMEOUT,
+        }
+    }
+
     pub fn is_expired(&self) -> bool {
-        self.created_at.elapsed().as_secs() > 30
+        self.created_at.elapsed() > self.response_timeout()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn wait_for_request_timeout_extends_for_long_caller_timeout() {
+        let (tx, _rx) = channel();
+        let req = PendingAutomationRequest::new(
+            1,
+            AutomationCommand::WaitFor {
+                selector: "body".to_string(),
+                timeout_ms: 120_000,
+            },
+            tx,
+        );
+
+        assert!(
+            req.response_timeout() >= Duration::from_secs(130),
+            "long wait_for must outlive the default 35s transport budget"
+        );
+    }
+
+    #[test]
+    fn non_wait_request_timeout_stays_on_default_budget() {
+        let (tx, _rx) = channel();
+        let req = PendingAutomationRequest::new(1, AutomationCommand::Snapshot, tx);
+
+        assert_eq!(req.response_timeout(), AUTOMATION_DISPATCH_TIMEOUT);
     }
 }

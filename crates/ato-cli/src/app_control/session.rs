@@ -6,13 +6,16 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use anyhow::{Context, Result};
 // Session record schema and atomic writer now live in `ato-session-core`
 // so `ato-desktop` can read records without depending on `ato-cli`. We
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
 pub(crate) use ato_session_core::{
-    write_session_record_atomic, GuestSessionDisplay, ServiceBackgroundDisplay,
+    launch_cache_root, write_materialized_launch_record_atomic, write_session_record_atomic,
+    GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
     StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
     StoredOrchestrationServices, StoredSessionInfo, TerminalSessionDisplay, WebSessionDisplay,
 };
@@ -25,9 +28,14 @@ use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
+#[cfg(unix)]
+use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::application::pipeline::phases::run::{
     persist_background_dependency_contracts, setup_dependency_contracts_launch_context,
     DependencyContractGuard, DerivedBridgeManifest, PreparedRunContext,
+};
+use crate::application::session_graph_populate::{
+    EDGE_KIND_PROVIDES, NODE_KIND_PROVIDER, NODE_KIND_SERVICE,
 };
 use crate::executors::source::{CapsuleProcess, ExecuteMode};
 use crate::executors::target_runner::{
@@ -38,6 +46,7 @@ use crate::reporters;
 use crate::reporters::CliReporter;
 use crate::runtime::process::{ProcessInfo, ProcessManager, ProcessStatus};
 use crate::runtime::tree as runtime_tree;
+use crate::runtime::{overrides as runtime_overrides, port_manager::PortManager};
 use crate::ProviderToolchain;
 
 use super::resolve::resolve_local_plan;
@@ -158,6 +167,16 @@ pub struct SessionInfo {
     /// running under during the v2 migration window.
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_receipt_schema_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_execution_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_execution_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_execution_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_completeness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reproducibility_class: Option<String>,
 }
 
 impl SessionInfo {
@@ -167,13 +186,64 @@ impl SessionInfo {
         self.pid
     }
 
-    /// Attach the execution receipt identity emitted for this session. Called
-    /// by the session start runner after `build_prelaunch_receipt_document`
-    /// writes the receipt to `~/.ato/executions/`.
-    pub(crate) fn attach_execution_receipt(&mut self, execution_id: String, schema_version: u32) {
-        self.execution_id = Some(execution_id);
-        self.execution_receipt_schema_version = Some(schema_version);
+    pub(crate) fn attach_execution_receipt_metadata(
+        &mut self,
+        metadata: &ExecutionReceiptSessionMetadata,
+    ) {
+        self.execution_id = Some(metadata.execution_id.clone());
+        self.execution_receipt_schema_version = Some(metadata.schema_version);
+        self.declared_execution_id = metadata.declared_execution_id.clone();
+        self.resolved_execution_id = metadata.resolved_execution_id.clone();
+        self.observed_execution_id = metadata.observed_execution_id.clone();
+        self.graph_completeness = metadata.graph_completeness.clone();
+        self.reproducibility_class = metadata.reproducibility_class.clone();
     }
+
+    pub(crate) fn to_materialized_launch_record(
+        &self,
+        resolution: &super::resolve::HandleResolution,
+        app_root: &Path,
+        launch_key: &str,
+        launch_digest: &str,
+        run_config_hash: &str,
+    ) -> MaterializedLaunchRecord {
+        let created_at_unix_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        MaterializedLaunchRecord {
+            schema_version: ato_session_core::MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION,
+            launch_key: launch_key.to_string(),
+            last_session_id: Some(self.session_id.clone()),
+            handle: self.handle.clone(),
+            normalized_handle: resolution.normalized_handle.clone(),
+            canonical_handle: resolution.canonical_handle.clone(),
+            trust_state: resolution.trust_state.clone(),
+            source: resolution.source.clone(),
+            restricted: resolution.restricted,
+            snapshot: resolution.snapshot.clone(),
+            target_label: self.target_label.clone(),
+            manifest_path: self.manifest_path.clone(),
+            app_root: app_root.display().to_string(),
+            platform: ato_session_core::current_platform_tag(),
+            launch_digest: launch_digest.to_string(),
+            run_config_hash: run_config_hash.to_string(),
+            created_at_unix_ms,
+            execution_id: self.execution_id.clone(),
+            execution_receipt_schema_version: self.execution_receipt_schema_version,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecutionReceiptSessionMetadata {
+    pub(crate) execution_id: String,
+    pub(crate) schema_version: u32,
+    pub(crate) declared_execution_id: Option<String>,
+    pub(crate) resolved_execution_id: Option<String>,
+    pub(crate) observed_execution_id: Option<String>,
+    pub(crate) graph_completeness: Option<String>,
+    pub(crate) reproducibility_class: Option<String>,
 }
 
 // On-disk session record schema lives in `ato-session-core` (see top-of-
@@ -184,7 +254,13 @@ impl SessionInfo {
 // types out so `ato-desktop` can read records without depending on
 // `ato-cli`.
 
-pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Result<()> {
+pub fn start_session(
+    handle: &str,
+    target_label: Option<&str>,
+    from_materialized_record: Option<&str>,
+    run_config_hash: Option<&str>,
+    json: bool,
+) -> Result<()> {
     // Reserve stdout for the SessionStartEnvelope when the caller
     // asked for JSON. Without this, the orchestrator's stream pumper
     // (`adapters/runtime/executors/orchestrator.rs::spawn_prefixed_stream`)
@@ -243,10 +319,52 @@ pub fn start_session(handle: &str, target_label: Option<&str>, json: bool) -> Re
         }
     }
 
-    let mut runner =
-        super::session_runner::SessionStartPhaseRunner::new(handle, target_label, json);
+    let mut runner = if let Some(record_path) = from_materialized_record {
+        let path = PathBuf::from(record_path);
+        let record = ato_session_core::read_materialized_launch_record(&path)?;
+        if record.handle != handle && record.normalized_handle != handle {
+            anyhow::bail!(
+                "materialized launch record {} belongs to '{}' not '{}'",
+                path.display(),
+                record.handle,
+                handle
+            );
+        }
+        super::session_runner::SessionStartPhaseRunner::from_materialized_record(
+            record,
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    } else {
+        super::session_runner::SessionStartPhaseRunner::new(
+            handle,
+            target_label,
+            run_config_hash.map(str::to_string),
+            json,
+        )
+    };
     let pipeline = ConsumerRunPipeline::standard();
-    futures::executor::block_on(pipeline.run(&mut runner))?;
+    // Boundary-level receipt emission (refs #74, #99). On the happy
+    // path the pipeline emits its own full v2 receipt before spawn
+    // (see `SessionStartPhaseRunner::emit_execution_receipt`); on the
+    // failure path the wrapper synthesizes a partial receipt with
+    // the typed `AtoExecutionError` envelope so `~/.ato/executions/`
+    // contains a record for every session-start attempt.
+    let ctx = crate::application::receipt_boundary::ReceiptEmissionContext::for_boundary(
+        "ato app session start",
+    );
+    futures::executor::block_on(
+        crate::application::receipt_boundary::emit_receipt_on_result(ctx, |sink| async {
+            // PR-3b: hand the boundary's graph-id sink to the runner so
+            // `emit_execution_receipt` can publish declared/resolved ids
+            // immediately after building the LaunchGraphBundle. If the
+            // rest of the runner fails (spawn, healthcheck, etc.), the
+            // partial-receipt boundary still observes the same ids the
+            // success receipt would have carried.
+            runner.receipt_graph_id_sink = Some(sink);
+            pipeline.run(&mut runner).await
+        }),
+    )?;
 
     let info = runner
         .session_info
@@ -410,6 +528,7 @@ pub(super) fn start_guest_session(
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -436,6 +555,14 @@ pub(super) fn start_guest_session(
         terminal: None,
         service: None,
         dependency_contracts: None,
+        graph: None,
+        execution_id: None,
+        execution_receipt_schema_version: None,
+        declared_execution_id: None,
+        resolved_execution_id: None,
+        observed_execution_id: None,
+        graph_completeness: None,
+        reproducibility_class: None,
         orchestration_services: None,
         // App Session Materialization: filled in by run_execute after spawn
         // succeeds (start_time helper takes the freshly-spawned PID + the
@@ -486,28 +613,114 @@ pub(super) fn start_runtime_session(
     } = prepare_session_execution(plan, raw_manifest)?;
     timer.finish_ok();
 
+    let session_web_port = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
+        if plan.execution_port().is_some() || runtime_overrides::override_port(None).is_some() {
+            // Explicit port declared or ATO_UI_OVERRIDE_PORT set: use normal resolution
+            // (which also handles remapping an occupied declared port to a free one).
+            Some(resolve_session_web_port(
+                resolution,
+                manifest_path,
+                plan,
+                launch,
+                &mut notes,
+            )?)
+        } else {
+            // run command uses $PORT but no port declared: auto-assign a free port.
+            let identity =
+                session_port_identity(resolution, manifest_path, plan.selected_target_label());
+            let port = PortManager::new()
+                .context("failed to initialise PortManager for auto port assignment")?
+                .resolve_port(&identity)
+                .context(
+                    "failed to auto-assign web port (run command uses $PORT but no port declared in capsule.toml)",
+                )?;
+            notes.push(format!(
+                "Auto-assigned port {port} for web server (no port declared in capsule.toml)."
+            ));
+            Some(SessionWebPort {
+                port,
+                remapped_from: None,
+            })
+        }
+    } else {
+        None
+    };
+    let session_port_override = session_web_port
+        .as_ref()
+        .map(|web_port| runtime_overrides::scoped_override_port(web_port.port));
+
+    // Pre-open the log file under a temporary name so we can wire
+    // `Stdio::from(file)` onto the child at spawn time. This replaces the
+    // older proxy-thread pattern in `attach_process_logs`, which dropped
+    // child output the moment `ato app session start` exited (the threads
+    // doing `io::copy` died with the parent process and the kernel sent
+    // EPIPE to the child's stdout).
+    //
+    // The temp suffix is the parent ato process's PID — unique per
+    // invocation, so concurrent `ato app session start` calls don't
+    // collide on the same temp file. After the child spawns we rename to
+    // the canonical `ato-desktop-session-<child_pid>.log` path; rename of
+    // an open file is fine on POSIX (the inode is preserved) and on
+    // Windows when the file was opened with default share modes.
+    let temp_log_path = session_root.join(format!(".tmp-spawn-{}.log", std::process::id()));
+    let _ = fs::remove_file(&temp_log_path);
+
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "spawn_runtime_process");
-    let mut runtime_process = spawn_runtime_process(plan, &prepared, &display_strategy)
-        .with_context(|| {
-            format!(
-                "failed to start capsule session for {}",
-                manifest_path.display()
-            )
-        })?;
+    let mut runtime_process = spawn_runtime_process(
+        plan,
+        &prepared,
+        &display_strategy,
+        &temp_log_path,
+        session_web_port.as_ref().map(|web_port| web_port.port),
+    )
+    .with_context(|| {
+        format!(
+            "failed to start capsule session for {}",
+            manifest_path.display()
+        )
+    })?;
+    drop(session_port_override);
     timer.finish_ok();
 
     let session_id = format!("ato-desktop-session-{}", runtime_process.child.id());
     let log_path = session_root.join(format!("{}.log", session_id));
-    attach_process_logs(&mut runtime_process.child, &log_path)?;
+    // Some executor kinds (deno, node_compat, web/static) don't honour
+    // `ExecuteMode::Logged` because they own their own stdio routing —
+    // they never opened `temp_log_path` at all. Treat the rename's ENOENT
+    // as "this executor doesn't write a log" and just touch an empty file
+    // so the desktop's log-tail UI has a stable path to read from.
+    if temp_log_path.exists() {
+        if let Err(err) = fs::rename(&temp_log_path, &log_path) {
+            let _ = runtime_process.child.kill();
+            let _ = runtime_process.child.wait();
+            return Err(anyhow::Error::new(err).context(format!(
+                "failed to rename session log {} -> {}",
+                temp_log_path.display(),
+                log_path.display()
+            )));
+        }
+    } else {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("failed to create empty log file {}", log_path.display()))?;
+    }
 
-    let runtime = runtime_descriptor(plan);
+    let mut runtime = runtime_descriptor(plan);
+    if let Some(web_port) = session_web_port.as_ref() {
+        runtime.port = Some(web_port.port);
+    }
     let local_url = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
-        let port = launch.port.ok_or_else(|| {
-            anyhow::anyhow!(
-                "runtime=web target '{}' requires targets.<label>.port",
-                plan.selected_target_label()
-            )
-        })?;
+        let port = session_web_port
+            .as_ref()
+            .map(|web_port| web_port.port)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "runtime=web target '{}' requires targets.<label>.port",
+                    plan.selected_target_label()
+                )
+            })?;
         let health_path = "/";
         let timer = PhaseStageTimer::start(HourglassPhase::Execute, "wait_http_ready");
         let ready_result = wait_for_http_ready(
@@ -520,6 +733,12 @@ pub(super) fn start_runtime_session(
         match ready_result {
             Ok(()) => Some(format!("http://127.0.0.1:{port}/")),
             Err(err) => {
+                // Kill the entire process group so grandchildren (e.g. uvicorn spawned
+                // by `sh -lc`) are reaped and don't orphan on the declared port.
+                #[cfg(unix)]
+                if let Some(pid) = runtime_process.child.id().checked_sub(0) {
+                    let _ = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+                }
                 let _ = runtime_process.child.kill();
                 let _ = runtime_process.child.wait();
                 anyhow::bail!(
@@ -565,7 +784,7 @@ pub(super) fn start_runtime_session(
         manifest_path: Some(manifest_path.to_path_buf()),
         scoped_id: None,
         target_label: Some(plan.selected_target_label().to_string()),
-        requested_port: launch.port,
+        requested_port: session_web_port.as_ref().map(|web_port| web_port.port),
         log_path: Some(log_path.clone()),
         ready_at: Some(SystemTime::now()),
         last_event: Some("ready".to_string()),
@@ -577,8 +796,30 @@ pub(super) fn start_runtime_session(
     timer.finish_ok();
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
+    let legacy_dependency_contracts = dependency_contracts_for_session_record(
+        runtime_process.child.id() as i32,
+        dep_contracts.as_ref(),
+    );
+    // PR-5a: emit provider→provider `depends_on` edges from the
+    // live `RunningGraph.deps()[i].needs` so PR-5b's
+    // `teardown_from_graph` has the reverse-topological ordering it
+    // needs. When `dep_contracts` is `None`, the needs map is empty
+    // and the populator behaves like the 1-arg form.
+    let provider_needs = dep_contracts_provider_needs(dep_contracts.as_ref());
+    let graph =
+        crate::application::session_graph_populate::populate_graph_from_dependency_contracts_with_needs(
+            legacy_dependency_contracts.as_ref(),
+            provider_needs.as_ref(),
+        );
+    let dependency_contracts =
+        crate::application::session_graph_populate::dependency_contracts_from_graph(
+            graph.as_ref(),
+            runtime_process.child.id() as i32,
+        )
+        .or(legacy_dependency_contracts);
     let session = StoredSessionInfo {
         session_id,
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -609,10 +850,15 @@ pub(super) fn start_runtime_session(
                 log_path: log_path.display().to_string(),
             }
         }),
-        dependency_contracts: dependency_contracts_for_session_record(
-            runtime_process.child.id() as i32,
-            dep_contracts.as_ref(),
-        ),
+        dependency_contracts,
+        graph,
+        execution_id: None,
+        execution_receipt_schema_version: None,
+        declared_execution_id: None,
+        resolved_execution_id: None,
+        observed_execution_id: None,
+        graph_completeness: None,
+        reproducibility_class: None,
         // Single-target session (no `[services]`); orchestration_services
         // is populated only by start_orchestration_session_in_process.
         orchestration_services: None,
@@ -861,8 +1107,36 @@ pub(super) fn start_orchestration_session_in_process(
     };
     process_manager.write_pid(&process_info)?;
 
+    // [dependencies.<alias>] subset — same as single-target session.
+    let legacy_dependency_contracts =
+        dependency_contracts_for_session_record(leaf_local_pid, dep_contracts.as_ref());
+    // PR-5a: live provider needs + manifest service depends_on map
+    // for teardown-order edges. See session_graph_populate.rs
+    // EDGE_KIND_DEPENDS_ON / EDGE_KIND_USES docstrings.
+    let provider_needs = dep_contracts_provider_needs(dep_contracts.as_ref());
+    let manifest_service_deps = manifest_service_depends_on_map(&plan.manifest);
+    let graph =
+        crate::application::session_graph_populate::populate_graph_from_dependency_contracts_with_needs(
+            legacy_dependency_contracts.as_ref(),
+            provider_needs.as_ref(),
+        );
+    let orchestration_services =
+        orchestration_services_for_session_record(std::process::id() as i32, &detached.services);
+    let graph =
+        crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
+            graph,
+            orchestration_services.as_ref(),
+            manifest_service_deps.as_ref(),
+        );
+    let dependency_contracts =
+        crate::application::session_graph_populate::dependency_contracts_from_graph(
+            graph.as_ref(),
+            leaf_local_pid,
+        )
+        .or(legacy_dependency_contracts);
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -885,20 +1159,21 @@ pub(super) fn start_orchestration_session_in_process(
         }),
         terminal: None,
         service: None,
-        // [dependencies.<alias>] subset — same as single-target session.
-        dependency_contracts: dependency_contracts_for_session_record(
-            leaf_local_pid,
-            dep_contracts.as_ref(),
-        ),
+        dependency_contracts,
+        graph,
+        execution_id: None,
+        execution_receipt_schema_version: None,
+        declared_execution_id: None,
+        resolved_execution_id: None,
+        observed_execution_id: None,
+        graph_completeness: None,
+        reproducibility_class: None,
         // [services] graph subset (#73 PR-D). Persisted so `stop_session`
         // (and the parent-death watcher from PR-B) can tear services down
         // after the wrapper process exits — the OS keeps the underlying
         // OCI containers / spawned children alive as orphans, but only
         // this record holds the container_ids / pids needed to stop them.
-        orchestration_services: orchestration_services_for_session_record(
-            std::process::id() as i32,
-            &detached.services,
-        ),
+        orchestration_services,
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
@@ -1078,6 +1353,7 @@ pub(super) fn start_orchestration_session_supervisor(
 
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -1101,6 +1377,14 @@ pub(super) fn start_orchestration_session_supervisor(
         terminal: None,
         service: None,
         dependency_contracts: None,
+        graph: None,
+        execution_id: None,
+        execution_receipt_schema_version: None,
+        declared_execution_id: None,
+        resolved_execution_id: None,
+        observed_execution_id: None,
+        graph_completeness: None,
+        reproducibility_class: None,
         // Legacy supervisor path: the nested `ato run` child owns the
         // service lifecycle, so this wrapper has no DetachedServiceSnapshot
         // to persist. Reachable only via ATO_LEGACY_SUPERVISOR=1.
@@ -1229,6 +1513,72 @@ fn dependency_contracts_for_session_record(
     })
 }
 
+/// PR-5a: extract per-provider `needs` (alias → needed-aliases) so
+/// the session_graph populator can emit provider→provider
+/// `depends_on` edges.
+///
+/// Today `RunningDep` does not carry `needs` (that field exists on
+/// `TeardownTarget` but not on the live runtime dep). Until a
+/// future commit threads needs through to `RunningDep`,
+/// provider→provider `depends_on` edges remain empty and
+/// PR-5b's `teardown_from_graph` will see no inter-provider
+/// ordering. Provider teardown still works via the legacy
+/// `teardown_reverse_topological` fallback because
+/// `graph_complete_for_teardown` returns false when a multi-
+/// provider session has no `depends_on` edges between them. Single-
+/// provider sessions are unaffected.
+///
+/// This stub returns `None` unconditionally so the populator skips
+/// emitting any provider depends_on edges. PR-6 demotion (or a
+/// future PR-5c) will lift this once `RunningDep.needs` exists.
+fn dep_contracts_provider_needs(
+    _dep_contracts: Option<&DependencyContractGuard>,
+) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    None
+}
+
+/// PR-5a: extract per-service `depends_on` (service-name →
+/// dep-targets) from the raw manifest's `[services.<name>]` table.
+/// Targets may be either sibling service names or provider aliases;
+/// the populator classifies them at edge-emit time. Returns `None`
+/// when the manifest has no `[services]` table or no depends_on
+/// declarations.
+fn manifest_service_depends_on_map(
+    manifest_raw: &toml::Value,
+) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    let services = manifest_raw.get("services")?.as_table()?;
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (service_name, value) in services {
+        let depends_on = value
+            .get("depends_on")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // Also fold in [services.<name>.dependencies.<alias>] keys
+        // (service-to-provider).
+        let mut targets = depends_on;
+        if let Some(deps_table) = value.get("dependencies").and_then(|v| v.as_table()) {
+            for alias in deps_table.keys() {
+                if !targets.iter().any(|t| t == alias) {
+                    targets.push(alias.clone());
+                }
+            }
+        }
+        if !targets.is_empty() {
+            out.insert(service_name.clone(), targets);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInfo {
     let guest_compat = session.guest.as_ref().map(|guest| {
         (
@@ -1290,8 +1640,13 @@ pub(crate) fn session_info_from_stored(session: StoredSessionInfo) -> SessionInf
         web: session.web,
         terminal: session.terminal,
         service: session.service,
-        execution_id: None,
-        execution_receipt_schema_version: None,
+        execution_id: session.execution_id,
+        execution_receipt_schema_version: session.execution_receipt_schema_version,
+        declared_execution_id: session.declared_execution_id,
+        resolved_execution_id: session.resolved_execution_id,
+        observed_execution_id: session.observed_execution_id,
+        graph_completeness: session.graph_completeness,
+        reproducibility_class: session.reproducibility_class,
     }
 }
 
@@ -1458,7 +1813,10 @@ fn spawn_runtime_process(
     plan: &capsule_core::router::ManifestData,
     prepared: &crate::executors::target_runner::PreparedTargetExecution,
     display_strategy: &CapsuleDisplayStrategy,
+    log_path: &Path,
+    selected_web_port: Option<u16>,
 ) -> Result<CapsuleProcess> {
+    let logged = || ExecuteMode::Logged(log_path.to_path_buf());
     if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         let driver = plan
             .execution_driver()
@@ -1487,12 +1845,13 @@ fn spawn_runtime_process(
                 log_path: None,
             }),
             "node" => Ok(CapsuleProcess {
-                child: crate::executors::node_compat::spawn(
+                child: crate::executors::node_compat::spawn_with_selected_port(
                     plan,
                     None,
                     &prepared.execution_plan,
                     &prepared.launch_ctx,
                     false,
+                    selected_web_port,
                 )?,
                 cleanup_paths: Vec::new(),
                 event_rx: None,
@@ -1503,7 +1862,7 @@ fn spawn_runtime_process(
                 plan,
                 None,
                 Arc::new(CliReporter::new(false)),
-                ExecuteMode::Piped,
+                logged(),
                 &prepared.launch_ctx,
             ),
             _ => anyhow::bail!("unsupported runtime=web driver '{driver}' for session start"),
@@ -1564,18 +1923,18 @@ fn spawn_runtime_process(
                 plan,
                 None,
                 Arc::new(CliReporter::new(false)),
-                ExecuteMode::Piped,
+                logged(),
                 &prepared.launch_ctx,
             )
         }
         _ if plan.execution_run_command().is_some() => {
-            crate::executors::shell::execute(plan, ExecuteMode::Piped, &prepared.launch_ctx)
+            crate::executors::shell::execute(plan, logged(), &prepared.launch_ctx)
         }
         _ => crate::executors::source::execute_host(
             plan,
             None,
             Arc::new(CliReporter::new(false)),
-            ExecuteMode::Piped,
+            logged(),
             &prepared.launch_ctx,
         ),
     }
@@ -1614,7 +1973,62 @@ fn display_strategy_for_runtime(
         return CapsuleDisplayStrategy::WebUrl;
     }
 
+    // A run command that uses $PORT / ${PORT} implies this is a web server even
+    // when no explicit `port` is declared in capsule.toml.  We will auto-assign
+    // a free port for it below.
+    if run_command_uses_port_var(plan) {
+        return CapsuleDisplayStrategy::WebUrl;
+    }
+
+    // A run command invoking a known WSGI/ASGI server (uvicorn, gunicorn, flask,
+    // etc.) — either as `uvicorn ...` or `python -m uvicorn ...` — is a web app
+    // even when neither `port` nor `$PORT` appears in capsule.toml.  Ato will
+    // auto-assign a port and inject `--port <N>` at spawn time.
+    if run_command_is_known_web_server(plan) {
+        return CapsuleDisplayStrategy::WebUrl;
+    }
+
     CapsuleDisplayStrategy::TerminalStream
+}
+
+/// Returns `true` when the target's run command contains `$PORT` or `${PORT}`,
+/// indicating the server binds to the system-injected port variable even when
+/// `port` is not declared explicitly in `capsule.toml`.
+fn run_command_uses_port_var(plan: &capsule_core::router::ManifestData) -> bool {
+    plan.execution_run_command()
+        .map(|cmd| cmd.contains("$PORT") || cmd.contains("${PORT}"))
+        .unwrap_or(false)
+}
+
+/// Returns `true` when the run command invokes a known Python WSGI/ASGI web
+/// server — either directly (`uvicorn app:app`) or via the module flag
+/// (`python -m uvicorn app:app`).  These servers need an explicit `--port`
+/// argument; ato injects one at spawn time when none is declared.
+fn run_command_is_known_web_server(plan: &capsule_core::router::ManifestData) -> bool {
+    const KNOWN_SERVERS: &[&str] = &[
+        "uvicorn",
+        "gunicorn",
+        "flask",
+        "streamlit",
+        "hypercorn",
+        "daphne",
+    ];
+    let Some(cmd) = plan.execution_run_command() else {
+        return false;
+    };
+    let lower = cmd.trim().to_ascii_lowercase();
+    // Direct invocation: starts with the server name
+    if KNOWN_SERVERS.iter().any(|s| lower.starts_with(s)) {
+        return true;
+    }
+    // Module invocation: `python -m uvicorn ...` or `python3 -m gunicorn ...`
+    if KNOWN_SERVERS
+        .iter()
+        .any(|s| lower.contains(&format!("-m {s}")))
+    {
+        return true;
+    }
+    false
 }
 
 fn runtime_descriptor(plan: &capsule_core::router::ManifestData) -> CapsuleRuntimeDescriptor {
@@ -1643,36 +2057,14 @@ fn web_served_by(plan: &capsule_core::router::ManifestData) -> String {
     }
 }
 
-fn attach_process_logs(child: &mut std::process::Child, log_path: &Path) -> Result<()> {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let writer = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
-    let stderr_writer = writer
-        .try_clone()
-        .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
-
-    if let Some(mut stdout) = stdout {
-        let mut writer = writer;
-        std::thread::spawn(move || {
-            let _ = std::io::copy(&mut stdout, &mut writer);
-        });
-    }
-    if let Some(mut stderr) = stderr {
-        let mut writer = stderr_writer;
-        std::thread::spawn(move || {
-            let _ = std::io::copy(&mut stderr, &mut writer);
-        });
-    }
-    Ok(())
-}
+// `attach_process_logs` (proxy-thread pattern) was removed in favour of
+// `ExecuteMode::Logged`, which connects the child's stdout/stderr directly
+// to the log file at `Command::spawn` time via `Stdio::from(File)`. The old
+// pattern silently dropped output once `ato app session start` exited
+// because the proxy threads doing `io::copy` died with the parent process,
+// and the kernel then sent EPIPE to the child's stdout. The replacement
+// keeps a kernel-owned file descriptor wired to the log file across the
+// parent's exit, so detached children continue logging normally.
 
 fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
     let bytes = fs::read(path).ok()?;
@@ -1704,194 +2096,48 @@ fn stop_recorded_orchestration_services(
     let Some(record) = record else {
         return Ok(false);
     };
-    let Some(snapshot) = record.orchestration_services.as_ref() else {
-        return Ok(false);
+    let graph_snapshot;
+    let snapshot = if let Some(snapshot) = record.orchestration_services.as_ref() {
+        snapshot
+    } else {
+        graph_snapshot = orchestration_services_from_graph(record);
+        let Some(snapshot) = graph_snapshot.as_ref() else {
+            return Ok(false);
+        };
+        snapshot
     };
     if snapshot.services.is_empty() {
         return Ok(false);
     }
 
-    // Lazy OCI client: only build if we actually have an OCI service.
-    // Avoids spinning up a tokio runtime + bollard handshake for the
-    // common case of a fully-managed (local-only) orchestration capsule.
-    let has_oci = snapshot.services.iter().any(|s| s.container_id.is_some());
-    let oci_runtime = if has_oci {
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => Some(rt),
-            Err(err) => {
-                eprintln!(
-                    "ATO-WARN failed to build tokio runtime for orchestration teardown: {err}"
-                );
-                None
-            }
-        }
+    // PR-5b-fix: per-service teardown is delegated to the
+    // `orchestration_teardown` primitive so behavior is identical
+    // whether the legacy iteration here or the graph-driven
+    // `teardown_from_graph` driver invokes it. `force=true` collapses
+    // to `Duration::ZERO`, matching the legacy "immediate SIGKILL"
+    // semantics.
+    let grace = if force {
+        Duration::from_secs(0)
     } else {
-        None
+        Duration::from_secs(10)
     };
-    let oci_client = oci_runtime.as_ref().and_then(|_| {
-        match capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default() {
-            Ok(c) => Some(c),
-            Err(err) => {
-                eprintln!(
-                    "ATO-WARN failed to connect to OCI engine for orchestration teardown: {err}"
-                );
-                None
-            }
-        }
-    });
 
     let mut any_stopped = false;
     // Reverse-topological: services were started by ServicePhaseCoordinator
     // in topological order, so reverse iteration is the correct teardown
-    // order (consumers before providers).
+    // order (consumers before providers). The per-service primitive
+    // implements pgroup kill, descendant walk, lsof fallback, and OCI
+    // stop/remove (PR-5b-fix).
     for service in snapshot.services.iter().rev() {
-        if let Some(container_id) = service.container_id.as_deref() {
-            let (Some(rt), Some(client)) = (oci_runtime.as_ref(), oci_client.as_ref()) else {
+        match crate::application::orchestration_teardown::stop_orchestration_service_record(
+            service, grace,
+        ) {
+            Ok(true) => any_stopped = true,
+            Ok(false) => {}
+            Err(err) => {
                 eprintln!(
-                    "ATO-WARN orchestration service '{}' has container_id but no OCI client; skipping",
-                    service.name
-                );
-                continue;
-            };
-            // Short timeout: the daemon will SIGKILL the container if it
-            // doesn't exit gracefully within the budget. 5s matches the
-            // `OCI_STOP_TIMEOUT_SECS` constant in `executors::orchestrator`.
-            use capsule_core::runtime::oci::OciRuntimeClient as _;
-            match rt.block_on(client.stop_container(container_id, 5)) {
-                Ok(()) => any_stopped = true,
-                Err(err) => {
-                    eprintln!(
-                        "ATO-WARN failed to stop OCI container {} for service '{}': {}",
-                        container_id, service.name, err
-                    );
-                }
-            }
-            if let Err(err) = rt.block_on(client.remove_container(container_id, force)) {
-                eprintln!(
-                    "ATO-WARN failed to remove OCI container {} for service '{}': {}",
-                    container_id, service.name, err
-                );
-            }
-        } else if let Some(pid) = service.local_pid {
-            #[cfg(unix)]
-            {
-                if pid > 0 {
-                    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-
-                    // Strategy in order of preference:
-                    //
-                    //   1. **Process-group kill** when the recorded
-                    //      `local_pid` is currently a pgroup leader
-                    //      (`getpgid(pid) == pid`). The
-                    //      `nacelle::manager::supervisor` spawn path
-                    //      sets this via `cmd.process_group(0)`, so a
-                    //      `kill(-pgid, sig)` reaps the wrapper AND
-                    //      every descendant atomically.
-                    //
-                    //   2. **Descendant walk + per-pid kill** when (1)
-                    //      doesn't apply — the typical orchestration
-                    //      session: ato-cli spawns nacelle (pid recorded
-                    //      as `local_pid`), nacelle internally launches
-                    //      `uv run` / `npm run dev` wrappers via the
-                    //      direct/sandbox-exec launchers (which inherit
-                    //      ato-cli's pgroup, not their own). A plain
-                    //      per-pid SIGKILL on the recorded pid kills
-                    //      nacelle but leaves the wrappers it spawned
-                    //      alive as init-reparented orphans (#92 AODD
-                    //      Phase 2 → #111). Capture the descendants via
-                    //      `pgrep -P` recursively *before* signaling so
-                    //      we don't lose them when reparenting happens,
-                    //      then signal recorded pid, then signal each
-                    //      descendant. Idempotent on stale/dead pids
-                    //      (ESRCH is silently swallowed).
-                    //
-                    //   3. The lsof-by-published-port fallback (#109)
-                    //      stays as a belt-and-suspenders for any
-                    //      listener we still missed (e.g. a service
-                    //      that spawned outside the recorded subtree).
-                    let mut signaled_via_pgroup = false;
-                    let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
-                    if pgid > 0 && pgid == pid as libc::pid_t {
-                        let ret = unsafe { libc::kill(-pgid, signal) };
-                        if ret == 0 {
-                            any_stopped = true;
-                            signaled_via_pgroup = true;
-                        } else {
-                            let err = std::io::Error::last_os_error();
-                            if err.raw_os_error() != Some(libc::ESRCH) {
-                                eprintln!(
-                                    "ATO-WARN failed to signal process group {} for service '{}': {}",
-                                    pgid, service.name, err
-                                );
-                            }
-                        }
-                    }
-
-                    if !signaled_via_pgroup {
-                        // Capture descendants BEFORE signaling — once
-                        // the recorded pid is killed, its children are
-                        // reparented to init and `pgrep -P recorded`
-                        // returns nothing, leaking the wrappers.
-                        let descendants = collect_descendant_pids(pid as u32, &service.name);
-
-                        // Per-pid kill on the recorded pid first.
-                        let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
-                        if ret == 0 {
-                            any_stopped = true;
-                        } else {
-                            let err = std::io::Error::last_os_error();
-                            if err.raw_os_error() != Some(libc::ESRCH) {
-                                eprintln!(
-                                    "ATO-WARN failed to signal local service '{}' (pid {}): {}",
-                                    service.name, pid, err
-                                );
-                            }
-                        }
-
-                        // Then signal every descendant we captured.
-                        // Each signal is idempotent — ESRCH means the
-                        // process already died (e.g. parent's death
-                        // cascaded), which is the desired end state.
-                        for child_pid in descendants {
-                            let ret = unsafe { libc::kill(child_pid as libc::pid_t, signal) };
-                            if ret == 0 {
-                                any_stopped = true;
-                            } else {
-                                let err = std::io::Error::last_os_error();
-                                if err.raw_os_error() != Some(libc::ESRCH) {
-                                    eprintln!(
-                                        "ATO-WARN failed to signal descendant {} (under recorded pid {}, service '{}'): {}",
-                                        child_pid, pid, service.name, err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                // Belt-and-suspenders for the wrapper-vs-workload PID gap
-                // (#108): even with the pgroup kill above, older
-                // session records (no pgroup, or pgid != recorded pid)
-                // and any spawn mode that drops out of the recorded
-                // pgroup land here. Look up the current listener via
-                // `lsof` and SIGKILL anything that's still bound to
-                // `published_port`; idempotent (returns false when the
-                // port is already free or the resolved pid matches
-                // what we just signaled, including via the pgroup).
-                if let Some(port) = service.published_port {
-                    if kill_listeners_on_published_port(port, pid, force, &service.name) {
-                        any_stopped = true;
-                    }
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (pid, force);
-                eprintln!(
-                    "ATO-WARN local orchestration service teardown is unix-only; service '{}' (pid {}) was left running",
-                    service.name, pid
+                    "ATO-WARN failed to stop orchestration service '{}': {}",
+                    service.name, err
                 );
             }
         }
@@ -1899,169 +2145,73 @@ fn stop_recorded_orchestration_services(
     Ok(any_stopped)
 }
 
-/// Walk the descendant tree of `root_pid` via `pgrep -P` (BFS) and
-/// return every transitive child's pid. Used by
-/// `stop_recorded_orchestration_services` to capture the wrapper
-/// subtree BEFORE killing the recorded pid (#111). Once the recorded
-/// pid dies, its children get reparented to init and `pgrep -P` no
-/// longer finds them — by capturing first, we keep an explicit list
-/// of pids to follow up on.
-///
-/// Best-effort: failures (missing `pgrep`, malformed output, fork
-/// races) yield an empty / partial list and a debug-level message.
-/// The caller still has the lsof-by-published-port fallback (#109)
-/// for any listener we miss here.
-///
-/// Bounded depth (32 levels) and bounded total pids (256) so a
-/// pathological process tree can't make teardown loop forever or
-/// allocate without limit.
-#[cfg(unix)]
-fn collect_descendant_pids(root_pid: u32, service_name: &str) -> Vec<u32> {
-    use std::collections::VecDeque;
-
-    const MAX_DEPTH: usize = 32;
-    const MAX_PIDS: usize = 256;
-
-    let mut collected: Vec<u32> = Vec::new();
-    let mut frontier: VecDeque<(u32, usize)> = VecDeque::new();
-    frontier.push_back((root_pid, 0));
-
-    while let Some((parent, depth)) = frontier.pop_front() {
-        if depth >= MAX_DEPTH || collected.len() >= MAX_PIDS {
-            break;
-        }
-        let output = match Command::new("pgrep")
-            .args(["-P", &parent.to_string()])
-            .output()
-        {
-            Ok(o) => o,
-            Err(err) => {
-                tracing::debug!(
-                    parent,
-                    service = service_name,
-                    error = %err,
-                    "collect_descendant_pids: pgrep -P failed"
-                );
-                continue;
-            }
-        };
-        // pgrep exits 1 when the parent has no children — not an error.
-        if !output.status.success() && output.status.code() != Some(1) {
-            tracing::debug!(
-                parent,
-                service = service_name,
-                exit = ?output.status.code(),
-                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                "collect_descendant_pids: pgrep returned non-success"
-            );
-            continue;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for token in stdout.split_whitespace() {
-            let Ok(child) = token.parse::<u32>() else {
-                continue;
-            };
-            if child == 0 || child == parent || collected.contains(&child) {
-                continue;
-            }
-            collected.push(child);
-            frontier.push_back((child, depth + 1));
-            if collected.len() >= MAX_PIDS {
-                break;
-            }
-        }
+fn orchestration_services_from_graph(
+    record: &StoredSessionInfo,
+) -> Option<StoredOrchestrationServices> {
+    let graph = record.graph.as_ref()?;
+    let mut services = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_SERVICE)
+        .map(|node| {
+            let host_ports = node
+                .metadata
+                .get("host_ports")
+                .map(|encoded| parse_graph_host_ports(encoded))
+                .unwrap_or_default();
+            let published_port = node
+                .metadata
+                .get("published_port")
+                .and_then(|value| value.parse::<u16>().ok())
+                .or(node.port);
+            let order = node
+                .metadata
+                .get("order")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            (
+                order,
+                StoredOrchestrationService {
+                    name: node.identifier.clone(),
+                    target_label: node
+                        .metadata
+                        .get("target_label")
+                        .cloned()
+                        .unwrap_or_else(|| node.identifier.clone()),
+                    local_pid: node.pid,
+                    container_id: node.container_id.clone(),
+                    host_ports,
+                    published_port,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    if services.is_empty() {
+        return None;
     }
-
-    collected
+    services.sort_by_key(|(order, service)| (*order, service.name.clone()));
+    Some(StoredOrchestrationServices {
+        wrapper_pid: record.pid,
+        services: services.into_iter().map(|(_, service)| service).collect(),
+    })
 }
 
-/// Kill any process currently bound to `port` on `127.0.0.1` whose pid
-/// differs from `recorded_pid` (which the caller already attempted to
-/// signal). Used as the wrapper-vs-workload fallback in
-/// `stop_recorded_orchestration_services` (#108): when ato spawned the
-/// service via `npm run dev` / `uv run` / a shell wrapper, the recorded
-/// `local_pid` is the wrapper and the actual listener is its child.
-/// `lsof -nP -iTCP:<port> -sTCP:LISTEN` is the host-portable way to
-/// resolve the current listener; macOS and Linux both ship it.
-///
-/// Returns `true` iff at least one previously-unsignaled pid was
-/// successfully killed.
-#[cfg(unix)]
-fn kill_listeners_on_published_port(
-    port: u16,
-    recorded_pid: i32,
-    force: bool,
-    service_name: &str,
-) -> bool {
-    let listener_pids = match listener_pids_on_port(port) {
-        Ok(pids) => pids,
-        Err(err) => {
-            eprintln!(
-                "ATO-WARN failed to enumerate listeners on port {} for service '{}': {}",
-                port, service_name, err
-            );
-            return false;
-        }
-    };
-    let signal = if force { libc::SIGKILL } else { libc::SIGTERM };
-    let mut killed = false;
-    for pid in listener_pids {
-        if pid as i32 == recorded_pid {
-            // Already handled by the recorded-pid kill above.
-            continue;
-        }
-        let ret = unsafe { libc::kill(pid as libc::pid_t, signal) };
-        if ret == 0 {
-            killed = true;
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ESRCH) {
-                eprintln!(
-                    "ATO-WARN failed to signal port-{} listener (pid {}) for service '{}': {}",
-                    port, pid, service_name, err
-                );
-            }
-        }
-    }
-    killed
+fn parse_graph_host_ports(encoded: &str) -> BTreeMap<u16, u16> {
+    encoded
+        .split(',')
+        .filter_map(|pair| {
+            let (host, container) = pair.split_once(':')?;
+            Some((host.parse::<u16>().ok()?, container.parse::<u16>().ok()?))
+        })
+        .collect()
 }
 
-/// Best-effort resolve "which pids are listening on TCP `port` on the
-/// loopback right now?" using `lsof`. Returns the parsed pid list (may
-/// be empty if nothing is bound). Limited to TCP / IPv4 LISTEN to match
-/// how managed services bind their sockets — the orchestrator's
-/// readiness probe only ever waits on TCP listeners on 127.0.0.1.
-#[cfg(unix)]
-fn listener_pids_on_port(port: u16) -> Result<Vec<u32>> {
-    // `-t` prints PIDs only (one per line), bypassing the column-parsing
-    // hazard of the default human format.
-    let output = Command::new("lsof")
-        .args(["-nP", "-t", &format!("-iTCP:{}", port), "-sTCP:LISTEN"])
-        .output()
-        .with_context(|| format!("failed to invoke lsof for port {}", port))?;
-    // `lsof` exits 1 when there are no matches — that is not an error
-    // for our purposes, so only fail on unexpected exit codes.
-    if !output.status.success() && output.status.code() != Some(1) {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "lsof exited {:?} for port {}: {}",
-            output.status.code(),
-            port,
-            stderr.trim()
-        );
-    }
-    let mut pids = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(pid) = trimmed.parse::<u32>() {
-            pids.push(pid);
-        }
-    }
-    Ok(pids)
-}
+// PR-5b-fix: `collect_descendant_pids`, `kill_listeners_on_published_port`,
+// and `listener_pids_on_port` moved to
+// `crate::application::orchestration_teardown` so the graph-driven
+// teardown driver can reuse them. The legacy
+// `stop_recorded_orchestration_services` (above) delegates per-service
+// to that primitive.
 
 fn stop_recorded_dependency_contracts(
     record: Option<&StoredSessionInfo>,
@@ -2070,43 +2220,226 @@ fn stop_recorded_dependency_contracts(
     let Some(record) = record else {
         return Ok(false);
     };
-    let Some(snapshot) = record.dependency_contracts.as_ref() else {
+    let Some(plan) = dependency_teardown_plan(record)? else {
         return Ok(false);
     };
-    if snapshot.providers.is_empty() {
-        return Ok(false);
-    }
-
-    let targets = snapshot
-        .providers
-        .iter()
-        .map(
-            |provider| crate::application::dependency_runtime::TeardownTarget {
-                dep: provider.alias.clone(),
-                pid: provider.pid,
-                state_dir: provider.state_dir.clone(),
-                needs: Vec::new(),
-            },
-        )
-        .collect();
     let grace = if force {
         Duration::from_secs(0)
     } else {
         Duration::from_secs(10)
     };
-    crate::application::dependency_runtime::teardown_reverse_topological(targets, grace)
-        .with_context(|| {
-            format!(
-                "Failed to stop dependency contracts for {}",
-                record.session_id
+    match plan.strategy {
+        DependencyTeardownStrategy::Graph => {
+            crate::application::dependency_runtime::teardown::teardown_in_order(
+                &plan.targets,
+                grace,
             )
-        })?;
-    for provider in &snapshot.providers {
-        let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(
-            &provider.state_dir,
-        );
+        }
+        DependencyTeardownStrategy::LegacyDependencyContracts => {
+            crate::application::dependency_runtime::teardown_reverse_topological(
+                plan.targets,
+                grace,
+            )
+        }
+    }
+    .with_context(|| {
+        format!(
+            "Failed to stop dependency contracts for {}",
+            record.session_id
+        )
+    })?;
+    for state_dir in &plan.state_dirs {
+        let _ = crate::application::dependency_runtime::orphan::sweep_stale_sentinel(state_dir);
     }
     Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DependencyTeardownStrategy {
+    Graph,
+    LegacyDependencyContracts,
+}
+
+#[derive(Debug, Clone)]
+struct DependencyTeardownPlan {
+    strategy: DependencyTeardownStrategy,
+    targets: Vec<crate::application::dependency_runtime::TeardownTarget>,
+    state_dirs: Vec<PathBuf>,
+}
+
+fn dependency_teardown_plan(record: &StoredSessionInfo) -> Result<Option<DependencyTeardownPlan>> {
+    if let Some(plan) = dependency_teardown_plan_from_graph(record) {
+        return Ok(Some(plan));
+    }
+
+    let Some(snapshot) = record.dependency_contracts.as_ref() else {
+        return Ok(None);
+    };
+    if snapshot.providers.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(DependencyTeardownPlan {
+        strategy: DependencyTeardownStrategy::LegacyDependencyContracts,
+        targets: snapshot
+            .providers
+            .iter()
+            .map(
+                |provider| crate::application::dependency_runtime::TeardownTarget {
+                    dep: provider.alias.clone(),
+                    pid: provider.pid,
+                    state_dir: provider.state_dir.clone(),
+                    needs: Vec::new(),
+                },
+            )
+            .collect(),
+        state_dirs: snapshot
+            .providers
+            .iter()
+            .map(|provider| provider.state_dir.clone())
+            .collect(),
+    }))
+}
+
+fn dependency_teardown_plan_from_graph(
+    record: &StoredSessionInfo,
+) -> Option<DependencyTeardownPlan> {
+    let graph = record.graph.as_ref()?;
+    let snapshot = record.dependency_contracts.as_ref()?;
+    let ordered_aliases = graph_provider_aliases_in_reverse_topological_order(graph);
+    if ordered_aliases.is_empty() {
+        return None;
+    }
+
+    let graph_aliases_sorted =
+        sorted_provider_aliases(ordered_aliases.iter().map(|alias| alias.as_str()));
+    let contract_aliases_sorted = sorted_provider_aliases(
+        snapshot
+            .providers
+            .iter()
+            .map(|provider| provider.alias.as_str()),
+    );
+    debug_assert_eq!(
+        graph_aliases_sorted,
+        contract_aliases_sorted,
+        "session record graph/provider alias divergence (graph={graph_aliases_sorted:?}, contracts={contract_aliases_sorted:?})"
+    );
+    if graph_aliases_sorted != contract_aliases_sorted {
+        return None;
+    }
+
+    let providers_by_alias = snapshot
+        .providers
+        .iter()
+        .map(|provider| (provider.alias.as_str(), provider))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut targets = Vec::with_capacity(ordered_aliases.len());
+    let mut state_dirs = Vec::with_capacity(ordered_aliases.len());
+    for alias in ordered_aliases {
+        let provider = providers_by_alias.get(alias.as_str())?;
+        targets.push(crate::application::dependency_runtime::TeardownTarget {
+            dep: provider.alias.clone(),
+            pid: provider.pid,
+            state_dir: provider.state_dir.clone(),
+            needs: Vec::new(),
+        });
+        state_dirs.push(provider.state_dir.clone());
+    }
+
+    Some(DependencyTeardownPlan {
+        strategy: DependencyTeardownStrategy::Graph,
+        targets,
+        state_dirs,
+    })
+}
+
+fn graph_provider_aliases_in_reverse_topological_order(
+    graph: &ato_session_core::StoredExecutionGraph,
+) -> Vec<String> {
+    let provider_aliases = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NODE_KIND_PROVIDER)
+        .map(|node| node.identifier.clone())
+        .collect::<BTreeSet<_>>();
+    if provider_aliases.is_empty() {
+        return Vec::new();
+    }
+
+    let mut adjacency = provider_aliases
+        .iter()
+        .map(|alias| (alias.clone(), Vec::<String>::new()))
+        .collect::<BTreeMap<_, _>>();
+    let mut subset_has_provides = false;
+    for edge in &graph.edges {
+        if edge.kind != EDGE_KIND_PROVIDES {
+            continue;
+        }
+        if !provider_aliases.contains(&edge.source) {
+            continue;
+        }
+        subset_has_provides = true;
+        adjacency
+            .entry(edge.source.clone())
+            .or_default()
+            .push(edge.target.clone());
+        adjacency.entry(edge.target.clone()).or_default();
+    }
+    if !subset_has_provides {
+        return Vec::new();
+    }
+
+    let mut visited = BTreeSet::<String>::new();
+    let mut visiting = BTreeSet::<String>::new();
+    let mut order = Vec::<String>::new();
+    let mut stack = Vec::<String>::new();
+    for node in adjacency.keys().cloned().collect::<Vec<_>>() {
+        topo_visit(
+            &node,
+            &adjacency,
+            &mut visited,
+            &mut visiting,
+            &mut order,
+            &mut stack,
+        );
+    }
+
+    order.reverse();
+    order
+        .into_iter()
+        .filter(|node| provider_aliases.contains(node))
+        .collect()
+}
+
+fn topo_visit(
+    node: &str,
+    adjacency: &BTreeMap<String, Vec<String>>,
+    visited: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<String>,
+    order: &mut Vec<String>,
+    stack: &mut Vec<String>,
+) {
+    if visited.contains(node) || visiting.contains(node) {
+        return;
+    }
+    visiting.insert(node.to_string());
+    stack.push(node.to_string());
+    if let Some(neighbors) = adjacency.get(node) {
+        for next in neighbors {
+            topo_visit(next, adjacency, visited, visiting, order, stack);
+        }
+    }
+    stack.pop();
+    visiting.remove(node);
+    visited.insert(node.to_string());
+    order.push(node.to_string());
+}
+
+fn sorted_provider_aliases<'a>(aliases: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut aliases = aliases.collect::<Vec<_>>();
+    aliases.sort_unstable();
+    aliases
 }
 
 fn dependency_sidecar_has_providers(
@@ -2133,8 +2466,63 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             false
         }
     };
-    if !sidecar_has_providers || !stopped {
-        match stop_recorded_dependency_contracts(session_record.as_ref(), true) {
+
+    // PR-5b: prefer graph-driven teardown when the persisted graph is
+    // complete (every provider has pid+state_dir; service node count
+    // matches; etc — see `graph_complete_for_teardown`). Incomplete
+    // graphs (older session records, partial teardown info) fall
+    // through to the legacy two-path teardown below.
+    let used_graph_teardown = if let Some(record) = session_record.as_ref() {
+        if crate::application::session_graph_populate::graph_complete_for_teardown(record) {
+            if let Some(graph) = record.graph.as_ref() {
+                match crate::application::dependency_runtime::teardown::teardown_from_graph(
+                    graph,
+                    Duration::from_secs(0),
+                ) {
+                    Ok(()) => {
+                        stopped = true;
+                        let _ = process_manager.delete_pid(session_id);
+                        true
+                    }
+                    Err(err) => {
+                        if stop_error.is_none() {
+                            stop_error = Some(anyhow::Error::new(err));
+                        }
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !used_graph_teardown {
+        if !sidecar_has_providers || !stopped {
+            match stop_recorded_dependency_contracts(session_record.as_ref(), true) {
+                Ok(record_stopped) => {
+                    if record_stopped {
+                        let _ = process_manager.delete_pid(session_id);
+                    }
+                    stopped |= record_stopped;
+                }
+                Err(err) => {
+                    if stop_error.is_none() {
+                        stop_error = Some(err);
+                    }
+                }
+            }
+        }
+        // Orchestration `[services]` graph teardown (#73 PR-D, closes #28
+        // phase 2). Independent of the dep-contract sidecar — orchestration
+        // sessions persist their services subset on the record and there is
+        // no sidecar form. `force=true` matches the dep-contract path's
+        // behavior on `stop_session`.
+        match stop_recorded_orchestration_services(session_record.as_ref(), true) {
             Ok(record_stopped) => {
                 if record_stopped {
                     let _ = process_manager.delete_pid(session_id);
@@ -2278,9 +2666,114 @@ fn write_session_record(root: &Path, session: &StoredSessionInfo) -> Result<()> 
     write_session_record_atomic(root, session)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionWebPort {
+    port: u16,
+    remapped_from: Option<u16>,
+}
+
+fn resolve_session_web_port(
+    resolution: &super::resolve::HandleResolution,
+    manifest_path: &Path,
+    plan: &capsule_core::router::ManifestData,
+    launch: &capsule_core::launch_spec::LaunchSpec,
+    notes: &mut Vec<String>,
+) -> Result<SessionWebPort> {
+    let requested_port = runtime_overrides::override_port(launch.port).ok_or_else(|| {
+        anyhow::anyhow!(
+            "runtime=web target '{}' requires targets.<label>.port",
+            plan.selected_target_label()
+        )
+    })?;
+    let identity = session_port_identity(resolution, manifest_path, plan.selected_target_label());
+    choose_session_web_port(requested_port, &identity, notes, |identity| {
+        PortManager::new()?.resolve_port(identity)
+    })
+}
+
+fn choose_session_web_port<F>(
+    requested_port: u16,
+    identity: &str,
+    notes: &mut Vec<String>,
+    allocate_fallback: F,
+) -> Result<SessionWebPort>
+where
+    F: FnOnce(&str) -> Result<u16>,
+{
+    if local_port_is_available(requested_port) {
+        return Ok(SessionWebPort {
+            port: requested_port,
+            remapped_from: None,
+        });
+    }
+
+    let fallback_port = allocate_fallback(identity).with_context(|| {
+        format!(
+            "declared web port {requested_port} is already in use and no alternate session port could be allocated"
+        )
+    })?;
+    if fallback_port == requested_port || !local_port_is_available(fallback_port) {
+        anyhow::bail!(
+            "declared web port {requested_port} is already in use and alternate session port {fallback_port} is unavailable"
+        );
+    }
+
+    eprintln!(
+        "ATO-WARN declared web port {requested_port} is already in use; remapping this session to {fallback_port}"
+    );
+    notes.push(format!(
+        "Declared web port {requested_port} was already in use; remapped this session to {fallback_port}."
+    ));
+
+    Ok(SessionWebPort {
+        port: fallback_port,
+        remapped_from: Some(requested_port),
+    })
+}
+
+fn session_port_identity(
+    resolution: &super::resolve::HandleResolution,
+    manifest_path: &Path,
+    target_label: &str,
+) -> String {
+    let base = resolution
+        .canonical_handle
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            (!resolution.normalized_handle.trim().is_empty())
+                .then_some(resolution.normalized_handle.as_str())
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| manifest_path.to_string_lossy().to_string());
+
+    if target_label.is_empty() || target_label == "default" {
+        format!("session:{base}")
+    } else {
+        format!("session:{base}:{target_label}")
+    }
+}
+
+fn local_port_is_available(port: u16) -> bool {
+    #[cfg(unix)]
+    if listener_pids_on_port(port)
+        .map(|pids| !pids.is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    TcpListener::bind(("127.0.0.1", port))
+        .map(|listener| {
+            drop(listener);
+            true
+        })
+        .unwrap_or(false)
+}
+
 fn reserve_port(default_port: Option<u16>) -> Result<u16> {
     if let Some(port) = default_port {
-        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if local_port_is_available(port) {
             return Ok(port);
         }
     }
@@ -2298,21 +2791,56 @@ fn wait_for_http_ready(
     timeout: Duration,
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
+    let mut last_rejected_listener: Option<String> = None;
     loop {
         if let Some(status) = child.try_wait()? {
             anyhow::bail!("process exited before readiness with status {status}");
         }
 
         if http_get_ok(port, path) {
-            return Ok(());
+            match http_listener_belongs_to_child_tree(port, child.id()) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    last_rejected_listener = Some(format!(
+                        "http://127.0.0.1:{port}{path} responded, but the listener is not owned by the session process tree rooted at pid {}",
+                        child.id()
+                    ));
+                }
+                Err(err) => {
+                    last_rejected_listener = Some(format!(
+                        "http://127.0.0.1:{port}{path} responded, but listener ownership could not be verified: {err}"
+                    ));
+                }
+            }
         }
 
         if std::time::Instant::now() >= deadline {
+            if let Some(reason) = last_rejected_listener {
+                anyhow::bail!("readiness timed out for http://127.0.0.1:{port}{path}; {reason}");
+            }
             anyhow::bail!("readiness timed out for http://127.0.0.1:{port}{path}");
         }
 
         std::thread::sleep(SESSION_READY_POLL_INTERVAL);
     }
+}
+
+#[cfg(unix)]
+fn http_listener_belongs_to_child_tree(port: u16, root_pid: u32) -> Result<bool> {
+    let listener_pids = listener_pids_on_port(port)?;
+    if listener_pids.is_empty() {
+        return Ok(false);
+    }
+
+    let mut allowed_pids = collect_descendant_pids(root_pid, "readiness");
+    allowed_pids.push(root_pid);
+
+    Ok(listener_pids.iter().all(|pid| allowed_pids.contains(pid)))
+}
+
+#[cfg(not(unix))]
+fn http_listener_belongs_to_child_tree(_port: u16, _root_pid: u32) -> Result<bool> {
+    Ok(true)
 }
 
 pub(crate) fn http_get_ok(port: u16, path: &str) -> bool {
@@ -2465,10 +2993,83 @@ mod tests {
     use capsule_core::handle::normalize_capsule_handle;
     use serial_test::serial;
 
+    /// Env guard for tests that mutate `HOME`/`ATO_HOME`/`ATO_DESKTOP_SESSION_ROOT`.
+    /// Always take `crate::tests::env_lock()` BEFORE constructing this guard so that
+    /// concurrent tests cannot observe the intermediate state.
+    struct TestEnvGuard {
+        ato_home: Option<String>,
+        home: Option<String>,
+        session_root: Option<String>,
+    }
+
+    impl TestEnvGuard {
+        fn capture_and_set(ato_home_path: &std::path::Path, session_root: &std::path::Path) -> Self {
+            let guard = Self {
+                ato_home: std::env::var("ATO_HOME").ok(),
+                home: std::env::var("HOME").ok(),
+                session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
+            };
+            std::env::set_var("ATO_HOME", ato_home_path);
+            std::env::set_var("HOME", ato_home_path);
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", session_root);
+            guard
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            match &self.ato_home {
+                Some(v) => std::env::set_var("ATO_HOME", v),
+                None => std::env::remove_var("ATO_HOME"),
+            }
+            match &self.home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.session_root {
+                Some(v) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", v),
+                None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
+            }
+        }
+    }
+
     #[test]
     fn reserve_port_returns_requested_port_when_available() {
         let port = reserve_port(Some(43291)).expect("reserve port");
         assert_eq!(port, 43291);
+    }
+
+    #[test]
+    fn choose_session_web_port_remaps_occupied_declared_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind occupied port");
+        let occupied_port = listener.local_addr().expect("listener addr").port();
+        let mut notes = Vec::new();
+
+        let selected = choose_session_web_port(occupied_port, "test/session", &mut notes, |_| {
+            reserve_port(None)
+        })
+        .expect("choose alternate port");
+
+        assert_ne!(selected.port, occupied_port);
+        assert_eq!(selected.remapped_from, Some(occupied_port));
+        assert!(notes
+            .iter()
+            .any(|note| note.contains(&format!("remapped this session to {}", selected.port))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_listener_ownership_rejects_unrelated_process() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind occupied port");
+        let port = listener.local_addr().expect("listener addr").port();
+        let mut child = Command::new("sleep").arg("5").spawn().expect("spawn sleep");
+
+        let belongs = http_listener_belongs_to_child_tree(port, child.id())
+            .expect("check listener ownership");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!belongs);
     }
 
     #[test]
@@ -2524,6 +3125,11 @@ mod tests {
                 service: None,
                 execution_id: None,
                 execution_receipt_schema_version: None,
+                declared_execution_id: None,
+                resolved_execution_id: None,
+                observed_execution_id: None,
+                graph_completeness: None,
+                reproducibility_class: None,
             },
         };
 
@@ -2557,6 +3163,478 @@ mod tests {
         assert_eq!(super::super::SCHEMA_VERSION, "ccp/v1");
     }
 
+    /// Slice A of #125 (umbrella #74), session-start integration shape:
+    /// when a session record carries non-empty `dependency_contracts`,
+    /// the populator must also emit a non-None `graph` whose provider
+    /// node set matches the providers, and the resulting `StoredSessionInfo`
+    /// must round-trip through serde unchanged.
+    ///
+    /// This is the integration counterpart to the unit tests in
+    /// `application::session_graph_populate::tests`; it pins the call
+    /// shape used by `start_runtime_session` /
+    /// `start_orchestration_session_in_process` (build
+    /// dependency_contracts → call populator with the same value → store
+    /// both on the record).
+    #[test]
+    fn session_record_with_dep_contracts_carries_populated_graph_and_round_trips() {
+        use crate::application::session_graph_populate::populate_graph_from_dependency_contracts;
+
+        let dependency_contracts = Some(StoredDependencyContracts {
+            consumer_pid: 4242,
+            providers: vec![
+                StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: 5252,
+                    state_dir: PathBuf::from("/tmp/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec!["DATABASE_URL".to_string()],
+                },
+                StoredDependencyProvider {
+                    alias: "cache".to_string(),
+                    pid: 5353,
+                    state_dir: PathBuf::from("/tmp/cache"),
+                    resolved: "capsule://example/cache@1".to_string(),
+                    allocated_port: Some(6379),
+                    log_path: None,
+                    runtime_export_keys: vec!["CACHE_URL".to_string()],
+                },
+            ],
+        });
+        let graph = populate_graph_from_dependency_contracts(dependency_contracts.as_ref());
+        assert!(
+            graph.is_some(),
+            "non-empty dependency_contracts must yield a populated graph (slice A)"
+        );
+
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-populate".to_string(),
+            launch_key: None,
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: "/tmp/x.log".to_string(),
+            manifest_path: "/tmp/capsule.toml".to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts,
+            graph,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("d".repeat(64)),
+            process_start_time_unix_ms: None,
+        };
+
+        // Provider-set parity: graph providers ≡ dependency_contracts providers.
+        let contract_providers: std::collections::BTreeSet<&str> = record
+            .dependency_contracts
+            .as_ref()
+            .map(|c| c.providers.iter().map(|p| p.alias.as_str()).collect())
+            .unwrap_or_default();
+        let graph_providers: std::collections::BTreeSet<&str> = record
+            .graph
+            .as_ref()
+            .map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(|n| n.kind == "provider")
+                    .map(|n| n.identifier.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(graph_providers, contract_providers);
+
+        // Round-trip through serde unchanged: the populated graph survives
+        // ato-session-core's atomic-writer JSON serialization.
+        let first = serde_json::to_string(&record).expect("serialize");
+        let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
+        let second = serde_json::to_string(&parsed).expect("reserialize");
+        assert_eq!(first, second, "populated graph must round-trip byte-stable");
+        assert!(parsed.graph.is_some(), "graph must survive the round-trip");
+        let parsed_graph = parsed.graph.expect("graph present after round-trip");
+        assert_eq!(
+            parsed_graph.schema_version,
+            ato_session_core::StoredExecutionGraph::SCHEMA_VERSION
+        );
+        assert_eq!(parsed_graph.nodes.len(), 2);
+        assert_eq!(parsed_graph.edges.len(), 2);
+    }
+
+    #[test]
+    fn dependency_teardown_plan_prefers_graph_when_provider_subset_is_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-stop".to_string(),
+            launch_key: None,
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![
+                    StoredDependencyProvider {
+                        alias: "db".to_string(),
+                        pid: 1,
+                        state_dir: temp.path().join("state/db"),
+                        resolved: "capsule://example/db@1".to_string(),
+                        allocated_port: Some(5432),
+                        log_path: None,
+                        runtime_export_keys: vec![],
+                    },
+                    StoredDependencyProvider {
+                        alias: "cache".to_string(),
+                        pid: 2,
+                        state_dir: temp.path().join("state/cache"),
+                        resolved: "capsule://example/cache@1".to_string(),
+                        allocated_port: Some(6379),
+                        log_path: None,
+                        runtime_export_keys: vec![],
+                    },
+                ],
+            }),
+            graph: Some(ato_session_core::StoredExecutionGraph {
+                schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![
+                    ato_session_core::StoredGraphNode {
+                        kind: NODE_KIND_PROVIDER.to_string(),
+                        identifier: "cache".to_string(),
+                        pid: None,
+                        state_dir: None,
+                        port: None,
+                        container_id: None,
+                        capability: None,
+                        metadata: std::collections::BTreeMap::new(),
+                    },
+                    ato_session_core::StoredGraphNode {
+                        kind: NODE_KIND_PROVIDER.to_string(),
+                        identifier: "db".to_string(),
+                        pid: None,
+                        state_dir: None,
+                        port: None,
+                        container_id: None,
+                        capability: None,
+                        metadata: std::collections::BTreeMap::new(),
+                    },
+                ],
+                edges: vec![
+                    ato_session_core::StoredGraphEdge {
+                        source: "cache".to_string(),
+                        target: "output://cache".to_string(),
+                        kind: EDGE_KIND_PROVIDES.to_string(),
+                        metadata: std::collections::BTreeMap::new(),
+                    },
+                    ato_session_core::StoredGraphEdge {
+                        source: "db".to_string(),
+                        target: "output://db".to_string(),
+                        kind: EDGE_KIND_PROVIDES.to_string(),
+                        metadata: std::collections::BTreeMap::new(),
+                    },
+                ],
+            }),
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let plan = super::dependency_teardown_plan(&record)
+            .expect("plan result")
+            .expect("plan present");
+        assert_eq!(plan.strategy, super::DependencyTeardownStrategy::Graph);
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| target.dep.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db", "cache"]
+        );
+    }
+
+    #[test]
+    fn dependency_teardown_plan_falls_back_to_legacy_when_graph_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-v0_5-stop".to_string(),
+            launch_key: None,
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: 1,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec![],
+                }],
+            }),
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let plan = super::dependency_teardown_plan(&record)
+            .expect("plan result")
+            .expect("plan present");
+        assert_eq!(
+            plan.strategy,
+            super::DependencyTeardownStrategy::LegacyDependencyContracts
+        );
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| target.dep.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_recorded_dependency_contracts_graph_path_kills_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-graph-kill".to_string(),
+            launch_key: None,
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: provider.id() as i32,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec![],
+                }],
+            }),
+            graph: Some(ato_session_core::StoredExecutionGraph {
+                schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+                nodes: vec![ato_session_core::StoredGraphNode {
+                    kind: NODE_KIND_PROVIDER.to_string(),
+                    identifier: "db".to_string(),
+                    pid: None,
+                    state_dir: None,
+                    port: None,
+                    container_id: None,
+                    capability: None,
+                    metadata: std::collections::BTreeMap::new(),
+                }],
+                edges: vec![ato_session_core::StoredGraphEdge {
+                    source: "db".to_string(),
+                    target: "output://db".to_string(),
+                    kind: EDGE_KIND_PROVIDES.to_string(),
+                    metadata: std::collections::BTreeMap::new(),
+                }],
+            }),
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
+            .expect("stop graph path");
+        assert!(stopped);
+        for _ in 0..40 {
+            if provider.try_wait().expect("provider wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = provider.kill();
+        panic!("graph-backed provider teardown did not stop provider within 1s");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_recorded_dependency_contracts_v0_5_fallback_kills_provider() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
+        let record = StoredSessionInfo {
+            session_id: "ato-desktop-session-v0_5-kill".to_string(),
+            launch_key: None,
+            handle: "capsule://example/demo".to_string(),
+            normalized_handle: "capsule://example/demo".to_string(),
+            canonical_handle: Some("capsule://example/demo".to_string()),
+            trust_state: TrustState::Untrusted,
+            source: Some("registry".to_string()),
+            restricted: false,
+            snapshot: None,
+            runtime: CapsuleRuntimeDescriptor {
+                target_label: "web".to_string(),
+                runtime: Some("source".to_string()),
+                driver: None,
+                language: None,
+                port: None,
+            },
+            display_strategy: CapsuleDisplayStrategy::WebUrl,
+            pid: 4242,
+            log_path: temp.path().join("session.log").display().to_string(),
+            manifest_path: temp.path().join("capsule.toml").display().to_string(),
+            target_label: "web".to_string(),
+            notes: vec![],
+            guest: None,
+            web: None,
+            terminal: None,
+            service: None,
+            dependency_contracts: Some(StoredDependencyContracts {
+                consumer_pid: 4242,
+                providers: vec![StoredDependencyProvider {
+                    alias: "db".to_string(),
+                    pid: provider.id() as i32,
+                    state_dir: temp.path().join("state/db"),
+                    resolved: "capsule://example/db@1".to_string(),
+                    allocated_port: Some(5432),
+                    log_path: None,
+                    runtime_export_keys: vec![],
+                }],
+            }),
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
+            orchestration_services: None,
+            schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
+            launch_digest: Some("digest".repeat(8)),
+            process_start_time_unix_ms: None,
+        };
+
+        let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
+            .expect("stop legacy fallback");
+        assert!(stopped);
+        for _ in 0..40 {
+            if provider.try_wait().expect("provider wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = provider.kill();
+        panic!("legacy dependency-contract fallback did not stop provider within 1s");
+    }
+
     #[test]
     fn loopback_registry_handle_exposes_registry_override_for_materialization() {
         let canonical =
@@ -2573,40 +3651,11 @@ mod tests {
     #[serial]
     #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_sidecar_is_missing() {
-        struct EnvGuard {
-            ato_home: Option<String>,
-            home: Option<String>,
-            session_root: Option<String>,
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.ato_home {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
-                }
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.session_root {
-                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
-                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
-                }
-            }
-        }
-
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let _guard = EnvGuard {
-            ato_home: std::env::var("ATO_HOME").ok(),
-            home: std::env::var("HOME").ok(),
-            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
-        };
-        std::env::set_var("ATO_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
 
         let mut consumer = Command::new("sleep").arg("30").spawn().expect("consumer");
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
@@ -2640,6 +3689,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/demo".to_string(),
                 normalized_handle: "capsule://example/demo".to_string(),
                 canonical_handle: Some("capsule://example/demo".to_string()),
@@ -2680,6 +3730,14 @@ mod tests {
                         runtime_export_keys: vec!["DATABASE_URL".to_string()],
                     }],
                 }),
+                graph: None,
+                execution_id: None,
+                execution_receipt_schema_version: None,
+                declared_execution_id: None,
+                resolved_execution_id: None,
+                observed_execution_id: None,
+                graph_completeness: None,
+                reproducibility_class: None,
                 orchestration_services: None,
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -2689,6 +3747,9 @@ mod tests {
         .expect("write session record");
 
         stop_session(&session_id, true).expect("stop session");
+
+        // Allow signal delivery and process cleanup before polling.
+        std::thread::sleep(std::time::Duration::from_millis(150));
 
         assert!(consumer.try_wait().expect("consumer wait").is_some());
         assert!(provider.try_wait().expect("provider wait").is_some());
@@ -2703,42 +3764,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_pid_file_is_missing() {
-        struct EnvGuard {
-            ato_home: Option<String>,
-            home: Option<String>,
-            session_root: Option<String>,
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.ato_home {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
-                }
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.session_root {
-                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
-                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
-                }
-            }
-        }
-
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let _guard = EnvGuard {
-            ato_home: std::env::var("ATO_HOME").ok(),
-            home: std::env::var("HOME").ok(),
-            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
-        };
-        std::env::set_var("ATO_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
 
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
         let session_id = "ato-desktop-session-missing-pid".to_string();
@@ -2758,6 +3789,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/demo".to_string(),
                 normalized_handle: "capsule://example/demo".to_string(),
                 canonical_handle: Some("capsule://example/demo".to_string()),
@@ -2798,6 +3830,14 @@ mod tests {
                         runtime_export_keys: vec!["DATABASE_URL".to_string()],
                     }],
                 }),
+                graph: None,
+                execution_id: None,
+                execution_receipt_schema_version: None,
+                declared_execution_id: None,
+                resolved_execution_id: None,
+                observed_execution_id: None,
+                graph_completeness: None,
+                reproducibility_class: None,
                 orchestration_services: None,
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -2807,6 +3847,9 @@ mod tests {
         .expect("write session record");
 
         stop_session(&session_id, true).expect("stop session");
+
+        // Allow signal delivery and process cleanup before polling.
+        std::thread::sleep(std::time::Duration::from_millis(150));
 
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
@@ -2852,6 +3895,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-orch".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -2877,6 +3921,14 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: std::process::id() as i32,
                 services: vec![
@@ -2947,52 +3999,17 @@ mod tests {
     /// process exits successfully after detaching the workload runtime
     /// via `Box::leak`). The teardown must fall through to the persisted
     /// `orchestration_services` subset and still report `stopped:true`.
-    ///
-    /// `#[ignore]` matches the sibling tests above — they mutate
-    /// `ATO_HOME`/`HOME`/`ATO_DESKTOP_SESSION_ROOT` process-globally and
-    /// race with each other on shared CI runners (#82). Run locally
-    /// with `cargo test … -- --ignored`.
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "mutates HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT (#82)"]
     fn stop_session_kills_orchestration_services_when_recorded_pid_is_dead() {
         use std::collections::BTreeMap;
 
-        struct EnvGuard {
-            ato_home: Option<String>,
-            home: Option<String>,
-            session_root: Option<String>,
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.ato_home {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
-                }
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.session_root {
-                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
-                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
-                }
-            }
-        }
-
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let _guard = EnvGuard {
-            ato_home: std::env::var("ATO_HOME").ok(),
-            home: std::env::var("HOME").ok(),
-            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
-        };
-        std::env::set_var("ATO_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
 
         // Stand-ins for the live `[services]` workloads that survived the
         // wrapper exit (e.g. uvicorn for `app`, vite for `web`). `db` is
@@ -3035,6 +4052,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/orch".to_string(),
                 normalized_handle: "capsule://example/orch".to_string(),
                 canonical_handle: Some("capsule://example/orch".to_string()),
@@ -3064,6 +4082,14 @@ mod tests {
                 terminal: None,
                 service: None,
                 dependency_contracts: None,
+                graph: None,
+                execution_id: None,
+                execution_receipt_schema_version: None,
+                declared_execution_id: None,
+                resolved_execution_id: None,
+                observed_execution_id: None,
+                graph_completeness: None,
+                reproducibility_class: None,
                 orchestration_services: Some(StoredOrchestrationServices {
                     wrapper_pid: dead_recorded_pid,
                     services: vec![
@@ -3209,6 +4235,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-fallback".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -3234,6 +4261,14 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: dead_recorded_pid,
                 services: vec![StoredOrchestrationService {
@@ -3268,6 +4303,100 @@ mod tests {
         }
         let _ = workload.kill();
         panic!("orphan workload (pid {workload_pid}) was not killed within 1s");
+    }
+
+    /// PR-5b-fix parity test: the graph-driven teardown path
+    /// (`teardown_from_graph` → `stop_orchestration_service_record`)
+    /// must do the same `published_port` lsof listener cleanup that
+    /// the legacy `stop_recorded_orchestration_services` does — see
+    /// the sibling test above. Same setup (dead recorded pid + live
+    /// orphan listener); the only difference is which teardown entry
+    /// point we call. If they diverge, the graph path is unsafe.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "depends on lsof + python3 cold-start; flaky under loaded `cargo test`"]
+    fn teardown_from_graph_kills_orphan_listener_via_published_port_parity_with_legacy() {
+        use std::collections::BTreeMap;
+        use std::net::TcpListener;
+
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind workload listener for graph parity test");
+        let port = listener.local_addr().expect("listener addr").port();
+        drop(listener);
+
+        let workload = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import http.server, socketserver; \
+                     socketserver.TCPServer.allow_reuse_address = True; \
+                     httpd = socketserver.TCPServer(('127.0.0.1', {port}), http.server.SimpleHTTPRequestHandler); \
+                     httpd.serve_forever()"
+                ),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn orphan workload");
+        let workload_pid = workload.id();
+
+        let bound_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(pids) = listener_pids_on_port(port) {
+                if pids.contains(&workload_pid) {
+                    break;
+                }
+            }
+            if std::time::Instant::now() >= bound_deadline {
+                let _ = unsafe { libc::kill(workload_pid as libc::pid_t, libc::SIGKILL) };
+                panic!(
+                    "orphan workload (pid {workload_pid}) failed to bind 127.0.0.1:{port} within 10s"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let dead_recorded_pid: i32 = 999_999_999;
+
+        // Build a single-service graph carrying the dead recorded pid
+        // + the live `published_port`. No depends_on/uses edges
+        // needed (single service → no ordering ambiguity).
+        let mut metadata = BTreeMap::new();
+        metadata.insert("target_label".to_string(), "web".to_string());
+        metadata.insert("published_port".to_string(), port.to_string());
+
+        let service_node = ato_session_core::StoredGraphNode {
+            kind: NODE_KIND_SERVICE.to_string(),
+            identifier: "web".to_string(),
+            pid: Some(dead_recorded_pid),
+            state_dir: None,
+            port: Some(port),
+            container_id: None,
+            capability: None,
+            metadata,
+        };
+        let graph = ato_session_core::StoredExecutionGraph {
+            schema_version: ato_session_core::StoredExecutionGraph::SCHEMA_VERSION,
+            nodes: vec![service_node],
+            edges: vec![],
+        };
+
+        crate::application::dependency_runtime::teardown::teardown_from_graph(
+            &graph,
+            Duration::from_secs(0),
+        )
+        .expect("graph teardown");
+
+        // Same exit poll as the legacy parity test.
+        let mut workload = workload;
+        for _ in 0..40 {
+            if workload.try_wait().expect("workload wait").is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = workload.kill();
+        panic!("orphan workload (pid {workload_pid}) was not killed within 1s by graph teardown");
     }
 
     /// #111 wrapper-and-workload pgroup teardown: the recorded `local_pid`
@@ -3369,6 +4498,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-pgroup".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -3394,6 +4524,14 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: wrapper_pid as i32,
                 services: vec![StoredOrchestrationService {

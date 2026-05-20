@@ -88,6 +88,112 @@ export interface LockDraft {
 export type LockDraftRepoFileEntry = RepoFileEntry;
 export type LockDraftSelectedTarget = SelectedTarget;
 
+// ── LEIP v1 types ─────────────────────────────────────────────────────────────
+// Mirror of leip.rs types, serialized via serde.
+
+export type EvidenceKind =
+  | "runtime_marker_file"
+  | "package_manager_lockfile"
+  | "package_script_command"
+  | "entrypoint_file"
+  | "direct_shell_command"
+  | "readme_raw_shell_command"
+  | "framework_marker"
+  | "manifest_hint";
+
+export type EvidenceSource = "repo_file_index" | "file_text_map" | "manifest_hint";
+
+export interface Evidence {
+  id: string;
+  kind: EvidenceKind;
+  path: string;
+  key: string;
+  normalized_value: string;
+  source: EvidenceSource;
+}
+
+export type LeipNodeKind = "app_target" | "worker_target" | "provider_capsule";
+
+export interface LaunchEnvelopeDraft {
+  driver?: string | null;
+  runtime_version?: string | null;
+  cmd: string[];
+  entrypoint?: string | null;
+  env?: Record<string, string>;
+  port?: number | null;
+}
+
+export interface LaunchGraphNodeDraft {
+  id: string;
+  kind: LeipNodeKind;
+  label: string;
+  envelope?: LaunchEnvelopeDraft | null;
+  service?: string | null;
+  provider_capsule?: string | null;
+}
+
+export interface LaunchGraphEdgeDraft {
+  source: string;
+  target: string;
+  kind: string;
+  evidence_refs: string[];
+}
+
+export interface LaunchGraphDraft {
+  primary_node_id: string;
+  nodes: LaunchGraphNodeDraft[];
+  edges: LaunchGraphEdgeDraft[];
+  evidence_refs: string[];
+  unsupported_features: string[];
+}
+
+export type LeipDecision =
+  | { kind: "auto_accept"; candidate_id: string }
+  | { kind: "needs_selection"; reason: string }
+  | { kind: "unresolved"; reason: string }
+  | { kind: "rejected"; reason: string };
+
+export interface LaunchGraphCandidate {
+  id: string;
+  graph: LaunchGraphDraft;
+  score: number;
+  relative_confidence: number;
+  margin: number;
+  decision: LeipDecision;
+  evidence_refs: string[];
+  risks: string[];
+  hard_constraint_failures: string[];
+  runtime_score: number;
+  launch_score: number;
+  lockfile_score: number;
+  risk_penalty: number;
+}
+
+export interface LeipInput {
+  repo_file_index?: RepoFileEntry[];
+  file_text_map?: Record<string, string>;
+  target_hint?: SelectedTarget | null;
+  existing_ato_lock_summary?: ExistingAtoLockSummary | null;
+}
+
+export interface LeipResult {
+  candidates: LaunchGraphCandidate[];
+  rejected_candidates: LaunchGraphCandidate[];
+  decision: LeipDecision;
+  engine_version: string;
+  required_evidence_coverage: number;
+  diagnostics: string[];
+}
+
+export interface VerificationObservation {
+  candidate_id: string;
+  stage: string;
+  status: string;
+  failure_class?: string | null;
+  redacted_log_excerpt?: string | null;
+  elapsed_ms: number;
+}
+
 // Wrapper function for Cloudflare Workers (synchronous WASM execution).
 // wasm-pack's generated wrapper calls __wbindgen_start() unconditionally, but
 // Cloudflare's module validator may expose the wasm exports under `default`.
@@ -98,6 +204,9 @@ import {
   __wbg_set_wasm,
   __wbindgen_init_externref_table,
   evaluateLockDraftJson,
+  // NOTE: evaluateLaunchGraphsJson / evaluateLaunchEnvelopesJson are only available
+  // after `wasm-pack build --target bundler --features wasm` is re-run.
+  // The stubs below cast via `unknown` to avoid build failures until the pkg/ is rebuilt.
 } from "./pkg/lock_draft_engine_bg.js";
 
 type LockDraftWasmExports = {
@@ -143,4 +252,42 @@ function ensureWasmInitialized() {
 export function evaluateLockDraft(input: LockDraftInput): LockDraft {
   ensureWasmInitialized();
   return JSON.parse(evaluateLockDraftJson(JSON.stringify(input))) as LockDraft;
+}
+
+/**
+ * Primary LEIP v1 inference API.
+ * NOTE: Requires wasm-pack rebuild to be functional — stubs until then.
+ */
+export function evaluateLaunchGraphs(input: LeipInput): LeipResult {
+  ensureWasmInitialized();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fn = (globalThis as any).evaluateLaunchGraphsJson as
+    | ((s: string) => string)
+    | undefined;
+  if (typeof fn !== "function") {
+    throw new Error(
+      "evaluateLaunchGraphsJson WASM export unavailable — run wasm-pack build to regenerate pkg/"
+    );
+  }
+  return JSON.parse(fn(JSON.stringify(input))) as LeipResult;
+}
+
+/**
+ * LEIP v1 compatibility wrapper.
+ * Accepts `LockDraftInput` (maps `selected_target` → `target_hint`)
+ * and returns a `LeipResult`.
+ * NOTE: Requires wasm-pack rebuild to be functional — stubs until then.
+ */
+export function evaluateLaunchEnvelopes(input: LockDraftInput): LeipResult {
+  ensureWasmInitialized();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fn = (globalThis as any).evaluateLaunchEnvelopesJson as
+    | ((s: string) => string)
+    | undefined;
+  if (typeof fn !== "function") {
+    throw new Error(
+      "evaluateLaunchEnvelopesJson WASM export unavailable — run wasm-pack build to regenerate pkg/"
+    );
+  }
+  return JSON.parse(fn(JSON.stringify(input))) as LeipResult;
 }

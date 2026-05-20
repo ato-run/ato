@@ -1,0 +1,49 @@
+usecase: "Replace the Control Bar's Store button icon (currently a tray / Inbox glyph) with a shopping-bag glyph"
+actor: "Autonomous Claude Operator screenshotting the Control Bar via MCP after the icon swap"
+goal: "Store pill button shows a Lucide-style shopping-bag icon next to the 'ストア' label"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Re-styling the Settings or Card Switcher icons"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: the Store pill renders the Inbox/tray icon, not a shopping bag"
+    observation: "`control_bar.rs::bar_pill` had `PillIcon::Builtin(IconName::Inbox)` for the Store. `IconName` is auto-generated from gpui_component's bundled SVG set, which has no shopping-bag glyph."
+
+  - action: "Add `assets/icons/shopping-bag.svg` to ato-desktop's local asset tree"
+    observation: |
+      Lucide-style SVG matching the visual language of the existing
+      icons (gpui_component bundles Lucide). `stroke-width=2`,
+      `stroke-linecap=round`, `stroke-linejoin=round`, paths derived
+      from Lucide's `shopping-bag` glyph (bag body + handle arc + lid
+      crease).
+
+  - action: "Refactor `pill_button`'s icon parameter from `Option<IconName>` to `Option<PillIcon>` where `PillIcon = Builtin(IconName) | Custom(&'static str)`"
+    observation: |
+      Custom variant routes through gpui's `svg()` element with the
+      path looked up by the app's `AssetSource` (local `assets/` ➜
+      gpui_component bundle fallback, already wired in
+      `app::LocalAssetSource::load`). Settings + Card Switcher
+      callers keep `PillIcon::Builtin(...)`; the Store caller now
+      passes `PillIcon::Custom("icons/shopping-bag.svg")`.
+
+  - action: "Rebuild, launch hermetic Focus mode, screenshot"
+    observation: |
+      shopping-bag-icon.png shows the Control Bar pill with the
+      Store button on the right rendering the Lucide-style
+      shopping-bag glyph next to the 'ストア' label — replacing
+      the previous Inbox/tray.
+
+agent_observation:
+  user_visible_problem: "Resolved at the glyph level. Store now reads as a 'shopping' affordance rather than an inbox tray."
+  likely_cause: "Initial scaffolding picked the closest existing Lucide icon (Inbox) because gpui_component's bundle has no shopping-bag glyph."
+  suggested_fix:
+    - "Already shipped: custom shopping-bag.svg + PillIcon::Custom routing through gpui::svg() + asset-source fallback."
+    - "Future: if more custom icons accumulate, consider moving them under a single `assets/icons/custom/` directory or contributing them upstream to gpui-component's set."
+
+evidence:
+  - shopping-bag-icon.png
+
+status: "fixed"

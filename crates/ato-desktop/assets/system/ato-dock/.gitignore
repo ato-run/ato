@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Mockups / design artifacts
+mockup.html
+mockup.png
+
+# OS files
+.DS_Store

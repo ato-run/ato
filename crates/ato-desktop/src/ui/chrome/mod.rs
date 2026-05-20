@@ -1,11 +1,15 @@
 mod window_controls;
 
 use gpui::prelude::*;
-use gpui::{div, hsla, point, px, BoxShadow, Entity, FontWeight, IntoElement, MouseButton, Window};
+use gpui::{
+    div, hsla, point, px, svg, BoxShadow, Entity, FontWeight, IntoElement, MouseButton,
+    SharedString, Window,
+};
 use gpui_component::input::{Input, InputState};
+use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, SelectTask,
+    BrowserBack, BrowserForward, BrowserReload, FocusCommandBar, NavigateToUrl, NewTab, SelectTask,
     ShowSettings, StopActiveSession, StopAllRetainedSessions, ToggleRouteMetadataPopover,
 };
 use crate::state::{
@@ -34,7 +38,10 @@ pub(super) fn render_command_chrome(
         .bg(theme.panel_bg)
         .border_b_1()
         .border_color(theme.panel_border)
-        .child(render_window_controls(default_window_control_buttons()))
+        .child(render_window_controls(
+            default_window_control_buttons(),
+            theme,
+        ))
         .child(render_nav_buttons(state, theme))
         .child(div().flex_1().flex().justify_center().child(render_omnibar(
             omnibar,
@@ -43,8 +50,85 @@ pub(super) fn render_command_chrome(
             command_bar,
             theme,
         )))
+        .child(render_right_actions(theme))
+        .child(render_chrome_divider(theme))
         .child(render_retention_indicator(state, theme))
         .child(render_active_route_status(state, theme))
+}
+
+/// Right-side action cluster — `+` (NewTab) + `⚙` (Settings).
+///
+/// ## gpui-html origin
+///
+/// Lowered from `.tmp/gpui-html/right-actions.html`. The generated
+/// chain is preserved in `.tmp/gpui-html/right-actions.generated.rs`.
+/// The mockup expresses two `p-2 rounded-md` boxes each wrapping a
+/// `size-4` icon slot at `gap-1`; production tightens spacing to
+/// `gap_0p5()` / `p_1p5()` (the half-step scale gpui-html v0.1 lacks)
+/// and replaces the placeholder `div().size_4()` with real
+/// `Icon::new(IconName::{Plus,Settings})`.
+///
+/// Bell and Avatar from the mockup are deliberately not ported — see
+/// `.tmp/aodd-receipts/{bell,avatar}-blocked-*.yaml` (no underlying
+/// feature exists; rendering them would violate the no-lying-UI rule).
+fn render_right_actions(theme: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .child(render_action_button(
+            "chrome-action-new-tab",
+            IconName::Plus,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(NewTab), cx);
+            },
+        ))
+        .child(render_action_button(
+            "chrome-action-settings",
+            IconName::Settings,
+            theme,
+            |_, window, cx| {
+                window.dispatch_action(Box::new(ShowSettings), cx);
+            },
+        ))
+}
+
+fn render_action_button(
+    id: &'static str,
+    icon: IconName,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    // Same visual treatment as the nav-button row (text-tertiary rest,
+    // text-secondary + surface-hover bg on hover). Local helper rather
+    // than reusing render_nav_button because the nav helper is being
+    // rewritten in parallel by PR #157; a follow-up refactor can fold
+    // both into a single `icon_button` once both PRs land.
+    let rest_color = theme.text_tertiary;
+    let hover_color = theme.text_secondary;
+    let hover_bg = theme.surface_hover;
+
+    div()
+        .id(id)
+        .p_1p5()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rest_color)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_bg).text_color(hover_color))
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(Icon::new(icon).size_4())
+}
+
+/// 1px vertical divider between the action cluster and the route /
+/// retention indicators. Mirrors the mockup's `w-px h-4 bg-border
+/// mx-1`. `w-px` is not in gpui-html v0.1's class table so this is
+/// authored directly in Rust rather than lowered.
+fn render_chrome_divider(theme: &Theme) -> impl IntoElement {
+    div().w(px(1.0)).h_4().mx_1().bg(theme.border_subtle)
 }
 
 /// RFC: SURFACE_CLOSE_SEMANTICS §6.4 — discoverability hook for
@@ -86,27 +170,21 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
     // Reload works on any web pane (capsule reload restarts the session)
     let has_any_web_pane =
         state.active_web_pane().is_some() || state.active_capsule_pane().is_some();
-    let enabled_color = theme.text_secondary;
-    let disabled_color = theme.text_tertiary;
-    let nav_color = if is_external_url {
-        enabled_color
-    } else {
-        disabled_color
-    };
-    let reload_color = if has_any_web_pane {
-        enabled_color
-    } else {
-        disabled_color
-    };
 
+    // Layout chain mirrors the gpui-html lowering of
+    //   <div class="flex items-center gap-1"> …three p-2 rounded-md
+    //   wrappers around a size-4 icon slot… </div>
+    // (see .tmp/gpui-html/nav-buttons.generated.rs). Production
+    // tightens gap-1 / p-2 back to the mockup's gap-0.5 / p-1.5
+    // (gpui exposes the half-step scale via `.gap_0p5()` / `.p_1p5()`;
+    // gpui-html v0.1 does not).
     div()
         .flex()
         .items_center()
-        .gap(px(2.0))
+        .gap_0p5()
         .child(render_nav_button(
             "nav-back",
-            "◀",
-            nav_color,
+            IconName::ChevronLeft,
             is_external_url,
             theme,
             |_, window, cx| {
@@ -115,8 +193,7 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         ))
         .child(render_nav_button(
             "nav-forward",
-            "▶",
-            nav_color,
+            IconName::ChevronRight,
             is_external_url,
             theme,
             |_, window, cx| {
@@ -125,8 +202,7 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
         ))
         .child(render_nav_button(
             "nav-reload",
-            "↻",
-            reload_color,
+            IconName::Redo,
             has_any_web_pane,
             theme,
             |_, window, cx| {
@@ -137,30 +213,36 @@ fn render_nav_buttons(state: &AppState, theme: &Theme) -> impl IntoElement {
 
 fn render_nav_button(
     id: &'static str,
-    label: &'static str,
-    color: gpui::Hsla,
+    icon: IconName,
     enabled: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    // Mockup: `p-1.5 rounded-md text-muted hover:bg-hover
+    // hover:text-secondary transition-colors`. The generated
+    // skeleton is just `div().p_2().rounded_md().child(div().size_4())`
+    // (gpui-html lowers neither `text-<token>` for unmapped tokens
+    // nor `hover:` prefixes); the rest below — color, hover state,
+    // gating, click dispatch — is the Rust-side work the SKILL.md
+    // workflow expects.
+    let rest_color = theme.text_tertiary;
+    let hover_color = theme.text_secondary;
     let hover_bg = theme.surface_hover;
 
     div()
         .id(id)
-        .w(px(26.0))
-        .h(px(26.0))
-        .rounded(px(6.0))
+        .p_1p5()
+        .rounded_md()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(12.0))
-        .text_color(color)
+        .text_color(rest_color)
         .when(enabled, move |this| {
             this.cursor_pointer()
-                .hover(move |style| style.bg(hover_bg))
+                .hover(move |style| style.bg(hover_bg).text_color(hover_color))
                 .on_mouse_down(MouseButton::Left, on_click)
         })
-        .child(label)
+        .child(Icon::new(icon).size_4())
 }
 
 fn render_omnibar(
@@ -188,10 +270,17 @@ fn render_omnibar(
         .w_full()
         .max_w(px(560.0))
         .child(
+            // Pill shape lowered from .tmp/gpui-html/omnibar-pill.html:
+            //   <div class="w-full h-8 rounded-full border px-3 flex
+            //               items-center gap-2"></div>
+            // (see .tmp/gpui-html/omnibar-pill.generated.rs). Production
+            // adds the cursor / mouse-down / theme-driven bg+border /
+            // focus-shadow / leading-icon + input children that gpui-html
+            // doesn't lower.
             div()
-                .h(px(30.0))
+                .h_8()
                 .w_full()
-                .rounded(px(8.0))
+                .rounded_full()
                 .px_3()
                 .flex()
                 .items_center()
@@ -217,10 +306,15 @@ fn render_omnibar(
                     }])
                 })
                 .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(if command_bar { icon_active } else { icon_rest })
-                        .child("⌕"),
+                    // Lock SVG matches the mockup's leading-icon glyph
+                    // (header.html `<!-- Security Lock Icon -->` block).
+                    // Asset lives at crates/ato-desktop/assets/icons/
+                    // lock.svg; LocalAssetSource resolves it ahead of
+                    // gpui_component_assets in the loader chain.
+                    svg()
+                        .path(SharedString::new_static("icons/lock.svg"))
+                        .size(px(14.0))
+                        .text_color(if command_bar { icon_active } else { icon_rest }),
                 )
                 .child(
                     div()

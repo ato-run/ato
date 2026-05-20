@@ -6,6 +6,7 @@ mod config;
 mod engine;
 mod explain_hash;
 mod fetch;
+mod import_cmd;
 mod inspect;
 mod install;
 mod internal;
@@ -45,6 +46,7 @@ use self::cache::execute_cache_command;
 use self::config::execute_config_command;
 use self::explain_hash::execute_explain_hash_command;
 use self::fetch::{execute_fetch_command, execute_finalize_command};
+use self::import_cmd::execute_import_command;
 use self::inspect::execute_inspect_command;
 use self::ipc::execute_ipc_command;
 use self::key::execute_key_command;
@@ -97,6 +99,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             allow_unverified,
             rebuild,
             no_build,
+            plan_only,
             read,
             write,
             read_write,
@@ -142,6 +145,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             cwd,
             cache_strategy: cache,
             deprecation_warning: None,
+            plan_only,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 
@@ -158,6 +162,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         ),
 
         Commands::ExplainHash { capsule } => execute_explain_hash_command(&capsule),
+
+        Commands::Import(args) => execute_import_command(args),
 
         Commands::Cache { command } => execute_cache_command(command),
 
@@ -588,10 +594,17 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Session { command } => session::execute_session_command(command),
 
-        Commands::Login { token, headless } => {
+        Commands::Login {
+            token,
+            headless,
+            desktop_webview,
+        } => {
             let rt = tokio::runtime::Runtime::new()?;
             match token {
                 Some(token) => rt.block_on(auth::login_with_token(token)),
+                None if desktop_webview => {
+                    rt.block_on(auth::login_with_store_device_flow_desktop())
+                }
                 None => rt.block_on(auth::login_with_store_device_flow(headless)),
             }
         }

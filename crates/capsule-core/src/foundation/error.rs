@@ -112,6 +112,23 @@ impl fmt::Display for AtoErrorPhase {
     }
 }
 
+/// One pending permission gate in an [`AtoError::PermissionGatesRequired`] envelope.
+///
+/// Each entry names an individual gate (identified by `code`) that must be
+/// cleared before the capsule can run.  `resolution` carries the exact human-
+/// readable action the user must take.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingPermissionGate {
+    /// Short error code, e.g. `"E301"` or `"E302"`.
+    pub code: String,
+    /// Machine-readable gate name, e.g. `"sandbox_opt_in"`.
+    pub name: String,
+    /// Human-readable description of why this gate is blocked.
+    pub message: String,
+    /// Human-readable action required to clear this gate.
+    pub resolution: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AtoError {
@@ -235,6 +252,30 @@ pub enum AtoError {
         message: String,
         hint: Option<String>,
         path: Option<String>,
+    },
+    /// E306 — emitted when auto-install requires explicit confirmation
+    /// (`-y/--yes`) but the CLI is running in JSON mode or without a TTY.
+    /// Distinct from E301 (security policy) and E302 (execution plan consent)
+    /// so consumers can route install-gate errors independently.
+    InstallConsentRequired {
+        message: String,
+        hint: Option<String>,
+    },
+    /// E307 — aggregated gate error emitted when **both** sandbox opt-in (E301)
+    /// and execution-plan consent (E302) are pending at the same time.
+    ///
+    /// Without aggregation the user would discover gates sequentially: first E301
+    /// forces them to add `--sandbox`, then on the next run E302 asks for consent.
+    /// E307 collapses these into a single diagnostic so CLI shows everything
+    /// upfront and Desktop can render a single approval modal.
+    ///
+    /// `pending_gates` carries one [`PendingPermissionGate`] per blocked gate
+    /// (currently always `[E301, E302]`).  Consumers should key on `name` or
+    /// `code` within each entry rather than on the outer E307 code.
+    PermissionGatesRequired {
+        message: String,
+        hint: Option<String>,
+        pending_gates: Vec<PendingPermissionGate>,
     },
     SecurityPolicyViolation {
         message: String,
@@ -413,6 +454,16 @@ impl AtoError {
                 name: "storage_no_space",
                 phase: AtoErrorPhase::Provisioning,
             },
+            Self::InstallConsentRequired { .. } => ErrorKind {
+                code: "E306",
+                name: "install_consent_required",
+                phase: AtoErrorPhase::Provisioning,
+            },
+            Self::PermissionGatesRequired { .. } => ErrorKind {
+                code: "E307",
+                name: "permission_gates_required",
+                phase: AtoErrorPhase::Execution,
+            },
             Self::SecurityPolicyViolation { .. } => ErrorKind {
                 code: "E301",
                 name: "security_policy_violation",
@@ -483,6 +534,8 @@ impl AtoError {
             | Self::TlsBootstrapRequired { message, .. }
             | Self::TlsBootstrapFailed { message, .. }
             | Self::StorageNoSpace { message, .. }
+            | Self::InstallConsentRequired { message, .. }
+            | Self::PermissionGatesRequired { message, .. }
             | Self::SecurityPolicyViolation { message, .. }
             | Self::ExecutionContractInvalid { message, .. }
             | Self::ExecutionPlanConsentRequired { message, .. }
@@ -516,6 +569,8 @@ impl AtoError {
             | Self::TlsBootstrapRequired { hint, .. }
             | Self::TlsBootstrapFailed { hint, .. }
             | Self::StorageNoSpace { hint, .. }
+            | Self::InstallConsentRequired { hint, .. }
+            | Self::PermissionGatesRequired { hint, .. }
             | Self::SecurityPolicyViolation { hint, .. }
             | Self::ExecutionContractInvalid { hint, .. }
             | Self::ExecutionPlanConsentRequired { hint, .. }
@@ -550,6 +605,7 @@ impl AtoError {
                 | Self::TlsBootstrapRequired { .. }
                 | Self::TlsBootstrapFailed { .. }
                 | Self::ExecutionPlanConsentRequired { .. }
+                | Self::PermissionGatesRequired { .. }
         )
     }
 
@@ -664,6 +720,10 @@ impl AtoError {
             Self::TlsBootstrapRequired { binding, .. }
             | Self::TlsBootstrapFailed { binding, .. } => Some(json!({ "binding": binding })),
             Self::StorageNoSpace { path, .. } => Some(json!({ "path": path })),
+            Self::InstallConsentRequired { .. } => None,
+            Self::PermissionGatesRequired { pending_gates, .. } => {
+                Some(json!({ "pending_gates": pending_gates }))
+            }
             Self::SecurityPolicyViolation {
                 resource,
                 blocked_host,
@@ -696,6 +756,76 @@ impl AtoError {
             } => Some(json!({ "backend": backend, "target": target })),
             Self::InternalError { component, .. } => Some(json!({ "component": component })),
             Self::AuthRequired { .. } => None,
+        }
+    }
+
+    /// Returns the additive [`InteractiveResolutionEnvelope`] for variants
+    /// that the user can resolve interactively today (E103
+    /// `MissingRequiredEnv` and E302 `ExecutionPlanConsentRequired`).
+    ///
+    /// This is the typed counterpart to the legacy per-variant
+    /// [`details`](AtoError::details) JSON. Both are emitted side-by-side
+    /// on the wire so existing consumers (the desktop's
+    /// `MissingEnvDetailsDto` / `ConsentRequiredDetailsDto`) keep parsing
+    /// the legacy shape unchanged, while new consumers can route on the
+    /// single typed envelope. See `foundation::interactive_resolution`
+    /// for the long-form rationale and the migration plan toward
+    /// aggregate-envelope work in #117.
+    ///
+    /// Returns `None` for non-interactive variants. The set returned
+    /// here is intentionally narrower than
+    /// [`interactive_resolution`](AtoError::interactive_resolution): the
+    /// boolean signals "the desktop should pause and show *something*",
+    /// while this method only returns when we have a typed payload to
+    /// drive a generic resolution UI without per-variant branching.
+    pub fn interactive_resolution_envelope(
+        &self,
+    ) -> Option<crate::interactive_resolution::InteractiveResolutionEnvelope> {
+        use crate::interactive_resolution::{
+            InteractiveResolutionEnvelope, InteractiveResolutionKind, ResolutionDisplay,
+        };
+
+        match self {
+            Self::MissingRequiredEnv {
+                message,
+                hint,
+                missing_schema,
+                target,
+                ..
+            } => Some(InteractiveResolutionEnvelope {
+                kind: InteractiveResolutionKind::SecretsRequired {
+                    target: target.clone(),
+                    schema: missing_schema.clone(),
+                },
+                display: ResolutionDisplay {
+                    message: message.clone(),
+                    hint: hint.clone(),
+                },
+            }),
+            Self::ExecutionPlanConsentRequired {
+                message,
+                hint,
+                scoped_id,
+                version,
+                target_label,
+                policy_segment_hash,
+                provisioning_policy_hash,
+                summary,
+            } => Some(InteractiveResolutionEnvelope {
+                kind: InteractiveResolutionKind::ConsentRequired {
+                    scoped_id: scoped_id.clone(),
+                    version: version.clone(),
+                    target_label: target_label.clone(),
+                    policy_segment_hash: policy_segment_hash.clone(),
+                    provisioning_policy_hash: provisioning_policy_hash.clone(),
+                    summary: summary.clone(),
+                },
+                display: ResolutionDisplay {
+                    message: message.clone(),
+                    hint: hint.clone(),
+                },
+            }),
+            _ => None,
         }
     }
 }

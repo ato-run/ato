@@ -1,3 +1,14 @@
+# Standalone workspace marker. The parent `apps/ato/Cargo.toml` excludes
+# this directory from its workspace, but Cargo's exclude paths are
+# relative to the parent manifest, so they don't match when ato-desktop
+# is checked out under `.worktrees/<branch>/crates/ato-desktop/`. The
+# empty `[workspace]` block here makes the crate its own workspace
+# regardless of where the directory lives, so `cargo check` /
+# `cargo build` inside the worktree resolves dependencies through the
+# crate-local `Cargo.lock` (already committed alongside) instead of
+# tripping the parent's exclude logic.
+[workspace]
+
 [package]
 name = "ato-desktop"
 version = "0.5.1"
@@ -39,6 +50,7 @@ gpui-inspector = ["gpui-component/inspector"]
 anyhow = "1.0"
 ato-session-core = { path = "../ato-session-core", version = "0.1.0" }
 base64 = "0.22"
+include_dir = "0.7"
 capsule-core = { path = "../capsule-core", version = "0.11.0" }
 capsule-wire = { path = "../capsule-wire", version = "0.1.0" }
 cookie = "0.18"
@@ -64,7 +76,6 @@ http = "1.4.0"
 #    and lenient, supporting both PNG-encoded and DIB-encoded entries.
 ico = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
-include_dir = "0.7"
 resvg = "0.45"
 tiny-skia = "0.11"
 usvg = "0.45"
@@ -78,7 +89,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 unicode-width = "0.2"
-ureq = "2.12.1"
+ureq = { version = "2.12.1", features = ["json"] }
 url = "2.5.4"
 wry = { version = "0.55.0", features = ["protocol", "devtools"] }
 
@@ -92,6 +103,11 @@ objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-quartz-core = "0.3.2"
 objc2-web-kit = "0.3.2"
+# `raw-window-handle` is already pulled in transitively (gpui, wry).
+# Declared as a direct dep here so `window/macos.rs` can call
+# `gpui::Window::window_handle()` to descend to NSWindow and wire
+# `addChildWindow:ordered:` for the Focus View Control Bar (#171).
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

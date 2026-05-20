@@ -551,6 +551,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-web-kit",
  "portable-pty",
+ "raw-window-handle",
  "resvg",
  "semver",
  "serde",
@@ -574,6 +575,7 @@ name = "ato-session-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "capsule-core",
  "capsule-wire",
  "dirs 5.0.1",
@@ -4654,6 +4656,7 @@ name = "lock-draft-engine"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -8870,6 +8873,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
