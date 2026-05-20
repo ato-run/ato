@@ -1911,11 +1911,31 @@ impl DesktopShell {
             }
         }
     }
+
+    fn drain_pending_close_panes(&mut self, cx: &mut Context<Self>) {
+        if self.state.pending_close_panes.is_empty() {
+            return;
+        }
+        use crate::window::content_windows::OpenContentWindows;
+        let pane_ids: Vec<usize> = self.state.pending_close_panes.drain(..).collect();
+        for pane_id in pane_ids {
+            let handle = cx
+                .try_global::<OpenContentWindows>()
+                .and_then(|ocw| ocw.get(pane_id as u64).map(|e| e.handle));
+            if let Some(h) = handle {
+                let _ = h.update(cx, |_, window, _| window.remove_window());
+                tracing::info!(pane_id, "closed pane via automation");
+            } else {
+                tracing::warn!(pane_id, "close_pane: pane not found");
+            }
+        }
+    }
 }
 
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.drain_pending_host_actions(window, cx);
+        self.drain_pending_close_panes(cx);
         let handled_open_urls = self.drain_open_urls();
         let size = window.bounds().size;
         let stage_bounds =

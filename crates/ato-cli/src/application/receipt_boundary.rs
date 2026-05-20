@@ -209,12 +209,16 @@ where
     if let Err(error) = outcome.as_ref() {
         if let Some(receipt) = partial_receipt_for_error_with_ctx(error, &ctx) {
             match write_receipt_document_atomic(&ExecutionReceiptDocument::V2(receipt.clone())) {
-                Ok(path) => eprintln!(
-                    "Execution receipt (v2-experimental, {}): {} ({})",
-                    receipt_result_label(receipt.result),
-                    receipt.execution_id,
-                    path.display()
-                ),
+                Ok(path) => {
+                    eprintln!(
+                        "Execution receipt (v2-experimental, {}): {} ({})",
+                        receipt_result_label(receipt.result),
+                        receipt.execution_id,
+                        path.display()
+                    );
+                    // Stable machine-readable line for non-TTY callers (CI, scripts, MCP).
+                    eprintln!("RECEIPT: {}", path.display());
+                }
                 Err(write_err) => {
                     eprintln!(
                         "ATO-WARN failed to write partial execution receipt for {} boundary: {write_err}",

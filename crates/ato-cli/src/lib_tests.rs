@@ -16,7 +16,13 @@ use crate::install::support::{
 };
 use crate::ProviderToolchain;
 
-fn env_lock() -> &'static Mutex<()> {
+/// Shared mutex for tests that mutate process-global env vars
+/// (`HOME`, `ATO_HOME`, `ATO_DESKTOP_SESSION_ROOT`, etc.).
+///
+/// All env-touching tests across the crate must hold this lock for
+/// the duration of their execution to prevent races under `cargo test`'s
+/// default parallel scheduler. Use: `let _lock = crate::tests::env_lock().lock().unwrap();`
+pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
