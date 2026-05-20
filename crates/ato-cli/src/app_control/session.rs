@@ -2975,6 +2975,46 @@ mod tests {
     use capsule_core::handle::normalize_capsule_handle;
     use serial_test::serial;
 
+    /// Env guard for tests that mutate `HOME`/`ATO_HOME`/`ATO_DESKTOP_SESSION_ROOT`.
+    /// Always take `crate::tests::env_lock()` BEFORE constructing this guard so that
+    /// concurrent tests cannot observe the intermediate state.
+    struct TestEnvGuard {
+        ato_home: Option<String>,
+        home: Option<String>,
+        session_root: Option<String>,
+    }
+
+    impl TestEnvGuard {
+        fn capture_and_set(ato_home_path: &std::path::Path, session_root: &std::path::Path) -> Self {
+            let guard = Self {
+                ato_home: std::env::var("ATO_HOME").ok(),
+                home: std::env::var("HOME").ok(),
+                session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
+            };
+            std::env::set_var("ATO_HOME", ato_home_path);
+            std::env::set_var("HOME", ato_home_path);
+            std::env::set_var("ATO_DESKTOP_SESSION_ROOT", session_root);
+            guard
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            match &self.ato_home {
+                Some(v) => std::env::set_var("ATO_HOME", v),
+                None => std::env::remove_var("ATO_HOME"),
+            }
+            match &self.home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.session_root {
+                Some(v) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", v),
+                None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
+            }
+        }
+    }
+
     #[test]
     fn reserve_port_returns_requested_port_when_available() {
         let port = reserve_port(Some(43291)).expect("reserve port");
@@ -3591,42 +3631,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_sidecar_is_missing() {
-        struct EnvGuard {
-            ato_home: Option<String>,
-            home: Option<String>,
-            session_root: Option<String>,
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.ato_home {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
-                }
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.session_root {
-                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
-                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
-                }
-            }
-        }
-
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let _guard = EnvGuard {
-            ato_home: std::env::var("ATO_HOME").ok(),
-            home: std::env::var("HOME").ok(),
-            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
-        };
-        std::env::set_var("ATO_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
 
         let mut consumer = Command::new("sleep").arg("30").spawn().expect("consumer");
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
@@ -3719,6 +3729,9 @@ mod tests {
 
         stop_session(&session_id, true).expect("stop session");
 
+        // Allow signal delivery and process cleanup before polling.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
         assert!(consumer.try_wait().expect("consumer wait").is_some());
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
@@ -3732,42 +3745,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_pid_file_is_missing() {
-        struct EnvGuard {
-            ato_home: Option<String>,
-            home: Option<String>,
-            session_root: Option<String>,
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.ato_home {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
-                }
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.session_root {
-                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
-                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
-                }
-            }
-        }
-
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let _guard = EnvGuard {
-            ato_home: std::env::var("ATO_HOME").ok(),
-            home: std::env::var("HOME").ok(),
-            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
-        };
-        std::env::set_var("ATO_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
 
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
         let session_id = "ato-desktop-session-missing-pid".to_string();
@@ -3845,6 +3828,9 @@ mod tests {
         .expect("write session record");
 
         stop_session(&session_id, true).expect("stop session");
+
+        // Allow signal delivery and process cleanup before polling.
+        std::thread::sleep(std::time::Duration::from_millis(150));
 
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
@@ -3994,52 +3980,17 @@ mod tests {
     /// process exits successfully after detaching the workload runtime
     /// via `Box::leak`). The teardown must fall through to the persisted
     /// `orchestration_services` subset and still report `stopped:true`.
-    ///
-    /// `#[ignore]` matches the sibling tests above — they mutate
-    /// `ATO_HOME`/`HOME`/`ATO_DESKTOP_SESSION_ROOT` process-globally and
-    /// race with each other on shared CI runners (#82). Run locally
-    /// with `cargo test … -- --ignored`.
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "mutates HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT (#82)"]
     fn stop_session_kills_orchestration_services_when_recorded_pid_is_dead() {
         use std::collections::BTreeMap;
 
-        struct EnvGuard {
-            ato_home: Option<String>,
-            home: Option<String>,
-            session_root: Option<String>,
-        }
-
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match &self.ato_home {
-                    Some(value) => std::env::set_var("ATO_HOME", value),
-                    None => std::env::remove_var("ATO_HOME"),
-                }
-                match &self.home {
-                    Some(value) => std::env::set_var("HOME", value),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.session_root {
-                    Some(value) => std::env::set_var("ATO_DESKTOP_SESSION_ROOT", value),
-                    None => std::env::remove_var("ATO_DESKTOP_SESSION_ROOT"),
-                }
-            }
-        }
-
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
         let session_root = temp.path().join("sessions");
         fs::create_dir_all(&session_root).expect("create session root");
-        let _guard = EnvGuard {
-            ato_home: std::env::var("ATO_HOME").ok(),
-            home: std::env::var("HOME").ok(),
-            session_root: std::env::var("ATO_DESKTOP_SESSION_ROOT").ok(),
-        };
-        std::env::set_var("ATO_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
 
         // Stand-ins for the live `[services]` workloads that survived the
         // wrapper exit (e.g. uvicorn for `app`, vite for `web`). `db` is

@@ -99,6 +99,10 @@ pub enum AutomationCommand {
     ListPanes,
     /// Focuses a pane by ID (makes it the active pane).
     FocusPane { pane_id: usize },
+    /// Closes a pane (content window) by ID.
+    ClosePane { pane_id: usize },
+    /// Clicks at absolute pixel coordinates within the WebView.
+    ClickAt { x: f64, y: f64 },
     /// Opens a URL via the app-level omnibar (navigate_to_url).
     /// Works even when no pane is currently active; creates a new pane.
     OpenUrl { url: String },

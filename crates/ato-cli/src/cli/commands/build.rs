@@ -667,6 +667,7 @@ fn pack_source_bundle(
             standalone,
             strict_manifest,
             timings,
+            publish_profile: capsule_core::packers::pack_filter::PublishProfile::Artifact,
         },
         reporter.clone(),
     );
