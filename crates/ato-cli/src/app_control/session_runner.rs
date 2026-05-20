@@ -22,6 +22,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use ato_session_core::{
+    validate_materialized_launch_record, MaterializedLaunchRecord,
+    MaterializedLaunchValidationOutcome,
+};
 use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::router::ManifestData;
 
@@ -39,7 +43,7 @@ use crate::executors::target_runner;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, HandleResolution};
+use super::resolve::{build_resolution, resolve_local_plan, HandleResolution};
 use super::session::{
     redirect_stdout_to_stderr, resolve_session_launch_plan, restore_stdout, start_guest_session,
     start_orchestration_session_in_process, start_orchestration_session_supervisor,
@@ -69,10 +73,17 @@ pub(crate) fn legacy_supervisor_enabled_for_value(value: Option<&str>) -> bool {
     matches!(value, Some("1"))
 }
 
-pub(super) struct SessionStartPhaseRunner<'a> {
-    handle: &'a str,
-    target_label: Option<&'a str>,
+#[derive(Clone)]
+enum SessionStartSource {
+    Handle,
+    MaterializedRecord(MaterializedLaunchRecord),
+}
+
+pub(super) struct SessionStartPhaseRunner {
+    handle: String,
+    target_label: Option<String>,
     json: bool,
+    start_source: SessionStartSource,
 
     // Set by Install phase
     resolution: Option<HandleResolution>,
@@ -138,12 +149,39 @@ pub(super) struct SessionStartPhaseRunner<'a> {
         Option<crate::application::receipt_boundary::ReceiptGraphIdSink>,
 }
 
-impl<'a> SessionStartPhaseRunner<'a> {
-    pub(super) fn new(handle: &'a str, target_label: Option<&'a str>, json: bool) -> Self {
+impl SessionStartPhaseRunner {
+    pub(super) fn new(handle: &str, target_label: Option<&str>, json: bool) -> Self {
         Self {
-            handle,
-            target_label,
+            handle: handle.to_string(),
+            target_label: target_label.map(str::to_string),
             json,
+            start_source: SessionStartSource::Handle,
+            resolution: None,
+            manifest_path: None,
+            plan: None,
+            launch: None,
+            raw_manifest: None,
+            manifest_value: None,
+            notes: Vec::new(),
+            launch_ctx: RuntimeLaunchContext::empty(),
+            install_reused: false,
+            pre_projection_spec: None,
+            _launch_lock: None,
+            build_observation: None,
+            build_decision_kind: None,
+            execute_reused: false,
+            execute_prior_kind: None,
+            session_info: None,
+            receipt_graph_id_sink: None,
+        }
+    }
+
+    pub(super) fn from_materialized_record(record: MaterializedLaunchRecord, json: bool) -> Self {
+        Self {
+            handle: record.handle.clone(),
+            target_label: Some(record.target_label.clone()),
+            json,
+            start_source: SessionStartSource::MaterializedRecord(record),
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -180,10 +218,104 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 .unwrap_or(false)
     }
 
+    fn install_from_materialized_record(
+        &mut self,
+        record: &MaterializedLaunchRecord,
+    ) -> Result<()> {
+        match validate_materialized_launch_record(record)? {
+            MaterializedLaunchValidationOutcome::Valid => {}
+            MaterializedLaunchValidationOutcome::Stale { reason } => {
+                anyhow::bail!(
+                    "materialized launch record {} is stale: {}",
+                    record.session_id,
+                    reason.as_str()
+                );
+            }
+        }
+
+        let manifest_path = PathBuf::from(&record.manifest_path);
+        let manifest_path_str = manifest_path.to_string_lossy().to_string();
+        let mut resolution =
+            build_resolution(&manifest_path_str, Some(record.target_label.as_str()), None)?;
+        resolution.input = record.handle.clone();
+        resolution.normalized_handle = record.normalized_handle.clone();
+        resolution.canonical_handle = record.canonical_handle.clone();
+        resolution.source = record.source.clone();
+        resolution.trust_state = record.trust_state.clone();
+        resolution.restricted = record.restricted;
+        resolution.snapshot = record.snapshot.clone();
+
+        let (plan, _guest, mut notes) =
+            resolve_local_plan(&manifest_path, Some(record.target_label.as_str()))?;
+        let expected_app_root = PathBuf::from(&record.app_root)
+            .canonicalize()
+            .with_context(|| format!("failed to resolve app root {}", record.app_root))?;
+        let actual_app_root = plan.workspace_root.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve workspace root {}",
+                plan.workspace_root.display()
+            )
+        })?;
+        if actual_app_root != expected_app_root {
+            anyhow::bail!(
+                "materialized launch record {} is stale: workspace root changed from {} to {}",
+                record.session_id,
+                expected_app_root.display(),
+                actual_app_root.display()
+            );
+        }
+
+        let launch = capsule_core::launch_spec::derive_launch_spec(&plan).with_context(|| {
+            format!(
+                "failed to derive launch spec for materialized manifest {}",
+                manifest_path.display()
+            )
+        })?;
+        let raw_manifest = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        let manifest_value: toml::Value = toml::from_str(&raw_manifest)
+            .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+        let launch_spec = lm::canonicalize_launch_spec(
+            &record.handle,
+            &record.target_label,
+            &plan,
+            &launch,
+            &manifest_path,
+            None,
+        )?;
+        let launch_digest = lm::compute_launch_digest(&launch_spec);
+        if launch_digest != record.launch_digest {
+            anyhow::bail!(
+                "materialized launch record {} is stale: launch digest changed",
+                record.session_id
+            );
+        }
+
+        let launch_key = lm::compute_launch_key(&launch_spec);
+        self._launch_lock = lm::acquire_launch_lock(&launch_key).ok();
+        self.pre_projection_spec = Some(launch_spec);
+        notes.push(format!(
+            "Relaunched from materialized launch record {}; skipped resolve/install.",
+            record.session_id
+        ));
+        self.resolution = Some(resolution);
+        self.manifest_path = Some(manifest_path);
+        self.plan = Some(plan);
+        self.launch = Some(launch);
+        self.raw_manifest = Some(raw_manifest);
+        self.manifest_value = Some(manifest_value);
+        self.notes = notes;
+        Ok(())
+    }
+
     async fn run_install(&mut self) -> Result<()> {
+        if let SessionStartSource::MaterializedRecord(record) = self.start_source.clone() {
+            return self.install_from_materialized_record(&record);
+        }
+
         if let Some(hit) = crate::application::warm_launch::try_registry_live_reuse_fast_path(
-            self.handle,
-            self.target_label,
+            &self.handle,
+            self.target_label.as_deref(),
         )? {
             self.install_reused = true;
             self.pre_projection_spec = Some(hit.pre_projection_spec);
@@ -192,9 +324,9 @@ impl<'a> SessionStartPhaseRunner<'a> {
             return Ok(());
         }
 
-        let resolution = build_resolution(self.handle, self.target_label, None)?;
+        let resolution = build_resolution(&self.handle, self.target_label.as_deref(), None)?;
         let (manifest_path, mut plan, mut launch, mut notes) =
-            resolve_session_launch_plan(self.handle, self.target_label)?;
+            resolve_session_launch_plan(&self.handle, self.target_label.as_deref())?;
         let is_orchestration = self.target_label.is_none() && plan.is_orchestration_mode();
 
         // Env preflight runs BEFORE the live-session reuse check so we never
@@ -257,6 +389,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             let platform = warm_launch::current_platform();
             let target_label = self
                 .target_label
+                .as_deref()
                 .unwrap_or_else(|| plan.selected_target_label())
                 .to_string();
 
@@ -274,7 +407,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             // Build the pre-projection LaunchSpec + acquire the advisory lock
             // so concurrent callers serialise on the same slot.
             let pre_spec = lm::canonicalize_launch_spec(
-                self.handle,
+                &self.handle,
                 &target_label,
                 &plan,
                 &launch,
@@ -365,10 +498,11 @@ impl<'a> SessionStartPhaseRunner<'a> {
             if self.pre_projection_spec.is_none() {
                 let target_label = self
                     .target_label
+                    .as_deref()
                     .unwrap_or_else(|| plan.selected_target_label())
                     .to_string();
                 let pre_spec = lm::canonicalize_launch_spec(
-                    self.handle,
+                    &self.handle,
                     &target_label,
                     &plan,
                     &launch,
@@ -412,12 +546,15 @@ impl<'a> SessionStartPhaseRunner<'a> {
             .expect("install phase must populate plan before build");
         let workspace_root = plan.workspace_root.clone();
 
-        let prepared = bm::prepare_decision(
-            plan,
-            &self.launch_ctx,
-            bm::BuildPolicy::IfStale,
-            &workspace_root,
-        );
+        let build_policy = if matches!(
+            &self.start_source,
+            SessionStartSource::MaterializedRecord(_)
+        ) {
+            bm::BuildPolicy::NoBuild
+        } else {
+            bm::BuildPolicy::IfStale
+        };
+        let prepared = bm::prepare_decision(plan, &self.launch_ctx, build_policy, &workspace_root);
         self.build_observation = prepared.observation.clone();
         self.build_decision_kind = Some(prepared.decision.result_kind);
 
@@ -506,8 +643,9 @@ impl<'a> SessionStartPhaseRunner<'a> {
             (stored, lock)
         } else {
             let spec = lm::canonicalize_launch_spec(
-                self.handle,
+                &self.handle,
                 self.target_label
+                    .as_deref()
                     .unwrap_or_else(|| plan.selected_target_label()),
                 plan,
                 launch,
@@ -521,9 +659,18 @@ impl<'a> SessionStartPhaseRunner<'a> {
         let launch_digest = lm::compute_launch_digest(&launch_spec);
 
         // 1. Lookup + validate.
-        let lookup_timer = PhaseStageTimer::start(HourglassPhase::Execute, "session_lookup");
-        let decision = lm::prepare_reuse_decision(&launch_spec, &launch_digest);
-        lookup_timer.finish_ok();
+        let materialized_start = matches!(
+            &self.start_source,
+            SessionStartSource::MaterializedRecord(_)
+        );
+        let decision = if materialized_start {
+            None
+        } else {
+            let lookup_timer = PhaseStageTimer::start(HourglassPhase::Execute, "session_lookup");
+            let decision = lm::prepare_reuse_decision(&launch_spec, &launch_digest);
+            lookup_timer.finish_ok();
+            Some(decision)
+        };
 
         // 1b. Emit the execution receipt BEFORE we spawn the workload. The
         // launch envelope identity (source/deps/runtime/env/fs/policy/launch)
@@ -572,7 +719,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
         };
 
         let (mut info, fresh_spawn) = match decision {
-            Ok(lm::ReuseDecision::Reuse { record }) => {
+            Some(Ok(lm::ReuseDecision::Reuse { record })) => {
                 let validate_timer =
                     PhaseStageTimer::start(HourglassPhase::Execute, "session_validate");
                 // The 5-condition check ran inside prepare_reuse_decision;
@@ -583,7 +730,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 self.execute_reused = true;
                 (super::session::session_info_from_stored(*record), false)
             }
-            Ok(lm::ReuseDecision::Spawn { prior_kind }) => {
+            Some(Ok(lm::ReuseDecision::Spawn { prior_kind })) => {
                 self.execute_prior_kind = prior_kind;
                 (
                     self.spawn_fresh_session(
@@ -597,7 +744,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                     true,
                 )
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 // Lookup failure (e.g. session_root unreadable) — fall
                 // through to spawn. The reuse miss is itself diagnostic
                 // signal; surface it as `prior_kind=stale-session` is
@@ -616,6 +763,17 @@ impl<'a> SessionStartPhaseRunner<'a> {
                     true,
                 )
             }
+            None => (
+                self.spawn_fresh_session(
+                    resolution,
+                    manifest_path,
+                    plan,
+                    manifest_value,
+                    raw_manifest,
+                    launch,
+                )?,
+                true,
+            ),
         };
 
         // 3. Enrich the freshly-written record with schema=2 fields. Best-
@@ -654,6 +812,25 @@ impl<'a> SessionStartPhaseRunner<'a> {
             }
         }
 
+        if fresh_spawn {
+            let materialized_record = info.to_materialized_launch_record(
+                resolution,
+                &plan.workspace_root,
+                &launch_digest,
+            );
+            if let Err(err) = crate::app_control::session::launch_cache_root().and_then(|root| {
+                crate::app_control::session::write_materialized_launch_record_atomic(
+                    &root,
+                    &materialized_record,
+                )
+            }) {
+                eprintln!(
+                    "ATO-WARN failed to persist materialized launch record for {}: {}",
+                    materialized_record.session_id, err
+                );
+            }
+        }
+
         self.session_info = Some(info);
         Ok(())
     }
@@ -681,9 +858,12 @@ impl<'a> SessionStartPhaseRunner<'a> {
             .as_ref()
             .context("emit_execution_receipt: plan missing")?;
 
-        let compiled =
-            compile_execution_plan(manifest_path, ExecutionProfile::Dev, self.target_label)
-                .map_err(|err| anyhow::anyhow!("failed to compile execution plan: {err}"))?;
+        let compiled = compile_execution_plan(
+            manifest_path,
+            ExecutionProfile::Dev,
+            self.target_label.as_deref(),
+        )
+        .map_err(|err| anyhow::anyhow!("failed to compile execution plan: {err}"))?;
 
         let receipt_output =
             execution_receipt_builder::build_prelaunch_receipt_document_with_graph(
@@ -755,7 +935,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                     "ATO-WARN ATO_LEGACY_SUPERVISOR=1 — using legacy nested `ato run` supervisor for orchestration session start. This emergency fallback is removed in v0.5.x.",
                 );
                 return start_orchestration_session_supervisor(
-                    self.handle,
+                    &self.handle,
                     resolution,
                     manifest_path,
                     plan,
@@ -763,7 +943,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
                 );
             }
             return start_orchestration_session_in_process(
-                self.handle,
+                &self.handle,
                 resolution,
                 manifest_path,
                 plan,
@@ -781,7 +961,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
 
         if let Some(guest) = guest {
             start_guest_session(
-                self.handle,
+                &self.handle,
                 resolution,
                 manifest_path,
                 plan,
@@ -790,7 +970,7 @@ impl<'a> SessionStartPhaseRunner<'a> {
             )
         } else {
             start_runtime_session(
-                self.handle,
+                &self.handle,
                 resolution,
                 manifest_path,
                 plan,
@@ -880,7 +1060,7 @@ fn maybe_project_to_session(
 }
 
 #[async_trait(?Send)]
-impl HourglassPhaseRunner for SessionStartPhaseRunner<'_> {
+impl HourglassPhaseRunner for SessionStartPhaseRunner {
     async fn run_phase(
         &mut self,
         phase: HourglassPhase,

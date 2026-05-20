@@ -4,6 +4,7 @@
 //! WKWebView attaches.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -616,6 +617,30 @@ pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandl
         _ => None,
     };
 
+    open_app_window_with_capsule_input(cx, route, capsule_input)
+}
+
+pub fn open_app_window_from_materialized_record(
+    cx: &mut App,
+    route: GuestRoute,
+    record_path: PathBuf,
+) -> Result<AnyWindowHandle> {
+    let launch_configs: Vec<(String, String)> = cx
+        .try_global::<crate::window::launch_window::PendingLaunchConfigs>()
+        .map(|g| g.0.clone())
+        .unwrap_or_default();
+    cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
+
+    let capsule_input = match &route {
+        GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
+            Some(CapsuleBootInput::MaterializedRestart {
+                handle: handle.clone(),
+                record_path,
+                configs: launch_configs,
+            })
+        }
+        _ => None,
+    };
     open_app_window_with_capsule_input(cx, route, capsule_input)
 }
 

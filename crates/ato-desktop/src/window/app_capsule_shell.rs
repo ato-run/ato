@@ -17,6 +17,7 @@
 //!   7. Handles resize by updating WebView bounds whenever the GPUI window
 //!      changes size.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
@@ -48,6 +49,11 @@ use crate::{impl_focusable_via_paste, paste_render_wrap};
 pub enum CapsuleBootInput {
     Start {
         handle: String,
+        configs: Vec<(String, String)>,
+    },
+    MaterializedRestart {
+        handle: String,
+        record_path: PathBuf,
         configs: Vec<(String, String)>,
     },
     Ready {
@@ -95,6 +101,11 @@ impl AppCapsuleShell {
     ) -> Self {
         match input {
             CapsuleBootInput::Start { handle, configs } => Self::new(handle, configs, window, cx),
+            CapsuleBootInput::MaterializedRestart {
+                handle,
+                record_path,
+                configs,
+            } => Self::new_from_materialized_record(handle, record_path, configs, window, cx),
             CapsuleBootInput::Ready { session } => Self::new_ready(session, window, cx),
         }
     }
@@ -110,8 +121,7 @@ impl AppCapsuleShell {
 
         // Load per-handle secrets from the persistent store on disk.
         let secret_store = crate::config::load_secrets();
-        let secrets: Vec<_> = secret_store
-            .secrets_for_capsule(&handle);
+        let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
 
         // Spawn background thread for the blocking orchestration call.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -272,6 +282,158 @@ impl AppCapsuleShell {
         }
     }
 
+    pub fn new_from_materialized_record(
+        handle: String,
+        record_path: PathBuf,
+        configs: Vec<(String, String)>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let win_size = window.bounds().size;
+        let abort_flag = Arc::new(AtomicBool::new(false));
+
+        let secret_store = crate::config::load_secrets();
+        let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
+
+        let boot_shell_weak: Option<WeakEntity<LaunchWindowShell>> = cx
+            .try_global::<PendingBootShell>()
+            .and_then(|g| g.0.clone());
+        cx.set_global(PendingBootShell(None));
+
+        let handle_clone = handle.clone();
+        let record_path_clone = record_path.clone();
+        let abort_clone = Arc::clone(&abort_flag);
+        std::thread::spawn(move || {
+            let prog = progress_tx;
+            let result = crate::orchestrator::resolve_and_start_guest_from_materialized_record(
+                &handle_clone,
+                &record_path_clone,
+                &secrets,
+                &configs,
+                Some(Box::new(move |step| {
+                    let _ = prog.send(step);
+                })),
+            );
+            if abort_clone.load(Ordering::Acquire) {
+                if let Ok(ref session) = result {
+                    let sid = session.session_id.clone();
+                    let _ = crate::orchestrator::stop_guest_session(&sid);
+                }
+                return;
+            }
+            let _ = tx.send(result);
+        });
+
+        let entity = cx.entity().downgrade();
+        let abort_poll = Arc::clone(&abort_flag);
+        let async_app = cx.to_async();
+        async_app
+            .foreground_executor()
+            .spawn({
+                let be = async_app.background_executor().clone();
+                let aa = async_app.clone();
+                async move {
+                    loop {
+                        be.timer(Duration::from_millis(100)).await;
+
+                        let steps: Vec<u8> = {
+                            let mut v = Vec::new();
+                            while let Ok(s) = progress_rx.try_recv() {
+                                v.push(s);
+                            }
+                            v
+                        };
+                        if !steps.is_empty() {
+                            aa.update(|cx: &mut App| {
+                                if let Some(weak) = &boot_shell_weak {
+                                    if let Some(shell) = weak.upgrade() {
+                                        for step in steps {
+                                            let _ = shell.update(cx, |s, _cx| {
+                                                s.push_step(step);
+                                                let msg = match step {
+                                                    0 => "Validating launch plan",
+                                                    1 => "Resolving capsule targets",
+                                                    2 => "Starting capsule session",
+                                                    3 => "Connecting to capsule endpoint",
+                                                    _ => "Processing launch step",
+                                                };
+                                                s.push_detail(msg);
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        match rx.try_recv() {
+                            Ok(result) => {
+                                aa.update(|cx: &mut App| {
+                                    close_boot_window(cx);
+
+                                    match entity.upgrade() {
+                                        Some(entity) => {
+                                            if let Some(weak) = &boot_shell_weak {
+                                                if let Some(shell) = weak.upgrade() {
+                                                    let _ =
+                                                        shell.update(cx, |s, _cx| {
+                                                            match &result {
+                                                        Ok(_) => s.push_detail(
+                                                            "Capsule session started successfully",
+                                                        ),
+                                                        Err(err) => s.push_detail(&format!(
+                                                            "Launch failed: {}",
+                                                            describe_launch_error(err)
+                                                        )),
+                                                    }
+                                                        });
+                                                }
+                                            }
+                                            entity.update(cx, |shell, cx| {
+                                                shell.pending_result = Some(result);
+                                                cx.notify();
+                                            });
+                                        }
+                                        None => {
+                                            if let Ok(session) = result {
+                                                let sid = session.session_id.clone();
+                                                std::thread::spawn(move || {
+                                                    let _ = crate::orchestrator::stop_guest_session(
+                                                        &sid,
+                                                    );
+                                                });
+                                            }
+                                        }
+                                    }
+                                });
+                                break;
+                            }
+                            Err(TryRecvError::Disconnected) => break,
+                            Err(TryRecvError::Empty) => {
+                                if abort_poll.load(Ordering::Acquire) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+
+        Self {
+            handle,
+            boot_state: CapsuleBootState::Booting,
+            webview: None,
+            content_window_id: None,
+            pending_result: None,
+            window_size: win_size,
+            abort_flag,
+            paste: WebViewPasteSupport::new(cx),
+        }
+    }
+
     fn new_ready(
         session: GuestLaunchSession,
         window: &mut gpui::Window,
@@ -306,11 +468,7 @@ impl AppCapsuleShell {
 
     /// Process a result that arrived from the background thread.
     /// Called from `render` when `pending_result` is `Some`.
-    fn process_pending_result(
-        &mut self,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn process_pending_result(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
         let Some(result) = self.pending_result.take() else {
             return;
         };
@@ -325,8 +483,7 @@ impl AppCapsuleShell {
                     requested_client: SessionClientKind::AtoWindow,
                     source: CapsuleOpenSource::NavigateToUrl,
                 };
-                let capsule_session =
-                    CapsuleSession::from_launch_session(&session, launch_context);
+                let capsule_session = CapsuleSession::from_launch_session(&session, launch_context);
                 let mut registry = cx.global_mut::<SessionRegistry>();
                 registry.register_session(capsule_session);
                 let client = SessionClient {

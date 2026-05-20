@@ -1214,13 +1214,33 @@ fn restart_focus_content_window(cx: &mut App, window_id: u64) {
     let Some(entry) = cx.global::<OpenContentWindows>().get(window_id).cloned() else {
         return;
     };
+    let capsule_session_id = entry
+        .capsule
+        .as_ref()
+        .and_then(|capsule| capsule.session_id.clone());
     let ContentWindowKind::AppWindow { route } = entry.kind else {
         return;
     };
+    let materialized_record_path = capsule_session_id.and_then(|session_id| match &route {
+        crate::state::GuestRoute::CapsuleHandle { .. }
+        | crate::state::GuestRoute::CapsuleUrl { .. } => ato_session_core::launch_cache_root()
+            .ok()
+            .map(|root| ato_session_core::materialized_launch_record_path(&root, &session_id)),
+        _ => None,
+    });
     let _ = entry
         .handle
         .update(cx, |_, window, _| window.remove_window());
-    if let Err(err) = crate::window::open_app_window(cx, route) {
+    let restart_result = if let Some(record_path) = materialized_record_path {
+        crate::window::orchestrator::open_app_window_from_materialized_record(
+            cx,
+            route.clone(),
+            record_path,
+        )
+    } else {
+        crate::window::open_app_window(cx, route.clone())
+    };
+    if let Err(err) = restart_result {
         tracing::error!(error = %err, window_id, "RestartContentWindow failed");
     }
 }
