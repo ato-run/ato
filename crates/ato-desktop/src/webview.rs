@@ -981,6 +981,11 @@ impl WebViewManager {
                     req.send(Ok(serde_json::json!({ "ok": true })));
                     continue;
                 }
+                ClosePane { pane_id } => {
+                    state.pending_close_panes.push_back(*pane_id);
+                    req.send(Ok(serde_json::json!({ "ok": true })));
+                    continue;
+                }
                 OpenUrl { url } => {
                     state.navigate_to_url(url);
                     req.send(Ok(serde_json::json!({ "ok": true })));
@@ -4649,6 +4654,13 @@ pub(crate) fn dispatch_automation_command(
                 req
             );
         }
+        ClickAt { x, y } => {
+            js_call!(
+                format!(
+                    "(function(){{var el=document.elementFromPoint({x},{y});if(!el)return JSON.stringify({{ok:false,error:'no element at ({x},{y})'}});el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));return JSON.stringify({{ok:true}});}})()"),
+                req
+            );
+        }
         Fill {
             ref ref_id,
             ref value,
@@ -4854,6 +4866,7 @@ pub(crate) fn dispatch_automation_command(
         // Handled in dispatch_automation_requests before reaching here.
         ListPanes
         | FocusPane { .. }
+        | ClosePane { .. }
         | OpenUrl { .. }
         | SetCapsuleSecrets { .. }
         | ApproveExecutionPlanConsent { .. }

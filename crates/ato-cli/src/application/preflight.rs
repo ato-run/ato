@@ -90,6 +90,9 @@ pub enum PreflightError {
     #[error("manifest path does not exist: {path}")]
     ManifestMissing { path: PathBuf },
 
+    #[error("unsupported preflight target '{input}': {reason}")]
+    UnsupportedTarget { input: String, reason: String },
+
     #[error("failed to load capsule manifest at {path}: {source}")]
     ManifestLoad {
         path: PathBuf,
@@ -119,22 +122,27 @@ pub enum PreflightError {
     },
 }
 
-/// Walk a local capsule path and collect every pending pre-launch
-/// requirement. The `target` argument matches the same input shape
-/// `ato run` and `ato inspect requirements` accept — a directory, a
-/// `capsule.toml` path, or (in the future) a registry ref. This slice
-/// supports local paths only; remote-resolution support tracks #117's
-/// continuation.
+/// Walk an offline-resolved capsule path and collect every pending
+/// pre-launch requirement. The supported target shapes are:
+///
+/// - a local capsule directory
+/// - a local `capsule.toml` path
+/// - a cached GitHub repository ref (`github.com/<owner>/<repo>` or
+///   `capsule://github.com/<owner>/<repo>`)
+///
+/// This intentionally does **not** fetch from registries, auto-install
+/// capsules, or materialize provider-backed workspaces. Unsupported
+/// targets fail fast with [`PreflightError::UnsupportedTarget`] so the
+/// caller cannot mistake this read-only path for normal `ato run`.
 ///
 /// `profile` is forwarded to `compile_execution_plan` so the caller
 /// can choose Dev (default) vs Prod policy. The desktop launch worker
 /// passes Dev.
 pub fn collect_aggregate_requirements(
     target: &str,
-    _registry: Option<&str>,
     profile: ExecutionProfile,
 ) -> Result<AggregatePreflightResult, PreflightError> {
-    let manifest_path = resolve_local_manifest_path(target)?;
+    let manifest_path = resolve_offline_manifest_path(target)?;
 
     let loaded =
         capsule_core::contract::manifest::load_manifest(&manifest_path).map_err(|err| {
@@ -306,32 +314,27 @@ pub fn collect_aggregate_requirements(
             path: manifest_path.clone(),
             source,
         })?;
-        let consent_input =
-            capsule_core::engine::execution_graph::GraphConsentInput {
-                scoped_id: plan.consent.key.scoped_id.clone(),
-                version: plan.consent.key.version.clone(),
-                target_label: plan.consent.key.target_label.clone(),
-                policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-                provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
-            };
-        let bundle =
-            crate::application::graph_views::build_declared_only_bundle_with_consent(
-                &target_deps,
-                Some(manifest_path.display().to_string()),
-                None,
-                Vec::new(),
-                consent_input,
-            );
-        let view = crate::application::graph_views::ExecutionConsentView::from_bundle(
-            &bundle,
+        let consent_input = capsule_core::engine::execution_graph::GraphConsentInput {
+            scoped_id: plan.consent.key.scoped_id.clone(),
+            version: plan.consent.key.version.clone(),
+            target_label: plan.consent.key.target_label.clone(),
+            policy_segment_hash: plan.consent.policy_segment_hash.clone(),
+            provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+        };
+        let bundle = crate::application::graph_views::build_declared_only_bundle_with_consent(
+            &target_deps,
+            Some(manifest_path.display().to_string()),
+            None,
+            Vec::new(),
+            consent_input,
         );
-        let already_consented = has_consent(&plan)
-            .map_err(|err| PreflightError::ConsentStore { source: err })?;
+        let view = crate::application::graph_views::ExecutionConsentView::from_bundle(&bundle);
+        let already_consented =
+            has_consent(&plan).map_err(|err| PreflightError::ConsentStore { source: err })?;
         debug_assert!(
             {
-                let view_side =
-                    crate::application::auth::consent_store::has_consent_view(&view)
-                        .unwrap_or(already_consented);
+                let view_side = crate::application::auth::consent_store::has_consent_view(&view)
+                    .unwrap_or(already_consented);
                 // Plan-side short-circuits to true for
                 // zero-permission plans; view-side has no such
                 // knowledge and returns false until a record lands.
@@ -351,10 +354,7 @@ pub fn collect_aggregate_requirements(
                     scoped_id: view.scoped_id.clone().unwrap_or_default(),
                     version: view.version.clone().unwrap_or_default(),
                     target_label: view.target_label.clone().unwrap_or_default(),
-                    policy_segment_hash: view
-                        .policy_segment_hash
-                        .clone()
-                        .unwrap_or_default(),
+                    policy_segment_hash: view.policy_segment_hash.clone().unwrap_or_default(),
                     provisioning_policy_hash: view
                         .provisioning_policy_hash
                         .clone()
@@ -390,52 +390,85 @@ pub fn collect_aggregate_requirements(
     })
 }
 
-/// Resolve `target` (a directory, a `capsule.toml` path, or a
-/// GitHub-flavoured `capsule://github.com/<owner>/<repo>` URL) to an
-/// absolute `capsule.toml` location. Returns
+/// Resolve `target` (a directory, a `capsule.toml` path, or a cached
+/// GitHub repository ref) to an absolute `capsule.toml` location. Returns
 /// [`PreflightError::ManifestMissing`] when no manifest is reachable.
 ///
 /// Resolution policy:
 ///
-/// 1. **`capsule://github.com/<owner>/<repo>`**: look for a previously
-///    fetched working tree under `${ATO_HOME}/tmp/gh-run/<repo>-*` and
-///    `${ATO_HOME}/external-capsules/github/<owner>/<repo>/*`,
-///    in that order. Use the most recently modified hit. This works
-///    only if `ato run`/`ato-desktop` has already cached the capsule
-///    once before — first-time fetching is intentionally out of scope
-///    for this slice (avoiding new network/git side effects in the
-///    preflight path is what makes preflight safe).
-/// 2. **Local directory**: append `capsule.toml`.
-/// 3. **Local file**: use as-is.
-/// 4. **`publisher/slug` registry refs**: not supported in this slice
-///    — registry resolution would re-introduce network side effects.
-///    The caller should fall back to the legacy E103/E302 flow.
-fn resolve_local_manifest_path(target: &str) -> Result<PathBuf, PreflightError> {
+/// 1. **`capsule://github.com/<owner>/<repo>`**: look only under
+///    `${ATO_HOME}/external-capsules/github/<owner>/<repo>/*`. When the
+///    repo segment is pinned as `repo@<sha>`, only the exact
+///    `<sha>/capsule.toml` cache entry is valid; no mtime fallback is
+///    allowed. Unpinned refs may use the most recently modified cached
+///    external snapshot. This works only if `ato run`/`ato-desktop` has
+///    already cached the capsule once before — first-time fetching is
+///    intentionally out of scope for this slice (avoiding new network/git
+///    side effects in the preflight path is what makes preflight safe).
+/// 2. **`github.com/<owner>/<repo>`**: normalize it exactly the way
+///    `ato run` does, then reuse the same cache lookup.
+/// 3. **Local directory**: append `capsule.toml`.
+/// 4. **Local file**: use as-is.
+/// 5. **Registry refs / provider refs**: rejected. Side-effect-free
+///    preflight must not fetch from registries or materialize
+///    provider-backed workspaces.
+fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError> {
     if let Some(rest) = target.strip_prefix("capsule://github.com/") {
         return resolve_cached_github_capsule(rest);
     }
+
     let expanded = crate::local_input::expand_local_path(target);
-    if !expanded.exists() {
-        return Err(PreflightError::ManifestMissing {
-            path: expanded.clone(),
-        });
+    match crate::application::engine::install::provider_target::classify_run_target(target, &expanded)
+    {
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::GitHubRepository(
+            repository,
+        )) => resolve_cached_github_capsule(&repository),
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::LocalPath(_)) => {
+            if !expanded.exists() {
+                return Err(PreflightError::ManifestMissing {
+                    path: expanded.clone(),
+                });
+            }
+            let manifest = if expanded.is_dir() {
+                expanded.join("capsule.toml")
+            } else {
+                expanded
+            };
+            if !manifest.exists() {
+                return Err(PreflightError::ManifestMissing { path: manifest });
+            }
+            Ok(manifest)
+        }
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::Provider(
+            provider_target,
+        )) => Err(PreflightError::UnsupportedTarget {
+            input: target.to_string(),
+            reason: format!(
+                "provider-backed target '{}:{}' is not supported by side-effect-free preflight; it would need workspace materialization. Run `ato run` or `ato fetch` first.",
+                provider_target.provider.as_str(),
+                provider_target.ref_string
+            ),
+        }),
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::RegistryReference) =>
+        {
+            Err(PreflightError::UnsupportedTarget {
+                input: target.to_string(),
+                reason: "registry handles are not supported by side-effect-free preflight; install the capsule first, then run `--plan-only` against the resulting local path.".to_string(),
+            })
+        }
+        Err(err) => Err(PreflightError::UnsupportedTarget {
+            input: target.to_string(),
+            reason: err.to_string(),
+        }),
     }
-    let manifest = if expanded.is_dir() {
-        expanded.join("capsule.toml")
-    } else {
-        expanded
-    };
-    if !manifest.exists() {
-        return Err(PreflightError::ManifestMissing { path: manifest });
-    }
-    Ok(manifest)
 }
 
 /// Resolve a `capsule://github.com/<owner>/<repo>` ref to a cached
-/// working tree under `${ATO_HOME}/...`. Returns the most recently
-/// modified hit so a user who's iterating on a PR sees the latest
-/// cached snapshot. This intentionally never fetches over the network
-/// — preflight must stay side-effect-free.
+/// external snapshot under `${ATO_HOME}/external-capsules/github/...`.
+/// Pinned `repo@<sha>` refs require an exact `<sha>/capsule.toml`
+/// hit; unpinned refs use the most recently modified cached snapshot.
+/// This intentionally never fetches over the network — preflight must
+/// stay side-effect-free.
 fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> {
     let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() < 2 {
@@ -444,27 +477,11 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
         });
     }
     let owner = parts[0];
-    // Strip any commit-pin suffix (`repo@<sha>`) before using the repo
-    // name to locate cache directories. Without this, `repo@d8145039…`
-    // is treated as a literal repo name and every cache lookup misses.
-    let repo = parts[1].split('@').next().unwrap_or(parts[1]);
+    let (repo, pinned_ref) = match parts[1].split_once('@') {
+        Some((repo, pinned_ref)) if !pinned_ref.is_empty() => (repo, Some(pinned_ref)),
+        _ => (parts[1], None),
+    };
     let ato_home = capsule_core::common::paths::nacelle_home_dir_or_workspace_tmp();
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // Working trees fetched by `ato run` for the launch attempts the
-    // user has already made. These live under `~/.ato/tmp/gh-run/<repo>-*`
-    // (note: the prefix is the bare repo name, not owner/repo).
-    let gh_run_root = ato_home.join("tmp").join("gh-run");
-    if let Ok(entries) = std::fs::read_dir(&gh_run_root) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(&format!("{repo}-")) {
-                candidates.push(entry.path());
-            }
-        }
-    }
 
     // The publisher-scoped external-capsule cache. Layout:
     // `${ATO_HOME}/external-capsules/github/<owner>/<repo>/<commit>/`.
@@ -473,6 +490,15 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
         .join("github")
         .join(owner)
         .join(repo);
+    if let Some(pinned_ref) = pinned_ref {
+        let manifest = external_root.join(pinned_ref).join("capsule.toml");
+        if manifest.exists() {
+            return Ok(manifest);
+        }
+        return Err(PreflightError::ManifestMissing { path: manifest });
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&external_root) {
         for entry in entries.flatten() {
             candidates.push(entry.path());
@@ -669,7 +695,7 @@ egress_allow = ["smtp.gmail.com"]
         let target_str = manifest_path.to_string_lossy().to_string();
 
         let result =
-            collect_aggregate_requirements(&target_str, None, ExecutionProfile::Dev).expect("collect");
+            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
 
         // Two targets visited in service-name order (main → web).
         assert_eq!(result.visited_targets, vec!["app", "web"]);
@@ -725,7 +751,7 @@ egress_allow = ["smtp.gmail.com"]
         let target_str = manifest_path.to_string_lossy().to_string();
 
         let result =
-            collect_aggregate_requirements(&target_str, None, ExecutionProfile::Dev).expect("collect");
+            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
 
         for envelope in &result.requirements {
             if let InteractiveResolutionKind::ConsentRequired {
@@ -785,7 +811,7 @@ run = "python -m app"
         fs::write(&manifest_path, manifest).expect("write");
 
         let result =
-            collect_aggregate_requirements(&manifest_path.to_string_lossy(), None, ExecutionProfile::Dev)
+            collect_aggregate_requirements(&manifest_path.to_string_lossy(), ExecutionProfile::Dev)
                 .expect("collect");
 
         assert_eq!(result.visited_targets.len(), 1);
@@ -897,19 +923,19 @@ contract = "service@1"
         }
     }
 
-    /// #146 regression: `repo@<sha>` in the URL must not be treated as a
-    /// literal repo name when scanning cache directories. Verify that the
-    /// `@sha` suffix is stripped before constructing the cache prefix.
+    /// #146 regression: `repo@<sha>` must resolve only from the exact
+    /// commit cache entry, not by falling back to some other cached
+    /// commit for the same owner/repo.
     #[test]
-    fn github_cache_resolver_strips_sha_suffix_from_repo() {
-        // Build an isolated ATO_HOME with a fake cached working tree whose
-        // directory name matches the bare repo slug (no sha suffix).
+    #[serial_test::serial]
+    fn github_cache_resolver_requires_exact_sha_match() {
         let ato_home = tempfile::TempDir::new().expect("ato_home");
         let repo = "MyRepo";
         let owner = "acme";
+        let requested_commit = "somecommitsha";
 
         // Populate external-capsules cache: ~/.ato/external-capsules/github/<owner>/<repo>/<sha>/
-        let cached_commit = "abc123deadbeef";
+        let cached_commit = requested_commit;
         let ext_root = ato_home
             .path()
             .join("external-capsules")
@@ -923,19 +949,108 @@ contract = "service@1"
 
         let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
 
-        // Request with a sha suffix — the resolver must strip the suffix and
-        // still find the cached manifest.
-        let rest = format!("{owner}/{repo}@somecommitsha");
+        let rest = format!("{owner}/{repo}@{requested_commit}");
         let result = resolve_cached_github_capsule(&rest);
 
         assert!(
             result.is_ok(),
-            "#146: repo@sha should resolve from cache (got {result:?})"
+            "#146: repo@sha should resolve only from the exact cached commit (got {result:?})"
         );
         let found = result.unwrap();
+        assert_eq!(found, ext_root.join("capsule.toml"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn github_cache_resolver_rejects_mismatched_sha_cache_hit() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let repo = "MyRepo";
+        let owner = "acme";
+
+        let ext_root = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join(owner)
+            .join(repo)
+            .join("abc123deadbeef");
+        std::fs::create_dir_all(&ext_root).expect("create ext_root");
+        std::fs::write(ext_root.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let result = resolve_cached_github_capsule(&format!("{owner}/{repo}@somecommitsha"));
+
+        assert!(matches!(
+            result,
+            Err(PreflightError::ManifestMissing { .. })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn github_cache_resolver_ignores_owner_blind_gh_run_checkout() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let repo = "MyRepo";
+
+        let gh_run = ato_home
+            .path()
+            .join("tmp")
+            .join("gh-run")
+            .join(format!("{repo}-123"));
+        std::fs::create_dir_all(&gh_run).expect("create gh-run");
+        std::fs::write(gh_run.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let result = resolve_cached_github_capsule(&format!("acme/{repo}"));
+
+        assert!(matches!(
+            result,
+            Err(PreflightError::ManifestMissing { .. })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn offline_manifest_resolver_accepts_github_run_shorthand() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let owner = "acme";
+        let repo = "MyRepo";
+        let cached_commit = "abc123deadbeef";
+        let ext_root = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join(owner)
+            .join(repo)
+            .join(cached_commit);
+        std::fs::create_dir_all(&ext_root).expect("create ext_root");
+        std::fs::write(ext_root.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let resolved = resolve_offline_manifest_path(&format!("github.com/{owner}/{repo}"))
+            .expect("github shorthand should resolve from cache");
+
         assert!(
-            found.ends_with("capsule.toml"),
-            "expected a path ending in capsule.toml, got {found:?}"
+            resolved.ends_with("capsule.toml"),
+            "expected a path ending in capsule.toml, got {resolved:?}"
         );
+    }
+
+    #[test]
+    fn offline_manifest_resolver_rejects_registry_refs() {
+        let err = resolve_offline_manifest_path("acme/demo").expect_err("registry ref must fail");
+        match err {
+            PreflightError::UnsupportedTarget { input, reason } => {
+                assert_eq!(input, "acme/demo");
+                assert!(
+                    reason.contains("side-effect-free preflight"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected unsupported target error, got {other:?}"),
+        }
     }
 }
