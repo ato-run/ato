@@ -1865,6 +1865,34 @@ impl DesktopShell {
                 "OpenStartWindow" => {
                     window.dispatch_action(Box::new(crate::app::OpenStartWindow), cx);
                 }
+                "OpenGithubRunWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenGithubRunWindow), cx);
+                }
+                "GithubRunFindCandidates" => {
+                    // In DesktopShell mode there is no app_handle to pass extra URL params,
+                    // so we look up ActiveGithubRunShell directly.
+                    if let Some(shell_weak) = cx
+                        .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                        .and_then(|s| s.0.clone())
+                    {
+                        if let Some(shell) = shell_weak.upgrade() {
+                            let mock = serde_json::json!({
+                                "ok": true,
+                                "candidates": [{
+                                    "title": "mock/candidate",
+                                    "version": "0.1.0",
+                                    "description": "AODD mock candidate (DesktopShell mode)",
+                                    "author": "mock",
+                                    "status": "community",
+                                    "source": "github",
+                                    "toml": "[capsule]\nname = \"mock\"\nversion = \"0.1.0\"\n",
+                                    "repo": "mock/candidate",
+                                }]
+                            });
+                            shell.read(cx).inject_github_candidates(&mock);
+                        }
+                    }
+                }
                 "OpenStoreWindow" => {
                     window.dispatch_action(Box::new(crate::app::OpenStoreWindow), cx);
                 }

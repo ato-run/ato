@@ -16,8 +16,8 @@ use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
     FocusControlBarInput, HideControlBar, NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher,
-    OpenDockWindow, OpenStartWindow, OpenStoreWindow, ShowControlBar, ShowSettings,
-    ToggleControlBar,
+    OpenDockWindow, OpenGithubRunWindow, OpenStartWindow, OpenStoreWindow, ShowControlBar,
+    ShowSettings, ToggleControlBar,
 };
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
@@ -176,6 +176,40 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                     Box::new(OpenStartWindow),
                                                     cx,
                                                 );
+                                                Ok(())
+                                            }
+                                            "OpenGithubRunWindow" => {
+                                                window.dispatch_action(
+                                                    Box::new(OpenGithubRunWindow),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "GithubRunFindCandidates" => {
+                                                let repo = action_url.clone()
+                                                    .ok_or_else(|| "GithubRunFindCandidates requires a `url` (repo) parameter".to_string())?;
+                                                let shell_weak = cx
+                                                    .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                                                    .and_then(|s| s.0.clone());
+                                                let Some(shell_weak) = shell_weak else {
+                                                    return Err("GithubRunFindCandidates: no ActiveGithubRunShell — open the window first".into());
+                                                };
+                                                if let Some(shell) = shell_weak.upgrade() {
+                                                    let mock = serde_json::json!({
+                                                        "ok": true,
+                                                        "candidates": [{
+                                                            "title": repo,
+                                                            "version": "0.1.0",
+                                                            "description": "AODD mock candidate",
+                                                            "author": repo.split('/').next().unwrap_or(""),
+                                                            "status": "community",
+                                                            "source": "github",
+                                                            "toml": format!("[capsule]\nname = \"{repo}\"\nversion = \"0.1.0\"\n"),
+                                                            "repo": repo,
+                                                        }]
+                                                    });
+                                                    shell.read(cx).inject_github_candidates(&mock);
+                                                }
                                                 Ok(())
                                             }
                                             "ShowSettings" => {

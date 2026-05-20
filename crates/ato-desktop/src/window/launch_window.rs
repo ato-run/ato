@@ -199,6 +199,14 @@ pub struct ActiveConsentShell(pub Option<WeakEntity<LaunchWindowShell>>);
 
 impl gpui::Global for ActiveConsentShell {}
 
+/// Weak handle to the most recently opened GitHub Run wizard shell.
+/// Used by `inject_github_candidates` and AODD automation to deliver
+/// candidate lookup results into the wizard WebView.
+#[derive(Default, Clone)]
+pub struct ActiveGithubRunShell(pub Option<WeakEntity<LaunchWindowShell>>);
+
+impl gpui::Global for ActiveGithubRunShell {}
+
 pub struct LaunchWindowShell {
     _webview: WebView,
     window_size: Size<Pixels>,
@@ -302,6 +310,18 @@ impl LaunchWindowShell {
         let _ = self._webview.evaluate_script(
             "const el=document.getElementById('panel-config-body'); if (el) { el.scrollTop = el.scrollHeight; }",
         );
+    }
+
+    /// Deliver candidate lookup results into the GitHub Run wizard WebView.
+    /// `result` is a JSON value shaped as `{ok:true,candidates:[...]}` or
+    /// `{ok:false,error:"..."}`. Guards with `typeof` so a missed call is silent.
+    pub fn inject_github_candidates(&self, result: &serde_json::Value) {
+        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "typeof window.__ato_github_candidates_result==='function'&&window.__ato_github_candidates_result({})",
+            json
+        );
+        let _ = self._webview.evaluate_script(&script);
     }
 }
 
@@ -881,6 +901,8 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
         compose_init_script(locale, None)
     );
     let queue = system_ipc::new_queue();
+    let shell_slot: Arc<Mutex<Option<Entity<LaunchWindowShell>>>> = Arc::new(Mutex::new(None));
+    let shell_slot_inner = Arc::clone(&shell_slot);
     let queue_for_closure = queue.clone();
 
     let handle = cx.open_window(options, move |window, cx| {
@@ -905,11 +927,20 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
+        if let Ok(mut slot) = shell_slot_inner.lock() {
+            *slot = Some(shell.clone());
+        }
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
     system_ipc::spawn_drain_loop(cx, queue, *handle);
+    let shell = shell_slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("LaunchWindowShell entity must be populated by open_window closure");
+    cx.set_global(ActiveGithubRunShell(Some(shell.downgrade())));
     Ok(*handle)
 }
 
