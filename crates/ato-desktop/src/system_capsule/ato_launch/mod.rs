@@ -125,10 +125,10 @@ pub fn dispatch(
                     for (key, value) in &secrets {
                         if !value.is_empty() {
                             if let Err(e) = store.add_secret(key.clone(), value.clone()) {
-                                tracing::error!(error = %e, key, "ato_launch: add_secret failed");
+                                return Err(BrokerError::Internal(format!("Failed to save secret {key}: {e}")));
                             }
                             if let Err(e) = store.grant_secret(handle, key) {
-                                tracing::error!(error = %e, key, handle, "ato_launch: grant_secret failed");
+                                return Err(BrokerError::Internal(format!("Failed to grant secret {key} to {handle}: {e}")));
                             }
                         }
                     }

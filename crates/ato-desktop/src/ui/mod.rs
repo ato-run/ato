@@ -3496,11 +3496,10 @@ fn render_capsule_permissions_page(
     theme: &Theme,
 ) -> Div {
     let granted_envs: Vec<String> = state
-        .secret_store
-        .secrets_for_capsule(canonical_handle)
-        .iter()
-        .map(|s| s.key.clone())
-        .collect();
+        .secret_grant_keys_by_handle
+        .get(canonical_handle)
+        .cloned()
+        .unwrap_or_default();
     let allowlist_detail = if state.config.sandbox.default_egress_allow.is_empty() {
         None
     } else {
