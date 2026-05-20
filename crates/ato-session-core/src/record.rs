@@ -116,6 +116,11 @@ pub struct StoredSessionInfo {
     /// on Windows and serializes as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_start_time_unix_ms: Option<u64>,
+    /// Stable logical slot identity (`launch_key`) for the session.
+    /// Lets Desktop map a live session back to its materialized relaunch
+    /// record without depending on per-process `session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +339,7 @@ mod tests {
     fn schema_v2_round_trips_with_all_fields_present() {
         let original = StoredSessionInfo {
             session_id: "ato-desktop-session-99".to_string(),
+            launch_key: None,
             handle: "publisher/slug".to_string(),
             normalized_handle: "publisher/slug".to_string(),
             canonical_handle: Some("publisher/slug".to_string()),
@@ -413,6 +419,7 @@ mod tests {
         host_ports.insert(54320u16, 5432u16);
         let original = StoredSessionInfo {
             session_id: "ato-desktop-session-77".to_string(),
+            launch_key: None,
             handle: "publisher/orch".to_string(),
             normalized_handle: "publisher/orch".to_string(),
             canonical_handle: Some("publisher/orch".to_string()),
@@ -543,6 +550,7 @@ mod tests {
     fn graph_none_round_trips_byte_stable() {
         let original = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-none".to_string(),
+            launch_key: None,
             handle: "publisher/slug".to_string(),
             normalized_handle: "publisher/slug".to_string(),
             canonical_handle: None,
@@ -590,6 +598,7 @@ mod tests {
     fn graph_some_empty_round_trips_byte_stable() {
         let original = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-empty".to_string(),
+            launch_key: None,
             handle: "publisher/slug".to_string(),
             normalized_handle: "publisher/slug".to_string(),
             canonical_handle: None,

@@ -203,7 +203,9 @@ impl SessionInfo {
         &self,
         resolution: &super::resolve::HandleResolution,
         app_root: &Path,
+        launch_key: &str,
         launch_digest: &str,
+        run_config_hash: &str,
     ) -> MaterializedLaunchRecord {
         let created_at_unix_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -211,7 +213,8 @@ impl SessionInfo {
             .unwrap_or(0);
         MaterializedLaunchRecord {
             schema_version: ato_session_core::MATERIALIZED_LAUNCH_RECORD_SCHEMA_VERSION,
-            session_id: self.session_id.clone(),
+            launch_key: launch_key.to_string(),
+            last_session_id: Some(self.session_id.clone()),
             handle: self.handle.clone(),
             normalized_handle: resolution.normalized_handle.clone(),
             canonical_handle: resolution.canonical_handle.clone(),
@@ -222,7 +225,9 @@ impl SessionInfo {
             target_label: self.target_label.clone(),
             manifest_path: self.manifest_path.clone(),
             app_root: app_root.display().to_string(),
+            platform: ato_session_core::current_platform_tag(),
             launch_digest: launch_digest.to_string(),
+            run_config_hash: run_config_hash.to_string(),
             created_at_unix_ms,
             execution_id: self.execution_id.clone(),
             execution_receipt_schema_version: self.execution_receipt_schema_version,
@@ -253,6 +258,7 @@ pub fn start_session(
     handle: &str,
     target_label: Option<&str>,
     from_materialized_record: Option<&str>,
+    run_config_hash: Option<&str>,
     json: bool,
 ) -> Result<()> {
     // Reserve stdout for the SessionStartEnvelope when the caller
@@ -324,9 +330,18 @@ pub fn start_session(
                 handle
             );
         }
-        super::session_runner::SessionStartPhaseRunner::from_materialized_record(record, json)
+        super::session_runner::SessionStartPhaseRunner::from_materialized_record(
+            record,
+            run_config_hash.map(str::to_string),
+            json,
+        )
     } else {
-        super::session_runner::SessionStartPhaseRunner::new(handle, target_label, json)
+        super::session_runner::SessionStartPhaseRunner::new(
+            handle,
+            target_label,
+            run_config_hash.map(str::to_string),
+            json,
+        )
     };
     let pipeline = ConsumerRunPipeline::standard();
     // Boundary-level receipt emission (refs #74, #99). On the happy
@@ -513,6 +528,7 @@ pub(super) fn start_guest_session(
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_session_record");
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -803,6 +819,7 @@ pub(super) fn start_runtime_session(
         .or(legacy_dependency_contracts);
     let session = StoredSessionInfo {
         session_id,
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -1119,6 +1136,7 @@ pub(super) fn start_orchestration_session_in_process(
         .or(legacy_dependency_contracts);
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -1335,6 +1353,7 @@ pub(super) fn start_orchestration_session_supervisor(
 
     let session = StoredSessionInfo {
         session_id: session_id.clone(),
+        launch_key: None,
         handle: handle.to_string(),
         normalized_handle: resolution.normalized_handle.clone(),
         canonical_handle: resolution.canonical_handle.clone(),
@@ -3133,6 +3152,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-populate".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3212,6 +3232,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-stop".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3329,6 +3350,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-v0_5-stop".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3402,6 +3424,7 @@ mod tests {
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-graph-kill".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3490,6 +3513,7 @@ mod tests {
         let mut provider = Command::new("sleep").arg("30").spawn().expect("provider");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-v0_5-kill".to_string(),
+            launch_key: None,
             handle: "capsule://example/demo".to_string(),
             normalized_handle: "capsule://example/demo".to_string(),
             canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3636,6 +3660,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/demo".to_string(),
                 normalized_handle: "capsule://example/demo".to_string(),
                 canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3762,6 +3787,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/demo".to_string(),
                 normalized_handle: "capsule://example/demo".to_string(),
                 canonical_handle: Some("capsule://example/demo".to_string()),
@@ -3864,6 +3890,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-orch".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -4055,6 +4082,7 @@ mod tests {
             &session_root,
             &StoredSessionInfo {
                 session_id: session_id.clone(),
+                launch_key: None,
                 handle: "capsule://example/orch".to_string(),
                 normalized_handle: "capsule://example/orch".to_string(),
                 canonical_handle: Some("capsule://example/orch".to_string()),
@@ -4237,6 +4265,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-fallback".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
@@ -4499,6 +4528,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-pgroup".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: Some("capsule://example/orch".to_string()),
