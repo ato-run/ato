@@ -2986,6 +2986,11 @@ where
             execution_receipt_path.display()
         ))
         .await?;
+    // Stable machine-readable line for non-TTY callers (CI, scripts, MCP).
+    request
+        .reporter
+        .notify(format!("RECEIPT: {}", execution_receipt_path.display()))
+        .await?;
 
     let run_command_uses_specialized_executor = decision
         .plan
