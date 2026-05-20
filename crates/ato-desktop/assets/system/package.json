@@ -1,0 +1,8 @@
+{
+  "name": "@ato/system-ui-root",
+  "private": true,
+  "workspaces": [
+    "ato-ui",
+    "ato-launch"
+  ]
+}
