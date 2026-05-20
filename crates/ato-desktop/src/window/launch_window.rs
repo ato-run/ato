@@ -882,10 +882,7 @@ pub fn start_boot_launch(
 
     let secret_store = crate::config::load_secrets();
     let secrets: Vec<_> = secret_store
-        .secrets_for_capsule(&handle)
-        .into_iter()
-        .cloned()
-        .collect();
+        .secrets_for_capsule(&handle);
     let (tx, rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
     let handle_for_thread = handle.clone();

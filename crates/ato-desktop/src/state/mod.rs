@@ -1575,9 +1575,8 @@ impl AppState {
         &mut self,
         key: String,
         value: String,
-    ) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.add_secret(key, value);
-        crate::config::save_secrets(&self.secret_store)
+    ) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.add_secret(key, value)
     }
 
     /// Set or overwrite a single non-secret config value for a
@@ -1719,29 +1718,24 @@ impl AppState {
     }
 
     /// Remove a secret and persist to disk (#57).
-    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.remove_secret(key);
-        crate::config::save_secrets(&self.secret_store)
+    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.remove_secret(key)
     }
 
-    /// Grant a secret to a capsule and persist (#57).
     pub fn grant_secret_to_capsule(
         &mut self,
         capsule_handle: &str,
         key: &str,
-    ) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.grant_secret(capsule_handle, key);
-        crate::config::save_secrets(&self.secret_store)
+    ) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.grant_secret(capsule_handle, key)
     }
 
-    /// Revoke a secret from a capsule and persist (#57).
     pub fn revoke_secret_from_capsule(
         &mut self,
         capsule_handle: &str,
         key: &str,
-    ) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.revoke_secret(capsule_handle, key);
-        crate::config::save_secrets(&self.secret_store)
+    ) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.revoke_secret(capsule_handle, key)
     }
 
     pub fn focus_command_bar(&mut self) {
