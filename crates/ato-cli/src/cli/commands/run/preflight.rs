@@ -646,12 +646,26 @@ fn run_lifecycle_shell_command(
     let managed_node_path_prefix = if path_prefix_dirs.is_empty() {
         String::new()
     } else {
-        let joined = path_prefix_dirs
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(":");
-        format!("export PATH={joined}:$PATH; ")
+        #[cfg(windows)]
+        {
+            // On Windows, `cmd /C` doesn't understand `export` or `:` separators.
+            // Use `set PATH=<dir>;<dir>;%PATH%&` which cmd.exe does understand.
+            let joined = path_prefix_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";");
+            format!("set \"PATH={joined};%PATH%\"& ")
+        }
+        #[cfg(not(windows))]
+        {
+            let joined = path_prefix_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(":");
+            format!("export PATH={joined}:$PATH; ")
+        }
     };
     let effective_command = format!("{}{}", managed_node_path_prefix, command);
 

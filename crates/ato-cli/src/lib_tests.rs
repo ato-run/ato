@@ -672,12 +672,16 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                         SessionCommands::Start {
                             handle,
                             target,
+                            from_materialized_record,
+                            run_config_hash,
                             json,
                         },
                 },
         } => {
             assert_eq!(handle, "./samples/desky-mock-tauri");
             assert_eq!(target.as_deref(), Some("desktop"));
+            assert!(from_materialized_record.is_none());
+            assert!(run_config_hash.is_none());
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),

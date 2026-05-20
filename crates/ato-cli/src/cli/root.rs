@@ -111,7 +111,8 @@ pub(crate) enum Commands {
         #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
         enforcement: EnforcementMode,
 
-        /// Explicitly allow Tier2 (python/native) execution via native OS sandbox
+        /// Explicitly allow Tier2 (python/native) execution via native OS sandbox.
+        /// Required for capsules with runtime = "source/native" or "source/python".
         #[arg(long = "sandbox", default_value_t = false)]
         sandbox_mode: bool,
 
@@ -147,7 +148,9 @@ pub(crate) enum Commands {
         #[arg(long = "cache", value_enum, default_value_t = CacheStrategyArg::Auto)]
         cache: CacheStrategyArg,
 
-        /// Skip prompt and auto-install when app-id is not installed
+        /// Skip prompt and auto-install when app-id is not installed.
+        /// Required in CI and any non-TTY context (use `-y` when piping
+        /// output or running without an interactive terminal).
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
 
@@ -200,6 +203,11 @@ pub(crate) enum Commands {
         /// See: docs/rfcs/draft/BUILD_MATERIALIZATION.md
         #[arg(long = "no-build", default_value_t = false, conflicts_with = "rebuild")]
         no_build: bool,
+
+        /// Print the aggregate requirements (secrets, permissions, ports) for this capsule
+        /// without launching it. Exits 0. Useful for CI pre-flight and scripted orchestrators.
+        #[arg(long = "plan-only", default_value_t = false)]
+        plan_only: bool,
 
         /// Grant read-only access to a host file or directory in sandbox mode
         #[arg(long = "read", value_name = "PATH")]
