@@ -220,20 +220,36 @@ pub fn execute_host(
 
         if let Some(ref port) = injected_port {
             cmd.env("PORT", port);
-            // Auto-inject `--port <N>` for known WSGI/ASGI/web-server invocations
-            // that don't already carry an explicit --port flag.  This lets capsule
-            // authors omit both `port = N` in capsule.toml and `--port $PORT` in
-            // the run command — ato assigns the port and the server receives it.
-            if !has_explicit_port_flag(&launch_spec.args)
-                && (force_python_server_tool
-                    || is_python_module_server_invocation(&launch_spec.args))
-            {
+        }
+
+        // Determine whether to auto-inject `--port <N>`.
+        // `derive_launch_spec` for `python -m uvicorn app:main` produces:
+        //   command = "-m", args = ["uvicorn", "app:main", ...]
+        // so "-m" is the *command*, not in args — check both forms.
+        let needs_port_injection = injected_port.is_some()
+            && !has_explicit_port_flag(&launch_spec.args)
+            && (force_python_server_tool
+                || is_python_module_server_invocation(&launch_spec.args)
+                || is_module_command_server_invocation(&launch_spec.command, &launch_spec.args));
+
+        // For direct server-tool invocations (command = "uvicorn") inject before
+        // positional args so the flag is clearly grouped with the binary.
+        if needs_port_injection && force_python_server_tool {
+            if let Some(ref port) = injected_port {
                 cmd.args(["--port", port]);
             }
         }
 
         if !launch_spec.args.is_empty() {
             cmd.args(&launch_spec.args);
+        }
+
+        // For `python -m uvicorn` (command = "-m") inject after all args so
+        // the module can see the flag — `python -m uvicorn <args> --port N`.
+        if needs_port_injection && !force_python_server_tool {
+            if let Some(ref port) = injected_port {
+                cmd.args(["--port", port]);
+            }
         }
     }
 
@@ -626,6 +642,21 @@ fn is_python_module_server_invocation(args: &[String]) -> bool {
 /// meaning the user or a previous injection already set the port.
 fn has_explicit_port_flag(args: &[String]) -> bool {
     args.iter().any(|a| a == "--port" || a.starts_with("--port="))
+}
+
+/// Returns `true` when `command == "-m"` and the first arg is a known Python
+/// web-server module — i.e. the run spec was `python -m uvicorn …` and
+/// `derive_launch_spec` extracted command="-m", args=["uvicorn", …].
+fn is_module_command_server_invocation(command: &str, args: &[String]) -> bool {
+    if command != "-m" {
+        return false;
+    }
+    const PYTHON_SERVER_MODULES: &[&str] = &[
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+    ];
+    args.first()
+        .map(|m| PYTHON_SERVER_MODULES.contains(&m.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
@@ -2367,5 +2398,22 @@ mod tests {
             &plan,
             Some(&lock)
         ));
+    }
+
+    #[test]
+    fn module_command_server_invocation_detects_minus_m_uvicorn() {
+        // derive_launch_spec for `python -m uvicorn app:main` produces
+        // command="-m", args=["uvicorn", "app:main", ...].
+        let args: Vec<String> = vec!["uvicorn".into(), "app.main:app".into(), "--host".into(), "127.0.0.1".into()];
+        assert!(is_module_command_server_invocation("-m", &args));
+        assert!(!is_module_command_server_invocation("python", &args));
+    }
+
+    #[test]
+    fn has_explicit_port_flag_detects_port() {
+        let with_port: Vec<String> = vec!["app:main".into(), "--port".into(), "8000".into()];
+        let without_port: Vec<String> = vec!["app:main".into(), "--host".into(), "0.0.0.0".into()];
+        assert!(has_explicit_port_flag(&with_port));
+        assert!(!has_explicit_port_flag(&without_port));
     }
 }
