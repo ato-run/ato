@@ -6,3 +6,6 @@ dist/
 
 # Local Codex/Claude workspace settings
 .claude/settings.local.json
+
+# Onboarding screenshots
+onboarding-step-*.png

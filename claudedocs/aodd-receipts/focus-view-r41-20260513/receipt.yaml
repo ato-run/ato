@@ -1,0 +1,134 @@
+usecase: "https://... URLs open in a Desktop-owned WebLinkView (Wry WebView + back/forward/reload/URL chrome); Control Bar URL field reflects the most-recently-active content window's URL with scheme-appropriate icon."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket (NavigateToTestHttp / NavigateToTestCapsule pre-baked routes)"
+goal: "(1) NavigateToUrl(https://...) spawns an AppWindow whose body is a Wry browser view, NOT a hero placeholder. (2) Bar omnibar shows MRU-front URL, swapping icon Globe/capsule based on scheme."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r41"
+out_of_scope:
+  - "Multi-tab in WebLinkView (single tab per AppWindow for now; reference's tab strip can layer in once routing supports multiple URLs per window)."
+  - "Real focus-change detection via NSWindow notifications. MRU is bumped only at spawn time + when Card Switcher's ActivateWindow fires; user clicking a different already-open window via OS does not update MRU yet."
+  - "Address bar editing inside WebLinkView's chrome (the URL pill there is read-only — typing happens in the Control Bar instead)."
+  - "Capsule SESSION launch — capsule:// still spawns AppWindowShell placeholder. Awaits per-window WebViewManager migration."
+time_budget: "75 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User design note + reference image (crates/ato-desktop/browser-view.png) clarify the architecture: WebLinkView is a Desktop built-in, not a capsule"
+    observation: |
+      Trust surface argument: external URLs touch downloads, OAuth
+      callbacks, file pickers, network policy — all should belong to
+      the Desktop, not a sandboxed capsule. Browser-as-capsule is
+      left as a future extension (research-browser, AI-agent-browser,
+      etc.) — naming reserved as WebLinkView / InternalBrowserView /
+      AtoBrowserPane to keep the product axis clear.
+      Layout reference: tab strip + URL bar + back/forward/reload +
+      page content; light theme.
+
+  - action: "Create `crates/ato-desktop/assets/icons/reload.svg`"
+    observation: "Lucide-style refresh-cw glyph (curved arrow + arrow head). Stroked via currentColor so the chrome's text-color drives the tint."
+
+  - action: "Create `crates/ato-desktop/src/window/web_link_view.rs`"
+    observation: |
+      `WebLinkViewShell` holds a `Rc<RefCell<wry::WebView>>` so the
+      chrome's nav button click handlers can borrow the WebView
+      without contending with the shell's `&mut self` in render.
+      ::new builds the WebView via `build_as_child(window)` with a
+      `Rect { y: CHROME_HEIGHT, height: window_height - CHROME_HEIGHT }`
+      so the WebView fills the area below the chrome strip.
+      Render draws the chrome (back / forward / reload / URL pill /
+      menu dots) at y=0..48 in GPUI; the WebView is mounted by Wry
+      as a sibling NSView underneath.
+      Nav button clicks: back → `evaluate_script("history.back();")`,
+      forward → forward, reload → `location.reload()`. The URL pill
+      is read-only (display only); the user types in the Control Bar.
+
+  - action: "Branch `open_app_window` on route kind"
+    observation: |
+      When `GuestRoute::ExternalUrl(url)`, spawn `WebLinkViewShell`
+      inside the AppWindow. Other routes keep using the existing
+      `AppWindowShell` hero placeholder. The branch happens inside
+      the `cx.open_window(...)` closure — both arms produce the
+      same `Entity<gpui_component::Root>` (Root::new accepts
+      `impl Into<AnyView>`).
+
+  - action: "Add `url: SharedString` to ContentWindowEntry"
+    observation: |
+      Plumbed through every spawn site:
+        - orchestrator.rs: new `url_for_route(&route)` helper
+          (ExternalUrl→raw url, CapsuleHandle→`capsule://<handle>`,
+          CapsuleUrl→`capsule://<handle>/<url>`, etc).
+        - store.rs: STORE_URL constant (https://ato.run/)
+        - start_window.rs: "ato://start"
+        - launcher.rs: "ato://launcher"
+      Field is canonical-URL semantics; the bar uses it verbatim.
+
+  - action: "Add MRU → omnibar sync in ControlBarShellPlaceholder"
+    observation: |
+      - `omnibar_focused: bool` field tracked via InputEvent::Focus
+        / Blur subscriptions
+      - In render: when `!omnibar_focused`, read MRU[0].url and
+        call `omnibar.update(cx, |s, cx| s.set_value(target, window, cx))`
+        if it differs from the current value. The diff prevents an
+        infinite render/notify loop.
+      - The existing observe_global<OpenContentWindows> subscription
+        already calls `cx.notify()` so any registry change wakes
+        the render loop and the sync block runs.
+
+  - action: "Card Switcher ActivateWindow → bump MRU focus"
+    observation: |
+      Before calling `target.update(cx, |_, w, _| w.activate_window())`,
+      now also calls `cx.global_mut::<OpenContentWindows>().focus(window_id)`
+      to update `last_focused_at`. That moves the entry to the
+      front of `mru_order()`, which the bar then mirrors on its
+      next render.
+
+  - action: "Build + launch hermetic + dispatch NavigateToTestHttp"
+    observation: |
+      Log shows `Focus-mode NavigateToUrl url=https://ato.run/`.
+      `web-link-view.png` captures the spawned AppWindow rendering
+      the Wry WebView pointed at ato.run with the GPUI chrome above
+      (back / forward / reload, URL pill `https://ato.run/`, menu
+      dots). The chrome's URL pill matches the page content's URL.
+      Control Bar's omnibar also shows `https://ato.run/` with the
+      Globe icon (was the default; still matches MRU front).
+
+  - action: "Dispatch NavigateToTestCapsule to verify bar swaps"
+    observation: |
+      Log shows `Focus-mode NavigateToUrl url=capsule://github.com/Koh0920/WasedaP2P`.
+      `bar-after-capsule.png` shows the bar's URL switched to
+      `capsule://github.com/Koh0920/WasedaP2P` AND the leading icon
+      swapped from Globe to the indigo capsule glyph. Badge
+      incremented to 3 (Store + ato.run AppWindow + WasedaP2P
+      AppWindow). `full-after-capsule.png` confirms the WasedaP2P
+      AppWindow is now in front (its AppWindowShell hero is what
+      we see; the WebLinkView for ato.run is behind it).
+
+agent_observation:
+  user_visible_problem: |
+    Resolved at the architectural level. https URLs now open a real
+    browser-like view inside ato-desktop, with the chrome the user
+    asked for (back/forward/reload/URL/menu). The Control Bar's URL
+    field tracks the active window so users know what they're
+    looking at without scanning the window stack.
+
+  likely_cause: |
+    Two missing pieces compounded into the friction the user felt:
+    (a) every AppWindow rendered the same static hero placeholder
+    regardless of route, so https URLs felt empty. (b) the Control
+    Bar omnibar was a constant — typed value or the default; it
+    didn't change when windows opened/closed/focused. Both are
+    fixed in this iteration.
+
+  suggested_fix:
+    - "Already shipped: WebLinkView + open_app_window branch + ContentWindowEntry.url + MRU→omnibar sync + Card Switcher activate-bumps-MRU."
+    - "Future: tab strip inside WebLinkView. Each AppWindow could host multiple WebView tabs; current single-tab is the minimum viable."
+    - "Future: page load callback wires the chrome's URL pill to reflect actual page navigation (so internal links updating window.location are surfaced)."
+    - "Future: NSWindow focus notifications → bump OpenContentWindows MRU when the user click-focuses a window outside the Card Switcher path (currently MRU only updates at spawn and via ActivateWindow)."
+    - "Future: capsule:// route → real capsule WebView (per-window WebViewManager migration). The AppWindowShell hero stays until that lands."
+    - "Future: address bar editing inside WebLinkView's chrome — currently the user must type in the Control Bar; the in-page URL pill is read-only."
+
+evidence:
+  - web-link-view.png
+  - bar-after-capsule.png
+  - full-after-capsule.png
+
+status: "fixed"

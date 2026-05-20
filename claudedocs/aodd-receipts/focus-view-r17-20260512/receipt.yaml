@@ -1,0 +1,49 @@
+usecase: "Store window's Wry WebView should fill the window's content area, not render in a small rectangle at the top"
+actor: "Autonomous Claude Operator dispatching OpenStoreWindow + screenshotting via the Focus-mode MCP socket"
+goal: "ato.run page renders edge-to-edge inside the Store window"
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Live resize tracking (Wry needs explicit set_bounds when the window resizes; deferred)"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: Store WebView area is very narrow"
+    observation: "Looking back at the R16 screenshot, ato.run content was confined to the top-left ~250×200 region of the 1100×760 Store window. The rest of the window was blank."
+
+  - action: "Iter A — open Store via MCP, screenshot"
+    observation: |
+      Reproduced. The Store window is wide / tall but the WebView
+      contents only cover a small fraction near the top-left.
+      Likely cause: `WebViewBuilder::build_as_child(window)` without
+      `with_bounds` hands the WKWebView some Wry-default rectangle
+      (~480×320) instead of sizing it to the parent window.
+    stuck_at: "WebView mounted with default-size rect; doesn't fill window"
+
+  - action: "Iter B — pass `with_bounds(Rect{ origin: (0,0), size: window_bounds.size })` to the WebViewBuilder"
+    observation: |
+      Reads the window's content size from `window.bounds().size`
+      inside the `cx.open_window` builder closure and converts to
+      Wry's `LogicalPosition` / `LogicalSize` types. The WebView now
+      mounts at the same dimensions as the gpui Window.
+
+  - action: "Rebuild, relaunch, re-dispatch OpenStoreWindow + screenshot"
+    observation: |
+      See after-fullsize.png. ato.run logo, "Find AI agents" search
+      bar, ollama / jupyter / claude pill buttons, and the registry
+      description all render centred edge-to-edge inside the Store
+      window. The Control Bar pill remains visible above. No more
+      "narrow webview" complaint.
+
+agent_observation:
+  user_visible_problem: "Resolved at the boot path. Subsequent window resize is not yet propagated to the WebView — that is a separate iteration if a user drags the corner."
+  likely_cause: "Wry's `build_as_child` defaults the WebView frame to a small platform-specific rectangle when no `with_bounds` is supplied."
+  suggested_fix:
+    - "Already shipped: explicit `with_bounds` at builder time matching `window.bounds()`."
+    - "Defer: hook `window.observe_window_bounds` (or similar) and call `webview.set_bounds()` on resize so the WebView keeps filling the window when the user drags."
+
+evidence:
+  - after-fullsize.png
+
+status: "fixed"

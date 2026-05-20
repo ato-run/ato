@@ -1,0 +1,86 @@
+usecase: "Card Switcher card-head badges and dock tiles render the same SVG glyph vocabulary the legacy sidebar used for each running window, rather than a single-letter monogram."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Every entry in 開いているウィンドウ shows a meaningful glyph (chart / terminal / search / chat / cpu / code / store / sparkle / panel) on its card badge and dock tile, matching the icon identity the user established in the previous icon-bar UI."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r38"
+out_of_scope:
+  - "Integrating with the live favicon cache for `ExternalUrl` capsules (the legacy sidebar's `ExternalUrl { origin }` variant). Switcher currently has no AppWindow that targets a generic web URL, so this is deferred."
+  - "Pulling glyph from capsule manifest `[metadata].icon` field — would need the cards to carry capsule metadata. Heuristic-by-title covers the demo route (WasedaP2P)."
+  - "Per-app brand SVGs (the WasedaP2P logo, etc) — using the same generic glyph palette `start.html` already uses for visual consistency."
+
+time_budget: "25 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User asks the icon-bar icons (the ones used in the legacy sidebar) to be reused as each window's icon in the Card Switcher"
+    observation: |
+      Legacy sidebar (`ui/sidebar/mod.rs`) rendered four icon spec
+      variants — Monogram (letter on hue), ExternalUrl (favicon),
+      Image (capsule manifest icon), SystemIcon (>_, $, ◆, i, ⊙).
+      The closest equivalent for the new HTML Switcher is the SVG
+      glyph palette already in `start.html` (chart / terminal /
+      search / chat / cpu / code) plus three new ones for system
+      surfaces (store / sparkle / panel).
+
+  - action: "Add `glyph: &'static str` to CardDto + `glyph_for(title, kind)` helper"
+    observation: |
+      Helper rules:
+        - ContentWindowKind::Store → 'store' (shopping bag)
+        - ContentWindowKind::Start → 'sparkle' (4-point star)
+        - ContentWindowKind::Launcher → 'panel' (split rectangles —
+          mirrors SystemPageIcon::Launcher's ◆ semantically)
+        - ContentWindowKind::AppWindow:
+          - 'code'|'term'|'shell' in title → 'terminal'
+          - 'query'|'search' → 'search'
+          - 'chat'|'ai' → 'chat'
+          - 'ml'|'model' → 'cpu'
+          - default → 'chart' (matches WasedaP2P's data-visualisation
+            role)
+      Picked at switcher-open time, serialised to JSON.
+
+  - action: "Add GLYPH library to switcher.html JS"
+    observation: |
+      Same SVG strings as `start.html` exposes for the dock + recent-
+      capsules rows. Plus three system surfaces (store, sparkle,
+      panel). `glyphOrLetter(entry)` returns the SVG when the glyph
+      is known, falls back to the uppercase initial otherwise.
+      CSS additions: `.card-icon svg { width: 14px; height: 14px; }`
+      and `.dock-tile svg { width: 18px; height: 18px; }` so the
+      strokes scale appropriately for the smaller badge vs the
+      bigger dock chip.
+
+  - action: "Update `makeCard` and `makeDockTile` to render the glyph"
+    observation: |
+      Card-head badge: was the uppercase initial — now uses
+      `glyphOrLetter(entry)`. Dock tile: same change. Accent
+      colours unchanged (still `accentFor(title)` hash → 8-colour
+      palette).
+
+  - action: "Build + launch hermetic + open Start/AppWindow/Launcher + open switcher + screencap"
+    observation: |
+      switcher-full.png shows all four cards carrying their glyph
+      badges:
+        - Launcher (active, indigo border + glow): panel icon
+        - WasedaP2P (AppWindow): chart bars
+        - 新しいウィンドウ (Start): sparkle
+        - ストア (Store): shopping bag
+      Dock at the bottom mirrors the same four glyphs in larger
+      gradient tiles, with the new-window plus tile on the right.
+      Real window screenshots inside each card preview still work
+      (R37 unchanged) — the glyph badge is just an additional
+      identity cue at the card-head level.
+
+agent_observation:
+  user_visible_problem: "Resolved. Each open window now carries the same visual identity in the switcher card-head and the dock as the legacy sidebar would have shown — chart bars for data/visualisation capsules, terminal for code, search for query, chat for AI, shopping bag for store, panel for launcher, sparkle for new-window."
+  likely_cause: "The HTML migration ported the structure but stuck with the simplest possible badge (single letter), leaving the icon vocabulary the user had spent time on in the legacy sidebar behind. Reintroducing those glyphs reconnects the surfaces."
+  suggested_fix:
+    - "Already shipped: glyph_for heuristic + GLYPH library + card/dock renderers."
+    - "Future: read the capsule manifest `[metadata].icon` field and prefer it over the keyword heuristic when present (carries the user's real branded icon)."
+    - "Future: integrate the favicon cache so an AppWindow targeting an ExternalUrl renders the site favicon (matches legacy SidebarTaskIconSpec::ExternalUrl behaviour)."
+    - "Future: render the same glyph inside the start.html dock's plus-tile cell at startup so the dock visual matches across both surfaces."
+
+evidence:
+  - switcher-glyph-badges.png
+  - switcher-full.png
+
+status: "fixed"

@@ -23,6 +23,8 @@ pub enum AtoErrorCode {
     AtoErrArtifactIntegrityFailure,
     AtoErrRuntimeLaunchFailed,
     AtoErrLockfileTampered,
+    AtoErrInstallConsentRequired,
+    AtoErrPermissionGatesRequired,
     AtoErrInternal,
 }
 
@@ -48,6 +50,8 @@ impl AtoErrorCode {
             Self::AtoErrArtifactIntegrityFailure => "ATO_ERR_ARTIFACT_INTEGRITY_FAILURE",
             Self::AtoErrRuntimeLaunchFailed => "ATO_ERR_RUNTIME_LAUNCH_FAILED",
             Self::AtoErrLockfileTampered => "ATO_ERR_LOCKFILE_TAMPERED",
+            Self::AtoErrInstallConsentRequired => "ATO_ERR_INSTALL_CONSENT_REQUIRED",
+            Self::AtoErrPermissionGatesRequired => "ATO_ERR_PERMISSION_GATES_REQUIRED",
             Self::AtoErrInternal => "ATO_ERR_INTERNAL",
         }
     }
@@ -71,6 +75,8 @@ impl AtoErrorCode {
             Self::AtoErrArtifactIntegrityFailure => "artifact_integrity_failure",
             Self::AtoErrRuntimeLaunchFailed => "runtime_launch_failed",
             Self::AtoErrLockfileTampered => "lockfile_tampered",
+            Self::AtoErrInstallConsentRequired => "install_consent_required",
+            Self::AtoErrPermissionGatesRequired => "permission_gates_required",
             Self::AtoErrInternal => "internal_error",
         }
     }
@@ -87,8 +93,10 @@ impl AtoErrorCode {
             | Self::AtoErrEngineMissing
             | Self::AtoErrSkillNotFound
             | Self::AtoErrArtifactIntegrityFailure
-            | Self::AtoErrLockfileTampered => "provisioning",
-            Self::AtoErrCompatHardware
+            | Self::AtoErrLockfileTampered
+            | Self::AtoErrInstallConsentRequired => "provisioning",
+            Self::AtoErrPermissionGatesRequired
+            | Self::AtoErrCompatHardware
             | Self::AtoErrRuntimeLaunchFailed
             | Self::AtoErrPolicyViolation
             | Self::AtoErrSecurityPolicyViolation
@@ -200,6 +208,14 @@ pub struct AtoExecutionError {
     pub retryable: bool,
     pub interactive_resolution: bool,
     pub details: Option<Value>,
+    /// #96 — additive typed envelope describing what the user must do
+    /// to resolve this error. Populated for [`AtoError::MissingRequiredEnv`]
+    /// (E103) and [`AtoError::ExecutionPlanConsentRequired`] (E302); `None`
+    /// for variants that have no resolution UI surface today. The legacy
+    /// per-variant [`details`] JSON is emitted alongside this envelope so
+    /// existing desktop deserializers keep working unchanged.
+    pub interactive_resolution_required:
+        Option<crate::interactive_resolution::InteractiveResolutionEnvelope>,
     pub classification: AtoErrorClassification,
     pub cleanup_status: Option<CleanupStatus>,
     pub cleanup_actions: Vec<CleanupActionRecord>,
@@ -225,6 +241,7 @@ impl AtoExecutionError {
             retryable: code.retryable(),
             interactive_resolution: code.interactive_resolution(),
             details: None,
+            interactive_resolution_required: None,
             classification: AtoErrorClassification::from_phase(code.phase()),
             cleanup_status: None,
             cleanup_actions: Vec::new(),
@@ -234,6 +251,12 @@ impl AtoExecutionError {
 
     pub fn from_ato_error(error: AtoError) -> Self {
         let code = map_ato_error_code(&error);
+        // Construct the additive #96 envelope BEFORE we move per-field
+        // data out of `error` for the legacy `details` JSON. The
+        // envelope carries copies of the same data so the two on-the-wire
+        // shapes stay perfectly aligned (a desktop reading either path
+        // sees the same field values).
+        let interactive_resolution_required = error.interactive_resolution_envelope();
         Self {
             code: code.as_str(),
             name: error.name(),
@@ -245,6 +268,7 @@ impl AtoExecutionError {
             retryable: error.retryable(),
             interactive_resolution: error.interactive_resolution(),
             details: error.details(),
+            interactive_resolution_required,
             classification: AtoErrorClassification::from_phase(error.phase().as_str()),
             cleanup_status: None,
             cleanup_actions: Vec::new(),
@@ -504,6 +528,8 @@ fn map_ato_error_code(error: &AtoError) -> AtoErrorCode {
         }
         AtoError::TlsBootstrapFailed { .. } => AtoErrorCode::AtoErrProvisioningTlsTrust,
         AtoError::StorageNoSpace { .. } => AtoErrorCode::AtoErrStorageNoSpace,
+        AtoError::InstallConsentRequired { .. } => AtoErrorCode::AtoErrInstallConsentRequired,
+        AtoError::PermissionGatesRequired { .. } => AtoErrorCode::AtoErrPermissionGatesRequired,
         AtoError::ArtifactIntegrityFailure { .. } => AtoErrorCode::AtoErrArtifactIntegrityFailure,
         AtoError::SecurityPolicyViolation { .. } => AtoErrorCode::AtoErrSecurityPolicyViolation,
         AtoError::ExecutionContractInvalid { .. }

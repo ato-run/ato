@@ -55,11 +55,19 @@ pub struct CapsuleProcess {
     pub log_path: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ExecuteMode {
     Foreground,
     Background,
     Piped,
+    /// Connect the child's stdout and stderr directly to this log file at
+    /// `Command::spawn` time via `Stdio::from(File)`. Use this when the
+    /// caller intends to detach (e.g. `ato app session start` exits while
+    /// the child keeps running): the kernel keeps the file descriptor wired
+    /// to the file, so the child's writes survive the parent's exit. The
+    /// older `Piped` + proxy-thread pattern in `attach_process_logs`
+    /// silently dropped output once the parent thread died.
+    Logged(PathBuf),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,7 +117,7 @@ pub fn execute(
         )?;
     }
 
-    let adapter = NacelleExecAdapter::for_plan(plan, mode, launch_ctx)?;
+    let adapter = NacelleExecAdapter::for_plan(plan, mode.clone(), launch_ctx)?;
     let (child, event_rx, exec_meta) =
         spawn_internal_exec(&nacelle, &plan.manifest_dir, &adapter.payload, mode)?;
 
@@ -136,8 +144,13 @@ pub fn execute_host(
         .args
         .extend(launch_ctx.command_args().iter().cloned());
     let desktop_open_bundle = desktop_native_open_bundle_path(plan, authoritative_lock);
-    let force_python_no_bytecode =
-        is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
+    let force_python_server_tool = is_python_server_tool(&launch_spec.command)
+        && plan
+            .execution_driver()
+            .map(|d| d.trim().eq_ignore_ascii_case("python"))
+            .unwrap_or(false);
+    let force_python_no_bytecode = !force_python_server_tool
+        && is_python_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let force_node_runtime =
         is_node_launch_spec(plan, &launch_spec.command, launch_spec.language.as_deref());
     let injected_port =
@@ -149,6 +162,16 @@ pub fn execute_host(
 
     let mut cmd = if let Some(bundle_path) = desktop_open_bundle.as_ref() {
         build_desktop_open_command(bundle_path, &launch_spec.args)
+    } else if force_python_server_tool {
+        // WSGI/ASGI server tools (gunicorn, uvicorn, flask, streamlit, …) are
+        // installed into `.venv/bin/` by `uv sync`. They are standalone
+        // executables that embed their own Python interpreter entry point —
+        // they must NOT be invoked via `python <tool>` (which would treat the
+        // tool name as a script path). Resolve the binary directly from the
+        // venv when it exists, otherwise fall back to PATH.
+        let tool_bin = venv_tool_binary(&launch_spec.working_dir, &launch_spec.command)
+            .unwrap_or(host_command_path.clone());
+        Command::new(tool_bin)
     } else if force_python_no_bytecode {
         // Prefer the venv's interpreter when the build phase produced
         // one, so installed deps are visible without needing `uv run`.
@@ -190,14 +213,43 @@ pub fn execute_host(
             launch_spec.port,
             launch_ctx,
         )?;
-        apply_python_runtime_hardening(&mut cmd, force_python_no_bytecode);
+        apply_python_runtime_hardening(
+            &mut cmd,
+            force_python_no_bytecode || force_python_server_tool,
+        );
 
-        if let Some(port) = injected_port {
+        if let Some(ref port) = injected_port {
             cmd.env("PORT", port);
+        }
+
+        // Determine whether to auto-inject `--port <N>`.
+        // `derive_launch_spec` for `python -m uvicorn app:main` produces:
+        //   command = "-m", args = ["uvicorn", "app:main", ...]
+        // so "-m" is the *command*, not in args — check both forms.
+        let needs_port_injection = injected_port.is_some()
+            && !has_explicit_port_flag(&launch_spec.args)
+            && (force_python_server_tool
+                || is_python_module_server_invocation(&launch_spec.args)
+                || is_module_command_server_invocation(&launch_spec.command, &launch_spec.args));
+
+        // For direct server-tool invocations (command = "uvicorn") inject before
+        // positional args so the flag is clearly grouped with the binary.
+        if needs_port_injection && force_python_server_tool {
+            if let Some(ref port) = injected_port {
+                cmd.args(["--port", port]);
+            }
         }
 
         if !launch_spec.args.is_empty() {
             cmd.args(&launch_spec.args);
+        }
+
+        // For `python -m uvicorn` (command = "-m") inject after all args so
+        // the module can see the flag — `python -m uvicorn <args> --port N`.
+        if needs_port_injection && !force_python_server_tool {
+            if let Some(ref port) = injected_port {
+                cmd.args(["--port", port]);
+            }
         }
     }
 
@@ -217,6 +269,21 @@ pub fn execute_host(
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            apply_logged_stdio(&mut cmd, &log_path)?;
+        }
+    }
+
+    // Run the host-native consumer in its own process group on Unix
+    // so a parent SIGKILL doesn't strand it as a PID-1 orphan still
+    // bound to the consumer port. Mirrors the change the orchestrator
+    // applies to provider spawns; the session-start sweep (and the
+    // UI-stop pgroup-kill that already lives in session.rs) can then
+    // reap the consumer's subtree atomically. See ato-run/ato#121.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
     }
 
     // Run the host-native consumer in its own process group on Unix
@@ -268,6 +335,9 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            apply_logged_stdio(&mut cmd, &log_path)?;
+        }
     }
 
     let child = cmd
@@ -281,6 +351,37 @@ pub fn execute_open_path(app_path: &Path, mode: ExecuteMode) -> Result<CapsulePr
         workload_pid: None,
         log_path: None,
     })
+}
+
+/// Open `log_path` for append (creating it and any parent directories) and
+/// return an owning `File`. Used to wire `Stdio::from(file)` directly into
+/// the child at spawn time so the redirection survives the parent process's
+/// exit — see `ExecuteMode::Logged`.
+fn open_log_file_for_stdio(log_path: &Path) -> Result<fs::File> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open log file {}", log_path.display()))
+}
+
+/// Wire stdin=null and connect stdout+stderr to `log_path` at spawn time.
+/// The kernel keeps the file descriptor connected to the file across the
+/// parent's exit, so detached children (`ato app session start` returning
+/// after spawn) keep writing to the log without a proxy thread.
+fn apply_logged_stdio(cmd: &mut Command, log_path: &Path) -> Result<()> {
+    let stdout_handle = open_log_file_for_stdio(log_path)?;
+    let stderr_handle = stdout_handle
+        .try_clone()
+        .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::from(stdout_handle));
+    cmd.stderr(Stdio::from(stderr_handle));
+    Ok(())
 }
 
 fn apply_host_isolation(
@@ -498,6 +599,78 @@ fn venv_python_binary(working_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+/// Locate a named tool binary inside `<working_dir>/.venv/bin/<tool>`.
+/// Used for WSGI/ASGI server tools (gunicorn, uvicorn, flask, …) that are
+/// venv-installed executables and must be called directly, not via Python.
+fn venv_tool_binary(working_dir: &Path, tool: &str) -> Option<PathBuf> {
+    let candidates = [
+        working_dir.join(".venv").join("bin").join(tool),
+        working_dir
+            .join(".venv")
+            .join("Scripts")
+            .join(format!("{tool}.exe")),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Returns `true` when the command is a WSGI/ASGI server tool that lives as
+/// a standalone executable in `.venv/bin/` and must NOT be invoked via the
+/// Python interpreter (i.e. `python gunicorn` would treat it as a script).
+fn is_python_server_tool(command: &str) -> bool {
+    matches!(
+        command.trim().to_ascii_lowercase().as_str(),
+        "flask"
+            | "uvicorn"
+            | "gunicorn"
+            | "streamlit"
+            | "celery"
+            | "hypercorn"
+            | "daphne"
+            | "waitress-serve"
+    )
+}
+
+/// Returns `true` when the args list represents a `python -m <server>` invocation,
+/// e.g. `["-m", "uvicorn", ...]`.  Used to detect web-server launches that ato
+/// should inject `--port <N>` into even when the run command does not contain `$PORT`.
+fn is_python_module_server_invocation(args: &[String]) -> bool {
+    const PYTHON_SERVER_MODULES: &[&str] = &[
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+    ];
+    let mut iter = args.iter();
+    while let Some(token) = iter.next() {
+        if token == "-m" {
+            if let Some(module) = iter.next() {
+                if PYTHON_SERVER_MODULES.contains(&module.to_ascii_lowercase().as_str()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when `args` already contains an explicit `--port` flag,
+/// meaning the user or a previous injection already set the port.
+fn has_explicit_port_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--port" || a.starts_with("--port="))
+}
+
+/// Returns `true` when `command == "-m"` and the first arg is a known Python
+/// web-server module — i.e. the run spec was `python -m uvicorn …` and
+/// `derive_launch_spec` extracted command="-m", args=["uvicorn", …].
+fn is_module_command_server_invocation(command: &str, args: &[String]) -> bool {
+    if command != "-m" {
+        return false;
+    }
+    const PYTHON_SERVER_MODULES: &[&str] = &[
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+    ];
+    args.first()
+        .map(|m| PYTHON_SERVER_MODULES.contains(&m.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 fn resolve_host_command_path(working_dir: &Path, command: &str) -> PathBuf {
     let command_path = Path::new(command.trim());
     if command_path.is_absolute() {
@@ -610,6 +783,17 @@ fn is_node_launch_spec(plan: &ManifestData, command: &str, language: Option<&str
 fn apply_python_runtime_hardening(cmd: &mut Command, force_python_no_bytecode: bool) {
     if force_python_no_bytecode {
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+        // Force unbuffered stdout/stderr. Python defaults to block-buffered
+        // I/O whenever stdout isn't a TTY (i.e. when we redirect to a pipe
+        // or a log file via `Stdio::from(File)`), so short-lived `print()`
+        // calls sit in the 8 KB user-space buffer and never reach the log
+        // file the desktop tails for `display_strategy=terminal_stream`.
+        // Long-running services hide this behind their own framework
+        // logging (uvicorn, fastapi, etc.) but a bare `python app.py`
+        // surfaces it as "ato Desktop session is ready but the terminal
+        // pane is empty". Mirrors `start_guest_session`, which sets the
+        // same env var for the same reason.
+        cmd.env("PYTHONUNBUFFERED", "1");
     }
 }
 
@@ -1196,6 +1380,15 @@ fn spawn_internal_exec(
         ExecuteMode::Piped => {
             cmd.stderr(Stdio::piped());
         }
+        ExecuteMode::Logged(log_path) => {
+            // Nacelle's `internal exec` protocol talks JSON over stdout, so
+            // we cannot redirect stdout to a file here. Only stderr is safe
+            // to send to the log; nacelle's worker stdout/stderr already
+            // surface via `LifecycleEvent::ProcessOutput` to the supervisor
+            // when it routes them downstream.
+            let stderr_handle = open_log_file_for_stdio(&log_path)?;
+            cmd.stderr(Stdio::from(stderr_handle));
+        }
     }
 
     let mut child = cmd
@@ -1484,6 +1677,10 @@ mod tests {
     #[ignore = "flaky: depends on shared provider-workspace classification state; tracked in #82"]
     fn sandbox_source_entrypoint_keeps_shell_entrypoints_relative_off_linux() {
         let dir = tempdir().expect("tempdir");
+        // Create run.sh so the path-exists branch fires deterministically,
+        // avoiding dependence on provider-workspace classification of sibling tests.
+        fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho ok\n")
+            .expect("write run.sh");
         let plan = plan_from_manifest(
             &dir,
             r#"
@@ -1674,18 +1871,30 @@ mod tests {
         let mut cmd = Command::new("echo");
         apply_python_runtime_hardening(&mut cmd, true);
 
-        let value = cmd
-            .get_envs()
-            .find_map(|(key, value)| {
-                if key == "PYTHONDONTWRITEBYTECODE" {
+        let env_value = |needle: &str| -> Option<String> {
+            cmd.get_envs().find_map(|(key, value)| {
+                if key == needle {
                     value.map(|v| v.to_string_lossy().to_string())
                 } else {
                     None
                 }
             })
-            .expect("PYTHONDONTWRITEBYTECODE must be set");
+        };
 
-        assert_eq!(value, "1");
+        assert_eq!(
+            env_value("PYTHONDONTWRITEBYTECODE").as_deref(),
+            Some("1"),
+            "PYTHONDONTWRITEBYTECODE must be set"
+        );
+        // PYTHONUNBUFFERED must be set so `print()` flushes through to the
+        // log file the desktop tails (see `ExecuteMode::Logged`); without
+        // it Python defaults to block-buffered I/O whenever stdout isn't a
+        // TTY and short-lived output never reaches the file.
+        assert_eq!(
+            env_value("PYTHONUNBUFFERED").as_deref(),
+            Some("1"),
+            "PYTHONUNBUFFERED must be set"
+        );
     }
 
     #[test]
@@ -1693,11 +1902,139 @@ mod tests {
         let mut cmd = Command::new("echo");
         apply_python_runtime_hardening(&mut cmd, false);
 
-        let has_var = cmd
+        let has_dontwrite = cmd
             .get_envs()
             .any(|(key, _)| key == "PYTHONDONTWRITEBYTECODE");
+        assert!(!has_dontwrite, "PYTHONDONTWRITEBYTECODE must not be set");
 
-        assert!(!has_var, "PYTHONDONTWRITEBYTECODE must not be set");
+        let has_unbuffered = cmd.get_envs().any(|(key, _)| key == "PYTHONUNBUFFERED");
+        assert!(!has_unbuffered, "PYTHONUNBUFFERED must not be set");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_removes_stale_files() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let stale = dir.join("nacelle-123-456.toml");
+        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep stale nacelle manifests");
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_preserves_fresh_files() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let fresh = dir.join("nacelle-123-789.toml");
+        fs::write(&fresh, "schema_version = \"0.3\"\n").expect("write fresh manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep fresh nacelle manifests");
+
+        assert_eq!(removed, 0);
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_preserves_active_process_manifest() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let active_manifest = dir.join(format_nacelle_manifest_file_name(
+            current_nacelle_manifest_owner(),
+            42,
+        ));
+        fs::write(&active_manifest, "schema_version = \"0.3\"\n").expect("write active manifest");
+        set_file_mtime(&active_manifest, FileTime::from_unix_time(1, 0))
+            .expect("age active manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep active nacelle manifests");
+
+        assert_eq!(removed, 0);
+        assert!(active_manifest.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn nacelle_manifest_sweep_rejects_pid_reuse_when_start_time_mismatches() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
+        let stale = dir.join(format!("nacelle-{}-1-77.toml", std::process::id()));
+        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
+        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale manifest");
+
+        let removed = sweep_stale_nacelle_manifests_in(
+            &dir,
+            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
+            Duration::from_secs(24 * 60 * 60),
+        )
+        .expect("sweep mismatched active nacelle manifests");
+
+        assert_eq!(removed, 1);
+        assert!(!stale.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn write_normalized_manifest_sweeps_stale_pool_before_new_write() {
+        let temp = tempdir().expect("tempdir");
+        let ato_home = temp.path().join("ato-home");
+        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+        let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
+        fs::create_dir_all(&nacelle_dir).expect("create nacelle manifest dir");
+        let stale = nacelle_dir.join("nacelle-123-stale.toml");
+        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
+        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale manifest");
+
+        let plan = plan_from_manifest(
+            &temp,
+            r#"
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            entrypoint = "main.py"
+            "#,
+            "dev",
+        );
+
+        let normalized_path = write_normalized_manifest(&plan, &[], &[]).expect("write manifest");
+
+        assert!(
+            !stale.exists(),
+            "stale manifest should be swept before write"
+        );
+        assert!(normalized_path.exists());
     }
 
     #[test]
@@ -2203,5 +2540,22 @@ mod tests {
             &plan,
             Some(&lock)
         ));
+    }
+
+    #[test]
+    fn module_command_server_invocation_detects_minus_m_uvicorn() {
+        // derive_launch_spec for `python -m uvicorn app:main` produces
+        // command="-m", args=["uvicorn", "app:main", ...].
+        let args: Vec<String> = vec!["uvicorn".into(), "app.main:app".into(), "--host".into(), "127.0.0.1".into()];
+        assert!(is_module_command_server_invocation("-m", &args));
+        assert!(!is_module_command_server_invocation("python", &args));
+    }
+
+    #[test]
+    fn has_explicit_port_flag_detects_port() {
+        let with_port: Vec<String> = vec!["app:main".into(), "--port".into(), "8000".into()];
+        let without_port: Vec<String> = vec!["app:main".into(), "--host".into(), "0.0.0.0".into()];
+        assert!(has_explicit_port_flag(&with_port));
+        assert!(!has_explicit_port_flag(&without_port));
     }
 }

@@ -7,6 +7,8 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::command_spec::CommandSpec;
+
 // `ConfigField` / `ConfigKind` were extracted to `capsule-wire` in N2 so
 // `ato-desktop` can consume them without linking capsule-core's heavy
 // runtime deps. They are re-exported here so existing
@@ -422,6 +424,59 @@ pub struct ReadinessProbe {
     pub port: String,
 }
 
+/// Host integration capability names.
+///
+/// These are the only values accepted in `[[host_capabilities]]` blocks.
+/// The host validates the `name` field against this enum at session start;
+/// unrecognised names are rejected with a manifest-validation error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostCapabilityName {
+    /// Open a file or project in the host user's editor (VSCode, Cursor, etc.).
+    OpenEditor,
+    /// Open a file using the host OS default application.
+    OpenFile,
+    /// Reveal a path in the host OS file manager.
+    RevealWorkspace,
+}
+
+impl HostCapabilityName {
+    /// The kebab-case string used in `[[host_capabilities]] name = "..."`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OpenEditor => "open-editor",
+            Self::OpenFile => "open-file",
+            Self::RevealWorkspace => "reveal-workspace",
+        }
+    }
+}
+
+impl std::fmt::Display for HostCapabilityName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single host integration capability declared by a capsule.
+///
+/// ## Example `capsule.toml`
+///
+/// ```toml
+/// [[host_capabilities]]
+/// name = "open-editor"
+/// reason = "Open the generated project in the user's editor after scaffolding."
+/// ```
+///
+/// The `reason` is shown in the host consent UI.  Providing a clear, concise
+/// reason is required; an empty reason is rejected during manifest validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostCapabilitySpec {
+    /// The capability being requested.
+    pub name: HostCapabilityName,
+    /// Human-readable explanation shown to the user in the consent prompt.
+    pub reason: String,
+}
+
 /// Capsule Manifest v0.3
 ///
 /// The primary configuration format for all Capsules in Gumball v0.3.0+
@@ -583,6 +638,26 @@ pub struct CapsuleManifest {
     /// conformant ato implementation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foundation_requirements: Option<FoundationRequirements>,
+
+    /// Host integration capabilities requested by this capsule.
+    ///
+    /// Capsule code may invoke host-side editor / file-system operations only when the
+    /// corresponding capability is declared here.  The host presents a consent prompt that
+    /// shows each capability's `reason` before issuing the grant.
+    ///
+    /// ## Example
+    ///
+    /// ```toml
+    /// [[host_capabilities]]
+    /// name = "open-editor"
+    /// reason = "Open the generated project in your editor after scaffolding."
+    /// ```
+    ///
+    /// Undeclared capabilities are rejected with `GuestBridgeResponse::Denied` at
+    /// the IPC layer.  See [`crate::types::CapabilityGrant`] for the runtime grants
+    /// that correspond to each capability name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_capabilities: Vec<HostCapabilitySpec>,
 }
 
 /// Foundation conformance requirements (§3.6, Part I of the Capsule Protocol spec).
@@ -1342,8 +1417,18 @@ pub struct NamedTarget {
     pub package_type: Option<String>,
 
     /// Package-specific build command preserved from schema v0.3.
-    #[serde(default)]
+    #[serde(default, alias = "build")]
     pub build_command: Option<String>,
+
+    /// Install command — runs once before building (e.g., package manager install).
+    /// Supports string (legacy) and structured `CommandSpec` forms.
+    #[serde(default, alias = "install")]
+    pub install_command: Option<CommandSpec>,
+
+    /// Pre-start command — runs after build and provider readiness, before main run
+    /// (e.g., database migrations). Supports string (legacy) and structured forms.
+    #[serde(default, alias = "prestart")]
+    pub prestart_command: Option<CommandSpec>,
 
     /// CHML build cache output globs preserved on the normalized target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1705,6 +1790,46 @@ impl CapsuleManifest {
             }
         }
     }
+
+    /// Convert declared `[[host_capabilities]]` entries into the corresponding
+    /// [`crate::types::bridge::CapabilityGrant`] values.
+    ///
+    /// The returned set is what the host MUST grant at session creation time
+    /// (after user consent) for the capsule to operate correctly.
+    pub fn host_capability_grants(
+        &self,
+    ) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
+        self.host_capabilities
+            .iter()
+            .filter_map(|spec| match spec.name {
+                HostCapabilityName::OpenEditor => {
+                    Some(crate::foundation::types::bridge::CapabilityGrant::OpenEditor)
+                }
+                HostCapabilityName::OpenFile => {
+                    Some(crate::foundation::types::bridge::CapabilityGrant::OpenFile)
+                }
+                HostCapabilityName::RevealWorkspace => {
+                    Some(crate::foundation::types::bridge::CapabilityGrant::RevealWorkspace)
+                }
+            })
+            .collect()
+    }
+
+    /// Validate `[[host_capabilities]]` entries.
+    ///
+    /// Returns an error string when any entry has an empty `reason` field, since
+    /// the host consent UI cannot present a meaningful prompt without it.
+    pub fn validate_host_capabilities(&self) -> Result<(), String> {
+        for spec in &self.host_capabilities {
+            if spec.reason.trim().is_empty() {
+                return Err(format!(
+                    "host_capability '{}' must have a non-empty `reason` field",
+                    spec.name
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1738,5 +1863,132 @@ component = "hello.wasm"
         let app_target = targets.named.get("app").unwrap();
         eprintln!("component field: {:?}", app_target.component);
         assert_eq!(app_target.component.as_deref(), Some("hello.wasm"));
+    }
+}
+
+#[cfg(test)]
+mod host_capability_tests {
+    use super::*;
+
+    #[test]
+    fn host_capabilities_parse_from_toml() {
+        let toml = r#"
+schema_version = "0.3"
+name = "my-scaffold"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-editor"
+reason = "Open the generated project in your editor after scaffolding."
+
+[[host_capabilities]]
+name = "reveal-workspace"
+reason = "Show the output directory in the file manager."
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        assert_eq!(manifest.host_capabilities.len(), 2);
+        assert_eq!(manifest.host_capabilities[0].name, HostCapabilityName::OpenEditor);
+        assert_eq!(manifest.host_capabilities[1].name, HostCapabilityName::RevealWorkspace);
+    }
+
+    #[test]
+    fn host_capability_grants_conversion() {
+        let toml = r#"
+schema_version = "0.3"
+name = "editor-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-editor"
+reason = "Open generated files."
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        let grants = manifest.host_capability_grants();
+        assert_eq!(grants.len(), 1);
+        assert!(matches!(
+            grants[0],
+            crate::foundation::types::bridge::CapabilityGrant::OpenEditor
+        ));
+    }
+
+    #[test]
+    fn host_capability_empty_reason_fails_validation() {
+        let toml = r#"
+schema_version = "0.3"
+name = "bad-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-file"
+reason = ""
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        let errors = manifest.validate().expect_err("empty reason must fail validation");
+        let details = errors
+            .iter()
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("host_capability 'open-file' must have a non-empty `reason` field"));
+    }
+
+    #[test]
+    fn host_capability_empty_reason_is_rejected_by_load_manifest() {
+        let toml = r#"
+schema_version = "0.3"
+name = "bad-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-file"
+reason = ""
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capsule.toml");
+        std::fs::write(&path, toml).expect("write manifest");
+
+        let err = crate::contract::manifest::load_manifest(&path)
+            .expect_err("load_manifest must reject empty host capability reason");
+        assert!(err
+            .to_string()
+            .contains("host_capability 'open-file' must have a non-empty `reason` field"));
+    }
+
+    #[test]
+    fn no_host_capabilities_is_valid() {
+        let toml = r#"
+schema_version = "0.3"
+name = "plain-capsule"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).unwrap();
+        assert!(manifest.host_capabilities.is_empty());
+        assert!(manifest.validate().is_ok());
+        assert!(manifest.host_capability_grants().is_empty());
     }
 }

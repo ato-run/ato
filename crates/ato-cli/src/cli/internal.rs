@@ -18,6 +18,44 @@ pub(crate) enum InternalCommands {
         #[command(subcommand)]
         command: ConsentInternalCommands,
     },
+
+    /// #117 — eager pre-launch requirement collection. Walks the
+    /// orchestration target graph for `target` (a local capsule path
+    /// or cached GitHub repository ref), derives an ExecutionPlan per service
+    /// target without running any provisioning side effects (no
+    /// `uv venv`, no `npm install`, no postgres provider startup),
+    /// checks consent state per plan, and inspects each target's
+    /// `required_env` (including dep-contract `{env.X}` substitutions)
+    /// against the caller's SecretStore.
+    ///
+    /// Emits one aggregate JSON envelope on stdout listing every
+    /// pending `InteractiveResolutionEnvelope` so a UI shell (today:
+    /// ato-desktop) can render a single resolution modal containing
+    /// all per-target consents + missing-env rows at once. The
+    /// envelope reuses the shape established by #96 / #126 / #135 /
+    /// #139 — no new wire format.
+    ///
+    /// Stability: same plumbing-tier guarantee as `ato internal
+    /// consent approve-execution-plan`. The desktop calls this
+    /// command before invoking `ato run` so the unified resolution
+    /// modal opens once with everything visible, instead of opening
+    /// repeatedly as the launch loop trips one error at a time.
+    #[command(
+        hide = true,
+        about = "Collect aggregate launch requirements before provisioning (plumbing)"
+    )]
+    Preflight {
+        /// Local capsule path or cached GitHub repository ref such as
+        /// `github.com/owner/repo`. Unlike `ato run`, this plumbing
+        /// path never fetches or installs.
+        target: String,
+        /// Emit machine-readable JSON output on stdout. Without it
+        /// the command emits a brief human-readable summary (still
+        /// including every identity field a TTY user could copy-
+        /// paste into `ato internal consent approve-execution-plan`).
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -16,7 +16,13 @@ use crate::install::support::{
 };
 use crate::ProviderToolchain;
 
-fn env_lock() -> &'static Mutex<()> {
+/// Shared mutex for tests that mutate process-global env vars
+/// (`HOME`, `ATO_HOME`, `ATO_DESKTOP_SESSION_ROOT`, etc.).
+///
+/// All env-touching tests across the crate must hold this lock for
+/// the duration of their execution to prevent races under `cargo test`'s
+/// default parallel scheduler. Use: `let _lock = crate::tests::env_lock().lock().unwrap();`
+pub(crate) fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -672,12 +678,16 @@ fn app_command_parses_resolve_status_bootstrap_and_repair_forms() {
                         SessionCommands::Start {
                             handle,
                             target,
+                            from_materialized_record,
+                            run_config_hash,
                             json,
                         },
                 },
         } => {
             assert_eq!(handle, "./samples/desky-mock-tauri");
             assert_eq!(target.as_deref(), Some("desktop"));
+            assert!(from_materialized_record.is_none());
+            assert!(run_config_hash.is_none());
             assert!(json);
         }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
@@ -1016,6 +1026,31 @@ fn dangerous_skip_permissions_requires_explicit_opt_in_env() {
     assert!(err
         .to_string()
         .contains("--dangerously-skip-permissions requires CAPSULE_ALLOW_UNSAFE=1"));
+    // Regression for issue #194: the error must be a typed AtoExecutionError so
+    // the diagnostic mapper reaches E301, not the E999 fallback.
+    assert!(
+        err.downcast_ref::<AtoExecutionError>().is_some(),
+        "error must be a typed AtoExecutionError (not plain anyhow), so the diagnostic \
+         mapper can produce E301 instead of E999"
+    );
+    let diagnostic = crate::adapters::output::diagnostics::from_anyhow(
+        &err,
+        crate::adapters::output::diagnostics::CommandContext::Run,
+    );
+    assert_eq!(
+        diagnostic.code,
+        crate::adapters::output::diagnostics::CliDiagnosticCode::E301,
+        "diagnostic must be E301 (security_policy_violation), not E999"
+    );
+    let hint = diagnostic.hint.as_deref().unwrap_or_default();
+    assert!(
+        hint.contains("CAPSULE_ALLOW_UNSAFE=1"),
+        "E301 hint must reference CAPSULE_ALLOW_UNSAFE=1, got: {hint:?}"
+    );
+    assert!(
+        !hint.contains("RUST_BACKTRACE"),
+        "E301 hint must not contain RUST_BACKTRACE — that belongs only on E999"
+    );
 }
 
 #[test]

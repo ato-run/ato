@@ -308,6 +308,14 @@ pub(super) fn resolve_local_plan(
     }
 }
 
+pub(crate) fn resolve_local_plan_for_session(
+    manifest_path: &std::path::Path,
+    target_label: Option<&str>,
+) -> Result<(ManifestData, Vec<String>)> {
+    let (plan, _guest, notes) = resolve_local_plan(manifest_path, target_label)?;
+    Ok((plan, notes))
+}
+
 /// Try to resolve a full execution plan from the locally-installed capsule archive when the
 /// registry returns only a short lock reference (no `[targets]` table).
 ///

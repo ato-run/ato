@@ -754,6 +754,7 @@ mod tests {
         fs::write(&log_path, "log").expect("log");
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-dead".to_string(),
+            launch_key: None,
             handle: "capsule://example/app".to_string(),
             normalized_handle: "capsule://example/app".to_string(),
             canonical_handle: None,
@@ -779,6 +780,14 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
@@ -818,6 +827,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-orch".to_string(),
+            launch_key: None,
             handle: "capsule://example/orch".to_string(),
             normalized_handle: "capsule://example/orch".to_string(),
             canonical_handle: None,
@@ -844,6 +854,14 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: Some(StoredOrchestrationServices {
                 wrapper_pid: 999_999_999,
                 services: vec![StoredOrchestrationService {
@@ -889,6 +907,7 @@ mod tests {
 
         let record = StoredSessionInfo {
             session_id: "ato-desktop-session-dep".to_string(),
+            launch_key: None,
             handle: "capsule://example/dep".to_string(),
             normalized_handle: "capsule://example/dep".to_string(),
             canonical_handle: None,
@@ -925,6 +944,14 @@ mod tests {
                     runtime_export_keys: Vec::new(),
                 }],
             }),
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: None,
             launch_digest: None,

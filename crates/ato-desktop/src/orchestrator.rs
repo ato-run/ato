@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ato_session_core::{
-    read_session_records, validate_record_only, RecordValidationOutcome, RecordValidationParams,
-    StoredSessionInfo,
+    compute_run_config_hash, materialized_launch_record_path, read_materialized_launch_record,
+    read_session_records, session_record_path, session_root as shared_session_root,
+    validate_record_only, RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
@@ -16,7 +17,7 @@ use capsule_wire::handle::{
     normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
     ResolvedSnapshot,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
@@ -237,6 +238,29 @@ pub enum LaunchError {
         /// exactly the same input.
         original_secrets: Vec<SecretEntry>,
     },
+    /// #117 — eager preflight detected one or more pending pre-launch
+    /// requirements (a mix of missing secrets and per-target consents)
+    /// before any provisioning side effects ran. Carries the full list
+    /// so `webview.rs` can populate the unified `pending_resolution`
+    /// in one shot and the resolution modal opens once with everything
+    /// visible — instead of the legacy lazy-aggregation flow that
+    /// re-opened the modal once per retry as the launch loop tripped
+    /// errors sequentially.
+    PreflightAggregate {
+        /// Original handle the user asked to launch — re-fed into
+        /// `resolve_and_start_capsule` after Submit.
+        handle: String,
+        /// Aggregate envelope from `ato internal preflight --json`.
+        /// Each item is either a `SecretsRequired` (target-scoped or
+        /// global) or a `ConsentRequired` carrying the five identity
+        /// fields the modal needs for `ato internal consent
+        /// approve-execution-plan`.
+        requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+        /// Snapshot of secrets passed to the original
+        /// `start_capsule` call. Cloned so the post-Submit retry uses
+        /// exactly the same input.
+        original_secrets: Vec<SecretEntry>,
+    },
     /// Any other failure — opaque string suitable for direct display.
     Other(String),
 }
@@ -258,6 +282,17 @@ impl std::fmt::Display for LaunchError {
             Self::MissingConsent { handle, .. } => {
                 write!(f, "guest launch needs ExecutionPlan consent for '{handle}'")
             }
+            Self::PreflightAggregate {
+                handle,
+                requirements,
+                ..
+            } => {
+                write!(
+                    f,
+                    "guest launch needs {} pre-launch requirement(s) for '{handle}'",
+                    requirements.len()
+                )
+            }
             Self::Other(message) => f.write_str(message),
         }
     }
@@ -277,12 +312,324 @@ pub fn resolve_and_start_guest(
     handle: &str,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
 ) -> Result<GuestLaunchSession, LaunchError> {
-    resolve_and_start_capsule(handle, secrets, plain_configs)
+    // Step 0: validating (emitted before preflight so the boot wizard shows
+    // "検証中" immediately, even if the page fires the callback before the
+    // WebView has fully loaded — the JS buffers it via DOMContentLoaded).
+    if let Some(ref f) = on_step {
+        f(0);
+    }
+
+    // #117 — eager preflight collection. Walks the orchestration
+    // target graph via `ato internal preflight --json` *before* any
+    // provisioning side effects. If any requirements are pending,
+    // surface them as a single `PreflightAggregate` so the unified
+    // resolution modal opens once with everything visible. If
+    // preflight is empty (every consent + every required env is
+    // already satisfied) or returns a "ref not supported" error
+    // (e.g. uncached remote ref), fall through to the legacy launch
+    // loop which still drains lazily via `merge_*_into_resolution`.
+    match collect_preflight_requirements(handle) {
+        Ok(envelopes) => {
+            // Preflight emits "what the manifest requires" — it has no
+            // visibility into the desktop's per-handle SecretStore.
+            // After the user submits the resolution modal, those
+            // secrets are persisted to the SecretStore but the
+            // manifest still lists them as required, so the next
+            // preflight call would re-emit them and re-open the modal
+            // on the retry.
+            //
+            // Intersect against the snapshot already in `secrets` to
+            // drop the satisfied ones. Consents are already filtered
+            // upstream (preflight reads the consent JSONL directly via
+            // `consent_store::has_consent`), so they pass through
+            // unchanged. An envelope whose schema becomes empty after
+            // filtering is dropped entirely — otherwise the modal
+            // would show a section header with no inputs.
+            let filtered = filter_already_provided_secrets(envelopes, secrets, plain_configs);
+            if !filtered.is_empty() {
+                return Err(LaunchError::PreflightAggregate {
+                    handle: handle.to_string(),
+                    requirements: filtered,
+                    original_secrets: secrets.to_vec(),
+                });
+            }
+            // Else: every secret already in SecretStore + every
+            // consent already recorded → fall through to the actual
+            // launch. Provisioning runs.
+        }
+        Err(error) => {
+            // Preflight intentionally fails closed for unsupported
+            // refs (e.g. an uncached `publisher/slug` registry ref)
+            // so the legacy E103/E302 flow can still surface the
+            // requirements lazily. Logged at warn so we can spot
+            // patterns without spamming under expected conditions.
+            warn!(
+                handle = %handle,
+                error = %error,
+                "preflight collection skipped; falling back to lazy aggregation"
+            );
+        }
+    }
+
+    resolve_and_start_capsule(handle, secrets, plain_configs, on_step)
+}
+
+pub fn resolve_and_start_guest_from_materialized_record(
+    handle: &str,
+    record_path: &Path,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
+) -> Result<GuestLaunchSession, LaunchError> {
+    if let Some(ref f) = on_step {
+        f(0);
+    }
+    if let Some(ref f) = on_step {
+        f(2);
+    }
+    let started =
+        start_capsule_from_materialized_record(handle, record_path, secrets, plain_configs)?;
+    if let Some(ref f) = on_step {
+        f(3);
+    }
+    Ok(build_launch_session_from_started(started)?)
+}
+
+/// Drop preflight envelopes whose requirements are already satisfied.
+/// `secrets` covers secret fields stored in the per-handle SecretStore;
+/// `plain_configs` covers non-secret fields (enum, string) submitted via
+/// the consent form. Returns the filtered list — consent envelopes pass
+/// through unchanged; secret envelopes have their `schema` narrowed to
+/// fields not yet in either provided set, and envelopes whose schema
+/// becomes empty are dropped.
+///
+/// The matching key is `ConfigField.name` (the env-var key the runtime
+/// expects), compared against `SecretEntry.key` / the plain-config key
+/// (both are the same env-var name). The explicit comparison documents the
+/// invariant so a future divergence breaks here instead of silently
+/// re-opening the modal.
+fn filter_already_provided_secrets(
+    envelopes: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+) -> Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope> {
+    use capsule_core::interactive_resolution::{
+        InteractiveResolutionEnvelope, InteractiveResolutionKind,
+    };
+    let provided: std::collections::HashSet<String> = secrets
+        .iter()
+        .map(|s| s.key.clone())
+        .chain(plain_configs.iter().map(|(k, _)| k.clone()))
+        .collect();
+
+    envelopes
+        .into_iter()
+        .filter_map(|env| match env.kind {
+            InteractiveResolutionKind::SecretsRequired { target, schema } => {
+                let still_missing: Vec<_> = schema
+                    .into_iter()
+                    .filter(|f| !provided.contains(&f.name))
+                    .collect();
+                if still_missing.is_empty() {
+                    None
+                } else {
+                    Some(InteractiveResolutionEnvelope {
+                        kind: InteractiveResolutionKind::SecretsRequired {
+                            target,
+                            schema: still_missing,
+                        },
+                        display: env.display,
+                    })
+                }
+            }
+            kind @ InteractiveResolutionKind::ConsentRequired { .. } => {
+                Some(InteractiveResolutionEnvelope {
+                    kind,
+                    display: env.display,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Shell out to `ato internal preflight <handle> --json` and parse
+/// the aggregate envelope. Returns the list of pending
+/// `InteractiveResolutionEnvelope` items — empty list means the
+/// launch can proceed without further interaction.
+///
+/// Errors from this helper are non-fatal: the caller falls through
+/// to the legacy launch loop. We intentionally do NOT bubble them up
+/// as `LaunchError::Other` because that would short-circuit the
+/// existing fallback story and confuse users whose capsule simply
+/// hasn't been cached yet.
+fn collect_preflight_requirements(
+    handle: &str,
+) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+    Ok(collect_preflight_envelope(handle)?.requirements)
+}
+
+/// Full capsule identity + requirements returned by `ato internal preflight --json`.
+#[derive(Debug, Clone)]
+pub(crate) struct ConsentPreflightData {
+    pub capsule_id: String,
+    pub capsule_version: String,
+    pub visited_targets: Vec<String>,
+    pub requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
+}
+
+/// Collect full preflight data for the consent wizard UI.
+/// Normalizes the handle (adds `capsule://` prefix for bare `github.com/` handles).
+pub(crate) fn collect_preflight_for_consent(handle: &str) -> Result<ConsentPreflightData> {
+    let normalized = normalize_preflight_handle(handle);
+    let envelope = collect_preflight_envelope(&normalized)?;
+    Ok(ConsentPreflightData {
+        capsule_id: envelope.capsule_id,
+        capsule_version: envelope.capsule_version,
+        visited_targets: envelope.visited_targets,
+        requirements: envelope.requirements,
+    })
+}
+
+/// Adds `capsule://` prefix to bare `github.com/owner/repo` handles.
+fn normalize_preflight_handle(handle: &str) -> String {
+    if handle.starts_with("capsule://") || handle.starts_with('/') || handle.starts_with('~') {
+        handle.to_string()
+    } else if handle.starts_with("github.com/") {
+        format!("capsule://{handle}")
+    } else {
+        handle.to_string()
+    }
+}
+
+fn collect_preflight_envelope(handle: &str) -> Result<PreflightAggregateEnvelope> {
+    let ato_bin = resolve_ato_binary()?;
+    debug!(bin = %ato_bin.display(), handle, "calling ato internal preflight");
+    let output = Command::new(&ato_bin)
+        .args(["internal", "preflight", handle, "--json"])
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke '{}' internal preflight",
+                ato_bin.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // Older ato CLI builds don't have `internal preflight`. In that case,
+        // fall back to an empty envelope so the consent wizard can still proceed
+        // without blocking on preflight requirements.
+        if stderr.contains("unrecognized subcommand") && stderr.contains("preflight") {
+            tracing::debug!(
+                handle,
+                "ato CLI does not support 'internal preflight'; skipping preflight (no requirements)"
+            );
+            return Ok(PreflightAggregateEnvelope {
+                schema_version: None,
+                capsule_id: String::new(),
+                capsule_version: String::new(),
+                visited_targets: vec![],
+                requirements: vec![],
+            });
+        }
+
+        bail!(
+            "ato internal preflight failed (exit {}): stderr={stderr} stdout={stdout}",
+            output.status
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    serde_json::from_str(trimmed)
+        .with_context(|| format!("failed to parse preflight JSON: {trimmed}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct PreflightAggregateEnvelope {
+    #[serde(default)]
+    #[allow(dead_code)]
+    schema_version: Option<String>,
+    #[serde(default)]
+    capsule_id: String,
+    #[serde(default)]
+    capsule_version: String,
+    #[serde(default)]
+    visited_targets: Vec<String>,
+    #[serde(default)]
+    requirements: Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>,
 }
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
     stop_capsule_session(session_id)
+}
+
+fn desktop_run_config_hash(secrets: &[SecretEntry], plain_configs: &[(String, String)]) -> String {
+    let secret_keys: Vec<String> = secrets.iter().map(|secret| secret.key.clone()).collect();
+    compute_run_config_hash(
+        plain_configs,
+        &secret_keys,
+        &ato_session_core::current_platform_tag(),
+    )
+}
+
+pub fn materialized_record_path_for_session(session_id: &str) -> Result<PathBuf> {
+    let root = shared_session_root()?;
+    let session_path = session_record_path(&root, session_id);
+    let raw = fs::read_to_string(&session_path)
+        .with_context(|| format!("failed to read session record {}", session_path.display()))?;
+    let record: StoredSessionInfo = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session record {}", session_path.display()))?;
+    let launch_key = record
+        .launch_key
+        .ok_or_else(|| anyhow!("session record {} is missing launch_key", session_id))?;
+    let cache_root = ato_session_core::launch_cache_root()?;
+    let path = materialized_launch_record_path(&cache_root, &launch_key);
+    let _ = read_materialized_launch_record(&path).with_context(|| {
+        format!(
+            "failed to read materialized launch record {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Result<()> {
+    let root = shared_session_root()?;
+    let session_path = session_record_path(&root, session_id);
+    let raw = fs::read_to_string(&session_path)
+        .with_context(|| format!("failed to read session record {}", session_path.display()))?;
+    let record: StoredSessionInfo = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session record {}", session_path.display()))?;
+    let pid = u32::try_from(record.pid).map_err(|_| anyhow!("invalid pid {}", record.pid))?;
+    let expected_start_time = record.process_start_time_unix_ms;
+
+    if !stop_guest_session(session_id)? {
+        bail!("session {} did not stop cleanly", session_id);
+    }
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !ato_session_core::process::pid_is_alive(pid) {
+            return Ok(());
+        }
+        if let Some(expected) = expected_start_time {
+            if ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    bail!(
+        "session {} is still alive after waiting {}ms",
+        session_id,
+        timeout.as_millis()
+    );
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -439,6 +786,7 @@ pub fn resolve_and_start_capsule(
     handle: &str,
     secrets: &[SecretEntry],
     plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
 ) -> Result<CapsuleLaunchSession, LaunchError> {
     info!(handle, "resolving capsule");
 
@@ -511,18 +859,27 @@ pub fn resolve_and_start_capsule(
     // resolve / session-start halves of the hot path are measured
     // independently (RFC §3.1 — Phase 1's two fast paths key on this
     // separation).
+    if let Some(ref f) = on_step {
+        f(1); // Step 1: resolving — before the slow resolve subprocess
+    }
     let resolved = {
         let timer = SurfaceStageTimer::start("resolve_subprocess");
         let result = resolve_capsule(handle);
         timer.finish_ok();
         result?
     };
+    if let Some(ref f) = on_step {
+        f(2); // Step 2: starting — before the slow session-start subprocess
+    }
     let started = {
         let timer = SurfaceStageTimer::start("session_start_subprocess");
         let result = start_capsule(handle, secrets, plain_configs);
         timer.finish_ok();
         result?
     };
+    if let Some(ref f) = on_step {
+        f(3); // Step 3: connecting — before building the launch session struct
+    }
     let mut session = {
         let timer = SurfaceStageTimer::start("build_launch_session");
         let result = build_launch_session(handle, resolved, started);
@@ -594,6 +951,144 @@ pub fn cleanup_stale_capsule_sessions() -> Result<Vec<String>> {
     Ok(notes)
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CleanupPreview {
+    pub(crate) postgres_pids: Vec<u32>,
+    pub(crate) bun_server_pids: Vec<u32>,
+    pub(crate) port_1111_pids: Vec<u32>,
+    pub(crate) shm_segments: usize,
+    pub(crate) needs_cleanup: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CleanupReport {
+    pub(crate) postgres_killed: usize,
+    pub(crate) bun_servers_killed: usize,
+    pub(crate) port_1111_killed: usize,
+    pub(crate) shm_freed: usize,
+}
+
+fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
+    // Safety: only use `-f` patterns that match specific process names.
+    if pattern.is_empty() || pattern.len() < 4 {
+        return Vec::new();
+    }
+    let output = match Command::new("pgrep").arg("-f").arg(pattern).output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn kill_pids(pids: &[u32]) -> usize {
+    let mut killed = 0usize;
+    let current = std::process::id();
+    for &pid in pids {
+        if pid == current {
+            continue;
+        }
+        // Use TERM only — no SIGKILL.
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        killed += 1;
+    }
+    killed
+}
+
+/// Preview what would be cleaned up. Does not modify anything.
+pub(crate) fn preview_host_cleanup() -> CleanupPreview {
+    let postgres_pids = find_pids_by_pattern("postgres.*ato");
+    let bun_server_pids = find_pids_by_pattern("bun.*dist/index");
+    let port_1111_pids = find_port_pids(1111);
+    let shm_segments = count_owned_shm();
+    CleanupPreview {
+        needs_cleanup: !postgres_pids.is_empty()
+            || !bun_server_pids.is_empty()
+            || !port_1111_pids.is_empty()
+            || shm_segments > 0,
+        postgres_pids,
+        bun_server_pids,
+        port_1111_pids,
+        shm_segments,
+    }
+}
+
+/// Execute host resource cleanup. Kills stale provider processes (TERM only)
+/// and frees SysV shared memory owned by the current user.
+pub(crate) fn cleanup_host_resources() -> CleanupReport {
+    let preview = preview_host_cleanup();
+
+    let postgres_killed = kill_pids(&preview.postgres_pids);
+    let bun_servers_killed = kill_pids(&preview.bun_server_pids);
+    let port_1111_killed = kill_pids(&preview.port_1111_pids);
+    let shm_freed = free_owned_shm();
+
+    CleanupReport {
+        postgres_killed,
+        bun_servers_killed,
+        port_1111_killed,
+        shm_freed,
+    }
+}
+
+fn find_port_pids(port: u16) -> Vec<u32> {
+    let output = match Command::new("lsof")
+        .arg("-ti")
+        .arg(format!(":{port}"))
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+fn count_owned_shm() -> usize {
+    let output = match Command::new("ipcs").arg("-m").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let current_user = std::env::var("USER").unwrap_or_default();
+    text.lines()
+        .filter(|line| line.contains(&current_user))
+        .count()
+}
+
+fn free_owned_shm() -> usize {
+    let output = match Command::new("ipcs").arg("-m").output() {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let current_user = std::env::var("USER").unwrap_or_default();
+    let mut freed = 0usize;
+    for line in text.lines() {
+        if !line.contains(&current_user) {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(id_str) = parts.get(1) {
+            if let Ok(id) = id_str.parse::<u32>() {
+                let _ = Command::new("ipcrm").arg("-m").arg(id.to_string()).output();
+                freed += 1;
+            }
+        }
+    }
+    freed
+}
+
 fn resolve_capsule(handle: &str) -> Result<ResolvePayload> {
     let envelope: ResolveEnvelope = run_ato_json(&["app", "resolve", handle, "--json"])?;
     capsule_wire::ccp::enforce_ccp_compat(&envelope, "resolve_handle")?;
@@ -643,6 +1138,17 @@ fn start_capsule(
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
+    let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
+    cmd.arg("--run-config-hash").arg(&run_config_hash);
+
+    let desktop_pid = std::process::id();
+    cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
+    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
+        cmd.env(
+            "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
+            start_time.to_string(),
+        );
+    }
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
@@ -684,6 +1190,53 @@ fn start_capsule(
         cmd.env(key, value);
     }
 
+    run_session_start_command(&ato_bin, handle, secrets, &mut cmd)
+}
+
+fn start_capsule_from_materialized_record(
+    handle: &str,
+    record_path: &Path,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+) -> Result<SessionStartInfo, LaunchError> {
+    let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
+    debug!(
+        bin = %ato_bin.display(),
+        handle,
+        record_path = %record_path.display(),
+        "spawning ato helper for materialized session start"
+    );
+    let mut cmd = Command::new(&ato_bin);
+    cmd.args(["app", "session", "start", handle, "--json"]);
+    cmd.arg("--from-materialized-record").arg(record_path);
+    let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
+    cmd.arg("--run-config-hash").arg(&run_config_hash);
+
+    let desktop_pid = std::process::id();
+    cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
+    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
+        cmd.env(
+            "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
+            start_time.to_string(),
+        );
+    }
+
+    for secret in secrets {
+        cmd.env(&secret.key, &secret.value);
+    }
+    for (key, value) in plain_configs {
+        cmd.env(key, value);
+    }
+
+    run_session_start_command(&ato_bin, handle, secrets, &mut cmd)
+}
+
+fn run_session_start_command(
+    ato_bin: &Path,
+    handle: &str,
+    secrets: &[SecretEntry],
+    cmd: &mut Command,
+) -> Result<SessionStartInfo, LaunchError> {
     let output = cmd.output().map_err(|err| {
         LaunchError::Other(format!(
             "failed to run ato helper '{}' for session start: {err}",
@@ -694,7 +1247,6 @@ fn start_capsule(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         // Try to lift the trailing JSONL fatal envelope out of the
         // CLI output — `emit_ato_error_jsonl` writes to stderr in
@@ -715,16 +1267,27 @@ fn start_capsule(
         // avoids re-breaking on future renumbering.
         let event = crate::cli_envelope::parse_cli_error_event(&stderr)
             .or_else(|| crate::cli_envelope::parse_cli_error_event(&stdout));
-        if let Some(event) = event {
+        if let Some(event) = &event {
             let is_missing_env = event.name.as_deref() == Some("missing_required_env")
                 || event.code == "ATO_ERR_MISSING_REQUIRED_ENV"
                 || event.code == "E103";
             if is_missing_env {
                 if let Some(details) = event.missing_env_details() {
                     if !details.missing_schema.is_empty() {
+                        // #117 — interactive resolution is an expected
+                        // state, not a failure. Log at warn (one line
+                        // per launch attempt, no payload spam) and
+                        // return the typed variant so the modal flow
+                        // takes over. The `error!` reserved for
+                        // unexpected CLI breakage stays at error.
+                        warn!(
+                            handle,
+                            target = ?details.target,
+                            "guest launch needs configuration; surfacing modal"
+                        );
                         return Err(LaunchError::MissingConfig {
                             handle: handle.to_string(),
-                            target: details.target.or(event.target),
+                            target: details.target.or(event.target.clone()),
                             fields: details.missing_schema,
                             original_secrets: secrets.to_vec(),
                         });
@@ -742,6 +1305,13 @@ fn start_capsule(
                 || event.code == "E302";
             if is_execution_contract {
                 if let Some(details) = event.consent_required_details() {
+                    // Same rationale as the missing-env branch:
+                    // interactive consent is expected.
+                    warn!(
+                        handle,
+                        target = %details.target_label,
+                        "guest launch needs ExecutionPlan consent; surfacing modal"
+                    );
                     return Err(LaunchError::MissingConsent {
                         handle: handle.to_string(),
                         scoped_id: details.scoped_id,
@@ -755,6 +1325,12 @@ fn start_capsule(
                 }
             }
         }
+
+        // Genuinely unexpected — preserve the original error log so
+        // operators can debug. Reaching here means either the CLI
+        // emitted a fatal we don't understand, or the envelope parse
+        // failed; both are worth a noisy entry.
+        error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
         let detail = if !stderr.is_empty() {
             stderr
@@ -984,7 +1560,33 @@ fn sibling_ato_binary() -> Result<Option<PathBuf>> {
 
     let bin_name = if cfg!(windows) { "ato.exe" } else { "ato" };
     let candidate = parent.join(bin_name);
+
     if candidate.is_file() {
+        // In monorepo dev builds, ato-desktop lives at crates/ato-desktop/target/{profile}/
+        // while ato-cli is built into the root workspace's target/{profile}/.
+        // If a fresher peer exists 4 ancestors up (repo root), prefer it so that
+        // rebuilding ato-cli is immediately picked up without re-bundling.
+        let profile = parent
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("debug");
+        if let Some(repo_root) = parent.ancestors().nth(4) {
+            let peer = repo_root.join("target").join(profile).join(bin_name);
+            if peer.is_file() && peer != candidate {
+                let sibling_mtime = candidate.metadata().and_then(|m| m.modified()).ok();
+                let peer_mtime = peer.metadata().and_then(|m| m.modified()).ok();
+                if let (Some(sm), Some(pm)) = (sibling_mtime, peer_mtime) {
+                    if pm > sm {
+                        tracing::debug!(
+                            sibling = %candidate.display(),
+                            peer = %peer.display(),
+                            "using fresher root-workspace ato binary"
+                        );
+                        return Ok(Some(peer));
+                    }
+                }
+            }
+        }
         return Ok(Some(candidate));
     }
     Ok(None)
@@ -1138,6 +1740,73 @@ fn build_launch_session(
     })
 }
 
+fn build_launch_session_from_started(started: SessionStartInfo) -> Result<CapsuleLaunchSession> {
+    let manifest_path = PathBuf::from(&started.manifest_path);
+    let app_root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("manifest path has no parent: {}", manifest_path.display()))?;
+
+    let display_strategy = started.display_strategy.clone();
+    let guest = started.guest.clone();
+    let web = started.web.clone();
+    let terminal = started.terminal.clone();
+    let service = started.service.clone();
+    let frontend_entry = match guest.as_ref() {
+        Some(guest) => Some(normalize_frontend_entry(
+            &app_root,
+            &guest.frontend_entry,
+            &guest.frontend_entry,
+        )?),
+        None => None,
+    };
+
+    if matches!(display_strategy, CapsuleDisplayStrategy::GuestWebview) && guest.is_none() {
+        bail!(
+            "ato app session start returned guest_webview for {} without guest payload",
+            started.handle
+        );
+    }
+
+    Ok(CapsuleLaunchSession {
+        handle: started.handle,
+        normalized_handle: started.normalized_handle,
+        canonical_handle: started.canonical_handle,
+        source: started.source,
+        trust_state: started.trust_state,
+        restricted: started.restricted,
+        snapshot_label: started.snapshot.as_ref().map(snapshot_label),
+        session_id: started.session_id,
+        runtime: started.runtime,
+        display_strategy,
+        manifest_path,
+        app_root,
+        target_label: started.target_label,
+        adapter: guest.as_ref().map(|item| item.adapter.clone()),
+        frontend_entry,
+        invoke_url: guest.as_ref().map(|item| item.invoke_url.clone()),
+        healthcheck_url: guest
+            .as_ref()
+            .map(|item| item.healthcheck_url.clone())
+            .or_else(|| web.as_ref().map(|item| item.healthcheck_url.clone())),
+        capabilities: guest
+            .as_ref()
+            .map(|item| item.capabilities.clone())
+            .unwrap_or_default(),
+        local_url: web.as_ref().map(|item| item.local_url.clone()),
+        served_by: web.as_ref().map(|item| item.served_by.clone()),
+        log_path: terminal
+            .as_ref()
+            .map(|item| PathBuf::from(&item.log_path))
+            .or_else(|| service.as_ref().map(|item| PathBuf::from(&item.log_path)))
+            .or_else(|| Some(PathBuf::from(&started.log_path))),
+        notes: started.notes,
+        execution_id: started.execution_id,
+        execution_receipt_schema_version: started.execution_receipt_schema_version,
+        click_origin: None,
+    })
+}
+
 fn snapshot_label(snapshot: &serde_json::Value) -> String {
     if let Some(commit_sha) = snapshot
         .get("commit_sha")
@@ -1182,6 +1851,31 @@ fn snapshot_label_from_resolved(snapshot: &ResolvedSnapshot) -> String {
 ///   construction error). The caller treats `Err` identically to
 ///   `Ok(None)` and falls back to the subprocess path.
 ///
+/// Try to reuse a live session for an explicit user click (e.g., Recent
+/// Capsules on the Start page). Wraps `try_session_record_fast_path` with
+/// the same `click_origin` anchoring and background receipt refresh that
+/// `resolve_and_start_capsule` performs, so surface-timing and receipts stay
+/// consistent regardless of which path opened the window.
+///
+/// Returns `Ok(Some(session))` when a live session was found and is ready to
+/// display. Returns `Ok(None)` on a clean miss (no session record or stale).
+/// Returns `Err` only for infrastructure failures (unreadable record dir,
+/// etc.) — callers should fall back to the consent flow in all non-`Some`
+/// cases.
+pub(crate) fn try_reuse_live_session_for_click(
+    handle: &str,
+) -> Result<Option<CapsuleLaunchSession>> {
+    match try_session_record_fast_path(handle) {
+        Ok(Some(mut session)) => {
+            session.click_origin = Some(ClickOrigin::now());
+            spawn_background_receipt_refresh(handle);
+            Ok(Some(session))
+        }
+        Ok(None) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// The function emits two SURFACE-TIMING stages so Phase 0 logs can
 /// distinguish fast-path-hit (`session_record_lookup` +
 /// `session_record_validate` present, `*_subprocess` absent) from
@@ -2425,7 +3119,7 @@ mod tests {
         }
 
         // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[])
+        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None)
             .expect("resolve_and_start_capsule should succeed for the share URL");
 
         eprintln!("[e2e] session_id  = {}", session.session_id);
@@ -4190,6 +4884,7 @@ mod fast_path_tests {
     fn base_record(handle: &str) -> StoredSessionInfo {
         StoredSessionInfo {
             session_id: format!("ato-desktop-session-{}", std::process::id()),
+            launch_key: None,
             handle: handle.to_string(),
             normalized_handle: handle.trim_start_matches("capsule://").to_string(),
             canonical_handle: Some(handle.trim_start_matches("capsule://").to_string()),
@@ -4225,6 +4920,14 @@ mod fast_path_tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
@@ -4384,5 +5087,23 @@ mod fast_path_tests {
         assert_eq!(session.capabilities, vec!["fs:read".to_string()]);
         // app_root is derived from manifest_path.parent().
         assert_eq!(session.app_root, PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn resolve_ato_binary_prefers_ato_desktop_ato_bin() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        let path = tmp.path().to_path_buf();
+        std::env::set_var("ATO_DESKTOP_ATO_BIN", &path);
+        let resolved = resolve_ato_binary().expect("resolve");
+        assert_eq!(resolved, path);
+        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+    }
+
+    #[test]
+    fn resolve_ato_binary_errors_on_missing_env_path() {
+        std::env::set_var("ATO_DESKTOP_ATO_BIN", "/nonexistent/ato/helper/binary");
+        let err = resolve_ato_binary().unwrap_err();
+        assert!(format!("{err:#}").contains("missing ato helper"));
+        std::env::remove_var("ATO_DESKTOP_ATO_BIN");
     }
 }

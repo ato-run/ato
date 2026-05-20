@@ -169,10 +169,10 @@ Notes on transitions:
 ### 5.1 Default TTL
 
 ```text
-v0 default: 5 minutes
+v0 default: 10 minutes
 ```
 
-5 minutes matches `SURFACE_MATERIALIZATION.md` §9.5's retention TTL,
+10 minutes matches `SURFACE_MATERIALIZATION.md` §9.5's retention TTL,
 so `RetainedSession` and (later) `RetainedSurface` share one timer.
 
 **v0 constant**: not user-configurable, not capsule-declarable.
@@ -308,7 +308,7 @@ keystroke".
 
 At minimum one of:
 
-- pane-close toast: `Session kept warm for 5 minutes`,
+- pane-close toast: `Session kept warm for 10 minutes`,
 - status indicator: `Running sessions: N`,
 - command palette (already required, qualifies if the
   retention-aware item is named visibly: `Stop all retained sessions
@@ -513,7 +513,7 @@ existing CLI command.
   multiple sessions of the same handle (different `session_id`s).
   Retention table must key on `session_id`, not on handle, so two
   retained instances of the same capsule are tracked independently.
-- **Indicator UX wording.** "Session kept warm for 5 minutes" is a
+- **Indicator UX wording.** "Session kept warm for 10 minutes" is a
   draft. Final wording reviewed at implementation time.
 - **Telemetry.** SURFACE-TIMING already records fast-path hit rate
   via the absence of `*_subprocess` stages. No new metric required

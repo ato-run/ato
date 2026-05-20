@@ -5,6 +5,7 @@ pub(crate) mod cache;
 pub(crate) mod commands;
 mod config;
 pub(crate) mod dispatch;
+mod import_cmd;
 mod inspect;
 mod internal;
 mod ipc;
@@ -29,6 +30,8 @@ pub(crate) use binding::BindingCommands;
 pub(crate) use config::{
     ConfigCommands, ConfigEngineCommands, ConfigRegistryCommands, EngineCommands,
 };
+#[allow(unused_imports)]
+pub(crate) use import_cmd::ImportArgs;
 #[allow(unused_imports)]
 pub(crate) use inspect::InspectCommands;
 #[allow(unused_imports)]

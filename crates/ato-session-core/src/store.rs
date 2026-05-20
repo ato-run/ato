@@ -169,6 +169,7 @@ mod tests {
     fn make_record(id: &str) -> StoredSessionInfo {
         StoredSessionInfo {
             session_id: id.to_string(),
+            launch_key: None,
             handle: "publisher/slug".to_string(),
             normalized_handle: "publisher/slug".to_string(),
             canonical_handle: None,
@@ -201,6 +202,14 @@ mod tests {
             terminal: None,
             service: None,
             dependency_contracts: None,
+            graph: None,
+            execution_id: None,
+            execution_receipt_schema_version: None,
+            declared_execution_id: None,
+            resolved_execution_id: None,
+            observed_execution_id: None,
+            graph_completeness: None,
+            reproducibility_class: None,
             orchestration_services: None,
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),

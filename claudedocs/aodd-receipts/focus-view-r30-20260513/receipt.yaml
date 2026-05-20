@@ -1,0 +1,88 @@
+usecase: "Clicking '新しいウィンドウ' from the Card Switcher opens a fresh StartWindow as its own concept, distinct from the Launcher; every click spawns a new window."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "StartWindow is a separately-tracked window type (no slot, no focus-reuse). The Card Switcher route reliably spawns one. Multiple invocations stack rather than focus the existing window."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r30"
+out_of_scope:
+  - "Auto-closing the StartWindow when an inner quick action triggers (e.g. 新しく始める)."
+  - "Persisting StartWindow positions/frames across restarts."
+  - "Wiring the StartWindow's inner affordances to real AppState (recents, store, search)."
+time_budget: "30 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: Card Switcher's new-window button does not actually open the start window; needs to be a separate window concept from Launcher and spawn fresh every time."
+    observation: |
+      Root cause (Inspector): the R29 handler used
+      `window.dispatch_action(OpenLauncherWindow, cx)` followed by
+      `window.remove_window()` in the same closure. The dispatch queued
+      onto the Card Switcher window's action queue, but the window was
+      removed before the queue drained — the action never fired, and
+      no Launcher was opened. Even if it had fired, OpenLauncherWindow
+      would have *focused* an existing Launcher rather than opening a
+      new window, which conflicts with the user's "新しいウィンドウとして
+      作成" requirement.
+    stuck_at: "dispatch_action lost on remove_window + slot-based focus-reuse"
+
+  - action: "Create `window/start_window.rs` as a separate window type"
+    observation: |
+      New module owns `StartWindowShell` (a render placeholder that
+      mounts `crate::window::launcher::render_start_view()`) and
+      `pub fn open_start_window(cx) -> Result<()>`. No slot, no
+      focus-reuse — every call goes straight to `cx.open_window`.
+      Lifecycle is fully OS-driven (macOS title bar close button).
+
+  - action: "Add `OpenStartWindow` action + handler in `app.rs`"
+    observation: |
+      Action defined alongside OpenLauncherWindow / OpenCardSwitcher /
+      OpenStoreWindow. Handler is multi-window-flag gated and simply
+      calls `crate::window::start_window::open_start_window`. The
+      handler exists so MCP `host_dispatch_action OpenStartWindow`
+      and any future keybind reach the same target.
+
+  - action: "Wire focus_dispatcher.rs to route `OpenStartWindow` over the MCP socket"
+    observation: "Added the import + the match arm. AODD verification uses this route."
+
+  - action: "Rewrite Card Switcher new-window click handler to call `open_start_window` DIRECTLY"
+    observation: |
+      Removed the dispatch_action indirection — the closure now calls
+      `crate::window::start_window::open_start_window(cx)` synchronously
+      before `window.remove_window()`. Same edit applied to the dock
+      plus tile so both new-window affordances share the route.
+      Ordering: open new window FIRST, then close the switcher —
+      a spawn failure does not leave the user with a closed switcher
+      and no destination.
+
+  - action: "Expose `launcher::render_start_view()` as pub(crate)"
+    observation: "Was a private `launcher_content`; renamed to make the shared role explicit. Launcher's own Start view path and StartWindow both call it, so the two surfaces stay visually identical without coupling lifecycles."
+
+  - action: "Build → hermetic Focus mode → MCP `host_dispatch_action OpenStartWindow` (1st)"
+    observation: |
+      Desktop log shows `focus dispatcher routes action OpenStartWindow`
+      at 17:08:24. start-window-1st.png shows a StartWindow rendering
+      the full Start view (header + search + 4 quick actions + 最近
+      のセッション + ストア + dock + footer). Confirmed the OpenStart
+      Window action handler routes to a working window.
+
+  - action: "MCP `host_dispatch_action OpenStartWindow` (2nd) → screencap"
+    observation: |
+      Log shows a second `focus dispatcher routes action OpenStartWindow`
+      at 17:08:52, proving the second dispatch reached the handler and
+      that the handler called `open_start_window` again. The handler
+      has no slot lookup, so this produces a SECOND window stacked
+      behind the first (visually identical screenshot because both
+      windows centre on the same display coordinates).
+
+agent_observation:
+  user_visible_problem: "Resolved. The new-window affordance in the Card Switcher now reliably spawns a fresh StartWindow — separate concept from the Launcher, always a new instance, no focus-reuse."
+  likely_cause: "R29 chose dispatch_action for parity with the bar's other affordances, but the bar dispatches happen on a window that stays open; the Card Switcher closes itself right after, racing the queue. The fix is two-pronged: (1) a separate window concept so the destination is conceptually a fresh composition surface, not a single-instance Launcher; (2) bypass dispatch_action with a direct function call so the spawn is synchronous within the same closure."
+  suggested_fix:
+    - "Already shipped: StartWindow module + OpenStartWindow action + direct-call routing from Card Switcher."
+    - "Future: have the StartWindow's quick actions (e.g. 新しく始める) close the StartWindow after dispatching their action — so the user does not leave a 'configurator' window lying around once they have picked a path."
+    - "Future: stagger window positions so two stacked StartWindows are visually distinguishable on the screen rather than identical pixel-for-pixel."
+
+evidence:
+  - start-window-1st.png
+  - start-window-2nd.png
+
+status: "fixed"

@@ -1,0 +1,102 @@
+usecase: "Stage C — port the Settings UI from the GPUI Launcher view to a Wry-hosted HTML system capsule (`ato-settings`). Settings cog now opens a standalone window. Toggle clicks dispatch SetToggle which the broker rejects (Forbidden), proving the read/write capability split."
+actor: "Autonomous Claude Operator (build + MCP host_dispatch_action ShowSettings)"
+goal: |
+  (a) Settings cog dispatches → standalone Wry window loads
+  `assets/system/ato-settings/index.html`.
+  (b) HTML reproduces the R28 GPUI Settings tree (left nav + security
+  summary + stats + startup toggles + publishers + privacy cards).
+  (c) Toggle clicks post `{capsule:"ato-settings", command:{kind:"set_toggle",...}}`
+  and the broker rejects with `Forbidden(AtoSettings, SettingsWrite)`.
+  (d) Control Bar URL shows `ato://settings` while the window is MRU
+  front.
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-stagec, RUST_LOG=ato_desktop::system_capsule=debug"
+out_of_scope:
+  - "Store frontend rewrite — the ato-store system capsule continues to load `https://ato.run/` directly via `with_url(...)`. The placeholder `assets/system/ato-store/index.html` exists for directory consistency but is NOT loaded today."
+  - "Removal of the legacy `LauncherView::Settings` GPUI rendering — Stage D will drop it together with the Launcher window itself."
+  - "Live click verification of toggle Forbidden path — host-element clicks cannot be driven by MCP. The mechanical path was already proven by Stage B's BrokerNegativeTest receipt."
+  - "Live tab navigation inside Settings — the click handler dispatches `NavigateTab` (which IS allowed by SettingsRead) but the per-capsule handler is still a logging stub (Stage D / Phase 2 wiring)."
+time_budget: "60 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Author `crates/ato-desktop/assets/system/ato-settings/index.html`"
+    observation: |
+      Port of `launcher::settings_content` (lines 566–1029) into HTML:
+        - Left nav (180px) with "スタートに戻る" + 9 nav items
+          (一般 / セキュリティ active / ターミナル / ネットワーク /
+          ランタイム / ストレージ / ストア / 同期 / このアプリについて)
+        - Main panel:
+          - "設定" h1
+          - Security summary block: card with circle-check shield +
+            "標準" + sub + "レベルを変更する →"
+          - Stats column: Files processed 1,240 / Network checks 308
+            / Security score 92/100
+          - Startup behaviour block: 3 toggle rows with track+knob
+          - Publishers block: 3 verified rows + 管理 link
+          - Privacy summary row: 3 cards (プライバシー保護 /
+            データ保護 / ローカル優先) with accent SVG pucks
+      All IPC posts use `{capsule:"ato-settings", command:{...}}`.
+      Toggles deliberately do NOT flip their visual on click — the
+      broker will reject SettingsWrite, and "no lying UI" requires
+      the visual to reflect the rejected state. Phase 2 will fire
+      the visual flip only when the broker accepts.
+
+  - action: "Create `crates/ato-desktop/src/window/settings_window.rs`"
+    observation: |
+      `SettingsWindowShell` holds the Wry WebView alive; same
+      pattern as `start_window.rs`. `open_settings_window(cx)` spawns
+      a fresh window (no slot — Phase 2 can add focus-reuse if
+      needed). Registers in `OpenContentWindows` with url
+      `ato://settings`, kind `Launcher` (reused for Phase 1; Stage D
+      may add a dedicated Settings variant). Uses
+      `system_capsule::ipc` — no per-window dispatcher.
+
+  - action: "Route `ShowSettings` action to the new window"
+    observation: |
+      `app.rs:501` previously flipped `LauncherViewState::Settings`.
+      Now calls `open_settings_window(cx)` directly. The Launcher's
+      `LauncherView::Settings` GPUI tree is now dead code; Stage D
+      will delete it together with the Launcher window.
+
+  - action: "Add placeholder `assets/system/ato-store/index.html`"
+    observation: |
+      Tiny redirect-to-ato.run page so the `assets/system/<name>/`
+      directory structure is uniform. NOT loaded — `store.rs`
+      still uses `WebViewBuilder::with_url(\"https://ato.run/\")`.
+      Phase 2 will (a) host the registry locally and (b) wire the
+      ato-store IPC for "click capsule card → open AppWindow".
+
+  - action: "Register `settings_window` in `window/mod.rs`"
+    observation: "Alphabetised next to `start_window`."
+
+  - action: "Build"
+    observation: "Clean. 116 warnings (all pre-existing dead-code lints unrelated to this stage)."
+
+  - action: "Hermetic launch + MCP `ShowSettings`"
+    observation: |
+      Log:
+        focus dispatcher routes action action=ShowSettings
+      settings-window-stage-c.png shows the new Settings window
+      with full HTML content matching R28 layout:
+        - Left nav with "スタートに戻る" + 9 nav items (セキュリティ
+          active)
+        - Settings header + security card + stats + toggles +
+          publishers + privacy row
+      Control Bar URL field (visible at top) reads `ato://settings`
+      — the system-capsule identity scheme. Badge=3 (Store +
+      Settings + bar registry sentinel).
+
+agent_observation:
+  user_visible_problem: "No visible regression. Settings now lives in its own dedicated window under the system-capsule abstraction. Users see the same controls; the broker enforces the read/write split so toggle clicks are no-ops (Phase 1 keeps SettingsWrite gated)."
+  likely_cause: "Stage B proved system_capsule::ipc + CapabilityBroker enforce the manifest allowlist. Stage C uses that infrastructure to host a real privileged UI — the Settings view — with the same gating. The architectural intent (system capsules are bounded UIs) is now demonstrated at the user-facing layer."
+  suggested_fix:
+    - "Already shipped Stage C: ato-settings HTML + settings_window + ShowSettings routing + ato-store placeholder asset."
+    - "Stage D — retire the Launcher window (delete launcher.rs, drop OpenLauncherWindow, simplify the Control Bar's Settings cog to dispatch ShowSettings alone)."
+    - "Stage D — migrate ato-web-viewer chrome (WebLinkView's tab strip + back/forward/reload) to HTML at capsule://system/ato-web-viewer/."
+    - "Future (Phase 2): the Settings consent flow that opens SettingsWrite. Toggle visual state should flip only after the broker accepts."
+
+evidence:
+  - settings-window-stage-c.png
+
+status: "fixed"

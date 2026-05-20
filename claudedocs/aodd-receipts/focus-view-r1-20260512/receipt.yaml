@@ -1,0 +1,71 @@
+usecase: "Spawn an AppWindow + Control Bar via the multi-window Focus View scaffolding and visually evaluate against the redesign reference"
+actor: "Autonomous Claude Operator driving ato-desktop via ato-desktop-mcp (stdio JSON-RPC)"
+goal: "Capture a screenshot showing the AppWindow + Control Bar so the Focus View can be visually compared to the reference mockups"
+entry_point: "Hermetic ato-desktop launched with ATO_DESKTOP_MULTI_WINDOW=1 and short-path ATO_HOME (/tmp/ato-aodd) to keep automation-socket pathname under SUN_LEN"
+out_of_scope:
+  - "Do not modify the user's real ~/.ato state"
+  - "Do not kill processes the user started outside the AODD run"
+time_budget: "10 minutes"
+
+result: "blocked"
+
+steps:
+  - action: "tools/call host_take_screenshot (initial sanity)"
+    observation: "PNG written at /tmp/ato-aodd/ato-home/aodd/host-...png. Shows macOS wallpaper + 'Code' (VS Code) menu bar. ato-desktop not in foreground yet."
+  - action: "tools/call host_activate_app (process_name='ato-desktop')"
+    observation: "osascript returned ok:true. Menu bar in next screenshot flipped to 'ato-desktop / Edit'."
+  - action: "tools/call host_take_screenshot (post-activate)"
+    observation: "Wallpaper still visible. Menu bar shows 'ato-desktop' as foreground app, but NO ato-desktop window is anywhere on screen. Process is alive (pid 36311), automation socket is listening, AppleScript visible-of-process returns 'true'."
+    stuck_at: "ato-desktop process is foregrounded but renders no visible window in hermetic env"
+  - action: "tools/call host_press_key (key='n', modifiers=['command','shift']) — attempt to spawn AppWindow via the redesign's cmd-shift-N action"
+    observation: "MCP returned isError:true with osascript error 1002: '補助アクセスは許可されません' (Accessibility access is not granted). No keystroke was delivered."
+    stuck_at: "macOS Accessibility permission missing for the terminal running ato-desktop-mcp; System Events keystroke / window enumeration both blocked"
+  - action: "tools/call host_take_screenshot (post-failed-keystroke)"
+    observation: "No change. Confirms the keystroke did not fire — same wallpaper, same idle menu bar."
+
+agent_observation:
+  user_visible_problem: |
+    Two compounding frictions stop AODD from progressing beyond the
+    process-launch step:
+    1. The redesigned ato-desktop opens with no visible window in a
+       hermetic env, even though the process is alive and the menu bar
+       reflects it as foregrounded. A first-time user would think the
+       app crashed.
+    2. The MCP's `host_press_key` and any `osascript`-based window
+       enumeration require macOS Accessibility permission, which is
+       granted per-application (Terminal / iTerm / claude-code host)
+       and cannot be requested from inside the MCP. Without it the
+       Operator is blind (no window inventory) AND mute (no key input).
+
+  likely_cause: |
+    Friction 1: investigation needed. Hypotheses:
+    - The window might be opening on a different macOS Space than the
+      one being captured (the hermetic env has no saved Space/window
+      preferences, so GPUI may default to an unexpected screen).
+    - `cx.activate(true)` may be racing with `cx.open_window` and the
+      window's first-render is somehow getting collapsed.
+    - The window decorations setting (`Client`) combined with no
+      titlebar tab in some code paths leaves zero on-screen geometry.
+
+    Friction 2: structural. osascript+System Events is the only macOS
+    affordance for synthetic keystrokes without third-party tools, and
+    it gates the entire feature on a one-time system-preferences
+    action. This is not a bug — it is the platform contract.
+
+  suggested_fix:
+    - "Add a new MCP tool `host_dispatch_action` that routes through the existing automation Unix socket to invoke ato-desktop's named GPUI actions directly (OpenAppWindowExperiment, OpenLauncherWindow, OpenCardSwitcher, …). This bypasses Accessibility entirely because the action is dispatched in-process by ato-desktop itself, not synthesised by AppKit."
+    - "Add tracing::info!(...) at every `cx.open_window` call in `app.rs` and `window/orchestrator.rs` so the desktop log records when and where each window appears. Friction 1 needs visibility into 'did the window even open' before we can debug placement."
+    - "Investigate `WindowOptions::window_bounds` defaults in hermetic env. The current code uses `Bounds::centered(None, size(px(1440.0), px(920.0)), cx)` which should always be visible on a primary display."
+    - "Document the Accessibility permission requirement in ato-cli-desktop-testing skill so future AODD runs grant it up front."
+
+evidence:
+  - step1-initial.png
+  - step3-after-activate.png
+  - step5-after-failed-keystroke.png
+  - desktop-log-excerpt: |
+      ato-desktop starting version=0.5.1 os=macos arch=aarch64 pid=36311
+      automation socket listening socket=/tmp/ato-aodd/ato-home/run/ato-desktop-36311.sock
+      normalized SVG icon to PNG input_bytes=437103 output_bytes=2862
+      (no further window-related log lines)
+
+status: "open"

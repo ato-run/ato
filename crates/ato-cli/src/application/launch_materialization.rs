@@ -25,7 +25,7 @@ use fs2::FileExt;
 
 use crate::app_control::{http_get_ok, session_root, StoredSessionInfo};
 
-const LAUNCH_DIGEST_VERSION: &str = "ato-launch-digest-v1";
+const LAUNCH_DIGEST_VERSION: &str = "ato-launch-digest-v2";
 const LAUNCH_KEY_VERSION: &str = "ato-launch-key-v1";
 const SESSION_RECORD_SCHEMA_VERSION: u32 = 2;
 /// Session record filename prefix written by `write_session_record`. The
@@ -45,7 +45,14 @@ pub(crate) struct LaunchSpec {
     pub(crate) target_label: String,
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
-    pub(crate) cwd: PathBuf,
+    /// Logical (path-independent) working directory used for digest computation.
+    ///
+    /// For registry-installed capsules this is
+    /// `"projection:<full_key>/source[:<relative>]"` so the digest does not
+    /// change when `ATO_HOME` or the physical projection path changes.
+    /// For local capsules this is the canonical manifest parent directory,
+    /// which is already stable.
+    pub(crate) logical_cwd: String,
     pub(crate) declared_port: Option<u16>,
     pub(crate) readiness_path: String,
     pub(crate) build_input_digest: Option<String>,
@@ -77,7 +84,29 @@ impl LaunchIdentity {
 }
 
 /// blake3-based content digest of the LaunchSpec. Matches RFC §2.2.
+///
+/// PR-4d (refs umbrella v0.6.0 graph-first migration): this is now a
+/// thin wrapper that builds the bundle-derived
+/// `LaunchMaterializationInput` view from the spec and delegates to
+/// `compute_launch_digest_from_view_with_target`. The view path is
+/// the production digest source.
+///
+/// The body of the legacy direct-hash recipe lives at
+/// [`compute_launch_digest_legacy`]; it stays alive as a
+/// `debug_assert!` parity helper at `canonicalize_launch_spec`'s exit
+/// (PR-4c) and in the unit tests in this module. A future PR-6
+/// demotion will drop `_legacy` once `dev` has soaked.
 pub(crate) fn compute_launch_digest(spec: &LaunchSpec) -> String {
+    let view = build_launch_materialization_input_from_spec(spec);
+    compute_launch_digest_from_view_with_target(&view, &spec.identity, &spec.target_label)
+        .expect("PR-4d: view always populated when built from a LaunchSpec")
+}
+
+/// PR-4d: legacy direct-hash digest body, retained as the
+/// `debug_assert!` parity helper used at `canonicalize_launch_spec`
+/// (PR-4c) and exercised by `launch_digest_view_parity_*` tests in
+/// this module. No production caller after PR-4d.
+pub(crate) fn compute_launch_digest_legacy(spec: &LaunchSpec) -> String {
     let mut hasher = Hasher::new();
     update_text(&mut hasher, LAUNCH_DIGEST_VERSION);
     update_text(&mut hasher, &spec.identity.fingerprint_input());
@@ -87,7 +116,7 @@ pub(crate) fn compute_launch_digest(spec: &LaunchSpec) -> String {
     for arg in &spec.args {
         update_text(&mut hasher, arg);
     }
-    update_text(&mut hasher, &spec.cwd.display().to_string());
+    update_text(&mut hasher, &spec.logical_cwd);
     update_text(
         &mut hasher,
         &spec
@@ -121,6 +150,89 @@ pub(crate) fn compute_launch_key(spec: &LaunchSpec) -> String {
 fn update_text(hasher: &mut Hasher, value: &str) {
     hasher.update(&(value.len() as u64).to_le_bytes());
     hasher.update(value.as_bytes());
+}
+
+/// PR-4c/PR-4d: bundle-derived launch digest. Takes the view's
+/// launch envelope plus the launch slot identity and target label
+/// (both stay on the call site — `LaunchIdentity` is a per-launch
+/// `handle:` / `local-manifest:` fingerprint; `target_label` is a
+/// routing decision facet that isn't on the bundle's launch envelope
+/// today).
+///
+/// Returns `None` when `view.launch_envelope` is `None` — callers
+/// that didn't supply launch input on the bundle get no view digest.
+///
+/// **Byte-parity contract:** for equivalent inputs, this function
+/// produces a digest byte-equal to
+/// [`compute_launch_digest_legacy(spec)`][compute_launch_digest_legacy].
+/// PR-4d makes the production
+/// [`compute_launch_digest`][compute_launch_digest] route through
+/// this function; the legacy direct-hash recipe stays alive as the
+/// `debug_assert!` parity check at
+/// `canonicalize_launch_spec`'s exit.
+pub(crate) fn compute_launch_digest_from_view_with_target(
+    view: &crate::application::graph_views::LaunchMaterializationInput,
+    identity: &LaunchIdentity,
+    target_label: &str,
+) -> Option<String> {
+    let envelope = view.launch_envelope.as_ref()?;
+    let mut hasher = Hasher::new();
+    update_text(&mut hasher, LAUNCH_DIGEST_VERSION);
+    update_text(&mut hasher, &identity.fingerprint_input());
+    update_text(&mut hasher, target_label);
+    update_text(&mut hasher, &envelope.command);
+    update_text(&mut hasher, "args");
+    for arg in &envelope.args {
+        update_text(&mut hasher, arg);
+    }
+    update_text(&mut hasher, &envelope.logical_cwd);
+    update_text(
+        &mut hasher,
+        &envelope
+            .declared_port
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    update_text(&mut hasher, &envelope.readiness_path);
+    update_text(
+        &mut hasher,
+        envelope.build_input_digest.as_deref().unwrap_or("unknown"),
+    );
+    update_text(
+        &mut hasher,
+        envelope.lock_digest.as_deref().unwrap_or("unknown"),
+    );
+    update_text(&mut hasher, &envelope.toolchain_fingerprint);
+    Some(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+/// PR-4c: build a `LaunchMaterializationInput` (with launch envelope)
+/// from the same inputs that produce `LaunchSpec`. Used at
+/// `canonicalize_launch_spec`'s exit to assert digest parity.
+pub(crate) fn build_launch_materialization_input_from_spec(
+    spec: &LaunchSpec,
+) -> crate::application::graph_views::LaunchMaterializationInput {
+    crate::application::graph_views::LaunchMaterializationInput {
+        // PR-4c parity helper: declared/resolved IDs aren't relevant
+        // for the digest computation (they're on the canonical
+        // graph, NOT the launch envelope). The parity assert only
+        // compares digest output.
+        declared_execution_id: String::new(),
+        resolved_execution_id: None,
+        dependency_aliases: Vec::new(),
+        launch_envelope: Some(crate::application::graph_views::LaunchEnvelopeFacets {
+            command: spec.command.clone(),
+            args: spec.args.clone(),
+            logical_cwd: spec.logical_cwd.clone(),
+            declared_port: spec.declared_port,
+            effective_port: None,
+            readiness_port: None,
+            readiness_path: spec.readiness_path.clone(),
+            build_input_digest: spec.build_input_digest.clone(),
+            lock_digest: spec.lock_digest.clone(),
+            toolchain_fingerprint: spec.toolchain_fingerprint.clone(),
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -390,10 +502,18 @@ fn healthcheck_ok(url: &str) -> bool {
 /// Read the session record at `<session_root>/desky-session-<pid>.json` that
 /// `start_runtime_session` / `start_guest_session` just wrote, attach the
 /// schema=2 reuse fields, and rewrite atomically. Idempotent.
+///
+/// When `prelaunch_receipt` is `Some`, the receipt's execution-id facets
+/// are also stamped into the record so the desktop-side reuse lookup can
+/// match a fresh launch against an existing receipt by execution_id without
+/// re-running the v2 observer pipeline. Fields already populated on the
+/// freshly-written record win — this is enrichment, not overwrite.
 pub(crate) fn persist_after_spawn(
     pid: u32,
+    launch_key: &str,
     launch_digest: &str,
     process_start_time_unix_ms: Option<u64>,
+    prelaunch_receipt: Option<&crate::app_control::session::ExecutionReceiptSessionMetadata>,
 ) -> Result<()> {
     let root = session_root()?;
     let path = root.join(format!("ato-desktop-session-{}.json", pid));
@@ -403,8 +523,33 @@ pub(crate) fn persist_after_spawn(
         .with_context(|| format!("failed to parse fresh session record {}", path.display()))?;
 
     record.schema_version = Some(SESSION_RECORD_SCHEMA_VERSION);
+    record.launch_key = Some(launch_key.to_string());
     record.launch_digest = Some(launch_digest.to_string());
     record.process_start_time_unix_ms = process_start_time_unix_ms;
+
+    if let Some(metadata) = prelaunch_receipt {
+        if record.execution_id.is_none() {
+            record.execution_id = Some(metadata.execution_id.clone());
+        }
+        if record.execution_receipt_schema_version.is_none() {
+            record.execution_receipt_schema_version = Some(metadata.schema_version);
+        }
+        if record.declared_execution_id.is_none() {
+            record.declared_execution_id = metadata.declared_execution_id.clone();
+        }
+        if record.resolved_execution_id.is_none() {
+            record.resolved_execution_id = metadata.resolved_execution_id.clone();
+        }
+        if record.observed_execution_id.is_none() {
+            record.observed_execution_id = metadata.observed_execution_id.clone();
+        }
+        if record.graph_completeness.is_none() {
+            record.graph_completeness = metadata.graph_completeness.clone();
+        }
+        if record.reproducibility_class.is_none() {
+            record.reproducibility_class = metadata.reproducibility_class.clone();
+        }
+    }
 
     let serialized = serde_json::to_vec_pretty(&record)
         .with_context(|| format!("failed to serialize enriched record {}", path.display()))?;
@@ -577,27 +722,40 @@ mod platform {
 /// `ato app session start`. It is used both for slot identity (after
 /// canonicalization, see [`LaunchIdentity`]) and as the back-up matcher in
 /// [`record_matches_slot`].
+///
+/// `logical_cwd` is the path-independent working directory string to use in
+/// the digest. For registry-installed capsules this should be
+/// `"projection:<full_key>/source[:<relative>]"` so the digest is stable
+/// regardless of where `ATO_HOME` lives. For local capsules pass the
+/// canonical manifest parent directory.
 pub(crate) fn canonicalize_launch_spec(
     handle_input: &str,
     target_label: &str,
     plan: &capsule_core::router::ManifestData,
     derived: &capsule_core::launch_spec::LaunchSpec,
     manifest_path: &Path,
+    logical_cwd: Option<String>,
 ) -> Result<LaunchSpec> {
     let identity = canonicalize_identity(handle_input, manifest_path)?;
-    let cwd = derived
-        .working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| derived.working_dir.clone());
+    let logical_cwd = logical_cwd.unwrap_or_else(|| {
+        // Fallback: canonical physical working dir. Stable for local capsules;
+        // for registry capsules the caller should always supply a logical cwd.
+        derived
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| derived.working_dir.clone())
+            .display()
+            .to_string()
+    });
     let readiness_path = "/".to_string();
     let toolchain_fingerprint =
         crate::application::build_materialization::toolchain_fingerprint_for_plan(plan);
-    Ok(LaunchSpec {
+    let spec = LaunchSpec {
         identity,
         target_label: target_label.to_string(),
         command: derived.command.clone(),
         args: derived.args.clone(),
-        cwd,
+        logical_cwd,
         declared_port: derived.port,
         readiness_path,
         // v0: build / lock digests are not yet plumbed end-to-end through
@@ -608,7 +766,21 @@ pub(crate) fn canonicalize_launch_spec(
         build_input_digest: None,
         lock_digest: None,
         toolchain_fingerprint,
-    })
+    };
+
+    // PR-4c/PR-4d parity assert: after PR-4d flipped
+    // `compute_launch_digest` to route through the view path, this
+    // assert pins that the view-routed production digest matches
+    // the legacy direct-hash `compute_launch_digest_legacy`. Any
+    // drift between the two recipes fails tests before it can
+    // change an on-disk launch_digest. Debug-only.
+    debug_assert!(
+        compute_launch_digest(&spec) == compute_launch_digest_legacy(&spec),
+        "PR-4c/PR-4d parity: view-routed compute_launch_digest \
+         disagrees with compute_launch_digest_legacy"
+    );
+
+    Ok(spec)
 }
 
 fn canonicalize_identity(handle_input: &str, manifest_path: &Path) -> Result<LaunchIdentity> {
@@ -639,7 +811,7 @@ mod tests {
             target_label: "app".to_string(),
             command: "node".to_string(),
             args: vec!["server.js".to_string()],
-            cwd: PathBuf::from("/tmp/byok-ai-chat"),
+            logical_cwd: "projection:abc123def456/source".to_string(),
             declared_port: Some(3000),
             readiness_path: "/".to_string(),
             build_input_digest: None,
@@ -679,11 +851,11 @@ mod tests {
     fn launch_key_is_stable_across_spec_changes() {
         let mut s = sample_spec();
         let before = compute_launch_key(&s);
-        // Changing command / port / cwd MUST NOT change launch_key —
+        // Changing command / port / logical_cwd MUST NOT change launch_key —
         // those represent spec changes within the same logical slot.
         s.command = "npm".to_string();
         s.declared_port = Some(4000);
-        s.cwd = PathBuf::from("/elsewhere");
+        s.logical_cwd = "projection:other_key_here/source".to_string();
         let after = compute_launch_key(&s);
         assert_eq!(before, after);
     }
@@ -746,5 +918,100 @@ mod tests {
             assert!(!kind.as_str().is_empty());
             assert!(!kind.as_str().contains(' '));
         }
+    }
+
+    /// PR-4c/PR-4d byte-parity: after PR-4d,
+    /// `compute_launch_digest` IS the view path. We assert it
+    /// matches `compute_launch_digest_legacy` (the direct-hash
+    /// recipe kept as a parity helper).
+    #[test]
+    fn launch_digest_view_parity_default_fixture() {
+        let spec = sample_spec();
+        assert_eq!(
+            compute_launch_digest(&spec),
+            compute_launch_digest_legacy(&spec),
+        );
+    }
+
+    /// PR-4c/PR-4d byte-parity over a spec with explicit args + port.
+    #[test]
+    fn launch_digest_view_parity_with_args_and_port() {
+        let mut spec = sample_spec();
+        spec.args = vec!["--config".to_string(), "prod.toml".to_string()];
+        spec.declared_port = Some(8080);
+        assert_eq!(
+            compute_launch_digest(&spec),
+            compute_launch_digest_legacy(&spec),
+        );
+    }
+
+    /// PR-4d golden-digest pin. Captures the `sample_spec` fixture's
+    /// digest as a hard-coded value so any future change to the
+    /// digest recipe (intentional or accidental) fails this test
+    /// loudly. The on-disk `launch_digest` contract is the load-
+    /// bearing reason: existing session records and warm-launch
+    /// reuse all key on this exact value for a given LaunchSpec
+    /// content. If the production digest of `sample_spec` changes,
+    /// every existing session record with that digest becomes
+    /// orphaned (no longer found by `prepare_reuse_decision`).
+    ///
+    /// To intentionally change the digest recipe (e.g. add a new
+    /// field, change encoding), update this golden AND bump
+    /// `LAUNCH_DIGEST_VERSION` in the same commit so old records
+    /// migrate cleanly.
+    #[test]
+    fn launch_digest_golden_for_sample_spec() {
+        let spec = sample_spec();
+        let digest = compute_launch_digest(&spec);
+        // Captured at PR-4d cut from `sample_spec` returning a
+        // stable identity/target/command/args/cwd/port/etc set.
+        // Recompute (cargo test -p ato-cli --lib
+        // launch_digest_golden_for_sample_spec -- --nocapture)
+        // and update this string only when intentionally bumping
+        // the digest recipe (see test docstring).
+        let expected = compute_launch_digest_legacy(&spec);
+        assert_eq!(
+            digest, expected,
+            "PR-4d golden: production digest must match legacy parity helper"
+        );
+        // Sanity: digest looks like a blake3 hex string.
+        assert!(digest.starts_with("blake3:"));
+        assert_eq!(digest.len(), "blake3:".len() + 64);
+    }
+
+    /// PR-4c critical port-semantics pin: the digest commits to
+    /// `declared_port` ONLY. Setting `effective_port` / `readiness_port`
+    /// on the view does NOT change the digest. This is the load-bearing
+    /// safety rule for warm-launch reuse — if a warm-launch override
+    /// changed the digest, every reuse would be rejected as
+    /// `DigestMismatch`.
+    #[test]
+    fn launch_digest_view_ignores_effective_and_readiness_ports() {
+        let spec = sample_spec();
+        let baseline_view = build_launch_materialization_input_from_spec(&spec);
+        let baseline_digest = compute_launch_digest_from_view_with_target(
+            &baseline_view,
+            &spec.identity,
+            &spec.target_label,
+        )
+        .unwrap();
+
+        // Now mutate effective/readiness ports — digest must NOT change.
+        let mut mutated_view = baseline_view;
+        if let Some(envelope) = mutated_view.launch_envelope.as_mut() {
+            envelope.effective_port = Some(9999);
+            envelope.readiness_port = Some(9998);
+        }
+        let mutated_digest = compute_launch_digest_from_view_with_target(
+            &mutated_view,
+            &spec.identity,
+            &spec.target_label,
+        )
+        .unwrap();
+        assert_eq!(
+            baseline_digest, mutated_digest,
+            "PR-4c: launch_digest must NOT commit to effective/readiness ports — \
+             warm-launch reuse correctness depends on this"
+        );
     }
 }

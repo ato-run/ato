@@ -1,0 +1,96 @@
+usecase: "Card Switcher cards and StartWindow tiles render with enough fidelity to be recognisable as the reference designs (.tmp/window-list.png, .tmp/start-window.png)."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Per-kind card previews look like real app UIs (line chart for AppWindow, settings nav+content for Launcher, store rows, start-page mock); StartWindow has proper visual hierarchy (gradient pucks, SVG store glyphs, depth on cards)."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r34b"
+out_of_scope:
+  - "Migrating to `ato-internal://` custom protocol (the user's recommended architecture)."
+  - "TypeScript build pipeline + React/Solid/Lit framework."
+  - "JSON-RPC 2.0 IPC envelope (current `{action, ...}` is the minimal shape; can be upgraded later)."
+  - "Real per-app icon assets in the dock (still rendering letter tiles)."
+  - "Real WKWebView snapshots in card previews — these CSS mocks are intentionally abstract."
+time_budget: "60 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports R33's HTML migration shipped but the design has not materially changed — still feels far from references"
+    observation: |
+      Re-running the build in current state shows the HTML pages do
+      load (visible from the violet wash, proper layout, header puck),
+      but several visual gaps remain:
+        - Card Switcher previews were abstract CSS mocks (a few bars,
+          a 3x3 grid). The reference window-list.png shows distinct
+          per-app UIs (chart with stats, code editor, query view,
+          chat bubbles).
+        - StartWindow row icons were flat coloured squares + letter.
+          The reference has more depth and richer visual weight.
+        - Dock tiles were single-flat-colour. References use rounded
+          squares with subtle gradients suggesting macOS dock.
+
+  - action: "Rewrite switcher.html previews to be app-shaped"
+    observation: |
+      AppWindow → SVG line chart with gradient fill + data points,
+        'アクティブ' green tag, '93%' indicator, two stat tiles
+        (セッション 1,240 / 同期 92%).
+      Store → list of 5 colored package rows with arrow chevrons.
+      Start → mock search bar + 2x2 quick-action grid + 3-row recent
+        list (mirrors the actual start.html layout in miniature).
+      Launcher → 6-row nav rail (second row indigo = active) + 3
+        content cards with bars (mirrors settings.html nav+main).
+      Active card now has a 2px indigo border + indigo box shadow
+      glow, much more prominent than R33's plain border-color flip.
+      Header puck switched to a violet gradient (ddd6fe → c4b5fd)
+      with a soft drop shadow. Dock tiles got a gradient + scale-on-
+      hover transition.
+
+  - action: "Refine start.html quick-action pucks and row icons"
+    observation: |
+      Quick-action pucks now use accent-tinted gradients (e.g. sky:
+      e0f2fe → bae6fd) so the icon reads as 'glowing' rather than
+      a flat patch. Row icons in 最近のセッション use accent
+      linear-gradients matching their letter colour. Store rows now
+      use proper SVG glyphs (chart bars / memory chips / mic / grid)
+      instead of a single grid SVG for all. Dock tiles also use
+      gradients for visual depth.
+
+  - action: "Build + launch hermetic Focus mode + screencap switcher with 4 windows"
+    observation: |
+      after-switcher.png shows the rebuilt previews:
+        - Launcher card (active, indigo border + glow): real-looking
+          settings panel with active indigo row in nav
+        - WasedaP2P card: actual line chart with data points + tag
+          and stat tiles
+        - 新しいウィンドウ card: mini start page
+        - ストア card: 5-row package list
+      Bottom dock tiles have gradient depth + plus tile.
+
+  - action: "Screencap StartWindow"
+    observation: |
+      after-startwindow.png shows:
+        - Violet gradient header puck
+        - Pill-shaped search bar with kbd chip
+        - 4 quick-action tiles with accent-tinted gradient pucks
+          (sky / amber / violet / indigo)
+        - 最近のセッション rows with gradient letter icons
+        - ストア rows with proper SVG glyphs (chart / memory / mic / grid)
+          on accent-tinted backgrounds
+        - Bottom dock pill with gradient tiles
+      Visual depth is dramatically improved vs the previous flat
+      rendering.
+
+agent_observation:
+  user_visible_problem: "Design has materially moved towards the reference. Cards now look like miniature app screenshots; StartWindow has proper visual hierarchy and depth. The user's complaint about 'design hasn't actually changed' is addressed at the layer it operates on (CSS / HTML fidelity)."
+  likely_cause: "R33 shipped the HTML architecture but kept previews extremely abstract — the architecture change was invisible at a glance. R34 puts the visual investment where the user feels it: inside the cards and tiles."
+  suggested_fix:
+    - "Already shipped: detailed per-kind CSS+SVG previews + gradient pucks + active card glow + SVG glyphs for store rows + gradient dock tiles."
+    - "Future (user's recommended path): migrate to `ato-internal://` custom protocol, TypeScript with a small framework (Lit recommended for size), JSON-RPC 2.0 IPC envelope, strict navigation handler. This is an architecture refactor — visual fidelity is independent."
+    - "Future: bundle per-app icon SVG assets and serve via the same custom protocol, replacing letter tiles in the dock and recent-sessions rows."
+    - "Future: real WKWebView snapshots inside the AppWindow card preview — wire a `windows.snapshot {windowId}` IPC route + host-side `WKWebView.takeSnapshot` handler."
+
+evidence:
+  - before-improvements.png
+  - after-close-switcher.png
+  - after-switcher.png
+  - after-startwindow.png
+
+status: "fixed"

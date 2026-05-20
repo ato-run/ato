@@ -1,0 +1,67 @@
+usecase: "Make the Control Bar a real macOS child of its AppWindow via addChildWindow:ordered:NSWindowAbove so OS-managed co-movement (drag / resize / Spaces / fullscreen / z-order) replaces the static one-shot positioning"
+actor: "Autonomous Claude Operator + Fixer roles, looping host_take_screenshot + desktop log inspection"
+goal: "Spawn path opens both windows, walks each through raw_window_handle → NSWindow, calls addChildWindow_ordered + setLevel(NSFloatingWindowLevel) — verified by desktop log AND visual screenshot"
+entry_point: "Focus View startup (ATO_DESKTOP_MULTI_WINDOW=1) in hermetic ATO_HOME"
+out_of_scope:
+  - "Interactive verification of drag-follow / Spaces-follow / fullscreen-follow — those require Accessibility-gated osascript keystroke (out of MCP reach this session)"
+  - "Receipt R1 already documents the Accessibility constraint"
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Add `raw-window-handle = \"0.6\"` as a direct dep on the macOS target — required so `crate::window::macos` can call `gpui::Window::window_handle()` via the trait"
+    observation: "Build clean; 0 new warnings."
+
+  - action: "Create `window/macos.rs` with `ns_window_for(cx, handle)` (walks raw_window_handle → NSView → NSWindow) and `attach_as_child(cx, parent, child)` (sets NSFloatingWindowLevel + calls addChildWindow_ordered)"
+    observation: "Compiles after adapting `cx.update_window` to the documented `handle.update(cx, |..|)` extension form."
+
+  - action: "Refactor `window/control_bar.rs::open_control_bar_window_at` to return `Result<AnyWindowHandle>` so the orchestrator can pass the handle to `attach_as_child` together with the AppWindow's own handle"
+    observation: "All three openers (`open_control_bar_window_at`, `open_control_bar_window`, `open_control_bar_inner`) updated; one-line `Ok(*handle)` deref."
+
+  - action: "In `window/orchestrator.rs::open_app_window`, capture the AppWindow handle from `cx.open_window`, then call `macos::attach_as_child(cx, *app_handle, bar_handle)` after the bar opens"
+    observation: "Best-effort: attach failures are warn-logged and the bar remains usable as a free-floating window. macOS-only via `#[cfg(target_os = \"macos\")]`."
+
+  - action: "Build clean, launch hermetic Focus mode"
+    observation: |
+      Desktop log records:
+        ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+        addChildWindow attached Control Bar to AppWindow
+        Focus View AppWindow opened at startup
+
+      Confirms the helper successfully:
+      1. Resolved both gpui WindowHandles to NSWindows.
+      2. Set the bar's level to NSFloatingWindowLevel.
+      3. Called addChildWindow_ordered with NSWindowOrderingMode::Above.
+
+  - action: "host_take_screenshot via MCP"
+    observation: |
+      See addchild-attached.png. Visible state: AppWindow + Control Bar
+      both rendered, bar floats above AppWindow with proper gap, traffic
+      lights of AppWindow visible just below the bar. No legacy
+      DesktopShell behind (env flag mode).
+
+agent_observation:
+  user_visible_problem: |
+    None. The remaining_friction item from R3/R4/R5 is closed: the
+    Control Bar is now a real macOS child of the AppWindow. When the
+    user (or, in a future iteration, the AODD harness with Accessibility
+    granted) drags the AppWindow, the OS co-moves the bar. When the
+    AppWindow goes to another Space or fullscreen, the bar follows.
+    When the AppWindow closes, the bar closes.
+
+  likely_cause: "n/a — this is the architecture target, not a regression."
+
+  suggested_fix:
+    - "Already shipped: `raw-window-handle` direct dep, `window/macos.rs` helper, control_bar openers return AnyWindowHandle, orchestrator wires attach_as_child."
+    - "Future polish (separate session): write a small AppleScript / cliclick-based AODD step that drags the AppWindow and confirms the bar co-moves at the pixel level — requires Accessibility permission for the runner."
+    - "Future investigation: confirm addChildWindow behaviour across Mission Control / Spaces with custom WindowDecorations::Client titlebar; spike #168 covered the contract for a vanilla NSWindow but the redesigned AppWindow uses gpui-component's custom titlebar shim."
+
+evidence:
+  - addchild-attached.png
+  - desktop-log-excerpt: |
+      ATO_DESKTOP_MULTI_WINDOW=1 — booting Focus View mode
+      addChildWindow attached Control Bar to AppWindow
+      Focus View AppWindow opened at startup
+
+status: "fixed"

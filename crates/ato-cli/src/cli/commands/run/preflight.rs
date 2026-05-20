@@ -267,6 +267,45 @@ pub(crate) async fn run_v03_lifecycle_steps(
     for target_label in targets_to_provision {
         let target_plan = plan.with_selected_target(target_label.clone());
         let working_dir = dependency_root(&target_plan);
+
+        // Log lifecycle phase context for debugging workspace isolation issues.
+        // Gate behind ATO_DEBUG_LIFECYCLE=1 to avoid verbose output in normal runs.
+        if std::env::var_os("ATO_DEBUG_LIFECYCLE").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            let which_bun = std::process::Command::new("which").arg("bun").output().ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+            let node_modules_at_cwd = working_dir.join("node_modules").is_dir();
+            tracing::info!(
+                phase = "pre-install", %target_label,
+                workspace_root = %plan.workspace_root.display(),
+                manifest_dir = %plan.manifest_dir.display(),
+                cwd = %working_dir.display(),
+                which_bun = %which_bun.trim(),
+                node_modules_at_cwd = %node_modules_at_cwd,
+            );
+        }
+
+        // Run install_command before provision (e.g. `bun install` to set up
+        // the package manager before dependency provisioning).
+        if let Some(command) = target_plan
+            .install_command_string()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            reporter
+                .notify(format!("⚙️  Install [{}]: {}", target_label, command))
+                .await?;
+            let extra_path =
+                ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            run_lifecycle_shell_command(
+                &target_plan,
+                launch_ctx,
+                &command,
+                "install",
+                &working_dir,
+                extra_path.as_deref(),
+            )?;
+        }
+
         let cmd_opt = match plan_v03_provision_command(&target_plan)? {
             Some(cmd) => Some(cmd),
             None => fallback_provision_command_from_manifest(
@@ -519,7 +558,11 @@ fn provision_command_from_python_importer(
             .to_string_lossy()
             .replace('\\', "/");
         return Ok(Some(format!(
-            "uv venv{python_pin} --clear && uv pip install -r {requirements_arg}"
+            // setuptools>=72 dropped `pkg_resources`; pin <72 so legacy packages
+            // (e.g. gunicorn<21) that import pkg_resources still work.
+            // Apps that explicitly pin setuptools>=72 in requirements.txt will
+            // get a clear uv conflict error and can remove the implicit constraint.
+            "uv venv{python_pin} --seed --clear && uv pip install -r {requirements_arg} 'setuptools<72'"
         )));
     }
 
@@ -603,12 +646,26 @@ fn run_lifecycle_shell_command(
     let managed_node_path_prefix = if path_prefix_dirs.is_empty() {
         String::new()
     } else {
-        let joined = path_prefix_dirs
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(":");
-        format!("export PATH={joined}:$PATH; ")
+        #[cfg(windows)]
+        {
+            // On Windows, `cmd /C` doesn't understand `export` or `:` separators.
+            // Use `set PATH=<dir>;<dir>;%PATH%&` which cmd.exe does understand.
+            let joined = path_prefix_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";");
+            format!("set \"PATH={joined};%PATH%\"& ")
+        }
+        #[cfg(not(windows))]
+        {
+            let joined = path_prefix_dirs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(":");
+            format!("export PATH={joined}:$PATH; ")
+        }
     };
     let effective_command = format!("{}{}", managed_node_path_prefix, command);
 
@@ -622,7 +679,7 @@ fn run_lifecycle_shell_command(
     #[cfg(not(windows))]
     let mut cmd = {
         let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-lc", &effective_command]);
+        cmd.args(["-c", &effective_command]);
         cmd
     };
 
@@ -1313,7 +1370,7 @@ run_command = "serve.py"
 
         assert_eq!(
             command,
-            "uv venv --python 3.11.10 --clear && uv pip install -r requirements.txt"
+            "uv venv --python 3.11.10 --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
         );
     }
 
@@ -1342,7 +1399,7 @@ run_command = "main.py"
 
         assert_eq!(
             command,
-            "uv venv --clear && uv pip install -r requirements.txt"
+            "uv venv --seed --clear && uv pip install -r requirements.txt 'setuptools<72'"
         );
     }
 
@@ -1371,9 +1428,10 @@ run_command = "main.py"
             .expect("python requirements should provision");
 
         assert!(
-            command.starts_with("uv venv --python 3.11.10 --clear &&"),
+            command.starts_with("uv venv --python 3.11.10 --seed --clear &&"),
             "command={command}"
         );
+        assert!(command.contains("'setuptools<72'"), "command={command}");
     }
 
     #[test]

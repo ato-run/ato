@@ -38,6 +38,21 @@ pub enum CapabilityGrant {
     Clipboard,
     /// Access to screen / screenshot APIs (desktop hosts only).
     ScreenCapture,
+    /// Open a file or project in the host user's editor (desktop + CLI hosts).
+    ///
+    /// Only issued when the capsule manifest declares
+    /// `[[host_capabilities]] name = "open-editor"`.
+    OpenEditor,
+    /// Open a file path using the host OS default application.
+    ///
+    /// Only issued when the capsule manifest declares
+    /// `[[host_capabilities]] name = "open-file"`.
+    OpenFile,
+    /// Reveal a path in the host OS file manager (Finder, Explorer, Nautilus).
+    ///
+    /// Only issued when the capsule manifest declares
+    /// `[[host_capabilities]] name = "reveal-workspace"`.
+    RevealWorkspace,
 }
 
 /// Requests sent from the guest capsule to the host broker.

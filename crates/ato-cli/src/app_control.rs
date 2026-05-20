@@ -21,11 +21,12 @@ use crate::cli::{ModelTierArg, PrivacyModeArg, RepairActionArg};
 mod guest_contract;
 mod latest;
 mod resolve;
-mod session;
+pub(crate) mod session;
 pub(crate) mod session_runner;
 
 pub use latest::fetch_latest;
 pub use resolve::resolve_handle;
+pub(crate) use resolve::resolve_local_plan_for_session;
 pub use session::{start_session, stop_session, watch_parent_and_stop_session};
 
 // App Session Materialization (RFC: APP_SESSION_MATERIALIZATION) consumes a
@@ -34,7 +35,9 @@ pub use session::{start_session, stop_session, watch_parent_and_stop_session};
 // flipping the entire `session` module to public. The session-record
 // schema itself now lives in `ato-session-core` (RFC §3.2 PR 4A.0);
 // `session::StoredSessionInfo` is a re-export of that shared type.
-pub(crate) use session::{http_get_ok, session_root, StoredSessionInfo};
+pub(crate) use session::{
+    http_get_ok, session_root, ExecutionReceiptSessionMetadata, StoredSessionInfo,
+};
 
 /// Canonical package identifier for the ato-desktop control-plane envelope.
 /// Renamed from the legacy `DESKY_PACKAGE_ID` (= "ato/desky") in line with the
@@ -1355,9 +1358,8 @@ mod tests {
         }
     }
 
-    fn test_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::env_lock().lock().expect("env lock")
     }
 
     fn write_fake_binary(dir: &Path, name: &str) {
@@ -1602,7 +1604,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn load_state_marks_missing_service_root_as_unmaterialized() {
-        let _guard = test_env_lock().lock().expect("lock env");
+        let _guard = test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let state_path = temp.path().join("bootstrap-state.json");
         let _state_guard = EnvVarGuard::set(
@@ -1631,7 +1633,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn bootstrap_finalize_materializes_missing_service_root() {
-        let _guard = test_env_lock().lock().expect("lock env");
+        let _guard = test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let state_path = temp.path().join("bootstrap-state.json");
         let bin_dir = temp.path().join("bin");
@@ -1673,7 +1675,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn repair_restart_services_recreates_missing_service_root() {
-        let _guard = test_env_lock().lock().expect("lock env");
+        let _guard = test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let state_path = temp.path().join("bootstrap-state.json");
         let bin_dir = temp.path().join("bin");

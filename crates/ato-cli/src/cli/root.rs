@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use super::app::AppCommands;
 use super::binding::BindingCommands;
 use super::config::{ConfigCommands, EngineCommands};
+use super::import_cmd::ImportArgs;
 use super::inspect::InspectCommands;
 use super::ipc::IpcCommands;
 use super::key::KeyCommands;
@@ -110,7 +111,8 @@ pub(crate) enum Commands {
         #[arg(long, value_enum, default_value_t = EnforcementMode::Strict)]
         enforcement: EnforcementMode,
 
-        /// Explicitly allow Tier2 (python/native) execution via native OS sandbox
+        /// Explicitly allow Tier2 (python/native) execution via native OS sandbox.
+        /// Required for capsules with runtime = "source/native" or "source/python".
         #[arg(long = "sandbox", default_value_t = false)]
         sandbox_mode: bool,
 
@@ -146,7 +148,9 @@ pub(crate) enum Commands {
         #[arg(long = "cache", value_enum, default_value_t = CacheStrategyArg::Auto)]
         cache: CacheStrategyArg,
 
-        /// Skip prompt and auto-install when app-id is not installed
+        /// Skip prompt and auto-install when app-id is not installed.
+        /// Required in CI and any non-TTY context (use `-y` when piping
+        /// output or running without an interactive terminal).
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
 
@@ -200,6 +204,12 @@ pub(crate) enum Commands {
         #[arg(long = "no-build", default_value_t = false, conflicts_with = "rebuild")]
         no_build: bool,
 
+        /// Print the aggregate requirements (secrets, permissions, ports) for this capsule
+        /// without launching it. Exits 0. Only supports local paths and already-cached
+        /// `github.com/<owner>/<repo>` refs; never installs or fetches.
+        #[arg(long = "plan-only", default_value_t = false)]
+        plan_only: bool,
+
         /// Grant read-only access to a host file or directory in sandbox mode
         #[arg(long = "read", value_name = "PATH")]
         read: Vec<String>,
@@ -248,6 +258,12 @@ pub(crate) enum Commands {
         #[arg(long = "capsule")]
         capsule: String,
     },
+
+    #[command(
+        next_help_heading = "Primary Commands",
+        about = "Import a GitHub repository as a source recipe session"
+    )]
+    Import(ImportArgs),
 
     #[command(about = "Inspect or prune the local A1 dependency cache")]
     Cache {
@@ -747,6 +763,9 @@ pub(crate) enum Commands {
         token: Option<String>,
         #[arg(long, default_value_t = false)]
         headless: bool,
+        /// Emit NDJSON events instead of opening a browser (used by ato-desktop).
+        #[arg(long = "desktop-webview", hide = true, default_value_t = false)]
+        desktop_webview: bool,
     },
 
     #[command(hide = true, about = "Logout")]

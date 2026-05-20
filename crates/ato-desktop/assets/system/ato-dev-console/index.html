@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ato Developer Console</title>
+<style>
+/* ── Design tokens ─────────────────────────────────────────── */
+:root {
+  --bg:         #ffffff;
+  --bg-subtle:  #f8f9fb;
+  --border:     #e8eaed;
+  --border-mid: #d1d5db;
+  --text:       #111827;
+  --text-mid:   #4b5563;
+  --text-muted: #9ca3af;
+  --accent:     #4f46e5;
+  --accent-lite:#eef2ff;
+  --accent-mid: #c7d2fe;
+  --green:      #16a34a;
+  --green-bg:   #dcfce7;
+  --amber:      #d97706;
+  --amber-bg:   #fef3c7;
+  --radius-sm:  6px;
+  --radius-md:  10px;
+  --radius-lg:  14px;
+  --shadow-sm:  0 1px 3px rgba(0,0,0,.07);
+  --shadow-md:  0 4px 16px rgba(0,0,0,.10);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  color: var(--text);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); overflow: hidden; }
+
+/* ── Pages ──────────────────────────────────────────────────── */
+.page { display: none; height: 100vh; flex-direction: column; overflow: hidden; }
+.page.active { display: flex; }
+
+/* ══════════════════════════════════════════════════════════════
+   ONBOARDING PAGE
+══════════════════════════════════════════════════════════════ */
+#page-onboarding {
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.onboarding-header {
+  text-align: center;
+  padding: 40px 24px 24px;
+}
+.onboarding-header h1 {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -.4px;
+  margin-bottom: 6px;
+}
+.onboarding-header p {
+  color: var(--text-mid);
+  font-size: 14px;
+}
+
+/* Step progress */
+.step-progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0 24px 28px;
+}
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid var(--border-mid);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: all .2s;
+}
+.step-dot.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.step-dot.done {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.step-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.step-label.active { color: var(--accent); }
+.step-connector {
+  width: 40px;
+  height: 2px;
+  background: var(--border);
+  margin: 0 4px;
+}
+.step-connector.done { background: var(--accent-mid); }
+
+/* Onboarding body — 2 columns */
+.onboarding-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding: 0 24px 24px;
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.onb-panel {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+.onb-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.onb-panel-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: #fff;
+  flex-shrink: 0;
+}
+.onb-panel-title { font-size: 16px; font-weight: 700; }
+.onb-panel-subtitle { font-size: 12px; color: var(--accent); margin-top: 2px; }
+
+/* Form fields */
+.field { margin-bottom: 16px; }
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-mid);
+  margin-bottom: 6px;
+}
+.field input, .field textarea, .field select {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  transition: border-color .15s;
+}
+.field input:focus, .field textarea:focus, .field select:focus {
+  border-color: var(--accent);
+}
+.field textarea { resize: vertical; min-height: 72px; }
+.field-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.field-hint.valid { color: var(--green); }
+
+/* URL slug row */
+.url-slug-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg);
+}
+.url-slug-prefix {
+  padding: 9px 10px;
+  background: var(--bg-subtle);
+  border-right: 1px solid var(--border-mid);
+  font-size: 12px;
+  color: var(--text-mid);
+  white-space: nowrap;
+}
+.url-slug-row input {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  padding: 9px 10px;
+}
+.url-slug-row input:focus { outline: none; }
+.url-slug-check {
+  padding: 9px 10px;
+  font-size: 14px;
+  color: var(--green);
+}
+
+/* Connection buttons */
+.connect-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 4px;
+}
+.connect-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 10px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  cursor: pointer;
+  transition: all .15s;
+  text-align: center;
+}
+.connect-btn:hover { border-color: var(--accent); background: var(--accent-lite); }
+.connect-btn-icon { font-size: 22px; }
+.connect-btn-label { font-size: 12px; font-weight: 600; color: var(--text); }
+.connect-btn-hint { font-size: 11px; color: var(--text-muted); }
+
+/* Value bullets */
+.value-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 16px;
+}
+.value-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+.value-item-icon { font-size: 22px; }
+.value-item-label { font-size: 12px; font-weight: 600; color: var(--text); }
+.value-item-desc { font-size: 11px; color: var(--text-muted); }
+
+/* Preview panel */
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.preview-label { font-size: 13px; font-weight: 600; color: var(--text-mid); }
+.preview-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-mid);
+  cursor: pointer;
+}
+.preview-dock {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.preview-dock-header {
+  padding: 16px;
+  background: linear-gradient(135deg, #312e81 0%, #4c1d95 100%);
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+.preview-dock-avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+.preview-dock-info { flex: 1; }
+.preview-dock-name { font-size: 16px; font-weight: 700; color: #fff; margin-bottom: 2px; }
+.preview-dock-handle { font-size: 12px; color: rgba(255,255,255,.7); }
+.preview-dock-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: rgba(255,255,255,.15);
+  color: #fff;
+  margin-top: 6px;
+  display: inline-block;
+}
+.preview-dock-desc {
+  font-size: 12px;
+  color: rgba(255,255,255,.8);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.preview-dock-body { padding: 14px; }
+.preview-capsules-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-mid);
+  margin-bottom: 10px;
+}
+.preview-capsule-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.preview-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+.preview-chip-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #fff;
+}
+.preview-chip-name { font-weight: 600; }
+.preview-chip-desc { color: var(--text-muted); font-size: 11px; }
+.preview-view-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background .15s;
+}
+.preview-view-link:hover { background: var(--accent-lite); }
+
+/* Footer bar */
+.onboarding-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg);
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+.agree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-mid);
+}
+.agree-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+.agree-row a { color: var(--accent); text-decoration: none; }
+.footer-actions { display: flex; gap: 10px; }
+.btn {
+  padding: 9px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all .15s;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--text-mid);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover { background: var(--bg-subtle); }
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-primary:hover { background: #4338ca; }
+.btn-primary:disabled { background: var(--border-mid); color: #fff; cursor: not-allowed; }
+
+/* ══════════════════════════════════════════════════════════════
+   MAIN CONSOLE PAGE
+══════════════════════════════════════════════════════════════ */
+#page-main { overflow: hidden; }
+
+/* Top header */
+.console-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  -webkit-app-region: drag;
+}
+.console-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  -webkit-app-region: no-drag;
+}
+.console-logo-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.console-logo-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.console-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.org-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  cursor: pointer;
+  transition: background .15s;
+  -webkit-app-region: no-drag;
+}
+.org-selector:hover { background: var(--bg-subtle); }
+.org-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.org-name { font-size: 13px; font-weight: 600; }
+.org-chevron { font-size: 10px; color: var(--text-muted); }
+.header-spacer { flex: 1; }
+.new-capsule-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: background .15s;
+  -webkit-app-region: no-drag;
+}
+.new-capsule-btn:hover { background: #4338ca; }
+.avatar-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-mid);
+  cursor: pointer;
+  position: relative;
+  -webkit-app-region: no-drag;
+}
+.avatar-btn:hover { border-color: var(--accent); }
+
+/* Avatar dropdown */
+.avatar-dropdown {
+  position: absolute;
+  top: 44px;
+  right: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 100;
+  min-width: 160px;
+  overflow: hidden;
+  display: none;
+}
+.avatar-dropdown.open { display: block; }
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .1s;
+}
+.dropdown-item:hover { background: var(--bg-subtle); }
+.dropdown-item-icon { font-size: 16px; }
+
+/* Main content */
+.console-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 32px;
+}
+
+.content-title {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -.5px;
+  margin-bottom: 4px;
+}
+.content-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+}
+
+/* Search + filter bar */
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.search-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 320px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.search-input-wrap input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: var(--text);
+  background: transparent;
+}
+.search-icon { font-size: 14px; color: var(--text-muted); }
+.filter-tabs {
+  display: flex;
+  gap: 4px;
+}
+.filter-tab {
+  padding: 7px 14px;
+  border-radius: 99px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  color: var(--text-mid);
+  transition: all .15s;
+}
+.filter-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.filter-tab:not(.active):hover { background: var(--bg-subtle); }
+
+/* Capsule list */
+.capsule-list { display: flex; flex-direction: column; gap: 0; }
+.capsule-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+  background: var(--bg);
+  transition: box-shadow .15s;
+  cursor: pointer;
+}
+.capsule-row:hover { box-shadow: var(--shadow-sm); }
+.capsule-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.capsule-info { flex: 1; min-width: 0; }
+.capsule-name {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.capsule-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.capsule-type {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 72px;
+  text-align: center;
+}
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 80px;
+  justify-content: center;
+}
+.status-badge.published {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.status-badge.draft {
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.capsule-date {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 120px;
+  text-align: right;
+}
+.capsule-action {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--bg);
+  white-space: nowrap;
+  color: var(--accent);
+  transition: all .15s;
+}
+.capsule-action:hover { background: var(--accent-lite); border-color: var(--accent-mid); }
+.capsule-action.edit { color: var(--text-mid); }
+.capsule-action.edit:hover { background: var(--bg-subtle); }
+
+/* Empty state */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.empty-state-icon { font-size: 48px; margin-bottom: 14px; }
+.empty-state-title { font-size: 16px; font-weight: 700; color: var(--text-mid); margin-bottom: 6px; }
+.empty-state-desc { font-size: 13px; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════
+     PAGE: ONBOARDING
+═══════════════════════════════════════════════════ -->
+<div id="page-onboarding" class="page">
+  <div class="onboarding-header">
+    <h1>Developer Console へようこそ 👋</h1>
+    <p id="onb-subtitle">最初の Dock を作成して、開発者としての拠点をはじめましょう。</p>
+  </div>
+
+  <!-- Step progress -->
+  <div class="step-progress">
+    <div class="step-item">
+      <div class="step-dot active" id="step-dot-1">1</div>
+      <span class="step-label active" id="step-label-1">Dock を作成</span>
+    </div>
+    <div class="step-connector" id="conn-1"></div>
+    <div class="step-item">
+      <div class="step-dot" id="step-dot-2">2</div>
+      <span class="step-label" id="step-label-2">GitHub を接続</span>
+    </div>
+    <div class="step-connector" id="conn-2"></div>
+    <div class="step-item">
+      <div class="step-dot" id="step-dot-3">3</div>
+      <span class="step-label" id="step-label-3">プロフィール設定</span>
+    </div>
+    <div class="step-connector" id="conn-3"></div>
+    <div class="step-item">
+      <div class="step-dot" id="step-dot-4">4</div>
+      <span class="step-label" id="step-label-4">Capsule を公開</span>
+    </div>
+  </div>
+
+  <!-- Body (scrollable) -->
+  <div style="flex:1; overflow-y:auto;">
+    <div class="onboarding-body">
+      <!-- Left: Form -->
+      <div class="onb-panel" id="onb-left">
+        <!-- Step 1: Create Dock -->
+        <div id="step-content-1">
+          <div class="onb-panel-header">
+            <div class="onb-panel-icon">⬡</div>
+            <div>
+              <div class="onb-panel-title">Dock を作成</div>
+              <div class="onb-panel-subtitle">Dock の基本情報を入力しましょう。</div>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:14px; margin-bottom:16px;">
+            <div style="flex-shrink:0;">
+              <label style="font-size:12px; font-weight:600; color:var(--text-mid); margin-bottom:6px; display:block;">Dock アイコン</label>
+              <div id="dock-icon-preview" style="width:80px; height:80px; border-radius:16px; background:linear-gradient(135deg,#312e81,#4c1d95); display:flex; align-items:center; justify-content:center; font-size:30px; font-weight:800; color:#fff; cursor:pointer; position:relative; border:2px dashed transparent; transition:border-color .15s;" onmouseenter="this.style.borderColor='var(--accent)'" onmouseleave="this.style.borderColor='transparent'">
+                <span id="dock-icon-letter">?</span>
+                <div style="position:absolute; bottom:3px; right:3px; width:20px; height:20px; background:rgba(0,0,0,.4); border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:10px;">📷</div>
+              </div>
+            </div>
+            <div style="flex:1;">
+              <div class="field">
+                <label>Dock 名</label>
+                <input type="text" id="dock-name" placeholder="例: Acme Labs" oninput="onDockNameChange()" />
+                <div class="field-hint">公開プロフィールに表示されます。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>ハンドル</label>
+            <div class="url-slug-row">
+              <span class="url-slug-prefix">ato.app/</span>
+              <input type="text" id="dock-handle" placeholder="my-dock" oninput="onHandleChange()" />
+              <span class="url-slug-check" id="handle-check" style="display:none;">✓</span>
+            </div>
+            <div class="field-hint" id="handle-hint">あなたの公開 URL: ato.app/<span id="handle-preview">my-dock</span></div>
+          </div>
+
+          <div>
+            <label style="font-size:12px; font-weight:600; color:var(--text-mid); margin-bottom:8px; display:block;">接続</label>
+            <div class="connect-grid">
+              <div class="connect-btn" onclick="connectGitHub()">
+                <div class="connect-btn-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C6.477 2 2 6.463 2 11.97c0 4.404 2.865 8.14 6.839 9.458.5.091.682-.216.682-.48 0-.236-.009-.864-.013-1.695-2.782.602-3.369-1.337-3.369-1.337-.454-1.151-1.11-1.458-1.11-1.458-.908-.618.069-.606.069-.606 1.003.07 1.531 1.027 1.531 1.027.892 1.524 2.341 1.084 2.91.828.092-.643.35-1.083.636-1.332-2.22-.251-4.555-1.107-4.555-4.927 0-1.088.39-1.979 1.029-2.675-.103-.252-.446-1.266.098-2.638 0 0 .84-.268 2.75 1.022A9.607 9.607 0 0 1 12 6.82c.85.004 1.705.114 2.504.336 1.909-1.29 2.747-1.022 2.747-1.022.546 1.372.202 2.386.1 2.638.64.696 1.028 1.587 1.028 2.675 0 3.83-2.339 4.673-4.566 4.92.359.307.678.915.678 1.846 0 1.332-.012 2.407-.012 2.734 0 .267.18.577.688.48 3.97-1.32 6.833-5.054 6.833-9.458C22 6.463 17.522 2 12 2z" fill="currentColor"/></svg>
+                </div>
+                <div class="connect-btn-label">GitHub を接続</div>
+                <div class="connect-btn-hint">リポジトリをインポートして<br>Capsule を自動作成します。</div>
+              </div>
+              <div class="connect-btn" onclick="importRepo()">
+                <div class="connect-btn-icon">📦</div>
+                <div class="connect-btn-label">リポジトリをインポート</div>
+                <div class="connect-btn-hint">既存のリポジトリを選択して<br>Capsule を追加します。</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="value-grid">
+            <div class="value-item">
+              <div class="value-item-icon">🌐</div>
+              <div class="value-item-label">あなただけの拠点</div>
+              <div class="value-item-desc">公開ページを自動生成</div>
+            </div>
+            <div class="value-item">
+              <div class="value-item-icon">👥</div>
+              <div class="value-item-label">チームで開発</div>
+              <div class="value-item-desc">メンバーと安全に共有</div>
+            </div>
+            <div class="value-item">
+              <div class="value-item-icon">🔒</div>
+              <div class="value-item-label">セキュアな管理</div>
+              <div class="value-item-desc">コードは安全に保護</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Preview -->
+      <div class="onb-panel">
+        <div class="preview-header">
+          <span class="preview-label">公開 Dock プレビュー</span>
+          <span class="preview-badge">公開ページのイメージ</span>
+        </div>
+        <div class="preview-dock">
+          <div class="preview-dock-header">
+            <div class="preview-dock-avatar" id="preview-avatar">?</div>
+            <div class="preview-dock-info">
+              <div class="preview-dock-name" id="preview-name">Dock 名</div>
+              <div class="preview-dock-handle" id="preview-handle">my-dock</div>
+              <div class="preview-dock-status">公開中</div>
+              <div class="preview-dock-desc" id="preview-desc">Dock の説明がここに表示されます。</div>
+            </div>
+          </div>
+          <div class="preview-dock-body">
+            <div class="preview-capsules-label">Capsules <span style="color:var(--accent); font-size:11px;">12 件の Capsule</span></div>
+            <div class="preview-capsule-chips">
+              <div class="preview-chip">
+                <div class="preview-chip-icon">⬡</div>
+                <div><div class="preview-chip-name">WasedaP2P</div><div class="preview-chip-desc">P2P ネットワーク</div></div>
+              </div>
+              <div class="preview-chip">
+                <div class="preview-chip-icon" style="background:linear-gradient(135deg,#16a34a,#15803d);">🛡</div>
+                <div><div class="preview-chip-name">SecureRun</div><div class="preview-chip-desc">セキュア実行環境</div></div>
+              </div>
+              <div class="preview-chip">
+                <div class="preview-chip-icon" style="background:linear-gradient(135deg,#d97706,#b45309);">🔶</div>
+                <div><div class="preview-chip-name">Model Hub</div><div class="preview-chip-desc">AI モデル管理</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="preview-view-link">
+            公開ページを表示 ↗
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="onboarding-footer">
+      <div class="agree-row">
+        <input type="checkbox" id="agree-check" onchange="updateCreateBtn()" />
+        <label for="agree-check"><a href="#">利用規約</a>と<a href="#">公開ポリシー</a>に同意します</label>
+      </div>
+      <div class="footer-actions">
+        <button class="btn btn-ghost" onclick="skipOnboarding()">後で</button>
+        <button class="btn btn-primary" id="create-dock-btn" disabled onclick="createDock()">Dock を作成 →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+     PAGE: MAIN CONSOLE
+═══════════════════════════════════════════════════ -->
+<div id="page-main" class="page">
+  <!-- Header -->
+  <div class="console-header">
+    <div class="console-logo">
+      <div class="console-logo-icon">⬡</div>
+      <div class="console-logo-name">Ato Developer Console</div>
+    </div>
+    <div class="console-divider"></div>
+    <div class="org-selector" onclick="toggleOrgMenu()">
+      <div class="org-icon" id="main-org-icon">W</div>
+      <span class="org-name" id="main-org-name">My Dock</span>
+      <span class="org-chevron">▾</span>
+    </div>
+    <div class="header-spacer"></div>
+    <button class="new-capsule-btn" onclick="newCapsule()">
+      <span>＋</span>
+      <span>New Capsule</span>
+    </button>
+    <div class="avatar-btn" onclick="toggleAvatarMenu()" id="avatar-btn">
+      <span id="avatar-initials">?</span>
+      <div class="avatar-dropdown" id="avatar-dropdown">
+        <div class="dropdown-item" onclick="goMyDock()">
+          <span class="dropdown-item-icon">⬡</span>
+          <span>My Dock</span>
+        </div>
+        <div class="dropdown-item" onclick="goSettings()">
+          <span class="dropdown-item-icon">⚙</span>
+          <span>Settings</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="console-content">
+    <div class="content-title">Capsules</div>
+    <div class="content-subtitle">公開中・下書きのカプセルを管理</div>
+
+    <div class="search-bar">
+      <div class="search-input-wrap">
+        <span class="search-icon">🔍</span>
+        <input type="text" placeholder="カプセルを検索" id="search-input" oninput="filterCapsules()" />
+      </div>
+      <div class="filter-tabs">
+        <div class="filter-tab active" data-filter="all" onclick="setFilter('all')">All</div>
+        <div class="filter-tab" data-filter="published" onclick="setFilter('published')">Published</div>
+        <div class="filter-tab" data-filter="draft" onclick="setFilter('draft')">Draft</div>
+      </div>
+    </div>
+
+    <div class="capsule-list" id="capsule-list"></div>
+    <div id="empty-state" class="empty-state" style="display:none;">
+      <div class="empty-state-icon">📦</div>
+      <div class="empty-state-title">カプセルがありません</div>
+      <div class="empty-state-desc">検索条件を変えるか、新しいカプセルを作成してください。</div>
+      <button class="btn btn-primary" onclick="newCapsule()">＋ New Capsule</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── App State ──────────────────────────────────────────────
+const STORAGE_KEY = 'ato-dev-console-state';
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return null;
+}
+function saveState(state) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e) {}
+}
+
+// ─── Onboarding state ───────────────────────────────────────
+let dockName = '';
+let dockHandle = '';
+
+function onDockNameChange() {
+  dockName = document.getElementById('dock-name').value;
+  // Auto-generate handle from name
+  const auto = dockName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  document.getElementById('dock-handle').value = auto;
+  dockHandle = auto;
+  updatePreview();
+  updateHandleUI();
+}
+
+function onHandleChange() {
+  dockHandle = document.getElementById('dock-handle').value;
+  updateHandleUI();
+  updatePreview();
+}
+
+function updateHandleUI() {
+  const check = document.getElementById('handle-check');
+  const hint = document.getElementById('handle-hint');
+  const preview = document.getElementById('handle-preview');
+  preview.textContent = dockHandle || 'my-dock';
+  if (dockHandle.length > 2) {
+    check.style.display = 'block';
+  } else {
+    check.style.display = 'none';
+  }
+}
+
+function updatePreview() {
+  const displayName = dockName || 'Dock 名';
+  document.getElementById('preview-name').textContent = displayName;
+  document.getElementById('preview-handle').textContent = dockHandle || 'my-dock';
+  const letter = (dockName || '?')[0].toUpperCase();
+  document.getElementById('preview-avatar').textContent = letter;
+  document.getElementById('dock-icon-letter').textContent = letter;
+}
+
+function updateCreateBtn() {
+  const agreed = document.getElementById('agree-check').checked;
+  const hasName = dockName.trim().length > 0;
+  document.getElementById('create-dock-btn').disabled = !(agreed && hasName);
+}
+
+function connectGitHub() {
+  const msg = { kind: 'open_external_url', url: 'https://github.com/apps/ato-run' };
+  window.__ATO_IPC__ && window.__ATO_IPC__.postMessage(JSON.stringify(msg));
+}
+
+function importRepo() {
+  alert('リポジトリのインポートは現在準備中です。');
+}
+
+function skipOnboarding() {
+  // Move to main with empty capsule list
+  const state = { onboarded: true, dockName: dockName || 'My Dock', dockHandle: dockHandle || 'my-dock', capsules: SAMPLE_CAPSULES };
+  saveState(state);
+  showMain(state);
+}
+
+function createDock() {
+  if (!dockName.trim()) return;
+  const state = { onboarded: true, dockName, dockHandle, capsules: SAMPLE_CAPSULES };
+  saveState(state);
+  showMain(state);
+}
+
+// ─── Sample capsule data ─────────────────────────────────────
+const SAMPLE_CAPSULES = [
+  { id: '1', name: 'WasedaP2P', desc: 'P2P ネットワーク', type: 'ツール', status: 'published', updatedAt: '2024/05/12', icon: '⬡', iconBg: 'linear-gradient(135deg,#4f46e5,#7c3aed)' },
+  { id: '2', name: 'ato-postgres', desc: 'PostgreSQL マネージド', type: 'データベース', status: 'published', updatedAt: '2024/05/10', icon: '🗃', iconBg: 'linear-gradient(135deg,#7c3aed,#6d28d9)' },
+  { id: '3', name: 'QueryKit', desc: 'データクエリツール', type: 'ツール', status: 'draft', updatedAt: '2024/05/09', icon: '🔍', iconBg: 'linear-gradient(135deg,#0891b2,#0e7490)' },
+  { id: '4', name: 'Flowtide', desc: 'データパイプライン', type: 'ツール', status: 'published', updatedAt: '2024/05/08', icon: '〜', iconBg: 'linear-gradient(135deg,#0891b2,#06b6d4)' },
+  { id: '5', name: 'Model Hub', desc: 'モデルレジストリ', type: 'ツール', status: 'draft', updatedAt: '2024/05/07', icon: '△', iconBg: 'linear-gradient(135deg,#7c3aed,#a855f7)' },
+];
+
+// ─── Main view ───────────────────────────────────────────────
+let currentFilter = 'all';
+let currentSearch = '';
+let currentCapsules = [];
+
+function showMain(state) {
+  document.getElementById('page-onboarding').classList.remove('active');
+  document.getElementById('page-main').classList.add('active');
+
+  const name = state.dockName || 'My Dock';
+  const handle = state.dockHandle || 'my-dock';
+  const letter = name[0].toUpperCase();
+  document.getElementById('main-org-icon').textContent = letter;
+  document.getElementById('main-org-name').textContent = name;
+  document.getElementById('avatar-initials').textContent = letter + (name.split(' ')[1] || '')[0] || letter;
+
+  currentCapsules = state.capsules || [];
+  renderCapsuleList();
+}
+
+function renderCapsuleList() {
+  const q = currentSearch.toLowerCase();
+  const filtered = currentCapsules.filter(c => {
+    if (currentFilter === 'published' && c.status !== 'published') return false;
+    if (currentFilter === 'draft' && c.status !== 'draft') return false;
+    if (q && !c.name.toLowerCase().includes(q) && !c.desc.toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  const list = document.getElementById('capsule-list');
+  const empty = document.getElementById('empty-state');
+
+  if (filtered.length === 0) {
+    list.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  list.innerHTML = filtered.map(c => {
+    const isPublished = c.status === 'published';
+    const statusLabel = isPublished ? '公開中' : '下書き';
+    const statusClass = isPublished ? 'published' : 'draft';
+    const actionLabel = isPublished ? 'Open ↗' : 'Edit ✏';
+    const actionClass = isPublished ? '' : 'edit';
+    return `
+      <div class="capsule-row" onclick="openCapsuleDetail('${c.id}')">
+        <div class="capsule-icon" style="background:${c.iconBg}">${c.icon}</div>
+        <div class="capsule-info">
+          <div class="capsule-name">${c.name}</div>
+          <div class="capsule-desc">${c.desc}</div>
+        </div>
+        <div class="capsule-type">${c.type}</div>
+        <div class="status-badge ${statusClass}">
+          <div class="status-dot"></div>
+          ${statusLabel}
+        </div>
+        <div class="capsule-date">更新日 ${c.updatedAt}</div>
+        <button class="capsule-action ${actionClass}" onclick="event.stopPropagation(); capsuleAction('${c.id}', '${c.status}')">${actionLabel}</button>
+      </div>`;
+  }).join('');
+}
+
+function setFilter(f) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.filter === f);
+  });
+  renderCapsuleList();
+}
+
+function filterCapsules() {
+  currentSearch = document.getElementById('search-input').value;
+  renderCapsuleList();
+}
+
+function openCapsuleDetail(id) {
+  const c = currentCapsules.find(x => x.id === id);
+  if (!c) return;
+  // Future: navigate to capsule detail page
+}
+
+function capsuleAction(id, status) {
+  const c = currentCapsules.find(x => x.id === id);
+  if (!c) return;
+  if (status === 'published') {
+    const msg = { kind: 'open_external_url', url: `https://ato.run/${c.name.toLowerCase()}` };
+    window.__ATO_IPC__ && window.__ATO_IPC__.postMessage(JSON.stringify(msg));
+  } else {
+    alert(`"${c.name}" の編集は現在準備中です。`);
+  }
+}
+
+function newCapsule() {
+  alert('新しいカプセルの作成は現在準備中です。\n\nato publish コマンドをターミナルで実行してください。');
+}
+
+function toggleAvatarMenu() {
+  document.getElementById('avatar-dropdown').classList.toggle('open');
+}
+
+function toggleOrgMenu() {
+  // Future: org selector
+}
+
+function goMyDock() {
+  document.getElementById('avatar-dropdown').classList.remove('open');
+  const msg = { kind: 'open_external_url', url: 'https://ato.run/my-dock' };
+  window.__ATO_IPC__ && window.__ATO_IPC__.postMessage(JSON.stringify(msg));
+}
+
+function goSettings() {
+  document.getElementById('avatar-dropdown').classList.remove('open');
+  const msg = { kind: 'open_settings' };
+  window.__ATO_IPC__ && window.__ATO_IPC__.postMessage(JSON.stringify(msg));
+}
+
+// Close dropdown on outside click
+document.addEventListener('click', (e) => {
+  const avatarBtn = document.getElementById('avatar-btn');
+  if (avatarBtn && !avatarBtn.contains(e.target)) {
+    document.getElementById('avatar-dropdown').classList.remove('open');
+  }
+});
+
+// ─── Init ────────────────────────────────────────────────────
+function init() {
+  const saved = loadState();
+  if (saved && saved.onboarded) {
+    showMain(saved);
+  } else {
+    document.getElementById('page-onboarding').classList.add('active');
+  }
+  // Apply i18n if available
+  if (window.__ATO_APPLY_I18N__) window.__ATO_APPLY_I18N__();
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

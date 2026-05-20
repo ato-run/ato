@@ -33,6 +33,10 @@ impl CapsuleManifest {
             ));
         }
 
+        if let Err(message) = self.validate_host_capabilities() {
+            errors.push(ValidationError::InvalidHostCapability(message));
+        }
+
         let schema_is_v03 = self.schema_version.trim() == "0.3";
 
         if !is_supported_schema_version(&self.schema_version) {
@@ -1361,6 +1365,8 @@ pub enum ValidationError {
         export: String,
         env_name: String,
     },
+    #[error("Invalid host capability: {0}")]
+    InvalidHostCapability(String),
 }
 
 pub(crate) fn is_kebab_case(s: &str) -> bool {

@@ -3,6 +3,7 @@
 //! The binary target stays intentionally small so startup, error rendering, and
 //! command dispatch can be exercised through this library from tests.
 
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -201,6 +202,16 @@ pub fn main_entry() {
     // silently do nothing.
     logging::init_subscriber();
 
+    // #117 follow-up — when the desktop spawns us, stdin/stdout are
+    // captured pipes and panics print to the captured stderr without
+    // a backtrace by default. Default to a full backtrace on panic so
+    // any future panic surfaces enough detail in the desktop's
+    // captured stderr that a single user repro is enough to fix it.
+    // The user can still override via the env var explicitly.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
+
     let args: Vec<String> = std::env::args().collect();
     // Detect JSON mode before Clap parsing so even parse-time failures can be
     // rendered as machine-readable diagnostics.
@@ -214,6 +225,18 @@ pub fn main_entry() {
 
         if ato_error_jsonl::try_emit_from_anyhow(&err, json_mode) {
             std::process::exit(error_codes::EXIT_USER_ERROR);
+        }
+
+        // #126 — non-TTY callers (CI, scripted shells, AODD harnesses) must
+        // be able to read the typed identity fields for any error that
+        // requires interactive resolution (consent_required, missing_env,
+        // auth_required, etc.). Emit the JSON envelope to stderr alongside
+        // the human diagnostic when stdin or stdout is not a TTY. This is
+        // additive: TTY callers and `--json` callers see no behaviour
+        // change.
+        let non_tty_caller = !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal();
+        if !json_mode && non_tty_caller {
+            ato_error_jsonl::try_emit_interactive_resolution_envelope(&err);
         }
 
         let diagnostic = diagnostics::from_anyhow(&err, command_context);

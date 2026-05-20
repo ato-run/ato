@@ -693,7 +693,7 @@ Phase 0 計測で安定と分かった場合のみ単純な
 
 **Retention の TTL / LRU**:
 
-- v0 default TTL: **5 分**（idle 時間。最後に attach 解除された時点から）
+- v0 default TTL: **10 分**（idle 時間。最後に attach 解除された時点から）
 - 上限: 同時 retain 数 **8**（OS の WebView 上限・GPU メモリを考慮した
   保守値）。超過時は LRU で oldest を destroy
 - 上限超過時に新規 retain を試みた場合、retention をスキップして単純
@@ -1137,7 +1137,7 @@ GPU メモリ枯渇 / WKWebView crash の risk。v0 では:
 
 - retention size を固定上限（v0 では同時 retain 数 8、§4）
 - 上限超過時 LRU で oldest を destroy
-- TTL 5 分（idle 後）で auto-evict
+- TTL 10 分（idle 後）で auto-evict
 - 古い `in_use` を強制終了する logic は持たない（ユーザの作業を勝手に
   消さない）
 

@@ -1,0 +1,396 @@
+//! `ato-launch` system capsule — capsule-launch wizards.
+//!
+//! Two HTML views:
+//!   - `assets/system/ato-launch/consent.html` — pre-flight
+//!     consent wizard. Shows the capsule's identity, requested
+//!     permissions, and any required env-var inputs. User clicks
+//!     "承認して起動" or "キャンセル".
+//!   - `assets/system/ato-launch/boot.html` — mid-flight boot
+//!     progress. Shows the launch steps (Capsule取得 → 依存解決
+//!     → 起動環境 → セキュリティ → データ保護 → プライバシー).
+//!
+//! Phase 1 ships both views as standalone demonstrable shells —
+//! they are openable via MCP for AODD, but are NOT yet hooked into
+//! the real `crate::orchestrator::resolve_and_start_guest` capsule
+//! launch flow. Phase 2 will (a) gate every CapsuleHandle spawn on
+//! a consent decision and (b) drive boot progress from orchestrator
+//! events.
+//!
+//! Phase 1 dispatch handlers close the wizard window on
+//! Approve/Cancel and log the outcome. Approve carries the capsule
+//! handle so a follow-up iteration can spawn the AppWindow once the
+//! consent flow is real.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use base64::Engine as _;
+use gpui::{AnyWindowHandle, App};
+use serde::Deserialize;
+
+use crate::state::GuestRoute;
+use crate::system_capsule::broker::{BrokerError, Capability};
+
+/// Consent identity sent from the wizard JS on Approve,
+/// matching the fields `approve_execution_plan_consent` expects.
+#[derive(Debug, Deserialize)]
+pub struct ConsentApprovalItem {
+    pub scoped_id: String,
+    pub version: String,
+    pub target_label: String,
+    pub policy_segment_hash: String,
+    pub provisioning_policy_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchCommand {
+    /// User clicked "承認して起動" in the consent wizard.
+    /// Carries the preview_id to guard against stale approvals,
+    /// any new secret values to persist, non-secret config values,
+    /// and execution-plan consent items to record.
+    Approve {
+        preview_id: String,
+        #[serde(default)]
+        secrets: HashMap<String, String>,
+        #[serde(default)]
+        config: HashMap<String, String>,
+        #[serde(default)]
+        consents: Vec<ConsentApprovalItem>,
+    },
+    /// User clicked "キャンセル" or dismissed the wizard.
+    Cancel,
+    /// Boot wizard's "Cancel during launch" affordance.
+    AbortBoot,
+    /// User pressed "Find candidates" in the GitHub Run wizard.
+    /// `repo` is `owner/repo` (already normalized by the React layer).
+    GithubFindCandidates { repo: String },
+    /// User clicked "起動レビューへ進む" (Proceed to review) in the
+    /// candidate detail screen. Normalizes `repo` into a launchable
+    /// `github.com/{owner}/{repo}` handle and opens the consent wizard.
+    GithubProceedToConsent { repo: String, title: String },
+}
+
+impl LaunchCommand {
+    pub fn required_capability(&self) -> Capability {
+        match self {
+            LaunchCommand::Approve { .. } => Capability::WebviewCreate,
+            LaunchCommand::Cancel | LaunchCommand::AbortBoot => Capability::WindowsClose,
+            LaunchCommand::GithubFindCandidates { .. } => Capability::WebviewCreate,
+            LaunchCommand::GithubProceedToConsent { .. } => Capability::WebviewCreate,
+        }
+    }
+}
+
+pub fn dispatch(
+    cx: &mut App,
+    host: AnyWindowHandle,
+    command: LaunchCommand,
+) -> Result<(), BrokerError> {
+    match command {
+        LaunchCommand::Approve {
+            preview_id,
+            secrets,
+            config,
+            consents,
+        } => {
+            tracing::info!(preview_id = %preview_id, "ato_launch: user approved");
+
+            // Warn if preview_id doesn't match the active wizard.
+            let pending_preview = cx
+                .try_global::<crate::window::launch_window::PendingConsentPreview>()
+                .and_then(|g| g.0.clone());
+            if let Some(ref preview) = pending_preview {
+                if preview.preview_id != preview_id {
+                    tracing::warn!(
+                        expected = %preview_id,
+                        current = %preview.preview_id,
+                        "ato_launch: preview_id mismatch on approve"
+                    );
+                }
+            }
+            cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
+
+            let stashed = cx
+                .global_mut::<crate::window::launch_window::PendingLaunches>()
+                .0
+                .remove(&preview_id);
+            let pending_route = stashed.as_ref().map(|s| s.route.clone());
+            let requested_client = stashed
+                .as_ref()
+                .map(|s| s.requested_client)
+                .unwrap_or(crate::state::session::SessionClientKind::AtoWindow);
+
+            // Derive route handle for secret grants (must match what
+            // AppCapsuleShell uses via secrets_for_capsule).
+            let route_handle: Option<String> = match &pending_route {
+                Some(GuestRoute::CapsuleHandle { handle, .. }) => Some(handle.clone()),
+                Some(GuestRoute::CapsuleUrl { handle, .. }) => Some(handle.clone()),
+                _ => None,
+            };
+
+            // Persist new secret values and grant them to this capsule.
+            if let Some(ref handle) = route_handle {
+                if !secrets.is_empty() {
+                    let mut store = crate::config::load_secrets();
+                    for (key, value) in &secrets {
+                        if !value.is_empty() {
+                            if let Err(e) = store.add_secret(key.clone(), value.clone()) {
+                                return Err(BrokerError::Internal(format!("Failed to save secret {key}: {e}")));
+                            }
+                            if let Err(e) = store.grant_secret(handle, key) {
+                                return Err(BrokerError::Internal(format!("Failed to grant secret {key} to {handle}: {e}")));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Record execution-plan consents.
+            for consent in &consents {
+                if let Err(err) = crate::orchestrator::approve_execution_plan_consent(
+                    &consent.scoped_id,
+                    &consent.version,
+                    &consent.target_label,
+                    &consent.policy_segment_hash,
+                    &consent.provisioning_policy_hash,
+                ) {
+                    tracing::error!(
+                        error = %err,
+                        scoped_id = %consent.scoped_id,
+                        "ato_launch: failed to approve consent"
+                    );
+                }
+            }
+
+            // Close the consent wizard so the boot wizard takes focus.
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+
+            // Store non-secret config so AppCapsuleShell passes it to
+            // resolve_and_start_guest.
+            let plain_configs: Vec<(String, String)> = config.into_iter().collect();
+            cx.set_global(crate::window::launch_window::PendingLaunchConfigs(
+                plain_configs.clone(),
+            ));
+
+            if let Some(route) = pending_route {
+                match crate::window::launch_window::open_boot_window(cx, Some(&route)) {
+                    Ok(boot_handle) => {
+                        // start_boot_launch owns the background launch
+                        // task: it stores the boot handle + abort flag
+                        // in BootWindowSlot, drives orchestrator progress
+                        // events into the wizard, and on success calls
+                        // `open_ready_capsule_window` itself. We must NOT
+                        // also call `open_app_window` here — that would
+                        // create two concurrent capsule sessions.
+                        crate::window::launch_window::start_boot_launch(
+                            cx,
+                            route.clone(),
+                            plain_configs,
+                            boot_handle,
+                            requested_client,
+                        );
+
+                        // Record launch in the start-page history so the
+                        // next time the start page opens, this capsule
+                        // appears in the "recent capsules" row.
+                        if let GuestRoute::CapsuleHandle { handle, label }
+                        | GuestRoute::CapsuleUrl { handle, label, .. } = &route
+                        {
+                            let mut store =
+                                crate::system_capsule::ato_start::StartPageHistoryStore::load();
+                            store.record_open(handle, label);
+                            if let Err(err) = store.save() {
+                                tracing::warn!(error = %err, "ato_launch: failed to save start history");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "ato_launch: open_boot_window failed after approve"
+                        );
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "ato_launch: approve from MCP/standalone (no pending target) — wizard closed, no AppWindow spawned"
+                );
+            }
+        }
+        LaunchCommand::Cancel => {
+            tracing::info!("ato_launch: user cancelled");
+            cx.set_global(crate::window::launch_window::PendingLaunches::default());
+            cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+        }
+        LaunchCommand::AbortBoot => {
+            tracing::info!("ato_launch: user aborted boot — signalling background task");
+
+            let slot = cx
+                .try_global::<crate::window::launch_window::BootWindowSlot>()
+                .cloned()
+                .unwrap_or_default();
+            cx.set_global(crate::window::launch_window::BootWindowSlot::default());
+
+            // Tell the background launch worker to suppress its
+            // successful session — otherwise a late success would
+            // spawn the AppWindow even after the user cancelled.
+            if let Some(flag) = slot.abort_flag.as_ref() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+            if let Some(boot) = slot.boot_window {
+                let _ = boot.update(cx, |_, window, _| window.remove_window());
+            }
+        }
+        LaunchCommand::GithubFindCandidates { repo } => {
+            tracing::info!(repo = %repo, "ato_launch: github_find_candidates requested");
+
+            let shell_weak = cx
+                .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                .and_then(|s| s.0.clone());
+            let Some(shell_weak) = shell_weak else {
+                tracing::warn!("ato_launch: github_find_candidates — no ActiveGithubRunShell");
+                return Ok(());
+            };
+
+            let async_app = cx.to_async();
+            let fe = cx.foreground_executor().clone();
+            let be = cx.background_executor().clone();
+            let repo_owned = Arc::new(repo);
+
+            fe.spawn(async move {
+                let repo_clone = Arc::clone(&repo_owned);
+                let result: serde_json::Value = be.spawn(async move {
+                    fetch_github_candidates(&repo_clone)
+                }).await;
+
+                let _ = async_app.update(|cx| {
+                    if let Some(shell) = shell_weak.upgrade() {
+                        shell.read(cx).inject_github_candidates(&result);
+                    }
+                });
+            }).detach();
+        }
+        LaunchCommand::GithubProceedToConsent { repo, title } => {
+            tracing::info!(repo = %repo, title = %title, "ato_launch: github_proceed_to_consent");
+
+            let handle = crate::window::launch_window::normalize_github_handle(&repo);
+            let route = GuestRoute::CapsuleHandle {
+                handle: handle.clone(),
+                label: title.clone(),
+            };
+
+            // Close the GitHub Run wizard; the consent wizard takes focus.
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+            cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
+
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            {
+                tracing::error!(
+                    error = %err,
+                    handle = %handle,
+                    "ato_launch: open_consent_window_for_route failed"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fetch `capsule.toml` candidates for `owner/repo` from the GitHub
+/// contents API. Returns a JSON envelope `{ok:true,candidates:[...]}` or
+/// `{ok:false,error:"..."}`. Runs on a background thread — uses `ureq`
+/// which is synchronous/blocking.
+fn fetch_github_candidates(repo: &str) -> serde_json::Value {
+    let url = format!(
+        "https://api.github.com/repos/{}/contents/capsule.toml",
+        repo
+    );
+    match ureq::get(&url)
+        .set("User-Agent", "ato-desktop")
+        .set("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(resp) => {
+            match resp.into_json::<serde_json::Value>() {
+                Ok(body) => {
+                    // GitHub API returns `{content: "<base64>", ...}` for file contents.
+                    let content_b64 = body.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .replace('\n', "");
+                    let toml_text = match base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &content_b64,
+                    ) {
+                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Err(err) => {
+                            return serde_json::json!({
+                                "ok": false,
+                                "error": format!("base64 decode failed: {err}")
+                            });
+                        }
+                    };
+
+                    // Extract basic metadata from TOML for the candidate row.
+                    let name = extract_toml_str(&toml_text, "name").unwrap_or_else(|| repo.to_string());
+                    let version = extract_toml_str(&toml_text, "version").unwrap_or_else(|| "0.0.0".to_string());
+                    let description = extract_toml_str(&toml_text, "description").unwrap_or_default();
+                    let author = extract_toml_str(&toml_text, "author").unwrap_or_default();
+
+                    serde_json::json!({
+                        "ok": true,
+                        "candidates": [{
+                            "title": name,
+                            "version": version,
+                            "description": description,
+                            "author": author,
+                            "status": "community",
+                            "source": "github",
+                            "toml": toml_text,
+                            "repo": repo,
+                        }]
+                    })
+                }
+                Err(err) => serde_json::json!({
+                    "ok": false,
+                    "error": format!("failed to parse GitHub response: {err}")
+                }),
+            }
+        }
+        Err(ureq::Error::Status(404, _)) => serde_json::json!({
+            "ok": false,
+            "error": "capsule.toml が見つかりませんでした。このリポジトリには capsule.toml がありません。"
+        }),
+        Err(ureq::Error::Status(code, _)) => serde_json::json!({
+            "ok": false,
+            "error": format!("GitHub API エラー (HTTP {code})")
+        }),
+        Err(err) => serde_json::json!({
+            "ok": false,
+            "error": format!("ネットワークエラー: {err}")
+        }),
+    }
+}
+
+/// Minimal single-value extractor for a top-level TOML string key.
+/// Avoids pulling in the full `toml` crate parse for a hot path.
+fn extract_toml_str(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with(key) {
+            if let Some(rest) = line.strip_prefix(key) {
+                let rest = rest.trim();
+                if rest.starts_with('=') {
+                    let value = rest[1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !value.is_empty() {
+                        return Some(value);
+                    }
+                }
+            }
+        }
+    }
+    None
+}

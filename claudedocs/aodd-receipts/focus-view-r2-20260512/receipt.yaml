@@ -1,0 +1,73 @@
+usecase: "Autonomous Operator drives ato-desktop via MCP socket to spawn an AppWindow + Control Bar + Card Switcher, captures each visual state"
+actor: "Autonomous Claude Operator using ato-desktop-mcp host_dispatch_action + host_take_screenshot"
+goal: "Visually confirm the redesigned Focus View renders as intended, end-to-end via the MCP, with no manual keypresses"
+entry_point: "Hermetic ato-desktop launched with ATO_HOME=/tmp/ato-aodd/ato-home and ATO_DESKTOP_MULTI_WINDOW=1 (real HOME preserved so GPUI framework state initialises)"
+out_of_scope:
+  - "Do not require macOS Accessibility permission"
+  - "Do not modify the user's real ~/.ato state"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "tools/call host_dispatch_action {action: 'OpenAppWindowExperiment'}"
+    observation: "{\"ok\":true,\"queued_action\":\"OpenAppWindowExperiment\"}. Desktop log records 'host action dispatched via automation socket', then 'OpenAppWindowExperiment handler entered', then 'calling open_app_window', then 'open_app_window returned Ok'. Full end-to-end action dispatch via socket — no Accessibility prompts."
+  - action: "tools/call host_take_screenshot"
+    observation: |
+      PNG saved. Visual content:
+      - The new AppWindow is on top, centred.
+      - Title bar: 'ato-desktop / Edit' with macOS traffic lights.
+      - Just below the title bar: the floating Control Bar pill (white bg, soft drop shadow, rounded full) with [⚙ 設定] [🌐 https://ato.run/ ▾] [card-switcher icon] [📦 ストア].
+      - Below the pill: WasedaP2P-style mock dashboard rendered against a light blue→pink diagonal gradient:
+        - Top row: CodeLab preview card (purple cog icon), Discover preview card (green chart icon), Safety summary card (Network shield 正常, Files protected 1,240, Security score 92/100).
+        - Title block: 'ato.run' / 'https://ato.run/' / 'App window placeholder — real WKWebView attaches in a follow-up'.
+        - Bottom row: ネットワーク (Peers 128, Documents 368, Videos 96), 転送状況 (Upload 1.2 TB, Download 688 GB, Protected 1,240), ストレージ (32% / 28% / 18%), and a dark Terminal panel with `ato sync --watch` mock output.
+      - The legacy DesktopShell is still visible behind (will be replaced once the Launcher migration takes the rail/chrome away from the host shell).
+  - action: "tools/call host_dispatch_action {action: 'OpenCardSwitcher'}"
+    observation: "{\"ok\":true,\"queued_action\":\"OpenCardSwitcher\"}. Desktop log shows the same drain → handler chain."
+  - action: "tools/call host_take_screenshot"
+    observation: |
+      PNG saved. Visual content:
+      - Card Switcher overlay window painted above everything: ~70% black backdrop, three rounded card placeholders side by side — 'WasedaP2P (most recent)' / 'example.com' / 'Launcher'.
+      - Control Bar pill from the AppWindow remains visible at the top.
+
+agent_observation:
+  user_visible_problem: |
+    None blocking. The autonomous AODD loop now completes — Operator can
+    launch the desktop hermetically, drive it through MCP, and observe
+    its GPUI host surfaces visually. Compared to round 1 (receipt
+    focus-view-r1-20260512) the friction at every layer is removed:
+    - Window invisibility (R1 stuck_at) → caused by HOME override
+      breaking GPUI framework state. Resolved by isolating only
+      ATO_HOME.
+    - Accessibility permission gating keystrokes (R1 stuck_at) →
+      bypassed structurally by adding host_dispatch_action that
+      routes through the existing automation socket and dispatches
+      named GPUI actions in-process.
+
+  remaining_friction:
+    - "Control Bar sits inside the AppWindow title-bar strip rather than free-floating above it. The reference mockup shows the bar separated from the title bar with the underlying app's frame visible between. Cosmetic; addChildWindow plumbing will let us position the bar correctly."
+    - "Card Switcher cards are hardcoded placeholders. Real MRU binding to actual `AppState::app_window_mru_order` is queued for the data-binding pass."
+    - "Legacy DesktopShell remains behind the new AppWindow. Once Launcher migration (#170) flips, the legacy chrome moves to a separate Launcher window and disappears from the running-app surface."
+    - "Title says 'ato.run' (URL-derived) instead of 'WasedaP2P' (capsule label) — the test route happens to be an external URL; spawning via a CapsuleHandle route would render the capsule label correctly."
+
+  suggested_fix:
+    - "Already shipped: host_dispatch_action MCP tool + AutomationCommand::HostDispatchAction + DesktopShell::drain_pending_host_actions + WebViewManager::HostDispatchAction handler with notify_window kick."
+    - "Already shipped: host_take_screenshot, host_activate_app, host_press_key (the last is honestly documented as gated on Accessibility; host_dispatch_action is the preferred path)."
+    - "Next iteration: investigate Control Bar vertical position vs reference (currently anchored at parent top, ideally above parent top with gap)."
+    - "Next iteration: spawn the experimental AppWindow with a CapsuleHandle route so the title block reads 'WasedaP2P' as in the reference."
+
+evidence:
+  - step-app-window-via-socket.png
+  - step-card-switcher.png
+  - desktop-log-excerpt: |
+      ato-desktop starting version=0.5.1 pid=42210
+      automation socket listening socket=/tmp/ato-aodd/ato-home/run/ato-desktop-42210.sock
+      host action dispatched via automation socket action=OpenAppWindowExperiment
+      OpenAppWindowExperiment handler entered
+      calling open_app_window
+      open_app_window returned Ok
+      host action dispatched via automation socket action=OpenCardSwitcher
+      ...
+
+status: "fixed"

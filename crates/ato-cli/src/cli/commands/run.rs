@@ -48,7 +48,7 @@ use capsule_core::types::CapsuleManifest;
 use capsule_core::{router, CapsuleReporter};
 
 mod background;
-mod preflight;
+pub(crate) mod preflight;
 mod watch;
 
 use background::*;
@@ -94,17 +94,97 @@ pub struct RunArgs {
     pub cache_strategy: crate::application::dependency_materializer::CacheStrategy,
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
+    /// When true, run preflight collection and print the aggregate requirements
+    /// envelope without launching the capsule. Equivalent to
+    /// `ato internal preflight <target> --json` but driven from `ato run`.
+    pub plan_only: bool,
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
-    if args.watch {
-        execute_watch_mode_with_install(args).await
-    } else {
-        execute_normal_mode(args).await
+    // --plan-only: collect aggregate requirements and print without launching.
+    if args.plan_only {
+        return execute_plan_only(args).await;
     }
+
+    // Boundary-level receipt emission (refs #74, #99). Wraps the inner
+    // pipeline so that on the recoverable-failure / aborted path a
+    // *partial* execution receipt is emitted to
+    // `~/.ato/executions/<id>/receipt.json`, even though the inner
+    // pipeline never reached `build_prelaunch_receipt_v2`. On the
+    // happy path the inner pipeline already emitted a full v2
+    // receipt; the wrapper observes `Ok(_)` and returns it unchanged.
+    let ctx = crate::application::receipt_boundary::ReceiptEmissionContext::for_boundary("ato run");
+    crate::application::receipt_boundary::emit_receipt_on_result(ctx, move |sink| async move {
+        if args.watch {
+            execute_watch_mode_with_install(args, sink).await
+        } else {
+            execute_normal_mode(args, sink).await
+        }
+    })
+    .await
 }
 
-async fn execute_watch_mode_with_install(args: RunArgs) -> Result<()> {
+/// `ato run --plan-only`: collect aggregate requirements and print the JSON envelope
+/// without launching. Equivalent to `ato internal preflight <target> --json` but
+/// driven from the main `ato run` command for scripted callers (CI, MCP, AODD).
+///
+/// Scope: local capsule paths plus already-cached `github.com/<owner>/<repo>` refs
+/// only. This command never fetches from registries, auto-installs missing capsules,
+/// or materializes provider-backed workspaces.
+///
+/// Exit policy: exits 0 even when requirements are pending (caller decides what to do
+/// based on the `"ok"` field). Non-zero only on genuine collection failures.
+async fn execute_plan_only(args: RunArgs) -> Result<()> {
+    use crate::application::preflight::collect_aggregate_requirements;
+    use capsule_core::router::ExecutionProfile;
+
+    if args.registry.is_some() {
+        anyhow::bail!(
+            "`ato run --plan-only` does not support `--registry`. It only inspects local paths and cached `github.com/<owner>/<repo>` checkouts without fetching or installing. Install the capsule first, then re-run `--plan-only` on the local path."
+        );
+    }
+
+    let target_str = args.target.to_string_lossy();
+    let result = collect_aggregate_requirements(&target_str, ExecutionProfile::Dev)
+        .map_err(|err| anyhow::anyhow!("preflight collection failed: {err}"))?;
+
+    if args.reporter.is_json() {
+        let payload = serde_json::json!({
+            "schema_version": "1",
+            "ok": result.is_empty(),
+            "capsule_id": result.capsule_id,
+            "capsule_version": result.capsule_version,
+            "visited_targets": result.visited_targets,
+            "requirements": result.requirements,
+        });
+        println!("{payload}");
+    } else if result.is_empty() {
+        println!(
+            "preflight: {}@{} — no pending requirements; launch can proceed.",
+            result.capsule_id, result.capsule_version
+        );
+    } else {
+        println!(
+            "preflight: {}@{} — {} requirement(s) across {} target(s):",
+            result.capsule_id,
+            result.capsule_version,
+            result.requirements.len(),
+            result.visited_targets.len()
+        );
+        for envelope in &result.requirements {
+            println!("  - {}", envelope.display.message);
+        }
+    }
+    Ok(())
+}
+
+async fn execute_watch_mode_with_install(
+    args: RunArgs,
+    _receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+) -> Result<()> {
+    // Watch mode bails before the receipt emit site (no provider-backed
+    // workspace, no v2 bundle build). The sink stays empty, and the
+    // partial-receipt boundary falls back to ctx-level ids if any.
     let install = run_install_phase(&args).await?;
     report_dependency_projection(&args, &install.dependency_projection)?;
     if matches!(
@@ -684,6 +764,12 @@ struct ConsumerRunPhaseRunner<'a> {
     provider_backed_target: bool,
     should_stop_after_install: bool,
     phase_annotations: std::collections::HashMap<HourglassPhase, PhaseAnnotation>,
+    /// PR-3b boundary plumbing: handle to the `ReceiptEmissionContext`'s
+    /// graph-id sink, owned by the wrapper in `execute()`. The Execute
+    /// phase writes declared/resolved ids here immediately after
+    /// `build_prelaunch_receipt_document_with_graph` so the partial
+    /// receipt boundary observes the same ids on the failure path.
+    receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
 }
 
 impl ConsumerRunPhaseRunner<'_> {
@@ -782,6 +868,13 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 .inspect_err(|err| {
                     emit_run_phase_failure(self.args, HourglassPhase::Prepare, err);
                 })?;
+                // PR-3b: hand the boundary's graph-id sink to the
+                // pipeline state so the Execute phase can publish ids
+                // immediately after building the LaunchGraphBundle.
+                let state = run_phase::attach_receipt_graph_id_sink(
+                    state,
+                    self.receipt_graph_id_sink.clone(),
+                );
                 self.state = Some(state);
                 self.record_phase_annotation(
                     HourglassPhase::Prepare,
@@ -904,7 +997,16 @@ impl HourglassPhaseRunner for ConsumerRunPhaseRunner<'_> {
                 Ok(())
             }
             HourglassPhase::Execute => {
-                let input = self.take_state(HourglassPhase::Execute)?;
+                // PR-3b (PR #180 review fix): defensively re-inject the
+                // boundary sink at Execute entry. Prepare already set
+                // it, but a future Build / Verify / DryRun refactor
+                // that reconstructs `RunPipelineState` would silently
+                // drop the field; using the helper here pins the
+                // wire-up at the consumer site.
+                let input = run_phase::attach_receipt_graph_id_sink(
+                    self.take_state(HourglassPhase::Execute)?,
+                    self.receipt_graph_id_sink.clone(),
+                );
                 let result = run_execute_phase(
                     self.args,
                     self.resolved_target(),
@@ -954,7 +1056,10 @@ fn report_dependency_projection(
     Ok(())
 }
 
-async fn execute_normal_mode(args: RunArgs) -> Result<()> {
+async fn execute_normal_mode(
+    args: RunArgs,
+    receipt_graph_id_sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+) -> Result<()> {
     // Register a Ctrl+C handler so in-flight run artifacts are cleaned up on SIGINT.
     let _ = ctrlc::set_handler(|| {
         run_sigint_cleanup();
@@ -974,6 +1079,7 @@ async fn execute_normal_mode(args: RunArgs) -> Result<()> {
         provider_backed_target: false,
         should_stop_after_install: false,
         phase_annotations: std::collections::HashMap::new(),
+        receipt_graph_id_sink,
     };
 
     let result = pipeline.run(&mut runner).await;
@@ -1898,6 +2004,7 @@ run = "node server.js""#,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
+            plan_only: false,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2001,6 +2108,7 @@ run = "main.py""#,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
+            plan_only: false,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2101,6 +2209,7 @@ run = "main.py""#,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
+            plan_only: false,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2135,6 +2244,67 @@ run = "main.py""#,
             routed.plan.execution_entrypoint().as_deref(),
             Some("MyApp.AppImage")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_only_rejects_registry_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "plan-only-fixture"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#,
+        )
+        .expect("write manifest");
+
+        let args = RunArgs {
+            target: manifest_path,
+            target_label: None,
+            args: Vec::new(),
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: Some("https://registry.example.invalid".to_string()),
+            enforcement: "best_effort".to_string(),
+            sandbox_mode: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
+            assume_yes: true,
+            verbose: false,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            read_grants: Vec::new(),
+            write_grants: Vec::new(),
+            read_write_grants: Vec::new(),
+            caller_cwd: tmp.path().to_path_buf(),
+            effective_cwd: None,
+            export_request: None,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
+            reporter: Arc::new(CliReporter::new(true)),
+            preview_mode: false,
+            plan_only: true,
+        };
+
+        let err = super::execute_plan_only(args)
+            .await
+            .expect_err("plan-only must reject --registry");
+        assert!(err.to_string().contains("does not support `--registry`"));
     }
 
     #[test]
