@@ -128,12 +128,6 @@ pub fn dispatch(
                             store.grant_secret(handle, key);
                         }
                     }
-                    if let Err(err) = crate::config::save_secrets(&store) {
-                        tracing::error!(
-                            error = %err,
-                            "ato_launch: failed to save secrets — proceeding with in-memory values"
-                        );
-                    }
                 }
             }
 

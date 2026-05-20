@@ -750,12 +750,14 @@ pub struct SecretStore {
     pub secrets: Vec<SecretEntry>,
 }
 
+/// Error surfaced when a bridge operation fails.
+#[derive(Debug, thiserror::Error)]
+pub enum BridgeError {
+    #[error("secret bridge error: {0}")]
+    Bridge(#[from] anyhow::Error),
+}
+
 impl SecretStore {
-    /// Strip the `@<version>` suffix from a capsule handle so that
-    /// `publisher/handle@1.2.3` and `publisher/handle` are treated as
-    /// the same identity for grant lookups.
-    /// Only the last path segment (after the final `/`) is checked,
-    /// so handles like `git@github.com:owner/repo` are left unchanged.
     pub fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
         let last_sep = handle.rfind('/');
         let search_start = last_sep.map_or(0, |p| p + 1);
@@ -768,8 +770,9 @@ impl SecretStore {
         handle
     }
 
-    pub fn add_secret(&mut self, key: String, value: String) {
-        // Update in-memory metadata list.
+    pub fn add_secret(&mut self, key: String, value: String) -> Result<(), BridgeError> {
+        crate::secret_bridge::CliSecretBridge::set(&key, &value, None, None, None)
+            .map_err(BridgeError::Bridge)?;
         if let Some(existing) = self.secrets.iter_mut().find(|s| s.key == key) {
             existing.value = String::new();
         } else {
@@ -778,12 +781,14 @@ impl SecretStore {
                 value: String::new(),
             });
         }
-        let _ = crate::secret_bridge::CliSecretBridge::set(&key, &value, None, None, None);
+        Ok(())
     }
 
-    pub fn remove_secret(&mut self, key: &str) {
+    pub fn remove_secret(&mut self, key: &str) -> Result<(), BridgeError> {
+        crate::secret_bridge::CliSecretBridge::delete(key, None)
+            .map_err(BridgeError::Bridge)?;
         self.secrets.retain(|s| s.key != key);
-        let _ = crate::secret_bridge::CliSecretBridge::delete(key, None);
+        Ok(())
     }
 
     pub fn secrets_for_capsule(&self, handle: &str) -> Vec<SecretEntry> {
@@ -807,28 +812,30 @@ impl SecretStore {
         }
     }
 
-    pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) {
+    pub fn grant_secret(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
         let mut allow = self.current_allow_list(key).unwrap_or_default();
         if !allow.contains(&canonical) {
             allow.push(canonical);
         }
-        let _ = crate::secret_bridge::CliSecretBridge::update_acl(
-            key,
-            Some(allow),
-            None,
-        );
+        crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
+            .map_err(BridgeError::Bridge)
     }
 
-    pub fn revoke_secret(&mut self, capsule_handle: &str, key: &str) {
+    pub fn revoke_secret(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
         let mut allow = self.current_allow_list(key).unwrap_or_default();
         allow.retain(|h| h != &canonical);
-        let _ = crate::secret_bridge::CliSecretBridge::update_acl(
-            key,
-            Some(allow),
-            None,
-        );
+        crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
+            .map_err(BridgeError::Bridge)
     }
 
     fn current_allow_list(&self, key: &str) -> Option<Vec<String>> {
@@ -951,7 +958,8 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
         if let Err(e) =
             crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
         {
-            tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, continuing");
+            tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, aborting");
+            return None;
         }
     }
 
