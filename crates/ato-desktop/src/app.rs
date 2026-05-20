@@ -95,6 +95,10 @@ actions!(
         OpenAppWindowExperiment,
         // #173 — opens the Card Switcher overlay window.
         OpenCardSwitcher,
+        // #174 — focus the previous / next app window in MRU order via
+        // a two-finger horizontal trackpad swipe on the Control Bar.
+        FocusPrevAppWindow,
+        FocusNextAppWindow,
         // Opens the Store window — a Wry WebView pointed at
         // https://ato.run/. Re-clicks focus the existing window
         // rather than stacking duplicates. Gated on the multi-window
@@ -984,6 +988,15 @@ pub fn run(skip_onboarding: bool) {
             }
         });
 
+        // #174 — cycle through open app windows in MRU order via
+        // trackpad swipe gestures on the Control Bar.
+        cx.on_action(|_: &FocusPrevAppWindow, cx: &mut App| {
+            cycle_app_window(cx, -1);
+        });
+        cx.on_action(|_: &FocusNextAppWindow, cx: &mut App| {
+            cycle_app_window(cx, 1);
+        });
+
         // Open / focus the Store window (Wry WebView → ato.run).
         cx.on_action(|_: &OpenStoreWindow, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
@@ -1166,6 +1179,23 @@ pub fn run(skip_onboarding: bool) {
 
         cx.activate(true);
     });
+}
+
+/// Cycle focus through open app windows in MRU order.
+/// `direction` is `+1` for next, `-1` for previous.
+fn cycle_app_window(cx: &mut App, direction: i32) {
+    use crate::window::content_windows::OpenContentWindows;
+
+    let windows = cx.global::<OpenContentWindows>().mru_order();
+    if windows.len() < 2 {
+        return;
+    }
+    // The frontmost window is windows[0] (MRU order).
+    // Wrap around to the next/previous entry.
+    let len = windows.len() as i32;
+    let idx = ((direction % len) + len) as usize % windows.len();
+    let target = windows[idx].handle;
+    let _ = target.update(cx, |_, window, _| window.activate_window());
 }
 
 fn stop_active_focus_capsule(cx: &mut App) {
