@@ -70,6 +70,8 @@ pub(crate) enum SessionCommands {
         handle: String,
         #[arg(long)]
         target: Option<String>,
+        #[arg(long = "from-materialized-record")]
+        from_materialized_record: Option<String>,
         #[arg(long)]
         json: bool,
     },
