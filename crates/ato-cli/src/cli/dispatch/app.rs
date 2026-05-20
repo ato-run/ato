@@ -22,8 +22,16 @@ pub(super) fn execute_app_command(command: crate::AppCommands, json_mode: bool) 
             crate::SessionCommands::Start {
                 handle,
                 target,
+                from_materialized_record,
+                run_config_hash,
                 json,
-            } => crate::app_control::start_session(&handle, target.as_deref(), json_mode || json),
+            } => crate::app_control::start_session(
+                &handle,
+                target.as_deref(),
+                from_materialized_record.as_deref(),
+                run_config_hash.as_deref(),
+                json_mode || json,
+            ),
             crate::SessionCommands::Stop { session_id, json } => {
                 crate::app_control::stop_session(&session_id, json_mode || json)
             }

@@ -473,6 +473,7 @@ name = "ato-session-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "capsule-core",
  "capsule-wire",
  "dirs 5.0.1",

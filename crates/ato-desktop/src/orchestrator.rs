@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ato_session_core::{
-    read_session_records, validate_record_only, RecordValidationOutcome, RecordValidationParams,
-    StoredSessionInfo,
+    compute_run_config_hash, materialized_launch_record_path, read_materialized_launch_record,
+    read_session_records, session_record_path, session_root as shared_session_root,
+    validate_record_only, RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
@@ -375,6 +376,27 @@ pub fn resolve_and_start_guest(
     resolve_and_start_capsule(handle, secrets, plain_configs, on_step)
 }
 
+pub fn resolve_and_start_guest_from_materialized_record(
+    handle: &str,
+    record_path: &Path,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
+) -> Result<GuestLaunchSession, LaunchError> {
+    if let Some(ref f) = on_step {
+        f(0);
+    }
+    if let Some(ref f) = on_step {
+        f(2);
+    }
+    let started =
+        start_capsule_from_materialized_record(handle, record_path, secrets, plain_configs)?;
+    if let Some(ref f) = on_step {
+        f(3);
+    }
+    Ok(build_launch_session_from_started(started)?)
+}
+
 /// Drop preflight envelopes whose requirements are already satisfied.
 /// `secrets` covers secret fields stored in the per-handle SecretStore;
 /// `plain_configs` covers non-secret fields (enum, string) submitted via
@@ -544,6 +566,70 @@ struct PreflightAggregateEnvelope {
 
 pub fn stop_guest_session(session_id: &str) -> Result<bool> {
     stop_capsule_session(session_id)
+}
+
+fn desktop_run_config_hash(secrets: &[SecretEntry], plain_configs: &[(String, String)]) -> String {
+    let secret_keys: Vec<String> = secrets.iter().map(|secret| secret.key.clone()).collect();
+    compute_run_config_hash(
+        plain_configs,
+        &secret_keys,
+        &ato_session_core::current_platform_tag(),
+    )
+}
+
+pub fn materialized_record_path_for_session(session_id: &str) -> Result<PathBuf> {
+    let root = shared_session_root()?;
+    let session_path = session_record_path(&root, session_id);
+    let raw = fs::read_to_string(&session_path)
+        .with_context(|| format!("failed to read session record {}", session_path.display()))?;
+    let record: StoredSessionInfo = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session record {}", session_path.display()))?;
+    let launch_key = record
+        .launch_key
+        .ok_or_else(|| anyhow!("session record {} is missing launch_key", session_id))?;
+    let cache_root = ato_session_core::launch_cache_root()?;
+    let path = materialized_launch_record_path(&cache_root, &launch_key);
+    let _ = read_materialized_launch_record(&path).with_context(|| {
+        format!(
+            "failed to read materialized launch record {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
+}
+
+pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Result<()> {
+    let root = shared_session_root()?;
+    let session_path = session_record_path(&root, session_id);
+    let raw = fs::read_to_string(&session_path)
+        .with_context(|| format!("failed to read session record {}", session_path.display()))?;
+    let record: StoredSessionInfo = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session record {}", session_path.display()))?;
+    let pid = u32::try_from(record.pid).map_err(|_| anyhow!("invalid pid {}", record.pid))?;
+    let expected_start_time = record.process_start_time_unix_ms;
+
+    if !stop_guest_session(session_id)? {
+        bail!("session {} did not stop cleanly", session_id);
+    }
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !ato_session_core::process::pid_is_alive(pid) {
+            return Ok(());
+        }
+        if let Some(expected) = expected_start_time {
+            if ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    bail!(
+        "session {} is still alive after waiting {}ms",
+        session_id,
+        timeout.as_millis()
+    );
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -887,11 +973,7 @@ fn find_pids_by_pattern(pattern: &str) -> Vec<u32> {
     if pattern.is_empty() || pattern.len() < 4 {
         return Vec::new();
     }
-    let output = match Command::new("pgrep")
-        .arg("-f")
-        .arg(pattern)
-        .output()
-    {
+    let output = match Command::new("pgrep").arg("-f").arg(pattern).output() {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -955,7 +1037,11 @@ pub(crate) fn cleanup_host_resources() -> CleanupReport {
 }
 
 fn find_port_pids(port: u16) -> Vec<u32> {
-    let output = match Command::new("lsof").arg("-ti").arg(format!(":{port}")).output() {
+    let output = match Command::new("lsof")
+        .arg("-ti")
+        .arg(format!(":{port}"))
+        .output()
+    {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
@@ -975,7 +1061,9 @@ fn count_owned_shm() -> usize {
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let current_user = std::env::var("USER").unwrap_or_default();
-    text.lines().filter(|line| line.contains(&current_user)).count()
+    text.lines()
+        .filter(|line| line.contains(&current_user))
+        .count()
 }
 
 fn free_owned_shm() -> usize {
@@ -1050,6 +1138,8 @@ fn start_capsule(
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
+    let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
+    cmd.arg("--run-config-hash").arg(&run_config_hash);
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
@@ -1091,6 +1181,53 @@ fn start_capsule(
         cmd.env(key, value);
     }
 
+    run_session_start_command(&ato_bin, handle, secrets, &mut cmd)
+}
+
+fn start_capsule_from_materialized_record(
+    handle: &str,
+    record_path: &Path,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+) -> Result<SessionStartInfo, LaunchError> {
+    let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
+    debug!(
+        bin = %ato_bin.display(),
+        handle,
+        record_path = %record_path.display(),
+        "spawning ato helper for materialized session start"
+    );
+    let mut cmd = Command::new(&ato_bin);
+    cmd.args(["app", "session", "start", handle, "--json"]);
+    cmd.arg("--from-materialized-record").arg(record_path);
+    let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
+    cmd.arg("--run-config-hash").arg(&run_config_hash);
+
+    let desktop_pid = std::process::id();
+    cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
+    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
+        cmd.env(
+            "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
+            start_time.to_string(),
+        );
+    }
+
+    for secret in secrets {
+        cmd.env(&secret.key, &secret.value);
+    }
+    for (key, value) in plain_configs {
+        cmd.env(key, value);
+    }
+
+    run_session_start_command(&ato_bin, handle, secrets, &mut cmd)
+}
+
+fn run_session_start_command(
+    ato_bin: &Path,
+    handle: &str,
+    secrets: &[SecretEntry],
+    cmd: &mut Command,
+) -> Result<SessionStartInfo, LaunchError> {
     let output = cmd.output().map_err(|err| {
         LaunchError::Other(format!(
             "failed to run ato helper '{}' for session start: {err}",
@@ -1588,6 +1725,73 @@ fn build_launch_session(
             .or_else(|| service.as_ref().map(|item| PathBuf::from(&item.log_path)))
             .or_else(|| Some(PathBuf::from(&started.log_path))),
         notes,
+        execution_id: started.execution_id,
+        execution_receipt_schema_version: started.execution_receipt_schema_version,
+        click_origin: None,
+    })
+}
+
+fn build_launch_session_from_started(started: SessionStartInfo) -> Result<CapsuleLaunchSession> {
+    let manifest_path = PathBuf::from(&started.manifest_path);
+    let app_root = manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("manifest path has no parent: {}", manifest_path.display()))?;
+
+    let display_strategy = started.display_strategy.clone();
+    let guest = started.guest.clone();
+    let web = started.web.clone();
+    let terminal = started.terminal.clone();
+    let service = started.service.clone();
+    let frontend_entry = match guest.as_ref() {
+        Some(guest) => Some(normalize_frontend_entry(
+            &app_root,
+            &guest.frontend_entry,
+            &guest.frontend_entry,
+        )?),
+        None => None,
+    };
+
+    if matches!(display_strategy, CapsuleDisplayStrategy::GuestWebview) && guest.is_none() {
+        bail!(
+            "ato app session start returned guest_webview for {} without guest payload",
+            started.handle
+        );
+    }
+
+    Ok(CapsuleLaunchSession {
+        handle: started.handle,
+        normalized_handle: started.normalized_handle,
+        canonical_handle: started.canonical_handle,
+        source: started.source,
+        trust_state: started.trust_state,
+        restricted: started.restricted,
+        snapshot_label: started.snapshot.as_ref().map(snapshot_label),
+        session_id: started.session_id,
+        runtime: started.runtime,
+        display_strategy,
+        manifest_path,
+        app_root,
+        target_label: started.target_label,
+        adapter: guest.as_ref().map(|item| item.adapter.clone()),
+        frontend_entry,
+        invoke_url: guest.as_ref().map(|item| item.invoke_url.clone()),
+        healthcheck_url: guest
+            .as_ref()
+            .map(|item| item.healthcheck_url.clone())
+            .or_else(|| web.as_ref().map(|item| item.healthcheck_url.clone())),
+        capabilities: guest
+            .as_ref()
+            .map(|item| item.capabilities.clone())
+            .unwrap_or_default(),
+        local_url: web.as_ref().map(|item| item.local_url.clone()),
+        served_by: web.as_ref().map(|item| item.served_by.clone()),
+        log_path: terminal
+            .as_ref()
+            .map(|item| PathBuf::from(&item.log_path))
+            .or_else(|| service.as_ref().map(|item| PathBuf::from(&item.log_path)))
+            .or_else(|| Some(PathBuf::from(&started.log_path))),
+        notes: started.notes,
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
@@ -4646,6 +4850,7 @@ mod fast_path_tests {
     fn base_record(handle: &str) -> StoredSessionInfo {
         StoredSessionInfo {
             session_id: format!("ato-desktop-session-{}", std::process::id()),
+            launch_key: None,
             handle: handle.to_string(),
             normalized_handle: handle.trim_start_matches("capsule://").to_string(),
             canonical_handle: Some(handle.trim_start_matches("capsule://").to_string()),

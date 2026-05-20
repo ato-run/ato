@@ -131,6 +131,7 @@ pub enum PreflightError {
 /// passes Dev.
 pub fn collect_aggregate_requirements(
     target: &str,
+    _registry: Option<&str>,
     profile: ExecutionProfile,
 ) -> Result<AggregatePreflightResult, PreflightError> {
     let manifest_path = resolve_local_manifest_path(target)?;
@@ -443,7 +444,10 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
         });
     }
     let owner = parts[0];
-    let repo = parts[1];
+    // Strip any commit-pin suffix (`repo@<sha>`) before using the repo
+    // name to locate cache directories. Without this, `repo@d8145039…`
+    // is treated as a literal repo name and every cache lookup misses.
+    let repo = parts[1].split('@').next().unwrap_or(parts[1]);
     let ato_home = capsule_core::common::paths::nacelle_home_dir_or_workspace_tmp();
 
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -665,7 +669,7 @@ egress_allow = ["smtp.gmail.com"]
         let target_str = manifest_path.to_string_lossy().to_string();
 
         let result =
-            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
+            collect_aggregate_requirements(&target_str, None, ExecutionProfile::Dev).expect("collect");
 
         // Two targets visited in service-name order (main → web).
         assert_eq!(result.visited_targets, vec!["app", "web"]);
@@ -721,7 +725,7 @@ egress_allow = ["smtp.gmail.com"]
         let target_str = manifest_path.to_string_lossy().to_string();
 
         let result =
-            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
+            collect_aggregate_requirements(&target_str, None, ExecutionProfile::Dev).expect("collect");
 
         for envelope in &result.requirements {
             if let InteractiveResolutionKind::ConsentRequired {
@@ -781,7 +785,7 @@ run = "python -m app"
         fs::write(&manifest_path, manifest).expect("write");
 
         let result =
-            collect_aggregate_requirements(&manifest_path.to_string_lossy(), ExecutionProfile::Dev)
+            collect_aggregate_requirements(&manifest_path.to_string_lossy(), None, ExecutionProfile::Dev)
                 .expect("collect");
 
         assert_eq!(result.visited_targets.len(), 1);
@@ -891,5 +895,47 @@ contract = "service@1"
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    /// #146 regression: `repo@<sha>` in the URL must not be treated as a
+    /// literal repo name when scanning cache directories. Verify that the
+    /// `@sha` suffix is stripped before constructing the cache prefix.
+    #[test]
+    fn github_cache_resolver_strips_sha_suffix_from_repo() {
+        // Build an isolated ATO_HOME with a fake cached working tree whose
+        // directory name matches the bare repo slug (no sha suffix).
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let repo = "MyRepo";
+        let owner = "acme";
+
+        // Populate external-capsules cache: ~/.ato/external-capsules/github/<owner>/<repo>/<sha>/
+        let cached_commit = "abc123deadbeef";
+        let ext_root = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join(owner)
+            .join(repo)
+            .join(cached_commit);
+        std::fs::create_dir_all(&ext_root).expect("create ext_root");
+        std::fs::write(ext_root.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        // Request with a sha suffix — the resolver must strip the suffix and
+        // still find the cached manifest.
+        let rest = format!("{owner}/{repo}@somecommitsha");
+        let result = resolve_cached_github_capsule(&rest);
+
+        assert!(
+            result.is_ok(),
+            "#146: repo@sha should resolve from cache (got {result:?})"
+        );
+        let found = result.unwrap();
+        assert!(
+            found.ends_with("capsule.toml"),
+            "expected a path ending in capsule.toml, got {found:?}"
+        );
     }
 }
