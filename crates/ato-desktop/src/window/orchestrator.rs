@@ -613,15 +613,24 @@ pub fn open_app_window_with_configs(
     route: GuestRoute,
     launch_configs: Vec<(String, String)>,
 ) -> Result<AnyWindowHandle> {
-    let capsule_input = match &route {
-        GuestRoute::CapsuleHandle { handle, .. } => Some(CapsuleBootInput::Start {
-            handle: handle.clone(),
-            configs: launch_configs,
-        }),
-        _ => None,
-    };
+    let capsule_input = start_capsule_input_for_route(&route, launch_configs);
 
     open_app_window_with_capsule_input(cx, route, capsule_input)
+}
+
+fn start_capsule_input_for_route(
+    route: &GuestRoute,
+    launch_configs: Vec<(String, String)>,
+) -> Option<CapsuleBootInput> {
+    match route {
+        GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
+            Some(CapsuleBootInput::Start {
+                handle: handle.clone(),
+                configs: launch_configs,
+            })
+        }
+        _ => None,
+    }
 }
 
 pub fn open_app_window_from_materialized_record(
@@ -826,4 +835,55 @@ fn open_app_window_with_capsule_input(
     // AppWindow open/close cycles.
     let _ = app_bounds; // bar positioning moved out of this function
     Ok(*app_handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_capsule_input_for_route;
+    use crate::state::GuestRoute;
+
+    #[test]
+    fn capsule_handle_route_produces_start_input() {
+        let route = GuestRoute::CapsuleHandle {
+            handle: "capsule://example/app".to_string(),
+            label: "Example".to_string(),
+        };
+        let configs = vec![("MODEL".to_string(), "gpt-5".to_string())];
+
+        let input = start_capsule_input_for_route(&route, configs.clone());
+
+        match input {
+            Some(super::CapsuleBootInput::Start {
+                handle,
+                configs: got,
+            }) => {
+                assert_eq!(handle, "capsule://example/app");
+                assert_eq!(got, configs);
+            }
+            other => panic!("expected Start input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capsule_url_route_produces_start_input() {
+        let route = GuestRoute::CapsuleUrl {
+            handle: "capsule://example/app".to_string(),
+            label: "Example".to_string(),
+            url: url::Url::parse("https://example.com/app").expect("url"),
+        };
+        let configs = vec![("PORT".to_string(), "3000".to_string())];
+
+        let input = start_capsule_input_for_route(&route, configs.clone());
+
+        match input {
+            Some(super::CapsuleBootInput::Start {
+                handle,
+                configs: got,
+            }) => {
+                assert_eq!(handle, "capsule://example/app");
+                assert_eq!(got, configs);
+            }
+            other => panic!("expected Start input, got {other:?}"),
+        }
+    }
 }
