@@ -528,9 +528,9 @@ fn install_runtime_tool_archive(
     extract_archive(&archive_path, &extracted_dir)?;
 
     let target_path = extracted_dir.join(resolved_layout_path(spec)?);
-    if !target_path.exists() {
+    if !target_path.is_file() {
         return Err(CapsuleError::Pack(format!(
-            "{} archive missing expected entry {}",
+            "{} archive missing expected file {}",
             spec.name,
             target_path.display()
         )));
@@ -781,7 +781,7 @@ mod tests {
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored)
             .unix_permissions(0o755);
-        let path = format!("{}/bun", resolved_layout_path(&BUN).expect("bun layout"));
+        let path = resolved_layout_path(&BUN).expect("bun layout");
         zip.start_file(path, options).expect("start bun file");
         zip.write_all(b"bun binary").expect("write bun");
         zip.finish().expect("finish bun zip");
@@ -988,7 +988,7 @@ mod tests {
             .join(&pnpm_version)
             .join("extracted")
             .join("package/bin/pnpm.cjs")
-            .exists());
+            .is_file());
 
         let yarn_version = unique_version("yarn");
         let yarn_handle = install_runtime_tool_archive(
@@ -1010,7 +1010,7 @@ mod tests {
             .join(&yarn_version)
             .join("extracted")
             .join("package/bin/yarn.js")
-            .exists());
+            .is_file());
 
         let bun_version = unique_version("bun");
         let bun_handle = install_runtime_tool_archive(
@@ -1030,7 +1030,7 @@ mod tests {
             .join(&bun_version)
             .join("extracted")
             .join(resolved_layout_path(&BUN).unwrap())
-            .exists());
+            .is_file());
 
         let uv_version = unique_version("uv");
         let uv_handle =
@@ -1046,7 +1046,7 @@ mod tests {
             .join(&uv_version)
             .join("extracted")
             .join("uv")
-            .exists());
+            .is_file());
     }
 
     #[test]
