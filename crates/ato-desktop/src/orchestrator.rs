@@ -1842,6 +1842,31 @@ fn snapshot_label_from_resolved(snapshot: &ResolvedSnapshot) -> String {
 ///   construction error). The caller treats `Err` identically to
 ///   `Ok(None)` and falls back to the subprocess path.
 ///
+/// Try to reuse a live session for an explicit user click (e.g., Recent
+/// Capsules on the Start page). Wraps `try_session_record_fast_path` with
+/// the same `click_origin` anchoring and background receipt refresh that
+/// `resolve_and_start_capsule` performs, so surface-timing and receipts stay
+/// consistent regardless of which path opened the window.
+///
+/// Returns `Ok(Some(session))` when a live session was found and is ready to
+/// display. Returns `Ok(None)` on a clean miss (no session record or stale).
+/// Returns `Err` only for infrastructure failures (unreadable record dir,
+/// etc.) — callers should fall back to the consent flow in all non-`Some`
+/// cases.
+pub(crate) fn try_reuse_live_session_for_click(
+    handle: &str,
+) -> Result<Option<CapsuleLaunchSession>> {
+    match try_session_record_fast_path(handle) {
+        Ok(Some(mut session)) => {
+            session.click_origin = Some(ClickOrigin::now());
+            spawn_background_receipt_refresh(handle);
+            Ok(Some(session))
+        }
+        Ok(None) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// The function emits two SURFACE-TIMING stages so Phase 0 logs can
 /// distinguish fast-path-hit (`session_record_lookup` +
 /// `session_record_validate` present, `*_subprocess` absent) from
