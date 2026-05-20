@@ -146,7 +146,7 @@ pub enum AutomationCommand {
     /// time the shell renders. This is the AODD bypass for macOS
     /// Accessibility permission, which would otherwise be required to
     /// synthesise keystrokes via osascript.
-    HostDispatchAction { action: String },
+    HostDispatchAction { action: String, url: Option<String> },
     /// List all tracked capsule sessions from the SessionRegistry.
     /// Returns a JSON array of `SessionViewEntry` objects suitable
     /// for the Open Windows / Card Switcher UI.
