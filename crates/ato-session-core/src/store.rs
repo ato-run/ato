@@ -169,6 +169,7 @@ mod tests {
     fn make_record(id: &str) -> StoredSessionInfo {
         StoredSessionInfo {
             session_id: id.to_string(),
+            launch_key: None,
             handle: "publisher/slug".to_string(),
             normalized_handle: "publisher/slug".to_string(),
             canonical_handle: None,

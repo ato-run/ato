@@ -1221,13 +1221,27 @@ fn restart_focus_content_window(cx: &mut App, window_id: u64) {
     let ContentWindowKind::AppWindow { route } = entry.kind else {
         return;
     };
-    let materialized_record_path = capsule_session_id.and_then(|session_id| match &route {
-        crate::state::GuestRoute::CapsuleHandle { .. }
-        | crate::state::GuestRoute::CapsuleUrl { .. } => ato_session_core::launch_cache_root()
-            .ok()
-            .map(|root| ato_session_core::materialized_launch_record_path(&root, &session_id)),
-        _ => None,
-    });
+    let materialized_record_path =
+        capsule_session_id
+            .as_deref()
+            .and_then(|session_id| match &route {
+                crate::state::GuestRoute::CapsuleHandle { .. }
+                | crate::state::GuestRoute::CapsuleUrl { .. } => {
+                    crate::orchestrator::materialized_record_path_for_session(session_id).ok()
+                }
+                _ => None,
+            });
+    if let Some(session_id) = capsule_session_id.as_deref() {
+        if materialized_record_path.is_some() {
+            if let Err(err) = crate::orchestrator::stop_guest_session_and_wait(
+                session_id,
+                std::time::Duration::from_secs(3),
+            ) {
+                tracing::error!(error = %err, window_id, "RestartContentWindow stop failed");
+                return;
+            }
+        }
+    }
     let _ = entry
         .handle
         .update(cx, |_, window, _| window.remove_window());
