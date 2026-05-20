@@ -111,10 +111,7 @@ impl AppCapsuleShell {
         // Load per-handle secrets from the persistent store on disk.
         let secret_store = crate::config::load_secrets();
         let secrets: Vec<_> = secret_store
-            .secrets_for_capsule(&handle)
-            .into_iter()
-            .cloned()
-            .collect();
+            .secrets_for_capsule(&handle);
 
         // Spawn background thread for the blocking orchestration call.
         let (tx, rx) = std::sync::mpsc::channel();
