@@ -11,11 +11,7 @@ use crate::cli::{ConsentInternalCommands, InternalCommands};
 pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> {
     match command {
         InternalCommands::Consent { command } => execute_consent_command(command),
-        InternalCommands::Preflight {
-            target,
-            registry,
-            json,
-        } => execute_preflight_command(target, registry, json),
+        InternalCommands::Preflight { target, json } => execute_preflight_command(target, json),
     }
 }
 
@@ -36,10 +32,9 @@ pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> 
 /// `requirements` array). Non-zero exits are reserved for genuine
 /// failures (manifest missing, derivation failed, consent store
 /// unreadable). This matches `ato inspect requirements`'s convention.
-fn execute_preflight_command(target: String, registry: Option<String>, json: bool) -> Result<()> {
-    let result =
-        collect_aggregate_requirements(&target, registry.as_deref(), ExecutionProfile::Dev)
-            .map_err(|err| anyhow!("preflight collection failed: {err}"))?;
+fn execute_preflight_command(target: String, json: bool) -> Result<()> {
+    let result = collect_aggregate_requirements(&target, ExecutionProfile::Dev)
+        .map_err(|err| anyhow!("preflight collection failed: {err}"))?;
 
     if json {
         let payload = serde_json::json!({

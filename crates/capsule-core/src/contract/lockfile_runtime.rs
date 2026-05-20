@@ -18,7 +18,7 @@ use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
 use super::lockfile_support::{
-    cached_sha256, ensure_node, ensure_pnpm, ensure_uv, metadata_cache_path,
+    cached_sha256, ensure_node, ensure_uv, metadata_cache_path,
 };
 use super::{
     artifact_root, read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
@@ -323,8 +323,19 @@ pub(super) async fn prepare_node_artifacts(
         return Ok(Vec::new());
     }
 
+    use crate::contract::tools::{ensure_runtime_tool, ToolDeps, PNPM};
     let node_path = ensure_node(node_version, reporter.clone()).await?;
-    let pnpm_cmd = ensure_pnpm(&node_path, reporter.clone()).await?;
+    let pnpm_handle = ensure_runtime_tool(
+        &PNPM,
+        None,
+        &ToolDeps { node_bin: Some(node_path.clone()) },
+        reporter.clone(),
+    )
+    .await
+    .map_err(|e| CapsuleError::Pack(e.to_string()))?;
+    let pnpm_bin = pnpm_handle
+        .bin_dir
+        .join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
     reporter
         .notify("⬇️  Fetching pnpm store".to_string())
         .await?;
@@ -344,9 +355,8 @@ pub(super) async fn prepare_node_artifacts(
     std::fs::copy(&lock_path, &temp_lock)
         .map_err(|e| CapsuleError::Pack(format!("Failed to copy pnpm-lock.yaml: {}", e)))?;
 
-    let mut cmd = std::process::Command::new(&pnpm_cmd.program);
-    cmd.args(&pnpm_cmd.args_prefix)
-        .args([
+    let mut cmd = std::process::Command::new(&pnpm_bin);
+    cmd.args([
             "fetch",
             "--ignore-scripts",
             "--silent",

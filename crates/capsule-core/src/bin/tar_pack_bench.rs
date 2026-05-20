@@ -100,6 +100,7 @@ manifest_hash = "sha256:dummy"
                 config_path,
                 lockfile_path,
                 signing_key: None,
+                publish_profile: capsule_core::packers::pack_filter::PublishProfile::Artifact,
             },
             Arc::new(capsule_core::reporter::NoOpReporter),
         ))

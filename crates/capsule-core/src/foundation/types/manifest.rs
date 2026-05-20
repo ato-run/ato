@@ -1938,7 +1938,40 @@ runtime = "source/node"
 run = "node index.js"
 "#;
         let manifest = CapsuleManifest::from_toml(toml).unwrap();
-        assert!(manifest.validate_host_capabilities().is_err());
+        let errors = manifest.validate().expect_err("empty reason must fail validation");
+        let details = errors
+            .iter()
+            .map(|err| err.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(details.contains("host_capability 'open-file' must have a non-empty `reason` field"));
+    }
+
+    #[test]
+    fn host_capability_empty_reason_is_rejected_by_load_manifest() {
+        let toml = r#"
+schema_version = "0.3"
+name = "bad-capsule"
+type = "app"
+default_target = "app"
+
+[[host_capabilities]]
+name = "open-file"
+reason = ""
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capsule.toml");
+        std::fs::write(&path, toml).expect("write manifest");
+
+        let err = crate::contract::manifest::load_manifest(&path)
+            .expect_err("load_manifest must reject empty host capability reason");
+        assert!(err
+            .to_string()
+            .contains("host_capability 'open-file' must have a non-empty `reason` field"));
     }
 
     #[test]
@@ -1955,7 +1988,7 @@ run = "node index.js"
 "#;
         let manifest = CapsuleManifest::from_toml(toml).unwrap();
         assert!(manifest.host_capabilities.is_empty());
-        assert!(manifest.validate_host_capabilities().is_ok());
+        assert!(manifest.validate().is_ok());
         assert!(manifest.host_capability_grants().is_empty());
     }
 }
