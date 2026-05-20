@@ -1162,6 +1162,9 @@ pub struct AppState {
     pub network_logs: Vec<NetworkLogEntry>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
+    /// Handle → granted secret keys cache, built from bridge list().allow
+    /// so the render path never spawns the CLI bridge.
+    pub secret_grant_keys_by_handle: std::collections::HashMap<String, Vec<String>>,
     /// Per-capsule plaintext configuration (model name, port, etc.)
     /// — anything that came in via a non-secret `ConfigField`. The
     /// orchestrator merges this into the child process env at launch
@@ -1302,6 +1305,8 @@ impl AppState {
             network_logs: Vec::new(),
             config: crate::config::load_config(),
             secret_store: crate::config::load_secrets(),
+            secret_grant_keys_by_handle: crate::config::SecretStore::build_grant_keys_cache()
+                .unwrap_or_default(),
             capsule_config_store: crate::config::load_capsule_configs(),
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
@@ -1494,6 +1499,8 @@ impl AppState {
                 let _ = crate::config::migrate_legacy_secrets_if_present();
                 crate::config::load_secrets()
             },
+            secret_grant_keys_by_handle: crate::config::SecretStore::build_grant_keys_cache()
+                .unwrap_or_default(),
             capsule_config_store: crate::config::load_capsule_configs(),
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
@@ -1576,7 +1583,16 @@ impl AppState {
         key: String,
         value: String,
     ) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.add_secret(key, value)
+        self.secret_store.add_secret(key, value)?;
+        self.rebuild_grant_cache();
+        Ok(())
+    }
+
+    fn rebuild_grant_cache(&mut self) {
+        match crate::config::SecretStore::build_grant_keys_cache() {
+            Ok(cache) => self.secret_grant_keys_by_handle = cache,
+            Err(e) => tracing::warn!(error = %e, "Failed to rebuild grant key cache, keeping stale"),
+        }
     }
 
     /// Set or overwrite a single non-secret config value for a
@@ -1719,7 +1735,9 @@ impl AppState {
 
     /// Remove a secret and persist to disk (#57).
     pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.remove_secret(key)
+        self.secret_store.remove_secret(key)?;
+        self.rebuild_grant_cache();
+        Ok(())
     }
 
     pub fn grant_secret_to_capsule(
@@ -1727,7 +1745,9 @@ impl AppState {
         capsule_handle: &str,
         key: &str,
     ) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.grant_secret(capsule_handle, key)
+        self.secret_store.grant_secret(capsule_handle, key)?;
+        self.rebuild_grant_cache();
+        Ok(())
     }
 
     pub fn revoke_secret_from_capsule(
@@ -1735,7 +1755,9 @@ impl AppState {
         capsule_handle: &str,
         key: &str,
     ) -> Result<(), crate::config::BridgeError> {
-        self.secret_store.revoke_secret(capsule_handle, key)
+        self.secret_store.revoke_secret(capsule_handle, key)?;
+        self.rebuild_grant_cache();
+        Ok(())
     }
 
     pub fn focus_command_bar(&mut self) {
