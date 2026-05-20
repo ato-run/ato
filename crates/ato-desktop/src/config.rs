@@ -943,7 +943,7 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
     // Step 2: invert grants map and set per-key allow lists.
     // Old: grants[handle] = [KEY_A, KEY_B]
     // New: entry(KEY_A).allow += [canonical(handle)]
-    let mut per_key_allows: std::collections::HashMap<String, Vec<String>> =
+    let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
     for (raw_handle, allowed_keys) in &legacy.grants {
         let canonical = SecretStore::canonicalize_handle(raw_handle).to_string();
@@ -951,10 +951,11 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
             per_key_allows
                 .entry(key.clone())
                 .or_default()
-                .push(canonical.clone());
+                .insert(canonical.clone());
         }
     }
-    for (key, allow) in per_key_allows {
+    for (key, allow_set) in per_key_allows {
+        let allow: Vec<String> = allow_set.into_iter().collect();
         if let Err(e) =
             crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
         {

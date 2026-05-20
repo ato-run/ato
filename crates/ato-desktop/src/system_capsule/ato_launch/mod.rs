@@ -124,8 +124,12 @@ pub fn dispatch(
                     let mut store = crate::config::load_secrets();
                     for (key, value) in &secrets {
                         if !value.is_empty() {
-                            store.add_secret(key.clone(), value.clone());
-                            store.grant_secret(handle, key);
+                            if let Err(e) = store.add_secret(key.clone(), value.clone()) {
+                                tracing::error!(error = %e, key, "ato_launch: add_secret failed");
+                            }
+                            if let Err(e) = store.grant_secret(handle, key) {
+                                tracing::error!(error = %e, key, handle, "ato_launch: grant_secret failed");
+                            }
                         }
                     }
                 }
