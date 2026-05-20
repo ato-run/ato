@@ -81,16 +81,8 @@ jobs:
             test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
             cd -
           done
-          # ato-store from apps/ato-web
-          cd apps/ato-web
-          npm install -g pnpm@latest
-          pnpm install --frozen-lockfile
-          pnpm run build:desktop-store
-          test -f dist/index.html || { echo "ERROR: ato-store dist/index.html missing after build"; exit 1; }
-          rm -rf ../../crates/ato-desktop/assets/system/ato-store/dist
-          cp -r dist ../../crates/ato-desktop/assets/system/ato-store/dist
-          test -f ../../crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store dest copy failed"; exit 1; }
-          cd -
+          # ato-store dist is committed; verify it's present
+          test -f crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
       - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
@@ -153,16 +145,8 @@ jobs:
             test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
             cd -
           done
-          # ato-store from apps/ato-web
-          cd apps/ato-web
-          npm install -g pnpm@latest
-          pnpm install --frozen-lockfile
-          pnpm run build:desktop-store
-          test -f dist/index.html || { echo "ERROR: ato-store dist/index.html missing after build"; exit 1; }
-          rm -rf ../../crates/ato-desktop/assets/system/ato-store/dist
-          cp -r dist ../../crates/ato-desktop/assets/system/ato-store/dist
-          test -f ../../crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store dest copy failed"; exit 1; }
-          cd -
+          # ato-store dist is committed; verify it's present
+          test -f crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
       - name: Install WiX Toolset 3.x
         # candle/light are required by xtask::package_msi. WiX 3.14 is
@@ -224,16 +208,8 @@ jobs:
             test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
             cd -
           done
-          # ato-store from apps/ato-web
-          cd apps/ato-web
-          npm install -g pnpm@latest
-          pnpm install --frozen-lockfile
-          pnpm run build:desktop-store
-          test -f dist/index.html || { echo "ERROR: ato-store dist/index.html missing after build"; exit 1; }
-          rm -rf ../../crates/ato-desktop/assets/system/ato-store/dist
-          cp -r dist ../../crates/ato-desktop/assets/system/ato-store/dist
-          test -f ../../crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store dest copy failed"; exit 1; }
-          cd -
+          # ato-store dist is committed; verify it's present
+          test -f crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
       - name: Install AppImage build deps
         # appimagetool is shipped as a single AppImage; we drop it on
