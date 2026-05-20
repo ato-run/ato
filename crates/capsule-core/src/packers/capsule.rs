@@ -16,7 +16,7 @@ use crate::common::paths::{
 };
 use crate::error::{CapsuleError, Result as CapsuleResult};
 use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
-use crate::packers::pack_filter::PackFilter;
+use crate::packers::pack_filter::{PackFilter, PublishProfile};
 use crate::packers::payload::{
     build_distribution_manifest, manifest_hash, normalize_relative_utf8_path,
     reconstruct_from_chunks,
@@ -52,6 +52,10 @@ pub struct CapsulePackOptions {
     /// Optional signing key. When present, `signature.json` will contain a valid
     /// Ed25519 signature. When absent, a `{"signed": false, ...}` placeholder is written.
     pub signing_key: Option<StoredKey>,
+    /// Controls whether dependency/build outputs are included in the artifact.
+    /// Defaults to [`PublishProfile::Artifact`] for backward compatibility.
+    /// Use [`PublishProfile::Source`] for source-native `ato publish` flows.
+    pub publish_profile: PublishProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -174,7 +178,8 @@ pub async fn pack(
     let compat_input = opts.compat_input.as_ref().ok_or_else(|| {
         CapsuleError::Pack("capsule pack requires compat manifest input".to_string())
     })?;
-    let pack_filter = PackFilter::from_manifest(compat_input.manifest())?;
+    let pack_filter =
+        PackFilter::from_manifest_with_profile(compat_input.manifest(), opts.publish_profile)?;
 
     // config/lockfile are prepared by the caller once and injected into this packer.
     debug!(
@@ -1123,7 +1128,7 @@ mod tests {
 
     use crate::capsule::{verify_artifact_hash, PayloadManifest};
     use crate::common::hash::sha256_hex;
-    use crate::packers::pack_filter::PackFilter;
+    use crate::packers::pack_filter::{PackFilter, PublishProfile};
     use crate::packers::payload::reconstruct_from_chunks;
     use crate::packers::sbom::SBOM_PATH;
     use crate::reporter::NoOpReporter;
@@ -1373,6 +1378,7 @@ manifest_hash = "sha256:dummy"
                 config_path: config_path.clone(),
                 lockfile_path: lock_path.clone(),
                 signing_key: None,
+                publish_profile: PublishProfile::Artifact,
             },
             Arc::new(NoOpReporter),
         )
@@ -1389,6 +1395,7 @@ manifest_hash = "sha256:dummy"
                 config_path,
                 lockfile_path: lock_path,
                 signing_key: None,
+                publish_profile: PublishProfile::Artifact,
             },
             Arc::new(NoOpReporter),
         )
@@ -1455,6 +1462,7 @@ manifest_hash = "sha256:dummy"
                 config_path,
                 lockfile_path: lock_path,
                 signing_key: None,
+                publish_profile: PublishProfile::Artifact,
             },
             Arc::new(NoOpReporter),
         )

@@ -21,7 +21,7 @@ pub(crate) enum InternalCommands {
 
     /// #117 — eager pre-launch requirement collection. Walks the
     /// orchestration target graph for `target` (a local capsule path
-    /// or `publisher/slug` ref), derives an ExecutionPlan per service
+    /// or cached GitHub repository ref), derives an ExecutionPlan per service
     /// target without running any provisioning side effects (no
     /// `uv venv`, no `npm install`, no postgres provider startup),
     /// checks consent state per plan, and inspects each target's
@@ -45,13 +45,10 @@ pub(crate) enum InternalCommands {
         about = "Collect aggregate launch requirements before provisioning (plumbing)"
     )]
     Preflight {
-        /// Local capsule path or scoped package reference such as
-        /// `publisher/slug`. Same input shape as `ato run`'s
-        /// positional argument and `ato inspect requirements`.
+        /// Local capsule path or cached GitHub repository ref such as
+        /// `github.com/owner/repo`. Unlike `ato run`, this plumbing
+        /// path never fetches or installs.
         target: String,
-        /// Registry URL override. Mirrors `ato inspect requirements`.
-        #[arg(long)]
-        registry: Option<String>,
         /// Emit machine-readable JSON output on stdout. Without it
         /// the command emits a brief human-readable summary (still
         /// including every identity field a TTY user could copy-

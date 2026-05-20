@@ -128,19 +128,25 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 /// without launching. Equivalent to `ato internal preflight <target> --json` but
 /// driven from the main `ato run` command for scripted callers (CI, MCP, AODD).
 ///
+/// Scope: local capsule paths plus already-cached `github.com/<owner>/<repo>` refs
+/// only. This command never fetches from registries, auto-installs missing capsules,
+/// or materializes provider-backed workspaces.
+///
 /// Exit policy: exits 0 even when requirements are pending (caller decides what to do
 /// based on the `"ok"` field). Non-zero only on genuine collection failures.
 async fn execute_plan_only(args: RunArgs) -> Result<()> {
     use crate::application::preflight::collect_aggregate_requirements;
     use capsule_core::router::ExecutionProfile;
 
+    if args.registry.is_some() {
+        anyhow::bail!(
+            "`ato run --plan-only` does not support `--registry`. It only inspects local paths and cached `github.com/<owner>/<repo>` checkouts without fetching or installing. Install the capsule first, then re-run `--plan-only` on the local path."
+        );
+    }
+
     let target_str = args.target.to_string_lossy();
-    let result = collect_aggregate_requirements(
-        &target_str,
-        args.registry.as_deref(),
-        ExecutionProfile::Dev,
-    )
-    .map_err(|err| anyhow::anyhow!("preflight collection failed: {err}"))?;
+    let result = collect_aggregate_requirements(&target_str, ExecutionProfile::Dev)
+        .map_err(|err| anyhow::anyhow!("preflight collection failed: {err}"))?;
 
     if args.reporter.is_json() {
         let payload = serde_json::json!({
@@ -2238,6 +2244,67 @@ run = "main.py""#,
             routed.plan.execution_entrypoint().as_deref(),
             Some("MyApp.AppImage")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_only_rejects_registry_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = tmp.path().join("capsule.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "plan-only-fixture"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source/node"
+run = "node index.js"
+"#,
+        )
+        .expect("write manifest");
+
+        let args = RunArgs {
+            target: manifest_path,
+            target_label: None,
+            args: Vec::new(),
+            watch: false,
+            background: false,
+            nacelle: None,
+            registry: Some("https://registry.example.invalid".to_string()),
+            enforcement: "best_effort".to_string(),
+            sandbox_mode: false,
+            dangerously_skip_permissions: false,
+            compatibility_fallback: None,
+            provider_toolchain_requested: crate::ProviderToolchain::Auto,
+            explicit_commit: None,
+            assume_yes: true,
+            verbose: false,
+            agent_mode: crate::RunAgentMode::Off,
+            agent_local_root: Some(tmp.path().to_path_buf()),
+            keep_failed_artifacts: false,
+            auto_fix_mode: None,
+            allow_unverified: false,
+            read_grants: Vec::new(),
+            write_grants: Vec::new(),
+            read_write_grants: Vec::new(),
+            caller_cwd: tmp.path().to_path_buf(),
+            effective_cwd: None,
+            export_request: None,
+            state_bindings: Vec::new(),
+            inject_bindings: Vec::new(),
+            build_policy: crate::application::build_materialization::BuildPolicy::IfStale,
+            cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
+            reporter: Arc::new(CliReporter::new(true)),
+            preview_mode: false,
+            plan_only: true,
+        };
+
+        let err = super::execute_plan_only(args)
+            .await
+            .expect_err("plan-only must reject --registry");
+        assert!(err.to_string().contains("does not support `--registry`"));
     }
 
     #[test]
