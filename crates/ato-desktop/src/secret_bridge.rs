@@ -1,9 +1,32 @@
+use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Typed error from the CLI bridge, preserving the machine-readable code
+/// so the UI can branch on `identity_not_loaded` etc.
+#[derive(Debug)]
+pub(crate) struct BridgeError {
+    pub code: String,
+    pub message: String,
+}
+
+impl BridgeError {
+    pub fn is_identity_not_loaded(&self) -> bool {
+        self.code == "identity_not_loaded"
+    }
+}
+
+impl fmt::Display for BridgeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "secret bridge {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for BridgeError {}
 
 /// JSON bridge request sent to `ato secrets bridge --json`.
 #[derive(Debug, Serialize)]
@@ -60,12 +83,21 @@ enum BridgeResponse {
 /// Thin client that calls the CLI's `ato secrets bridge --json`.
 pub(crate) struct CliSecretBridge;
 
+/// Internal result alias for bridge communication.
+type BridgeResult<T> = std::result::Result<T, BridgeError>;
+
 impl CliSecretBridge {
-    fn call(request: &BridgeRequest) -> Result<BridgeResponse> {
+    fn call(request: &BridgeRequest) -> BridgeResult<BridgeResponse> {
         let ato = crate::orchestrator::resolve_ato_binary()
-            .context("failed to resolve ato binary for secret bridge")?;
-        let request_json =
-            serde_json::to_string(request).context("failed to serialize bridge request")?;
+            .map_err(|e| BridgeError {
+                code: "binary_not_found".into(),
+                message: format!("failed to resolve ato binary: {e}"),
+            })?;
+        let request_json = serde_json::to_string(request)
+            .map_err(|e| BridgeError {
+                code: "serialization_failed".into(),
+                message: format!("{e}"),
+            })?;
 
         let mut child = Command::new(&ato)
             .args(["secrets", "bridge", "--json"])
@@ -73,45 +105,77 @@ impl CliSecretBridge {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("failed to spawn ato bridge ({})", ato.display()))?;
+            .map_err(|e| BridgeError {
+                code: "spawn_failed".into(),
+                message: format!("failed to spawn ato bridge ({}): {e}", ato.display()),
+            })?;
 
         {
-            let stdin = child
-                .stdin
-                .as_mut()
-                .context("failed to open bridge stdin")?;
-            stdin
-                .write_all(request_json.as_bytes())
-                .context("failed to write bridge request")?;
-            stdin
-                .write_all(b"\n")
-                .context("failed to write newline to bridge")?;
-            stdin.flush().context("failed to flush bridge stdin")?;
+            let stdin = child.stdin.as_mut().ok_or_else(|| BridgeError {
+                code: "spawn_failed".into(),
+                message: "failed to open bridge stdin".into(),
+            })?;
+            stdin.write_all(request_json.as_bytes()).map_err(|e| BridgeError {
+                code: "spawn_failed".into(),
+                message: format!("failed to write bridge request: {e}"),
+            })?;
+            stdin.write_all(b"\n").map_err(|e| BridgeError {
+                code: "spawn_failed".into(),
+                message: format!("failed to write newline: {e}"),
+            })?;
+            stdin.flush().map_err(|e| BridgeError {
+                code: "spawn_failed".into(),
+                message: format!("failed to flush bridge stdin: {e}"),
+            })?;
         }
 
-        let output = child
-            .wait_with_output()
-            .context("failed to wait for bridge process")?;
+        let output = child.wait_with_output().map_err(|e| BridgeError {
+            code: "spawn_failed".into(),
+            message: format!("failed to wait for bridge process: {e}"),
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "bridge exited with {}: {}",
-                output.status,
-                stderr.trim()
-            ));
+            return Err(BridgeError {
+                code: "spawn_failed".into(),
+                message: format!("bridge exited with {}: {}", output.status, stderr.trim()),
+            });
         }
 
         let mut stdout_reader = BufReader::new(&output.stdout[..]);
         let mut line = String::new();
-        stdout_reader
-            .read_line(&mut line)
-            .context("failed to read bridge response")?;
+        stdout_reader.read_line(&mut line).map_err(|e| BridgeError {
+            code: "spawn_failed".into(),
+            message: format!("failed to read bridge response: {e}"),
+        })?;
 
-        serde_json::from_str(line.trim()).context("failed to parse bridge response")
+        serde_json::from_str(line.trim()).map_err(|e| BridgeError {
+            code: "malformed_response".into(),
+            message: format!("failed to parse bridge response: {e}"),
+        })
     }
 
-    pub(crate) fn status() -> Result<bool> {
+    fn map_resp(resp: BridgeResponse) -> BridgeResult<()> {
+        match resp {
+            BridgeResponse::Ok { .. } => Ok(()),
+            BridgeResponse::Error { code, message } => Err(BridgeError { code, message }),
+        }
+    }
+
+    fn map_resp_data<T: serde::de::DeserializeOwned>(
+        resp: BridgeResponse,
+        label: &str,
+    ) -> BridgeResult<T> {
+        match resp {
+            BridgeResponse::Ok { data } => serde_json::from_value(data).map_err(|e| BridgeError {
+                code: "malformed_response".into(),
+                message: format!("failed to parse bridge {label} response: {e}"),
+            }),
+            BridgeResponse::Error { code, message } => Err(BridgeError { code, message }),
+        }
+    }
+
+    pub(crate) fn status() -> BridgeResult<bool> {
         let resp = Self::call(&BridgeRequest::Status)?;
         match resp {
             BridgeResponse::Ok { data } => Ok(data["identity_loaded"].as_bool().unwrap_or(false)),
@@ -125,83 +189,48 @@ impl CliSecretBridge {
         namespace: Option<&str>,
         allow: Option<Vec<String>>,
         deny: Option<Vec<String>>,
-    ) -> Result<()> {
-        let resp = Self::call(&BridgeRequest::Set {
+    ) -> BridgeResult<()> {
+        Self::map_resp(Self::call(&BridgeRequest::Set {
             key: key.to_string(),
             value: value.to_string(),
             namespace: namespace.map(|s| s.to_string()),
             description: None,
             allow,
             deny,
-        })?;
-        match resp {
-            BridgeResponse::Ok { .. } => Ok(()),
-            BridgeResponse::Error { code, message } => {
-                Err(anyhow::anyhow!("secret bridge {code}: {message}"))
-            }
-        }
+        })?)
     }
 
-    pub(crate) fn delete(key: &str, namespace: Option<&str>) -> Result<()> {
-        let resp = Self::call(&BridgeRequest::Delete {
+    pub(crate) fn delete(key: &str, namespace: Option<&str>) -> BridgeResult<()> {
+        Self::map_resp(Self::call(&BridgeRequest::Delete {
             key: key.to_string(),
             namespace: namespace.map(|s| s.to_string()),
-        })?;
-        match resp {
-            BridgeResponse::Ok { .. } => Ok(()),
-            BridgeResponse::Error { code, message } => {
-                Err(anyhow::anyhow!("secret bridge {code}: {message}"))
-            }
-        }
+        })?)
     }
 
-    pub(crate) fn list() -> Result<Vec<SecretEntryView>> {
-        let resp = Self::call(&BridgeRequest::List)?;
-        match resp {
-            BridgeResponse::Ok { data } => {
-                let entries: Vec<SecretEntryView> = serde_json::from_value(data)
-                    .context("failed to parse bridge list response")?;
-                Ok(entries)
-            }
-            BridgeResponse::Error { code, message } => {
-                Err(anyhow::anyhow!("secret bridge {code}: {message}"))
-            }
-        }
+    pub(crate) fn list() -> BridgeResult<Vec<SecretEntryView>> {
+        Self::map_resp_data(Self::call(&BridgeRequest::List)?, "list")
     }
 
-    pub(crate) fn resolve_for_capsule(handle: &str) -> Result<Vec<ResolvedSecret>> {
-        let resp = Self::call(&BridgeRequest::ResolveForCapsule {
-            capsule_handle: handle.to_string(),
-        })?;
-        match resp {
-            BridgeResponse::Ok { data } => {
-                let entries: Vec<ResolvedSecret> = serde_json::from_value(data)
-                    .context("failed to parse bridge resolve response")?;
-                Ok(entries)
-            }
-            BridgeResponse::Error { code, message } => {
-                Err(anyhow::anyhow!("secret bridge {code}: {message}"))
-            }
-        }
+    pub(crate) fn resolve_for_capsule(handle: &str) -> BridgeResult<Vec<ResolvedSecret>> {
+        Self::map_resp_data(
+            Self::call(&BridgeRequest::ResolveForCapsule {
+                capsule_handle: handle.to_string(),
+            })?,
+            "resolve_for_capsule",
+        )
     }
 
     pub(crate) fn update_acl(
         key: &str,
         allow: Option<Vec<String>>,
         deny: Option<Vec<String>>,
-    ) -> Result<()> {
-        let resp = Self::call(&BridgeRequest::UpdateAcl {
+    ) -> BridgeResult<()> {
+        Self::map_resp(Self::call(&BridgeRequest::UpdateAcl {
             key: key.to_string(),
             allow,
             deny,
             namespace: None,
-        })?;
-        match resp {
-            BridgeResponse::Ok { .. } => Ok(()),
-            BridgeResponse::Error { code, message } => {
-                Err(anyhow::anyhow!("secret bridge {code}: {message}"))
-            }
-        }
+        })?)
     }
 }
 

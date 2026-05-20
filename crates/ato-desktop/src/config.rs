@@ -751,11 +751,7 @@ pub struct SecretStore {
 }
 
 /// Error surfaced when a bridge operation fails.
-#[derive(Debug, thiserror::Error)]
-pub enum BridgeError {
-    #[error("secret bridge error: {0}")]
-    Bridge(#[from] anyhow::Error),
-}
+pub(crate) use crate::secret_bridge::BridgeError;
 
 impl SecretStore {
     pub fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
@@ -771,8 +767,7 @@ impl SecretStore {
     }
 
     pub fn add_secret(&mut self, key: String, value: String) -> Result<(), BridgeError> {
-        crate::secret_bridge::CliSecretBridge::set(&key, &value, None, None, None)
-            .map_err(BridgeError::Bridge)?;
+        crate::secret_bridge::CliSecretBridge::set(&key, &value, None, None, None)?;
         if let Some(existing) = self.secrets.iter_mut().find(|s| s.key == key) {
             existing.value = String::new();
         } else {
@@ -785,8 +780,7 @@ impl SecretStore {
     }
 
     pub fn remove_secret(&mut self, key: &str) -> Result<(), BridgeError> {
-        crate::secret_bridge::CliSecretBridge::delete(key, None)
-            .map_err(BridgeError::Bridge)?;
+        crate::secret_bridge::CliSecretBridge::delete(key, None)?;
         self.secrets.retain(|s| s.key != key);
         Ok(())
     }
@@ -818,12 +812,11 @@ impl SecretStore {
         key: &str,
     ) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
-        let mut allow = self.current_allow_list(key).unwrap_or_default();
+        let mut allow = self.current_allow_list(key)?;
         if !allow.contains(&canonical) {
             allow.push(canonical);
         }
         crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
-            .map_err(BridgeError::Bridge)
     }
 
     pub fn revoke_secret(
@@ -832,20 +825,38 @@ impl SecretStore {
         key: &str,
     ) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
-        let mut allow = self.current_allow_list(key).unwrap_or_default();
+        let mut allow = self.current_allow_list(key)?;
         allow.retain(|h| h != &canonical);
         crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
-            .map_err(BridgeError::Bridge)
     }
 
-    fn current_allow_list(&self, key: &str) -> Option<Vec<String>> {
-        match crate::secret_bridge::CliSecretBridge::list() {
-            Ok(entries) => entries
-                .into_iter()
-                .find(|e| e.key == key)
-                .and_then(|e| e.allow),
-            Err(_) => None,
+    fn current_allow_list(&self, key: &str) -> Result<Vec<String>, BridgeError> {
+        let entries = crate::secret_bridge::CliSecretBridge::list()?;
+        Ok(entries
+            .into_iter()
+            .find(|e| e.key == key)
+            .and_then(|e| e.allow)
+            .unwrap_or_default())
+    }
+
+    /// Rebuild `secret_grant_keys_by_handle` cache from the bridge.
+    /// Inverts per-key allow lists into per-handle key lists.
+    pub fn build_grant_keys_cache(
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
+        let entries = crate::secret_bridge::CliSecretBridge::list()?;
+        let mut cache: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for e in &entries {
+            if let Some(ref allow) = e.allow {
+                for handle in allow {
+                    cache
+                        .entry(handle.clone())
+                        .or_default()
+                        .push(e.key.clone());
+                }
+            }
         }
+        Ok(cache)
     }
 }
 
@@ -967,7 +978,8 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
     // Step 3: rename on full success.
     let bak_path = json_path.with_extension("json.bak");
     if let Err(e) = std::fs::rename(&json_path, &bak_path) {
-        tracing::warn!(src = %json_path.display(), dst = %bak_path.display(), error = %e, "Migration: secrets migrated but rename failed");
+        tracing::warn!(src = %json_path.display(), dst = %bak_path.display(), error = %e, "Migration: age write succeeded but rename of secrets.json failed — file still present at original path");
+        return None;
     } else {
         tracing::info!(
             path = %bak_path.display(),
