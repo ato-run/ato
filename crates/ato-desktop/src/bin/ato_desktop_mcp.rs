@@ -1137,6 +1137,7 @@ fn map_tool_to_command(
                 "FocusControlBarInput",
                 "ForceApprovePending",
                 "GithubRunFindCandidates",
+                "GithubRunProceedToConsent",
                 "NavigateToTestCapsule",
                 "NavigateToTestHttp",
                 "NavigateToUrl",
@@ -1169,6 +1170,9 @@ fn map_tool_to_command(
             }
             if action == "GithubRunFindCandidates" && url.is_none() {
                 return Err("GithubRunFindCandidates requires a `url` parameter (owner/repo or GitHub URL)".into());
+            }
+            if action == "GithubRunProceedToConsent" && url.is_none() {
+                return Err("GithubRunProceedToConsent requires a `url` parameter (owner/repo or GitHub URL)".into());
             }
             let mut params = serde_json::json!({ "action": action });
             if let Some(ref u) = url {

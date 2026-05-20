@@ -49,6 +49,16 @@ export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
   const [tab, setTab] = useState("structured");
   if (!candidate) return null;
 
+  function handleProceed() {
+    bridge({
+      kind: "github_proceed_to_consent",
+      repo: candidate.repo || "",
+      title: candidate.title || candidate.repo || "",
+    });
+    // onProceed is kept as a fallback for non-IPC environments (e.g. tests).
+    if (typeof onProceed === "function") onProceed();
+  }
+
   const metaFields = [
     { label: "Name",       value: candidate.title || "—" },
     { label: "Author",     value: candidate.author || "—" },
@@ -135,7 +145,7 @@ export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
           style={{ padding: "9px 18px", borderRadius: 8, border: "1px solid var(--border-soft)", background: "var(--surface)", fontSize: 13, cursor: "pointer", fontWeight: 500 }}
         >戻る</button>
         <button
-          onClick={onProceed}
+          onClick={handleProceed}
           style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
         >起動レビューへ進む</button>
       </div>

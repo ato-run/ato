@@ -65,6 +65,10 @@ pub enum LaunchCommand {
     /// User pressed "Find candidates" in the GitHub Run wizard.
     /// `repo` is `owner/repo` (already normalized by the React layer).
     GithubFindCandidates { repo: String },
+    /// User clicked "起動レビューへ進む" (Proceed to review) in the
+    /// candidate detail screen. Normalizes `repo` into a launchable
+    /// `github.com/{owner}/{repo}` handle and opens the consent wizard.
+    GithubProceedToConsent { repo: String, title: String },
 }
 
 impl LaunchCommand {
@@ -73,6 +77,7 @@ impl LaunchCommand {
             LaunchCommand::Approve { .. } => Capability::WebviewCreate,
             LaunchCommand::Cancel | LaunchCommand::AbortBoot => Capability::WindowsClose,
             LaunchCommand::GithubFindCandidates { .. } => Capability::WebviewCreate,
+            LaunchCommand::GithubProceedToConsent { .. } => Capability::WebviewCreate,
         }
     }
 }
@@ -266,6 +271,29 @@ pub fn dispatch(
                     }
                 });
             }).detach();
+        }
+        LaunchCommand::GithubProceedToConsent { repo, title } => {
+            tracing::info!(repo = %repo, title = %title, "ato_launch: github_proceed_to_consent");
+
+            let handle = crate::window::launch_window::normalize_github_handle(&repo);
+            let route = GuestRoute::CapsuleHandle {
+                handle: handle.clone(),
+                label: title.clone(),
+            };
+
+            // Close the GitHub Run wizard; the consent wizard takes focus.
+            let _ = host.update(cx, |_, window, _| window.remove_window());
+            cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
+
+            if let Err(err) =
+                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            {
+                tracing::error!(
+                    error = %err,
+                    handle = %handle,
+                    "ato_launch: open_consent_window_for_route failed"
+                );
+            }
         }
     }
     Ok(())
