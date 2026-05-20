@@ -1221,6 +1221,14 @@ fn restart_focus_content_window(cx: &mut App, window_id: u64) {
     let ContentWindowKind::AppWindow { route } = entry.kind else {
         return;
     };
+    let launch_configs = capsule_session_id
+        .as_deref()
+        .and_then(|session_id| {
+            cx.global::<crate::state::session::SessionRegistry>()
+                .get_session(session_id)
+                .map(|session| session.launch_context.launch_configs.clone())
+        })
+        .unwrap_or_default();
     let materialized_record_path =
         capsule_session_id
             .as_deref()
@@ -1232,27 +1240,26 @@ fn restart_focus_content_window(cx: &mut App, window_id: u64) {
                 _ => None,
             });
     if let Some(session_id) = capsule_session_id.as_deref() {
-        if materialized_record_path.is_some() {
-            if let Err(err) = crate::orchestrator::stop_guest_session_and_wait(
-                session_id,
-                std::time::Duration::from_secs(3),
-            ) {
-                tracing::error!(error = %err, window_id, "RestartContentWindow stop failed");
-                return;
-            }
+        if let Err(err) = crate::orchestrator::stop_guest_session_and_wait(
+            session_id,
+            std::time::Duration::from_secs(3),
+        ) {
+            tracing::error!(error = %err, window_id, "RestartContentWindow stop failed");
+            return;
         }
     }
     let _ = entry
         .handle
         .update(cx, |_, window, _| window.remove_window());
     let restart_result = if let Some(record_path) = materialized_record_path {
-        crate::window::orchestrator::open_app_window_from_materialized_record(
+        crate::window::orchestrator::open_app_window_from_materialized_record_with_configs(
             cx,
             route.clone(),
             record_path,
+            launch_configs,
         )
     } else {
-        crate::window::open_app_window(cx, route.clone())
+        crate::window::orchestrator::open_app_window_with_configs(cx, route.clone(), launch_configs)
     };
     if let Err(err) = restart_result {
         tracing::error!(error = %err, window_id, "RestartContentWindow failed");

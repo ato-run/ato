@@ -103,6 +103,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             write,
             read_write,
             cwd,
+            plan_only,
             args,
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
@@ -144,6 +145,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             cwd,
             cache_strategy: cache,
             deprecation_warning: None,
+            plan_only,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 
