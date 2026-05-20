@@ -205,7 +205,8 @@ pub(crate) enum Commands {
         no_build: bool,
 
         /// Print the aggregate requirements (secrets, permissions, ports) for this capsule
-        /// without launching it. Exits 0. Useful for CI pre-flight and scripted orchestrators.
+        /// without launching it. Exits 0. Only supports local paths and already-cached
+        /// `github.com/<owner>/<repo>` refs; never installs or fetches.
         #[arg(long = "plan-only", default_value_t = false)]
         plan_only: bool,
 

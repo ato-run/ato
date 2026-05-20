@@ -5,6 +5,20 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use crate::error::{CapsuleError, Result};
 use crate::types::CapsuleManifest;
 
+/// Controls which files are allowed into a capsule archive.
+///
+/// - `Source` (default for `ato publish`): source files and manifest metadata only.
+///   Dependency outputs and build artifacts are excluded by invariant, not denylist.
+///   Next.js `.next/standalone/node_modules` is excluded under this profile.
+/// - `Artifact`: allows build/runtime-complete artifacts through.
+///   The legacy pack behavior — use for `ato publish --profile artifact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PublishProfile {
+    #[default]
+    Source,
+    Artifact,
+}
+
 const SMART_DEFAULT_EXCLUDES: &[&str] = &[
     ".git/**",
     ".svn/**",
@@ -69,6 +83,7 @@ const SMART_DEFAULT_EXCLUDES: &[&str] = &[
 pub struct PackFilter {
     include: Option<GlobSet>,
     exclude: GlobSet,
+    profile: PublishProfile,
 }
 
 impl PackFilter {
@@ -84,7 +99,25 @@ impl PackFilter {
         Self::from_manifest(&manifest)
     }
 
+    /// Build a `PackFilter` from a manifest using the [`PublishProfile::Artifact`] profile.
+    ///
+    /// This preserves legacy behavior (Next.js standalone `node_modules` included).
+    /// For new source-native publish flows, use [`Self::from_manifest_with_profile`] with
+    /// [`PublishProfile::Source`] instead.
     pub fn from_manifest(manifest: &CapsuleManifest) -> Result<Self> {
+        Self::from_manifest_with_profile(manifest, PublishProfile::Artifact)
+    }
+
+    /// Build a `PackFilter` from a manifest with an explicit publish profile.
+    ///
+    /// - [`PublishProfile::Source`]: excludes Next.js standalone `node_modules` and all
+    ///   other dependency/build outputs by invariant.  Default for `ato publish`.
+    /// - [`PublishProfile::Artifact`]: allows runtime-complete artifacts through
+    ///   (legacy behavior; use for explicit artifact publish).
+    pub fn from_manifest_with_profile(
+        manifest: &CapsuleManifest,
+        profile: PublishProfile,
+    ) -> Result<Self> {
         let pack = manifest.pack.clone().unwrap_or_default();
         let include_patterns = normalized_patterns(&pack.include);
         let exclude_patterns = normalized_patterns(&pack.exclude);
@@ -100,7 +133,7 @@ impl PackFilter {
         excludes.extend(exclude_patterns);
 
         let exclude = build_glob_set(&excludes)?;
-        Ok(Self { include, exclude })
+        Ok(Self { include, exclude, profile })
     }
 
     pub fn should_include_file(&self, relative_path: &Path) -> bool {
@@ -115,9 +148,10 @@ impl PackFilter {
             }
         }
 
-        // Next.js standalone runtime requires bundled node_modules under `.next/standalone`.
-        // Keep this subtree even when broad node_modules excludes are configured.
-        if is_next_standalone_node_modules(&rel) {
+        // Next.js standalone runtime bundles node_modules under `.next/standalone`.
+        // Only allow this subtree for the Artifact profile — the Source profile treats
+        // all dependency outputs as excluded by invariant, not denylist.
+        if self.profile == PublishProfile::Artifact && is_next_standalone_node_modules(&rel) {
             return true;
         }
 
@@ -208,7 +242,7 @@ mod tests {
     // external crates
 
     // internal crates
-    use super::PackFilter;
+    use super::{PackFilter, PublishProfile};
     use crate::types::{CapsuleManifest, PackConfig};
 
     #[test]
@@ -247,6 +281,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new(".ato/source-inference/provenance.json")));
@@ -293,6 +328,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new("node_modules/a.js")));
@@ -335,6 +371,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/**".to_string()],
@@ -383,6 +420,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["**/node_modules/**".to_string()],
@@ -429,6 +467,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -482,6 +521,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -529,6 +569,7 @@ mod tests {
             platforms: Default::default(),
             tool_dependencies: Default::default(),
             foundation_requirements: None,
+            host_capabilities: vec![],
         })
         .expect("filter")
     }
@@ -571,5 +612,115 @@ mod tests {
         // Regular JSON files are still included
         assert!(filter.should_include_file(Path::new("src/data.json")));
         assert!(filter.should_include_file(Path::new("package.json")));
+    }
+
+    fn make_manifest_with_pack(include: Vec<String>, exclude: Vec<String>) -> CapsuleManifest {
+        let mut m = CapsuleManifest {
+            schema_version: "0.3".to_string(),
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            capsule_type: crate::types::CapsuleType::App,
+            default_target: "cli".to_string(),
+            metadata: Default::default(),
+            capabilities: None,
+            requirements: Default::default(),
+            execution: Default::default(),
+            storage: Default::default(),
+            state: Default::default(),
+            state_owner_scope: None,
+            service_binding_scope: None,
+            routing: Default::default(),
+            network: None,
+            model: None,
+            transparency: None,
+            pool: None,
+            build: None,
+            pack: None,
+            isolation: None,
+            polymorphism: None,
+            targets: None,
+            exports: None,
+            services: None,
+            dependencies: Default::default(),
+            required_env: Vec::new(),
+            contracts: Default::default(),
+            workspace: None,
+            distribution: None,
+            platforms: Default::default(),
+            tool_dependencies: Default::default(),
+            foundation_requirements: None,
+            host_capabilities: vec![],
+        };
+        m.pack = Some(PackConfig { include, exclude });
+        m
+    }
+
+    /// Source profile must exclude Next.js standalone node_modules — the invariant is:
+    /// source-native publish archives NEVER contain materialized dependency outputs.
+    #[test]
+    fn source_profile_excludes_next_standalone_node_modules() {
+        let manifest = make_manifest_with_pack(
+            vec!["**".to_string()],
+            vec!["**/node_modules/**".to_string()],
+        );
+        let filter = PackFilter::from_manifest_with_profile(&manifest, PublishProfile::Source)
+            .expect("filter");
+        // The Next.js standalone subtree must NOT be allowed through Source profile.
+        assert!(!filter.should_include_file(Path::new(
+            ".next/standalone/node_modules/next/package.json"
+        )));
+        assert!(!filter.should_include_file(Path::new(
+            "apps/web/.next/standalone/apps/web/node_modules/react/index.js"
+        )));
+        // Regular source files must still be included.
+        assert!(filter.should_include_file(Path::new("src/index.ts")));
+        assert!(filter.should_include_file(Path::new(".next/standalone/server.js")));
+    }
+
+    /// Artifact profile must still include Next.js standalone node_modules — pre-built
+    /// Next.js standalone apps bundle their own node_modules under `.next/standalone`.
+    #[test]
+    fn artifact_profile_includes_next_standalone_node_modules() {
+        let manifest = make_manifest_with_pack(
+            vec!["**".to_string()],
+            vec!["**/node_modules/**".to_string()],
+        );
+        let filter = PackFilter::from_manifest_with_profile(&manifest, PublishProfile::Artifact)
+            .expect("filter");
+        assert!(filter.should_include_file(Path::new(
+            ".next/standalone/node_modules/next/package.json"
+        )));
+        assert!(filter.should_include_file(Path::new(
+            "apps/web/.next/standalone/apps/web/node_modules/react/index.js"
+        )));
+    }
+
+    /// Common dependency/build output dirs are excluded by both profiles via SMART_DEFAULT_EXCLUDES.
+    #[test]
+    fn both_profiles_exclude_common_dependency_dirs() {
+        let base_manifest = make_manifest_with_pack(vec![], vec![]);
+        for profile in [PublishProfile::Source, PublishProfile::Artifact] {
+            let filter =
+                PackFilter::from_manifest_with_profile(&base_manifest, profile).expect("filter");
+            // Python virtual envs
+            assert!(
+                !filter.should_include_file(Path::new(".venv/lib/site-packages/requests/__init__.py")),
+                "{profile:?}: .venv should be excluded"
+            );
+            assert!(
+                !filter.should_include_file(Path::new("venv/bin/python")),
+                "{profile:?}: venv should be excluded"
+            );
+            // Rust build output
+            assert!(
+                !filter.should_include_file(Path::new("target/release/my-bin")),
+                "{profile:?}: target/ should be excluded"
+            );
+            // Node modules at project root
+            assert!(
+                !filter.should_include_file(Path::new("node_modules/.bin/eslint")),
+                "{profile:?}: node_modules at root should be excluded"
+            );
+        }
     }
 }

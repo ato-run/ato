@@ -489,6 +489,7 @@ pub(crate) fn build_capsule_artifact_with_output(
                     standalone: false,
                     strict_manifest: false,
                     timings: false,
+                    publish_profile: capsule_core::packers::pack_filter::PublishProfile::Source,
                 },
                 reporter,
             )?;
@@ -531,6 +532,7 @@ pub(crate) fn build_capsule_artifact_with_output(
                         standalone: false,
                         strict_manifest: false,
                         timings: false,
+                        publish_profile: capsule_core::packers::pack_filter::PublishProfile::Source,
                     },
                     reporter,
                 )?;
