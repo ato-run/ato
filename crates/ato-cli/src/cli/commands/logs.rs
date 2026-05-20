@@ -151,13 +151,9 @@ fn follow_log(log_path: &PathBuf, tail: Option<usize>, reporter: Arc<CliReporter
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::env_lock().lock().expect("env lock")
     }
 
     struct EnvVarGuard {

@@ -1358,9 +1358,8 @@ mod tests {
         }
     }
 
-    fn test_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::env_lock().lock().expect("env lock")
     }
 
     fn write_fake_binary(dir: &Path, name: &str) {
@@ -1605,7 +1604,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn load_state_marks_missing_service_root_as_unmaterialized() {
-        let _guard = test_env_lock().lock().expect("lock env");
+        let _guard = test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let state_path = temp.path().join("bootstrap-state.json");
         let _state_guard = EnvVarGuard::set(
@@ -1634,7 +1633,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn bootstrap_finalize_materializes_missing_service_root() {
-        let _guard = test_env_lock().lock().expect("lock env");
+        let _guard = test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let state_path = temp.path().join("bootstrap-state.json");
         let bin_dir = temp.path().join("bin");
@@ -1676,7 +1675,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn repair_restart_services_recreates_missing_service_root() {
-        let _guard = test_env_lock().lock().expect("lock env");
+        let _guard = test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let state_path = temp.path().join("bootstrap-state.json");
         let bin_dir = temp.path().join("bin");
