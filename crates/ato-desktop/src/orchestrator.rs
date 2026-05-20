@@ -4850,6 +4850,7 @@ mod fast_path_tests {
     fn base_record(handle: &str) -> StoredSessionInfo {
         StoredSessionInfo {
             session_id: format!("ato-desktop-session-{}", std::process::id()),
+            launch_key: None,
             handle: handle.to_string(),
             normalized_handle: handle.trim_start_matches("capsule://").to_string(),
             canonical_handle: Some(handle.trim_start_matches("capsule://").to_string()),
