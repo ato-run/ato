@@ -80,7 +80,7 @@ import FeaturedApps from "../components/FeaturedApps.astro";
       document.querySelectorAll('.action-card[data-action]').forEach(function (card) {
         card.addEventListener('click', function () {
           var action = this.dataset.action;
-          if (action === 'github') fillSearch('https://github.com/');
+          if (action === 'github') ipc({ kind: 'open_github_run' });
           else if (action === 'local') fillSearch('~/');
           else if (action === 'store') ipc({ kind: 'open_store' });
         });
@@ -90,7 +90,7 @@ import FeaturedApps from "../components/FeaturedApps.astro";
         tab.addEventListener('click', function () {
           var t = this.dataset.tab;
           if (t === 'store') ipc({ kind: 'open_store' });
-          else if (t === 'github') fillSearch('https://github.com/');
+          else if (t === 'github') ipc({ kind: 'open_github_run' });
           else if (t === 'local') fillSearch('~/');
           else if (t === 'recent') ipc({ kind: 'show_all_recent' });
         });
