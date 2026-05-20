@@ -629,6 +629,22 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
                 .and_then(|v| v.as_u64())
                 .ok_or("missing required param 'pane_id'")? as usize,
         }),
+        "close_pane" => Ok(AutomationCommand::ClosePane {
+            pane_id: params
+                .get("pane_id")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required param 'pane_id'")? as usize,
+        }),
+        "click_at" => Ok(AutomationCommand::ClickAt {
+            x: params
+                .get("x")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing required param 'x'")?,
+            y: params
+                .get("y")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing required param 'y'")?,
+        }),
         other => Err(format!("unknown automation method: {other}")),
     }
 }
