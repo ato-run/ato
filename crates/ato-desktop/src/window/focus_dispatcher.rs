@@ -137,8 +137,9 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                         };
                         req.send(Ok(serde_json::json!({ "panes": panes })));
                     }
-                    AutomationCommand::HostDispatchAction { action } => {
+                    AutomationCommand::HostDispatchAction { action, url } => {
                         let action_name = action.clone();
+                        let action_url = url.clone();
                         let dispatch_result: Result<(), String> = async_app_for_loop
                             .update(|cx| {
                                 app_handle
@@ -231,16 +232,17 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                                 window.remove_window();
                                                 Ok(())
                                             }
-                                            // AODD test path for the Control
-                                            // Bar URL pill's NavigateToUrl
-                                            // dispatch. The MCP envelope has
-                                            // no payload, so this branch
-                                            // hard-codes the well-known
-                                            // capsule:// URL the user wants
-                                            // investigated. A real Enter
-                                            // press on the bar input
-                                            // dispatches the same action
-                                            // with the typed value.
+                                            // Generic NavigateToUrl action — MCP callers pass `url` parameter.
+                                            // Legacy hardcoded test aliases below remain for backwards compat.
+                                            "NavigateToUrl" => {
+                                                let target = action_url.clone()
+                                                    .ok_or_else(|| "NavigateToUrl requires a `url` parameter".to_string())?;
+                                                window.dispatch_action(
+                                                    Box::new(NavigateToUrl { url: target }),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
                                             "NavigateToTestCapsule" => {
                                                 window.dispatch_action(
                                                     Box::new(NavigateToUrl {
