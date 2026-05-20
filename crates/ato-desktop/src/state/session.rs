@@ -67,6 +67,7 @@ pub enum SessionProcessState {
 pub struct CapsuleLaunchContext {
     pub handle_or_url: String,
     pub target: Option<String>,
+    pub launch_configs: Vec<(String, String)>,
     pub requested_client: SessionClientKind,
     pub source: CapsuleOpenSource,
 }
@@ -604,6 +605,7 @@ mod tests {
             launch_context: CapsuleLaunchContext {
                 handle_or_url: handle.to_string(),
                 target: None,
+                launch_configs: vec![],
                 requested_client: SessionClientKind::AtoWindow,
                 source: CapsuleOpenSource::NavigateToUrl,
             },
