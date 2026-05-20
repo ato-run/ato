@@ -151,9 +151,19 @@ jobs:
       - name: Install WiX Toolset 3.x
         # candle/light are required by xtask::package_msi. WiX 3.14 is
         # the v0.5 baseline. windows-2022 runners ship WiX 3.14.x
-        # preinstalled; --allow-downgrade lets choco no-op gracefully
-        # when the preinstalled version is newer than 3.14.0.
-        run: choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
+        # preinstalled at C:\Program Files (x86)\WiX Toolset v3.14\bin.
+        # Skip choco when candle.exe is already present; the choco
+        # community feed can return 503 transiently and there is no
+        # reason to re-install what is already there.
+        shell: pwsh
+        run: |
+          $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
+          if ($candle) {
+            Write-Host "WiX already installed at $($candle.Source) — skipping choco install"
+          } else {
+            Write-Host "candle.exe not found; installing via choco"
+            choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
+          }
 
       - name: Bundle and package .msi + .zip
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
