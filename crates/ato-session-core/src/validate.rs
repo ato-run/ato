@@ -160,6 +160,7 @@ mod tests {
     fn base_record() -> StoredSessionInfo {
         StoredSessionInfo {
             session_id: "ato-desktop-session-1".to_string(),
+            launch_key: None,
             handle: "capsule://ato.run/koh0920/byok-ai-chat".to_string(),
             normalized_handle: "koh0920/byok-ai-chat".to_string(),
             canonical_handle: Some("koh0920/byok-ai-chat".to_string()),

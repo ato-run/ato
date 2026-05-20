@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ato_session_core::{
-    read_session_records, validate_record_only, RecordValidationOutcome, RecordValidationParams,
-    StoredSessionInfo,
+    compute_run_config_hash, materialized_launch_record_path, read_session_records,
+    session_record_path, session_root as shared_session_root, validate_record_only,
+    RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
@@ -567,6 +568,63 @@ pub fn stop_guest_session(session_id: &str) -> Result<bool> {
     stop_capsule_session(session_id)
 }
 
+fn desktop_run_config_hash(secrets: &[SecretEntry], plain_configs: &[(String, String)]) -> String {
+    let secret_keys: Vec<String> = secrets.iter().map(|secret| secret.key.clone()).collect();
+    compute_run_config_hash(
+        plain_configs,
+        &secret_keys,
+        &ato_session_core::current_platform_tag(),
+    )
+}
+
+pub fn materialized_record_path_for_session(session_id: &str) -> Result<PathBuf> {
+    let root = shared_session_root()?;
+    let session_path = session_record_path(&root, session_id);
+    let raw = fs::read_to_string(&session_path)
+        .with_context(|| format!("failed to read session record {}", session_path.display()))?;
+    let record: StoredSessionInfo = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session record {}", session_path.display()))?;
+    let launch_key = record
+        .launch_key
+        .ok_or_else(|| anyhow!("session record {} is missing launch_key", session_id))?;
+    let cache_root = ato_session_core::launch_cache_root()?;
+    Ok(materialized_launch_record_path(&cache_root, &launch_key))
+}
+
+pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Result<()> {
+    let root = shared_session_root()?;
+    let session_path = session_record_path(&root, session_id);
+    let raw = fs::read_to_string(&session_path)
+        .with_context(|| format!("failed to read session record {}", session_path.display()))?;
+    let record: StoredSessionInfo = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session record {}", session_path.display()))?;
+    let pid = u32::try_from(record.pid).map_err(|_| anyhow!("invalid pid {}", record.pid))?;
+    let expected_start_time = record.process_start_time_unix_ms;
+
+    if !stop_guest_session(session_id)? {
+        bail!("session {} did not stop cleanly", session_id);
+    }
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !ato_session_core::process::pid_is_alive(pid) {
+            return Ok(());
+        }
+        if let Some(expected) = expected_start_time {
+            if ato_session_core::process::process_start_time_unix_ms(pid) != Some(expected) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    bail!(
+        "session {} is still alive after waiting {}ms",
+        session_id,
+        timeout.as_millis()
+    );
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ResolveEnvelope {
     /// CCP wire-contract field. `None` for legacy CLIs that predate v0.5.
@@ -1073,6 +1131,8 @@ fn start_capsule(
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
+    let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
+    cmd.arg("--run-config-hash").arg(&run_config_hash);
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
@@ -1133,6 +1193,8 @@ fn start_capsule_from_materialized_record(
     let mut cmd = Command::new(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
     cmd.arg("--from-materialized-record").arg(record_path);
+    let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
+    cmd.arg("--run-config-hash").arg(&run_config_hash);
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
