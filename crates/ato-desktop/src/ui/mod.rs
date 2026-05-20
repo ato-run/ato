@@ -3837,11 +3837,10 @@ fn render_capsule_api_page(
     theme: &Theme,
 ) -> Div {
     let granted_envs: Vec<String> = state
-        .secret_store
-        .secrets_for_capsule(canonical_handle)
-        .iter()
-        .map(|s| s.key.clone())
-        .collect();
+        .secret_grant_keys_by_handle
+        .get(canonical_handle)
+        .cloned()
+        .unwrap_or_default();
     let inbound_rows: Vec<AnyElement> = [
         active.local_url.as_deref().map(|value| {
             render_capsule_detail_row(
