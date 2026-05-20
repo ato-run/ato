@@ -1152,29 +1152,15 @@ pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
         .secrets
         .iter()
         .map(|s| {
-            let grant_count = store
-                .grants
-                .values()
-                .filter(|gkeys| gkeys.contains(&s.key))
-                .count();
             json!({
                 "key": s.key,
                 "hasValue": !s.value.is_empty(),
-                "grantCount": grant_count,
+                "grantCount": 0,
             })
         })
         .collect();
 
-    let grants: Vec<Value> = {
-        let mut g: Vec<_> = store
-            .grants
-            .iter()
-            .filter(|(_, keys)| !keys.is_empty())
-            .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
-            .collect();
-        g.sort_by(|a, b| a["handle"].as_str().cmp(&b["handle"].as_str()));
-        g
-    };
+    let grants: Vec<Value> = Vec::new();
 
     let path_str = crate::config::secrets_path_display();
     let mode = if cfg!(unix) { "0600" } else { "platform-acl" };

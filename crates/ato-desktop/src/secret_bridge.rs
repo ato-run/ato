@@ -12,10 +12,7 @@ enum BridgeRequest {
     #[serde(rename = "status")]
     Status,
     #[serde(rename = "list")]
-    List {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-    },
+    List,
     #[serde(rename = "set")]
     Set {
         key: String,
@@ -159,7 +156,7 @@ impl CliSecretBridge {
     }
 
     pub(crate) fn list() -> Result<Vec<SecretEntryView>> {
-        let resp = Self::call(&BridgeRequest::List { namespace: None })?;
+        let resp = Self::call(&BridgeRequest::List)?;
         match resp {
             BridgeResponse::Ok { data } => {
                 let entries: Vec<SecretEntryView> = serde_json::from_value(data)

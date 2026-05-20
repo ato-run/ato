@@ -1924,10 +1924,7 @@ impl WebViewManager {
         // Collect secrets granted for this capsule handle before moving into the async block.
         let secrets: Vec<SecretEntry> = state
             .secret_store
-            .secrets_for_capsule(&handle)
-            .into_iter()
-            .cloned()
-            .collect();
+            .secrets_for_capsule(&handle);
         // Same idea for plaintext config — capture a snapshot now so
         // the background thread doesn't reach back into AppState.
         let plain_configs: Vec<(String, String)> =
