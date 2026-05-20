@@ -30,8 +30,7 @@ use gpui_component::{Icon, IconName};
 
 use crate::app::{
     NavigateToUrl, OpenCardSwitcher, OpenContentWindowLogs, OpenContentWindowSettings,
-    OpenIdentityMenu, OpenStoreWindow, RestartContentWindow, ShowSettings, StopContentWindow,
-    ToggleControlBarInfoPopup, ToggleStarCapsule,
+    OpenDockWindow, OpenStoreWindow, ShowSettings, ToggleControlBarInfoPopup, ToggleStarCapsule,
 };
 use crate::config::{load_config, save_config, ControlBarMode};
 use crate::localization::{resolve_locale, tr, LocaleCode};
@@ -561,18 +560,18 @@ fn bar_pill(
 }
 
 /// Left group: [Settings]
-fn left_action_group(locale: LocaleCode) -> impl IntoElement {
+fn left_action_group(_locale: LocaleCode) -> impl IntoElement {
     div().flex().items_center().gap(px(2.0)).child(pill_button(
         "settings",
         Some(PillIcon::Builtin(IconName::Settings)),
-        Some(tr(locale, "control_bar.settings").into()),
+        None,
         ActionTarget::Settings,
         None,
     ))
 }
 
-/// Right group: [Windows/Tray+badge] [Store] [Profile]
-fn right_action_group(window_count: usize, locale: LocaleCode) -> impl IntoElement {
+/// Right group: [Windows/Tray+badge] [Store] [My Dock]
+fn right_action_group(window_count: usize, _locale: LocaleCode) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -587,11 +586,11 @@ fn right_action_group(window_count: usize, locale: LocaleCode) -> impl IntoEleme
         .child(pill_button(
             "store",
             Some(PillIcon::Custom("icons/shopping-bag.svg")),
-            Some(tr(locale, "control_bar.store").into()),
+            None,
             ActionTarget::Store,
             None,
         ))
-        .child(profile_button())
+        .child(my_dock_button())
 }
 
 /// Thin vertical separator line between bar groups.
@@ -613,28 +612,25 @@ fn compact_pill() -> impl IntoElement {
         .border_color(hsla(0.0, 0.0, 0.0, 0.08))
 }
 
-fn profile_button() -> impl IntoElement {
+fn my_dock_button() -> impl IntoElement {
     div()
-        .id("profile")
+        .id("my-dock")
         .w(px(36.0))
         .h(px(36.0))
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
-        .rounded_full()
-        .bg(rgb(0xeef2ff))
-        .border_1()
-        .border_color(rgb(0xe0e7ff))
+        .rounded(px(18.0))
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(0xe0e7ff)).border_color(rgb(0xc7d2fe)))
+        .hover(|s| s.bg(rgb(0xf4f4f5)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(OpenIdentityMenu), cx);
+            window.dispatch_action(Box::new(OpenDockWindow), cx);
         })
         .child(
-            Icon::new(IconName::User)
-                .size(px(18.0))
-                .text_color(rgb(0x4f46e5)),
+            Icon::new(IconName::LayoutDashboard)
+                .size(px(16.0))
+                .text_color(rgb(0x3f3f46)),
         )
 }
 
@@ -806,7 +802,7 @@ fn info_icon_button() -> impl IntoElement {
             window.dispatch_action(Box::new(ToggleControlBarInfoPopup), cx);
         })
         .child(
-            Icon::new(IconName::Settings)
+            Icon::new(IconName::Info)
                 .size(px(13.0))
                 .text_color(rgb(0x71717a)),
         )
@@ -929,6 +925,7 @@ fn info_popup_managed(
             &tr(locale, "control_bar.info.open_in_browser"),
             "open-browser",
             has_local_url,
+            Some(IconName::Globe),
             {
                 let url = local_url.clone();
                 move |_win, cx| {
@@ -938,11 +935,19 @@ fn info_popup_managed(
                 }
             },
         ))
+        .child(info_popup_item_enabled(
+            &tr(locale, "control_bar.info.open_headless"),
+            "open-headless",
+            false,
+            Some(IconName::SquareTerminal),
+            |_, _| {},
+        ))
         .child(info_popup_divider())
         .child(info_popup_item_enabled(
             &tr(locale, "control_bar.info.copy_capsule_url"),
             "copy-capsule-url",
             true,
+            Some(IconName::Copy),
             {
                 let url = capsule_url.clone();
                 move |_win, cx| {
@@ -954,6 +959,7 @@ fn info_popup_managed(
             &tr(locale, "control_bar.info.copy_local_url"),
             "copy-local-url",
             has_local_url,
+            Some(IconName::Copy),
             {
                 let url = local_url.clone();
                 move |_win, cx| {
@@ -963,11 +969,19 @@ fn info_popup_managed(
                 }
             },
         ))
+        .child(info_popup_item_enabled(
+            &tr(locale, "control_bar.info.show_identity"),
+            "show-execution-identity",
+            false,
+            Some(IconName::Search),
+            |_, _| {},
+        ))
         .child(info_popup_divider())
         .child(info_popup_item_enabled(
             &tr(locale, "control_bar.info.view_logs"),
             "view-logs",
             show_logs,
+            Some(IconName::SquareTerminal),
             move |win, cx| {
                 win.dispatch_action(Box::new(OpenContentWindowLogs { window_id }), cx);
             },
@@ -976,25 +990,9 @@ fn info_popup_managed(
             &tr(locale, "control_bar.info.open_settings"),
             "open-settings",
             true,
+            Some(IconName::Settings),
             move |win, cx| {
                 win.dispatch_action(Box::new(OpenContentWindowSettings { window_id }), cx);
-            },
-        ))
-        .child(info_popup_divider())
-        .child(info_popup_item_enabled(
-            &tr(locale, "control_bar.info.restart"),
-            "info-restart",
-            true,
-            move |win, cx| {
-                win.dispatch_action(Box::new(RestartContentWindow { window_id }), cx);
-            },
-        ))
-        .child(info_popup_item_enabled(
-            &tr(locale, "control_bar.info.stop"),
-            "info-stop",
-            true,
-            move |win, cx| {
-                win.dispatch_action(Box::new(StopContentWindow { window_id }), cx);
             },
         ))
 }
@@ -1055,6 +1053,7 @@ fn info_popup_item_enabled(
     label: &str,
     id: &str,
     enabled: bool,
+    icon: Option<IconName>,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let id = id.to_string();
@@ -1064,6 +1063,7 @@ fn info_popup_item_enabled(
         .py(px(8.0))
         .flex()
         .items_center()
+        .gap(px(8.0))
         .text_size(px(12.5))
         .text_color(if enabled {
             rgb(0x1f2937)
@@ -1087,6 +1087,13 @@ fn info_popup_item_enabled(
                         });
                     }
                 })
+        })
+        .when_some(icon, |this, icon_name| {
+            this.child(
+                Icon::new(icon_name)
+                    .size(px(13.0))
+                    .text_color(if enabled { rgb(0x6b7280) } else { rgb(0xd1d5db) }),
+            )
         })
         .child(label.to_string())
 }
