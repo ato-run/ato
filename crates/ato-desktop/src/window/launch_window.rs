@@ -52,8 +52,7 @@ use crate::{impl_focusable_via_paste, paste_render_wrap};
 /// (consent, boot, github_run, candidates, candidate_detail,
 ///  no_candidates, create_toml). Built from `assets/system/ato-launch/`
 /// with `vite-plugin-singlefile`; all JS/CSS is inlined.
-const LAUNCH_APP_HTML: &str =
-    include_str!("../../assets/system/ato-launch/dist/index.html");
+const LAUNCH_APP_HTML: &str = include_str!("../../assets/system/ato-launch/dist/index.html");
 
 // Legacy plain-HTML builds kept for reference; no longer loaded into WebViews.
 const _CONSENT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/consent.html");
@@ -510,12 +509,12 @@ pub fn open_consent_window_for_route_with_client(
         format!("{ms}-{pid}")
     };
 
-        let stashed = StashedLaunch {
-            route,
-            requested_client,
-        };
-        let mut launches = cx.global_mut::<PendingLaunches>();
-        launches.0.insert(preview_id.clone(), stashed);
+    let stashed = StashedLaunch {
+        route,
+        requested_client,
+    };
+    let mut launches = cx.global_mut::<PendingLaunches>();
+    launches.0.insert(preview_id.clone(), stashed);
 
     // Inject loading-state preview so the wizard renders immediately.
     let loading_preview = serde_json::json!({
@@ -998,8 +997,8 @@ pub fn start_boot_launch(
     };
 
     let secret_store = crate::config::load_secrets();
-    let secrets: Vec<_> = secret_store
-        .secrets_for_capsule(&handle);
+    let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
+    let launch_configs_for_result = configs.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
     let handle_for_thread = handle.clone();
@@ -1114,6 +1113,7 @@ pub fn start_boot_launch(
                                             launch_context: CapsuleLaunchContext {
                                                 handle_or_url: session.handle.clone(),
                                                 target: Some(session.target_label.clone()),
+                                                launch_configs: launch_configs_for_result.clone(),
                                                 requested_client: SessionClientKind::OsBrowser,
                                                 source: CapsuleOpenSource::NavigateToUrl,
                                             },
@@ -1140,6 +1140,7 @@ pub fn start_boot_launch(
                                             cx,
                                             route_for_open.clone(),
                                             session,
+                                            launch_configs_for_result.clone(),
                                         ) {
                                             Ok(app_handle) => {
                                                 close_boot_window_handle(cx, boot_handle);
