@@ -549,13 +549,36 @@ pub(super) fn start_runtime_session(
     timer.finish_ok();
 
     let session_web_port = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
-        Some(resolve_session_web_port(
-            resolution,
-            manifest_path,
-            plan,
-            launch,
-            &mut notes,
-        )?)
+        if plan.execution_port().is_some()
+            || runtime_overrides::override_port(None).is_some()
+        {
+            // Explicit port declared or ATO_UI_OVERRIDE_PORT set: use normal resolution
+            // (which also handles remapping an occupied declared port to a free one).
+            Some(resolve_session_web_port(
+                resolution,
+                manifest_path,
+                plan,
+                launch,
+                &mut notes,
+            )?)
+        } else {
+            // run command uses $PORT but no port declared: auto-assign a free port.
+            let identity =
+                session_port_identity(resolution, manifest_path, plan.selected_target_label());
+            let port = PortManager::new()
+                .context("failed to initialise PortManager for auto port assignment")?
+                .resolve_port(&identity)
+                .context(
+                    "failed to auto-assign web port (run command uses $PORT but no port declared in capsule.toml)",
+                )?;
+            notes.push(format!(
+                "Auto-assigned port {port} for web server (no port declared in capsule.toml)."
+            ));
+            Some(SessionWebPort {
+                port,
+                remapped_from: None,
+            })
+        }
     } else {
         None
     };
@@ -1886,7 +1909,23 @@ fn display_strategy_for_runtime(
         return CapsuleDisplayStrategy::WebUrl;
     }
 
+    // A run command that uses $PORT / ${PORT} implies this is a web server even
+    // when no explicit `port` is declared in capsule.toml.  We will auto-assign
+    // a free port for it below.
+    if run_command_uses_port_var(plan) {
+        return CapsuleDisplayStrategy::WebUrl;
+    }
+
     CapsuleDisplayStrategy::TerminalStream
+}
+
+/// Returns `true` when the target's run command contains `$PORT` or `${PORT}`,
+/// indicating the server binds to the system-injected port variable even when
+/// `port` is not declared explicitly in `capsule.toml`.
+fn run_command_uses_port_var(plan: &capsule_core::router::ManifestData) -> bool {
+    plan.execution_run_command()
+        .map(|cmd| cmd.contains("$PORT") || cmd.contains("${PORT}"))
+        .unwrap_or(false)
 }
 
 fn runtime_descriptor(plan: &capsule_core::router::ManifestData) -> CapsuleRuntimeDescriptor {
