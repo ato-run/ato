@@ -600,15 +600,19 @@ fn terminal_panel() -> impl IntoElement {
 /// (e.g. `app::run`'s Focus-mode automation dispatcher) can route
 /// keyboard actions to it.
 pub fn open_app_window(cx: &mut App, route: GuestRoute) -> Result<AnyWindowHandle> {
-    // Consume any pending launch configs stored by `ato_launch::dispatch(Approve)`.
-    // Other open paths (focus dispatcher, WebLinkView nav) get an empty vec,
-    // which is correct — they don't go through the consent form.
     let launch_configs: Vec<(String, String)> = cx
         .try_global::<crate::window::launch_window::PendingLaunchConfigs>()
         .map(|g| g.0.clone())
         .unwrap_or_default();
     cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
+    open_app_window_with_configs(cx, route, launch_configs)
+}
 
+pub fn open_app_window_with_configs(
+    cx: &mut App,
+    route: GuestRoute,
+    launch_configs: Vec<(String, String)>,
+) -> Result<AnyWindowHandle> {
     let capsule_input = match &route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(CapsuleBootInput::Start {
             handle: handle.clone(),
@@ -630,7 +634,15 @@ pub fn open_app_window_from_materialized_record(
         .map(|g| g.0.clone())
         .unwrap_or_default();
     cx.set_global(crate::window::launch_window::PendingLaunchConfigs(vec![]));
+    open_app_window_from_materialized_record_with_configs(cx, route, record_path, launch_configs)
+}
 
+pub fn open_app_window_from_materialized_record_with_configs(
+    cx: &mut App,
+    route: GuestRoute,
+    record_path: PathBuf,
+    launch_configs: Vec<(String, String)>,
+) -> Result<AnyWindowHandle> {
     let capsule_input = match &route {
         GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
             Some(CapsuleBootInput::MaterializedRestart {
@@ -648,8 +660,16 @@ pub fn open_ready_capsule_window(
     cx: &mut App,
     route: GuestRoute,
     session: GuestLaunchSession,
+    launch_configs: Vec<(String, String)>,
 ) -> Result<AnyWindowHandle> {
-    open_app_window_with_capsule_input(cx, route, Some(CapsuleBootInput::Ready { session }))
+    open_app_window_with_capsule_input(
+        cx,
+        route,
+        Some(CapsuleBootInput::Ready {
+            session,
+            configs: launch_configs,
+        }),
+    )
 }
 
 fn open_app_window_with_capsule_input(

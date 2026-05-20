@@ -58,6 +58,7 @@ pub enum CapsuleBootInput {
     },
     Ready {
         session: GuestLaunchSession,
+        configs: Vec<(String, String)>,
     },
 }
 
@@ -71,6 +72,7 @@ enum CapsuleBootState {
 
 pub struct AppCapsuleShell {
     handle: String,
+    launch_configs: Vec<(String, String)>,
     boot_state: CapsuleBootState,
     webview: Option<WebView>,
     content_window_id: Option<u64>,
@@ -106,7 +108,9 @@ impl AppCapsuleShell {
                 record_path,
                 configs,
             } => Self::new_from_materialized_record(handle, record_path, configs, window, cx),
-            CapsuleBootInput::Ready { session } => Self::new_ready(session, window, cx),
+            CapsuleBootInput::Ready { session, configs } => {
+                Self::new_ready(session, configs, window, cx)
+            }
         }
     }
 
@@ -137,13 +141,15 @@ impl AppCapsuleShell {
         cx.set_global(PendingBootShell(None));
 
         let handle_clone = handle.clone();
+        let launch_configs = configs.clone();
+        let configs_for_thread = configs.clone();
         let abort_clone = Arc::clone(&abort_flag);
         std::thread::spawn(move || {
             let prog = progress_tx;
             let result = crate::orchestrator::resolve_and_start_guest(
                 &handle_clone,
                 &secrets,
-                &configs,
+                &configs_for_thread,
                 Some(Box::new(move |step| {
                     let _ = prog.send(step);
                 })),
@@ -272,6 +278,7 @@ impl AppCapsuleShell {
 
         Self {
             handle,
+            launch_configs,
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
@@ -305,6 +312,7 @@ impl AppCapsuleShell {
 
         let handle_clone = handle.clone();
         let record_path_clone = record_path.clone();
+        let configs_for_thread = configs.clone();
         let abort_clone = Arc::clone(&abort_flag);
         std::thread::spawn(move || {
             let prog = progress_tx;
@@ -312,11 +320,25 @@ impl AppCapsuleShell {
                 &handle_clone,
                 &record_path_clone,
                 &secrets,
-                &configs,
+                &configs_for_thread,
                 Some(Box::new(move |step| {
                     let _ = prog.send(step);
                 })),
-            );
+            )
+            .or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    handle = %handle_clone,
+                    record_path = %record_path_clone.display(),
+                    "materialized relaunch failed; falling back to cold launch"
+                );
+                crate::orchestrator::resolve_and_start_guest(
+                    &handle_clone,
+                    &secrets,
+                    &configs_for_thread,
+                    None,
+                )
+            });
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
                     let sid = session.session_id.clone();
@@ -424,6 +446,7 @@ impl AppCapsuleShell {
 
         Self {
             handle,
+            launch_configs: configs.clone(),
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
@@ -436,6 +459,7 @@ impl AppCapsuleShell {
 
     fn new_ready(
         session: GuestLaunchSession,
+        configs: Vec<(String, String)>,
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -443,6 +467,7 @@ impl AppCapsuleShell {
         let handle = session.handle.clone();
         Self {
             handle,
+            launch_configs: configs,
             boot_state: CapsuleBootState::Booting,
             webview: None,
             content_window_id: None,
@@ -480,6 +505,7 @@ impl AppCapsuleShell {
                 let launch_context = CapsuleLaunchContext {
                     handle_or_url: self.handle.clone(),
                     target: None,
+                    launch_configs: self.launch_configs.clone(),
                     requested_client: SessionClientKind::AtoWindow,
                     source: CapsuleOpenSource::NavigateToUrl,
                 };

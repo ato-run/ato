@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ato_session_core::{
-    compute_run_config_hash, materialized_launch_record_path, read_session_records,
-    session_record_path, session_root as shared_session_root, validate_record_only,
-    RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
+    compute_run_config_hash, materialized_launch_record_path, read_materialized_launch_record,
+    read_session_records, session_record_path, session_root as shared_session_root,
+    validate_record_only, RecordValidationOutcome, RecordValidationParams, StoredSessionInfo,
 };
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path;
@@ -588,7 +588,14 @@ pub fn materialized_record_path_for_session(session_id: &str) -> Result<PathBuf>
         .launch_key
         .ok_or_else(|| anyhow!("session record {} is missing launch_key", session_id))?;
     let cache_root = ato_session_core::launch_cache_root()?;
-    Ok(materialized_launch_record_path(&cache_root, &launch_key))
+    let path = materialized_launch_record_path(&cache_root, &launch_key);
+    let _ = read_materialized_launch_record(&path).with_context(|| {
+        format!(
+            "failed to read materialized launch record {}",
+            path.display()
+        )
+    })?;
+    Ok(path)
 }
 
 pub fn stop_guest_session_and_wait(session_id: &str, timeout: Duration) -> Result<()> {
