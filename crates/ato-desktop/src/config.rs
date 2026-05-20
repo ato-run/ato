@@ -736,29 +736,25 @@ pub fn save_config(config: &DesktopConfig) {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub key: String,
-    /// Stored as plaintext in the JSON file (MVP).
-    /// Phase 2: macOS Keychain integration.
     pub value: String,
 }
 
-/// Secret storage with per-capsule grant management.
+/// Secret storage backed by the CLI's age-encrypted store via bridge.
+///
+/// The `secrets` field holds metadata-only entries (values are empty
+/// or truncated) for UI display. Actual secret values are resolved
+/// on demand through `secrets_for_capsule` which calls the age backend.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SecretStore {
-    /// Global secret entries.
     #[serde(default)]
     pub secrets: Vec<SecretEntry>,
-    /// Per-capsule grants: capsule handle → list of secret keys allowed.
-    #[serde(default)]
-    pub grants: std::collections::HashMap<String, Vec<String>>,
 }
 
+/// Error surfaced when a bridge operation fails.
+pub(crate) use crate::secret_bridge::BridgeError;
+
 impl SecretStore {
-    /// Strip the `@<version>` suffix from a capsule handle so that
-    /// `publisher/handle@1.2.3` and `publisher/handle` are treated as
-    /// the same identity for grant lookups.
-    /// Only the last path segment (after the final `/`) is checked,
-    /// so handles like `git@github.com:owner/repo` are left unchanged.
-    fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
+    pub fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
         let last_sep = handle.rfind('/');
         let search_start = last_sep.map_or(0, |p| p + 1);
         if let Some(pos) = handle[search_start..].find('@') {
@@ -770,220 +766,231 @@ impl SecretStore {
         handle
     }
 
-    pub fn add_secret(&mut self, key: String, value: String) {
+    pub fn add_secret(&mut self, key: String, value: String) -> Result<(), BridgeError> {
+        crate::secret_bridge::CliSecretBridge::set(&key, &value, None, None, None)?;
         if let Some(existing) = self.secrets.iter_mut().find(|s| s.key == key) {
-            existing.value = value;
+            existing.value = String::new();
         } else {
-            self.secrets.push(SecretEntry { key, value });
+            self.secrets.push(SecretEntry {
+                key: key.clone(),
+                value: String::new(),
+            });
         }
+        Ok(())
     }
 
-    pub fn remove_secret(&mut self, key: &str) {
+    pub fn remove_secret(&mut self, key: &str) -> Result<(), BridgeError> {
+        crate::secret_bridge::CliSecretBridge::delete(key, None)?;
         self.secrets.retain(|s| s.key != key);
-        for keys in self.grants.values_mut() {
-            keys.retain(|k| k != key);
-        }
+        Ok(())
     }
 
-    pub fn secrets_for_capsule(&self, handle: &str) -> Vec<&SecretEntry> {
+    pub fn secrets_for_capsule(&self, handle: &str) -> Vec<SecretEntry> {
         let canonical = Self::canonicalize_handle(handle);
-        let Some(allowed_keys) = self.grants.get(canonical) else {
-            return Vec::new();
-        };
-        self.secrets
-            .iter()
-            .filter(|s| allowed_keys.contains(&s.key))
-            .collect()
-    }
-
-    pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) {
-        let canonical = Self::canonicalize_handle(capsule_handle).to_string();
-        let keys = self.grants.entry(canonical).or_default();
-        if !keys.contains(&key.to_string()) {
-            keys.push(key.to_string());
-        }
-    }
-
-    pub fn revoke_secret(&mut self, capsule_handle: &str, key: &str) {
-        let canonical = Self::canonicalize_handle(capsule_handle);
-        if let Some(keys) = self.grants.get_mut(canonical) {
-            keys.retain(|k| k != key);
-        }
-    }
-}
-
-fn secrets_path() -> Option<PathBuf> {
-    ato_path("secrets.json").ok()
-}
-
-/// Return a human-readable display path for the secrets file, collapsing
-/// the home directory to `~`. Used by the settings UI snapshot.
-pub fn secrets_path_display() -> Option<String> {
-    secrets_path().map(|p| {
-        if let Ok(home) = home_dir_path() {
-            if let Ok(rel) = p.strip_prefix(&home) {
-                return format!("~/{}", rel.display());
+        match crate::secret_bridge::CliSecretBridge::resolve_for_capsule(canonical) {
+            Ok(resolved) => resolved
+                .into_iter()
+                .map(|r| SecretEntry {
+                    key: r.key,
+                    value: r.value,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    handle = %canonical,
+                    "Failed to resolve secrets for capsule"
+                );
+                Vec::new()
             }
         }
-        p.display().to_string()
-    })
+    }
+
+    pub fn grant_secret(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), BridgeError> {
+        let canonical = Self::canonicalize_handle(capsule_handle).to_string();
+        let mut allow = self.current_allow_list(key)?;
+        if !allow.contains(&canonical) {
+            allow.push(canonical);
+        }
+        crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
+    }
+
+    pub fn revoke_secret(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), BridgeError> {
+        let canonical = Self::canonicalize_handle(capsule_handle).to_string();
+        let mut allow = self.current_allow_list(key)?;
+        allow.retain(|h| h != &canonical);
+        crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
+    }
+
+    fn current_allow_list(&self, key: &str) -> Result<Vec<String>, BridgeError> {
+        let entries = crate::secret_bridge::CliSecretBridge::list()?;
+        Ok(entries
+            .into_iter()
+            .find(|e| e.key == key)
+            .and_then(|e| e.allow)
+            .unwrap_or_default())
+    }
+
+    /// Rebuild `secret_grant_keys_by_handle` cache from the bridge.
+    /// Inverts per-key allow lists into per-handle key lists.
+    pub fn build_grant_keys_cache(
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
+        let entries = crate::secret_bridge::CliSecretBridge::list()?;
+        let mut cache: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for e in &entries {
+            if let Some(ref allow) = e.allow {
+                for handle in allow {
+                    cache
+                        .entry(handle.clone())
+                        .or_default()
+                        .push(e.key.clone());
+                }
+            }
+        }
+        Ok(cache)
+    }
+}
+
+/// Return a display path for the age-based credential store.
+pub fn secrets_path_display() -> Option<String> {
+    let ato_home = ato_path("credentials/secrets/default.age").ok()?;
+    if let Ok(home) = home_dir_path() {
+        if let Ok(rel) = ato_home.strip_prefix(&home) {
+            return Some(format!("~/{}", rel.display()));
+        }
+    }
+    Some(ato_home.display().to_string())
 }
 
 fn home_dir_path() -> Result<PathBuf, ()> {
     dirs::home_dir().ok_or(())
 }
 
+/// Load secret metadata from the age store via bridge.
 pub fn load_secrets() -> SecretStore {
-    let Some(path) = secrets_path() else {
-        return SecretStore::default();
+    match crate::secret_bridge::CliSecretBridge::list() {
+        Ok(entries) => {
+            let secrets = entries
+                .into_iter()
+                .map(|e| SecretEntry {
+                    key: e.key,
+                    value: String::new(),
+                })
+                .collect();
+            SecretStore { secrets }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load secrets via bridge, using empty store");
+            SecretStore::default()
+        }
+    }
+}
+
+/// No-op kept for API compat — the bridge persists on every mutation.
+pub fn save_secrets(_store: &SecretStore) {}
+
+/// Migrate legacy `secrets.json` entries into the age store.
+///
+/// Reads old-style secrets + grants map, calls the bridge to store
+/// each entry, then renames `secrets.json` → `secrets.json.bak`.
+/// Safe to call repeatedly (re-imports are idempotent, values
+/// overwrite). Returns the number of migrated secrets on success.
+pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
+    let json_path = ato_path("secrets.json").ok()?;
+    if !json_path.exists() {
+        return None;
+    }
+
+    #[derive(Deserialize)]
+    struct LegacySecret {
+        key: String,
+        value: String,
+    }
+    #[derive(Deserialize)]
+    struct LegacyStore {
+        #[serde(default)]
+        secrets: Vec<LegacySecret>,
+        #[serde(default)]
+        grants: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "Cannot read legacy secrets.json, skipping migration");
+            return None;
+        }
+    };
+    let legacy: LegacyStore = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "Failed to parse legacy secrets.json, skipping migration");
+            return None;
+        }
     };
 
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str::<SecretStore>(&content) {
-            Ok(mut store) => {
-                // One-shot migration: deduplicate grants that differ only by
-                // @version suffix, merging their allowed-key lists under the
-                // canonical (version-stripped) handle key.
-                let grants = std::mem::take(&mut store.grants);
-                let mut canonical_grants: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-                let mut migrated = 0usize;
-                for (handle, keys) in grants {
-                    let canonical = SecretStore::canonicalize_handle(&handle).to_string();
-                    if canonical != handle {
-                        migrated += 1;
-                    }
-                    let entry = canonical_grants.entry(canonical).or_default();
-                    for k in keys {
-                        if !entry.contains(&k) {
-                            entry.push(k);
-                        }
-                    }
-                }
-                store.grants = canonical_grants;
-                if migrated > 0 {
-                    info!(
-                        path = %path.display(),
-                        deduped = migrated,
-                        "Migrated versioned grant keys to canonical form"
-                    );
-                    save_secrets(&store).ok();
-                }
-                info!(path = %path.display(), "Loaded secret store");
-                store
-            }
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "Failed to parse secret store, using empty");
-                SecretStore::default()
-            }
-        },
-        Err(_) => SecretStore::default(),
-    }
-}
+    let mut migrated = 0usize;
 
-/// Distinct error type so the UI can surface a precise reason — "your
-/// secret was not saved" is the visible failure, "could not encode JSON"
-/// vs "could not write file" vs "could not chmod 0600" are diagnostic.
-#[derive(Debug, thiserror::Error)]
-pub enum SaveSecretsError {
-    #[error("home directory could not be resolved; secrets not saved")]
-    HomeUnresolvable,
-    #[error("failed to create secret store directory {path}: {source}")]
-    CreateDir {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to encode secret store as JSON: {0}")]
-    Encode(#[from] serde_json::Error),
-    #[error("failed to write secret store {path}: {source}")]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to set 0600 permissions on {path}: {source}")]
-    Chmod {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Persist the secret store to `~/.ato/secrets.json` (#55, #57).
-///
-/// On unix the file is written with mode `0o600` (owner read/write only)
-/// via `OpenOptions::mode` so a fresh write never goes through a
-/// world-readable phase, plus an explicit `set_permissions` after for
-/// defense in depth and for files that already exist with looser modes.
-///
-/// Errors are returned, not swallowed, so callers (`AppState::add_secret`
-/// etc.) can surface failure to the UI instead of silently claiming
-/// success while the secret was never persisted (#57).
-pub fn save_secrets(store: &SecretStore) -> Result<(), SaveSecretsError> {
-    let path = secrets_path().ok_or(SaveSecretsError::HomeUnresolvable)?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| SaveSecretsError::CreateDir {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+    // Step 1: migrate secrets (key → value entries).
+    for entry in &legacy.secrets {
+        if let Err(e) = crate::secret_bridge::CliSecretBridge::set(
+            &entry.key, &entry.value, None, None, None,
+        ) {
+            tracing::warn!(key = %entry.key, error = %e, "Migration: failed to set secret, aborting");
+            return None;
+        }
+        migrated += 1;
     }
 
-    let json = serde_json::to_string_pretty(store)?;
+    // Step 2: invert grants map and set per-key allow lists.
+    // Old: grants[handle] = [KEY_A, KEY_B]
+    // New: entry(KEY_A).allow += [canonical(handle)]
+    let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for (raw_handle, allowed_keys) in &legacy.grants {
+        let canonical = SecretStore::canonicalize_handle(raw_handle).to_string();
+        for key in allowed_keys {
+            per_key_allows
+                .entry(key.clone())
+                .or_default()
+                .insert(canonical.clone());
+        }
+    }
+    for (key, allow_set) in per_key_allows {
+        let allow: Vec<String> = allow_set.into_iter().collect();
+        if let Err(e) =
+            crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
+        {
+            tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, aborting");
+            return None;
+        }
+    }
 
-    write_secret_file(&path, json.as_bytes())?;
-    info!(path = %path.display(), "Saved secret store");
-    Ok(())
+    // Step 3: rename on full success.
+    let bak_path = json_path.with_extension("json.bak");
+    if let Err(e) = std::fs::rename(&json_path, &bak_path) {
+        tracing::warn!(src = %json_path.display(), dst = %bak_path.display(), error = %e, "Migration: age write succeeded but rename of secrets.json failed — file still present at original path");
+        return None;
+    } else {
+        tracing::info!(
+            path = %bak_path.display(),
+            count = migrated,
+            "Migrated legacy secrets.json to age store and renamed to .bak"
+        );
+    }
+
+    Some(migrated)
 }
 
-#[cfg(unix)]
-fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), SaveSecretsError> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    // Mode 0o600 = owner-only read/write. `OpenOptions::mode` is honored
-    // when the file is being CREATED; if the file already exists with a
-    // looser mode we still need the explicit set_permissions below.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|source| SaveSecretsError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(bytes)
-        .map_err(|source| SaveSecretsError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-    // Defense in depth: re-apply 0o600 even when the file pre-existed
-    // with mode 0o644 (the bug this fixes — old secrets.json from before
-    // this change carried world-readable perms).
-    use std::os::unix::fs::PermissionsExt as _;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, perms).map_err(|source| SaveSecretsError::Chmod {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), SaveSecretsError> {
-    // Windows ACL-based permissioning is out of scope for v0.5.0 — the
-    // file inherits its parent directory's ACL. The error type is the
-    // same shape so callers don't branch on platform.
-    std::fs::write(path, bytes).map_err(|source| SaveSecretsError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
-}
 
 // ── Capsule Config Store (non-secret) ─────────────────────────────────────────
 
@@ -1525,35 +1532,25 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_dedup_migration_merges_same_grant_key() {
-        // When both "capsule://org/app" and "capsule://org/app@1.2.3"
-        // have grants, the migration should merge them under the
-        // canonical key.
-        let mut store = SecretStore::default();
-        store.grant_secret("capsule://org/app", "API_KEY");
-        store.grant_secret("capsule://org/app@1.2.3", "API_KEY");
-        store.grant_secret("capsule://org/app@1.2.3", "OTHER_KEY");
-        // Simulate what load_secrets does: re-key grants to canonical form
-        let grants = std::mem::take(&mut store.grants);
-        let mut canonical_grants: std::collections::HashMap<String, Vec<String>> =
+    fn migration_grants_inversion_output_canonical_keys() {
+        let legacy_grants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::from([
+                ("capsule://org/app@1.2.3".into(), vec!["API_KEY".into(), "OTHER_KEY".into()]),
+                ("capsule://org/app".into(), vec!["API_KEY".into()]),
+            ]);
+        let canonical = SecretStore::canonicalize_handle;
+        let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
-        for (handle, keys) in grants {
-            let canonical = SecretStore::canonicalize_handle(&handle).to_string();
-            let entry = canonical_grants.entry(canonical).or_default();
-            for k in keys {
-                if !entry.contains(&k) {
-                    entry.push(k);
-                }
+        for (raw_handle, allowed_keys) in &legacy_grants {
+            let ch = canonical(raw_handle).to_string();
+            for key in allowed_keys {
+                per_key_allows.entry(key.clone()).or_default().insert(ch.clone());
             }
         }
-        store.grants = canonical_grants;
-        let keys = store.grants.get("capsule://org/app").unwrap();
-        assert!(keys.contains(&"API_KEY".to_string()));
-        assert!(keys.contains(&"OTHER_KEY".to_string()));
-        assert_eq!(keys.len(), 2, "duplicate API_KEY must be merged");
-        assert!(
-            store.grants.get("capsule://org/app@1.2.3").is_none(),
-            "versioned key must be removed by migration"
-        );
+        let api_key_allows = per_key_allows.get("API_KEY").unwrap();
+        assert!(api_key_allows.contains("capsule://org/app"));
+        assert_eq!(api_key_allows.len(), 1, "versioned grant must merge to canonical");
+        let other_allows = per_key_allows.get("OTHER_KEY").unwrap();
+        assert!(other_allows.contains("capsule://org/app"));
     }
 }
