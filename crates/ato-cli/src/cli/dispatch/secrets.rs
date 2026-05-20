@@ -302,10 +302,7 @@ enum BridgeRequest {
     #[serde(rename = "status")]
     Status,
     #[serde(rename = "list")]
-    List {
-        #[serde(default)]
-        namespace: Option<String>,
-    },
+    List,
     #[serde(rename = "set")]
     Set {
         key: String,
@@ -409,7 +406,7 @@ fn cmd_bridge() -> Result<()> {
 fn handle_bridge_request(req: BridgeRequest) -> BridgeResponse {
     match req {
         BridgeRequest::Status => bridge_status(),
-        BridgeRequest::List { namespace } => bridge_list(namespace),
+        BridgeRequest::List => bridge_list(),
         BridgeRequest::Set {
             key,
             value,
@@ -433,7 +430,15 @@ fn handle_bridge_request(req: BridgeRequest) -> BridgeResponse {
 
 fn open_store() -> std::result::Result<SecretStore, BridgeResponse> {
     SecretStore::open().map_err(|e| {
-        BridgeResponse::error("store_open_failed", format!("{}", e))
+        let msg = format!("{}", e);
+        if msg.contains("no age identity loaded") {
+            BridgeResponse::error(
+                "identity_not_loaded",
+                "run `ato secrets init` to create an identity, or `ato session start` to unlock",
+            )
+        } else {
+            BridgeResponse::error("store_open_failed", msg)
+        }
     })
 }
 
@@ -448,7 +453,7 @@ fn bridge_status() -> BridgeResponse {
     }))
 }
 
-fn bridge_list(namespace: Option<String>) -> BridgeResponse {
+fn bridge_list() -> BridgeResponse {
     let store = match open_store() {
         Ok(s) => s,
         Err(e) => return e,

@@ -3495,12 +3495,7 @@ fn render_capsule_permissions_page(
     network_logs: &[&crate::state::NetworkLogEntry],
     theme: &Theme,
 ) -> Div {
-    let granted_envs = state
-        .secret_store
-        .grants
-        .get(canonical_handle)
-        .cloned()
-        .unwrap_or_default();
+    let granted_envs: Vec<String> = Vec::new();
     let allowlist_detail = if state.config.sandbox.default_egress_allow.is_empty() {
         None
     } else {
@@ -3837,12 +3832,7 @@ fn render_capsule_api_page(
     network_logs: &[&crate::state::NetworkLogEntry],
     theme: &Theme,
 ) -> Div {
-    let granted_envs = state
-        .secret_store
-        .grants
-        .get(canonical_handle)
-        .cloned()
-        .unwrap_or_default();
+    let granted_envs: Vec<String> = Vec::new();
     let inbound_rows: Vec<AnyElement> = [
         active.local_url.as_deref().map(|value| {
             render_capsule_detail_row(
