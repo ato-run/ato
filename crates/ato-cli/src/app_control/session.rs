@@ -3591,7 +3591,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_sidecar_is_missing() {
         struct EnvGuard {
             ato_home: Option<String>,
@@ -3719,6 +3718,9 @@ mod tests {
 
         stop_session(&session_id, true).expect("stop session");
 
+        // Allow signal delivery and process cleanup before polling.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
         assert!(consumer.try_wait().expect("consumer wait").is_some());
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
@@ -3732,7 +3734,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_pid_file_is_missing() {
         struct EnvGuard {
             ato_home: Option<String>,
@@ -3845,6 +3846,9 @@ mod tests {
         .expect("write session record");
 
         stop_session(&session_id, true).expect("stop session");
+
+        // Allow signal delivery and process cleanup before polling.
+        std::thread::sleep(std::time::Duration::from_millis(150));
 
         assert!(provider.try_wait().expect("provider wait").is_some());
         assert!(!session_root.join(format!("{}.json", session_id)).exists());
