@@ -36,6 +36,8 @@ samples/tutorial/
 **/node_modules/
 **/.next/
 **/dist/
+# ato-store dist is built from ato-run/ato-web (private repo) and committed here.
+!crates/ato-desktop/assets/system/ato-store/dist/
 
 # Parallel-development worktrees (see CLAUDE.md → "Parallel development with git worktrees").
 # The directory itself is tracked via .worktrees/.gitkeep so it always exists
