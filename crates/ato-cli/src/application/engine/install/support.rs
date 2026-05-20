@@ -701,7 +701,14 @@ pub(crate) fn enforce_sandbox_mode_flags(
     const ENV_ALLOW_UNSAFE: &str = "CAPSULE_ALLOW_UNSAFE";
 
     if matches!(enforcement, EnforcementMode::BestEffort) {
-        anyhow::bail!("--enforcement best-effort is no longer supported; use --enforcement strict");
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::SecurityPolicyViolation {
+                message: "--enforcement best-effort is no longer supported".to_string(),
+                hint: Some("Use --enforcement strict (the default) instead.".to_string()),
+                resource: None,
+                blocked_host: None,
+            },
+        )));
     }
 
     if matches!(enforcement, EnforcementMode::Strict) && sandbox_requested {
@@ -714,9 +721,14 @@ pub(crate) fn enforce_sandbox_mode_flags(
     }
 
     if dangerously_skip_permissions && compatibility_fallback.is_some() {
-        anyhow::bail!(
-            "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive"
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::SecurityPolicyViolation {
+                message: "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive".to_string(),
+                hint: Some("Remove one of the two flags before retrying.".to_string()),
+                resource: None,
+                blocked_host: None,
+            },
+        )));
     }
 
     if dangerously_skip_permissions {
