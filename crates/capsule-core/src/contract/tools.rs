@@ -60,11 +60,23 @@ pub enum FetchKind {
     NpmRegistry { package: &'static str },
     /// Tool is a GitHub release asset. `asset_template` may contain
     /// `{version}` and `{triple}` placeholders.
-    /// Slice A: declared but not yet resolved at runtime (no consumer).
+    /// `repo` is `"owner/repo"`.  `triple_style` controls how the current
+    /// host platform is rendered into the `{triple}` placeholder.
     GithubRelease {
         repo: &'static str,
         asset_template: &'static str,
+        triple_style: TripleStyle,
     },
+}
+
+/// Controls how the host platform is mapped to the `{triple}` placeholder
+/// inside a `GithubRelease` `asset_template`.
+#[derive(Debug, Clone, Copy)]
+pub enum TripleStyle {
+    /// Standard Rust target triple: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, etc.
+    Rust,
+    /// Bun-style: `darwin-aarch64`, `linux-x64`, `windows-x64`.
+    Bun,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,7 +114,58 @@ pub static PNPM: RuntimeToolSpec = RuntimeToolSpec {
     },
 };
 
-const REGISTRY: &[&RuntimeToolSpec] = &[&PNPM];
+pub static YARN: RuntimeToolSpec = RuntimeToolSpec {
+    name: "yarn",
+    default_version: "1.22.22",
+    roles: &[
+        ToolRole::DependencyResolver,
+        ToolRole::DependencyMaterializer,
+        ToolRole::ScriptRunner,
+    ],
+    depends_on: &["node"],
+    fetch: FetchKind::NpmRegistry { package: "yarn" },
+    layout: ToolLayout::NodeScript {
+        rel_path: "package/bin/yarn.js",
+    },
+};
+
+pub static BUN: RuntimeToolSpec = RuntimeToolSpec {
+    name: "bun",
+    default_version: "1.1.38",
+    roles: &[
+        ToolRole::DependencyResolver,
+        ToolRole::DependencyMaterializer,
+        ToolRole::ScriptRunner,
+    ],
+    depends_on: &[],
+    fetch: FetchKind::GithubRelease {
+        repo: "oven-sh/bun",
+        asset_template: "bun-{triple}.zip",
+        triple_style: TripleStyle::Bun,
+    },
+    layout: ToolLayout::NativeBinary {
+        rel_path: "bun-{triple}/bun",
+    },
+};
+
+pub static UV: RuntimeToolSpec = RuntimeToolSpec {
+    name: "uv",
+    default_version: "0.5.21",
+    roles: &[
+        ToolRole::DependencyResolver,
+        ToolRole::DependencyMaterializer,
+        ToolRole::ScriptRunner,
+    ],
+    depends_on: &[],
+    fetch: FetchKind::GithubRelease {
+        repo: "astral-sh/uv",
+        asset_template: "uv-{triple}.tar.gz",
+        triple_style: TripleStyle::Rust,
+    },
+    layout: ToolLayout::NativeBinary { rel_path: "uv" },
+};
+
+const REGISTRY: &[&RuntimeToolSpec] = &[&PNPM, &YARN, &BUN, &UV];
 
 pub fn registry() -> &'static [&'static RuntimeToolSpec] {
     REGISTRY
@@ -259,7 +322,7 @@ pub async fn ensure_runtime_tool(
     let archive_bytes = download_bytes(&url).await?;
     let archive_sha256 = hex::encode(Sha256::digest(&archive_bytes));
 
-    let archive_path = tools_root.join(archive_filename(&spec.fetch, &version));
+    let archive_path = tools_root.join(archive_filename(&spec.fetch, &version)?);
     fs::write(&archive_path, &archive_bytes).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to write archive {}: {}",
@@ -272,7 +335,15 @@ pub async fn ensure_runtime_tool(
     let target_rel = match &spec.layout {
         ToolLayout::NativeBinary { rel_path } | ToolLayout::NodeScript { rel_path } => rel_path,
     };
-    let target_path = extracted_dir.join(target_rel);
+    // For GithubRelease specs the rel_path may also contain `{triple}`.
+    let target_rel_resolved = match &spec.fetch {
+        FetchKind::GithubRelease { triple_style, .. } => {
+            let triple = host_triple(*triple_style)?;
+            target_rel.replace("{triple}", &triple)
+        }
+        _ => target_rel.to_string(),
+    };
+    let target_path = extracted_dir.join(&target_rel_resolved);
     if !target_path.exists() {
         return Err(CapsuleError::Pack(format!(
             "{} archive missing expected entry {}",
@@ -303,19 +374,34 @@ fn build_fetch_url(fetch: &FetchKind, version: &str) -> Result<String> {
         FetchKind::NpmRegistry { package } => Ok(format!(
             "https://registry.npmjs.org/{package}/-/{package}-{version}.tgz"
         )),
-        FetchKind::GithubRelease { .. } => Err(CapsuleError::Pack(
-            "GithubRelease fetch is reserved for the next slice (yarn/bun/deno); \
-             no consumer exists in Slice A"
-                .to_string(),
-        )),
+        FetchKind::GithubRelease {
+            repo,
+            asset_template,
+            triple_style,
+        } => {
+            let triple = host_triple(*triple_style)?;
+            let asset = asset_template
+                .replace("{version}", version)
+                .replace("{triple}", &triple);
+            Ok(format!(
+                "https://github.com/{repo}/releases/download/{version}/{asset}"
+            ))
+        }
     }
 }
 
-fn archive_filename(fetch: &FetchKind, version: &str) -> String {
+fn archive_filename(fetch: &FetchKind, version: &str) -> Result<String> {
     match fetch {
-        FetchKind::NpmRegistry { package } => format!("{package}-{version}.tgz"),
-        FetchKind::GithubRelease { asset_template, .. } => {
-            asset_template.replace("{version}", version)
+        FetchKind::NpmRegistry { package } => Ok(format!("{package}-{version}.tgz")),
+        FetchKind::GithubRelease {
+            asset_template,
+            triple_style,
+            ..
+        } => {
+            let triple = host_triple(*triple_style)?;
+            Ok(asset_template
+                .replace("{version}", version)
+                .replace("{triple}", &triple))
         }
     }
 }
@@ -361,9 +447,101 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
                     ))
                 })
         }
+        "zip" => {
+            use std::io;
+            let file = fs::File::open(archive_path).map_err(|e| {
+                CapsuleError::Pack(format!("Failed to open {}: {}", archive_path.display(), e))
+            })?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+                CapsuleError::Pack(format!(
+                    "Failed to read zip {}: {}",
+                    archive_path.display(),
+                    e
+                ))
+            })?;
+            for i in 0..archive.len() {
+                let mut entry = archive.by_index(i).map_err(|e| {
+                    CapsuleError::Pack(format!("zip entry error: {}", e))
+                })?;
+                let out_path = dest.join(entry.name());
+                if entry.is_dir() {
+                    fs::create_dir_all(&out_path).map_err(|e| {
+                        CapsuleError::Pack(format!(
+                            "Failed to create zip dir {}: {}",
+                            out_path.display(),
+                            e
+                        ))
+                    })?;
+                } else {
+                    if let Some(parent) = out_path.parent() {
+                        fs::create_dir_all(parent).map_err(|e| {
+                            CapsuleError::Pack(format!(
+                                "Failed to create parent {}: {}",
+                                parent.display(),
+                                e
+                            ))
+                        })?;
+                    }
+                    let mut out_file = fs::File::create(&out_path).map_err(|e| {
+                        CapsuleError::Pack(format!(
+                            "Failed to create {}: {}",
+                            out_path.display(),
+                            e
+                        ))
+                    })?;
+                    io::copy(&mut entry, &mut out_file).map_err(|e| {
+                        CapsuleError::Pack(format!(
+                            "Failed to write {}: {}",
+                            out_path.display(),
+                            e
+                        ))
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Some(mode) = entry.unix_mode() {
+                            fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))
+                                .ok();
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
         other => Err(CapsuleError::Pack(format!(
             "unsupported archive type: {other}"
         ))),
+    }
+}
+
+/// Maps the current host platform to a tool-specific triple string.
+/// Used to resolve `{triple}` placeholders in `GithubRelease` asset templates.
+fn host_triple(style: TripleStyle) -> Result<String> {
+    match style {
+        TripleStyle::Rust => {
+            let triple = match (cfg!(target_os = "macos"), cfg!(target_os = "linux"), cfg!(target_os = "windows"),
+                                cfg!(target_arch = "aarch64"), cfg!(target_arch = "x86_64")) {
+                (true, _, _, true, _)  => "aarch64-apple-darwin",
+                (true, _, _, _, true)  => "x86_64-apple-darwin",
+                (_, true, _, true, _)  => "aarch64-unknown-linux-gnu",
+                (_, true, _, _, true)  => "x86_64-unknown-linux-gnu",
+                (_, _, true, _, true)  => "x86_64-pc-windows-msvc",
+                _ => return Err(CapsuleError::Pack("Unsupported platform for Rust triple".to_string())),
+            };
+            Ok(triple.to_string())
+        }
+        TripleStyle::Bun => {
+            let triple = match (cfg!(target_os = "macos"), cfg!(target_os = "linux"), cfg!(target_os = "windows"),
+                                cfg!(target_arch = "aarch64"), cfg!(target_arch = "x86_64")) {
+                (true, _, _, true, _)  => "darwin-aarch64",
+                (true, _, _, _, true)  => "darwin-x64",
+                (_, true, _, true, _)  => "linux-aarch64",
+                (_, true, _, _, true)  => "linux-x64",
+                (_, _, true, _, true)  => "windows-x64",
+                _ => return Err(CapsuleError::Pack("Unsupported platform for Bun triple".to_string())),
+            };
+            Ok(triple.to_string())
+        }
     }
 }
 
@@ -520,9 +698,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_pnpm_only_in_slice_a() {
-        assert_eq!(registry().len(), 1);
-        assert_eq!(lookup("pnpm").map(|s| s.name), Some("pnpm"));
-        assert!(lookup("yarn").is_none());
+    fn registry_contains_all_slice_b_tools() {
+        assert!(lookup("pnpm").is_some());
+        assert!(lookup("yarn").is_some());
+        assert!(lookup("bun").is_some());
+        assert!(lookup("uv").is_some());
     }
 }
