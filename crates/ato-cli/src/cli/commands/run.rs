@@ -94,9 +94,18 @@ pub struct RunArgs {
     pub cache_strategy: crate::application::dependency_materializer::CacheStrategy,
     pub reporter: Arc<CliReporter>,
     pub preview_mode: bool,
+    /// When true, run preflight collection and print the aggregate requirements
+    /// envelope without launching the capsule. Equivalent to
+    /// `ato internal preflight <target> --json` but driven from `ato run`.
+    pub plan_only: bool,
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
+    // --plan-only: collect aggregate requirements and print without launching.
+    if args.plan_only {
+        return execute_plan_only(args).await;
+    }
+
     // Boundary-level receipt emission (refs #74, #99). Wraps the inner
     // pipeline so that on the recoverable-failure / aborted path a
     // *partial* execution receipt is emitted to
@@ -113,6 +122,54 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         }
     })
     .await
+}
+
+/// `ato run --plan-only`: collect aggregate requirements and print the JSON envelope
+/// without launching. Equivalent to `ato internal preflight <target> --json` but
+/// driven from the main `ato run` command for scripted callers (CI, MCP, AODD).
+///
+/// Exit policy: exits 0 even when requirements are pending (caller decides what to do
+/// based on the `"ok"` field). Non-zero only on genuine collection failures.
+async fn execute_plan_only(args: RunArgs) -> Result<()> {
+    use crate::application::preflight::collect_aggregate_requirements;
+    use capsule_core::router::ExecutionProfile;
+
+    let target_str = args.target.to_string_lossy();
+    let result = collect_aggregate_requirements(
+        &target_str,
+        args.registry.as_deref(),
+        ExecutionProfile::Dev,
+    )
+    .map_err(|err| anyhow::anyhow!("preflight collection failed: {err}"))?;
+
+    if args.reporter.is_json() {
+        let payload = serde_json::json!({
+            "schema_version": "1",
+            "ok": result.is_empty(),
+            "capsule_id": result.capsule_id,
+            "capsule_version": result.capsule_version,
+            "visited_targets": result.visited_targets,
+            "requirements": result.requirements,
+        });
+        println!("{payload}");
+    } else if result.is_empty() {
+        println!(
+            "preflight: {}@{} — no pending requirements; launch can proceed.",
+            result.capsule_id, result.capsule_version
+        );
+    } else {
+        println!(
+            "preflight: {}@{} — {} requirement(s) across {} target(s):",
+            result.capsule_id,
+            result.capsule_version,
+            result.requirements.len(),
+            result.visited_targets.len()
+        );
+        for envelope in &result.requirements {
+            println!("  - {}", envelope.display.message);
+        }
+    }
+    Ok(())
 }
 
 async fn execute_watch_mode_with_install(
@@ -1941,6 +1998,7 @@ run = "node server.js""#,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
+            plan_only: false,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2044,6 +2102,7 @@ run = "main.py""#,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
+            plan_only: false,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2144,6 +2203,7 @@ run = "main.py""#,
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
+            plan_only: false,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {

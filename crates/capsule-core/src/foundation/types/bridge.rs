@@ -38,6 +38,12 @@ pub enum CapabilityGrant {
     Clipboard,
     /// Access to screen / screenshot APIs (desktop hosts only).
     ScreenCapture,
+    /// Open a file in the host's default editor (desktop hosts only).
+    OpenEditor,
+    /// Open a file via the host OS file-open dialog (desktop hosts only).
+    OpenFile,
+    /// Reveal the capsule workspace in the host file manager (desktop hosts only).
+    RevealWorkspace,
 }
 
 /// Requests sent from the guest capsule to the host broker.
