@@ -1916,6 +1916,14 @@ fn display_strategy_for_runtime(
         return CapsuleDisplayStrategy::WebUrl;
     }
 
+    // A run command invoking a known WSGI/ASGI server (uvicorn, gunicorn, flask,
+    // etc.) — either as `uvicorn ...` or `python -m uvicorn ...` — is a web app
+    // even when neither `port` nor `$PORT` appears in capsule.toml.  Ato will
+    // auto-assign a port and inject `--port <N>` at spawn time.
+    if run_command_is_known_web_server(plan) {
+        return CapsuleDisplayStrategy::WebUrl;
+    }
+
     CapsuleDisplayStrategy::TerminalStream
 }
 
@@ -1926,6 +1934,32 @@ fn run_command_uses_port_var(plan: &capsule_core::router::ManifestData) -> bool 
     plan.execution_run_command()
         .map(|cmd| cmd.contains("$PORT") || cmd.contains("${PORT}"))
         .unwrap_or(false)
+}
+
+/// Returns `true` when the run command invokes a known Python WSGI/ASGI web
+/// server — either directly (`uvicorn app:app`) or via the module flag
+/// (`python -m uvicorn app:app`).  These servers need an explicit `--port`
+/// argument; ato injects one at spawn time when none is declared.
+fn run_command_is_known_web_server(plan: &capsule_core::router::ManifestData) -> bool {
+    const KNOWN_SERVERS: &[&str] = &[
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+    ];
+    let Some(cmd) = plan.execution_run_command() else {
+        return false;
+    };
+    let lower = cmd.trim().to_ascii_lowercase();
+    // Direct invocation: starts with the server name
+    if KNOWN_SERVERS.iter().any(|s| lower.starts_with(s)) {
+        return true;
+    }
+    // Module invocation: `python -m uvicorn ...` or `python3 -m gunicorn ...`
+    if KNOWN_SERVERS
+        .iter()
+        .any(|s| lower.contains(&format!("-m {s}")))
+    {
+        return true;
+    }
+    false
 }
 
 fn runtime_descriptor(plan: &capsule_core::router::ManifestData) -> CapsuleRuntimeDescriptor {
