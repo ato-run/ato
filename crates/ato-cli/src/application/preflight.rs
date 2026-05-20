@@ -90,6 +90,9 @@ pub enum PreflightError {
     #[error("manifest path does not exist: {path}")]
     ManifestMissing { path: PathBuf },
 
+    #[error("unsupported preflight target '{input}': {reason}")]
+    UnsupportedTarget { input: String, reason: String },
+
     #[error("failed to load capsule manifest at {path}: {source}")]
     ManifestLoad {
         path: PathBuf,
@@ -119,22 +122,27 @@ pub enum PreflightError {
     },
 }
 
-/// Walk a local capsule path and collect every pending pre-launch
-/// requirement. The `target` argument matches the same input shape
-/// `ato run` and `ato inspect requirements` accept — a directory, a
-/// `capsule.toml` path, or (in the future) a registry ref. This slice
-/// supports local paths only; remote-resolution support tracks #117's
-/// continuation.
+/// Walk an offline-resolved capsule path and collect every pending
+/// pre-launch requirement. The supported target shapes are:
+///
+/// - a local capsule directory
+/// - a local `capsule.toml` path
+/// - a cached GitHub repository ref (`github.com/<owner>/<repo>` or
+///   `capsule://github.com/<owner>/<repo>`)
+///
+/// This intentionally does **not** fetch from registries, auto-install
+/// capsules, or materialize provider-backed workspaces. Unsupported
+/// targets fail fast with [`PreflightError::UnsupportedTarget`] so the
+/// caller cannot mistake this read-only path for normal `ato run`.
 ///
 /// `profile` is forwarded to `compile_execution_plan` so the caller
 /// can choose Dev (default) vs Prod policy. The desktop launch worker
 /// passes Dev.
 pub fn collect_aggregate_requirements(
     target: &str,
-    _registry: Option<&str>,
     profile: ExecutionProfile,
 ) -> Result<AggregatePreflightResult, PreflightError> {
-    let manifest_path = resolve_local_manifest_path(target)?;
+    let manifest_path = resolve_offline_manifest_path(target)?;
 
     let loaded =
         capsule_core::contract::manifest::load_manifest(&manifest_path).map_err(|err| {
@@ -390,9 +398,8 @@ pub fn collect_aggregate_requirements(
     })
 }
 
-/// Resolve `target` (a directory, a `capsule.toml` path, or a
-/// GitHub-flavoured `capsule://github.com/<owner>/<repo>` URL) to an
-/// absolute `capsule.toml` location. Returns
+/// Resolve `target` (a directory, a `capsule.toml` path, or a cached
+/// GitHub repository ref) to an absolute `capsule.toml` location. Returns
 /// [`PreflightError::ManifestMissing`] when no manifest is reachable.
 ///
 /// Resolution policy:
@@ -405,30 +412,62 @@ pub fn collect_aggregate_requirements(
 ///    once before — first-time fetching is intentionally out of scope
 ///    for this slice (avoiding new network/git side effects in the
 ///    preflight path is what makes preflight safe).
-/// 2. **Local directory**: append `capsule.toml`.
-/// 3. **Local file**: use as-is.
-/// 4. **`publisher/slug` registry refs**: not supported in this slice
-///    — registry resolution would re-introduce network side effects.
-///    The caller should fall back to the legacy E103/E302 flow.
-fn resolve_local_manifest_path(target: &str) -> Result<PathBuf, PreflightError> {
+/// 2. **`github.com/<owner>/<repo>`**: normalize it exactly the way
+///    `ato run` does, then reuse the same cache lookup.
+/// 3. **Local directory**: append `capsule.toml`.
+/// 4. **Local file**: use as-is.
+/// 5. **Registry refs / provider refs**: rejected. Side-effect-free
+///    preflight must not fetch from registries or materialize
+///    provider-backed workspaces.
+fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError> {
     if let Some(rest) = target.strip_prefix("capsule://github.com/") {
         return resolve_cached_github_capsule(rest);
     }
+
     let expanded = crate::local_input::expand_local_path(target);
-    if !expanded.exists() {
-        return Err(PreflightError::ManifestMissing {
-            path: expanded.clone(),
-        });
+    match crate::application::engine::install::provider_target::classify_run_target(target, &expanded)
+    {
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::GitHubRepository(
+            repository,
+        )) => resolve_cached_github_capsule(&repository),
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::LocalPath(_)) => {
+            if !expanded.exists() {
+                return Err(PreflightError::ManifestMissing {
+                    path: expanded.clone(),
+                });
+            }
+            let manifest = if expanded.is_dir() {
+                expanded.join("capsule.toml")
+            } else {
+                expanded
+            };
+            if !manifest.exists() {
+                return Err(PreflightError::ManifestMissing { path: manifest });
+            }
+            Ok(manifest)
+        }
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::Provider(
+            provider_target,
+        )) => Err(PreflightError::UnsupportedTarget {
+            input: target.to_string(),
+            reason: format!(
+                "provider-backed target '{}:{}' is not supported by side-effect-free preflight; it would need workspace materialization. Run `ato run` or `ato fetch` first.",
+                provider_target.provider.as_str(),
+                provider_target.ref_string
+            ),
+        }),
+        Ok(crate::application::engine::install::provider_target::ParsedRunTarget::RegistryReference) =>
+        {
+            Err(PreflightError::UnsupportedTarget {
+                input: target.to_string(),
+                reason: "registry handles are not supported by side-effect-free preflight; install the capsule first, then run `--plan-only` against the resulting local path.".to_string(),
+            })
+        }
+        Err(err) => Err(PreflightError::UnsupportedTarget {
+            input: target.to_string(),
+            reason: err.to_string(),
+        }),
     }
-    let manifest = if expanded.is_dir() {
-        expanded.join("capsule.toml")
-    } else {
-        expanded
-    };
-    if !manifest.exists() {
-        return Err(PreflightError::ManifestMissing { path: manifest });
-    }
-    Ok(manifest)
 }
 
 /// Resolve a `capsule://github.com/<owner>/<repo>` ref to a cached
@@ -669,7 +708,7 @@ egress_allow = ["smtp.gmail.com"]
         let target_str = manifest_path.to_string_lossy().to_string();
 
         let result =
-            collect_aggregate_requirements(&target_str, None, ExecutionProfile::Dev).expect("collect");
+            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
 
         // Two targets visited in service-name order (main → web).
         assert_eq!(result.visited_targets, vec!["app", "web"]);
@@ -725,7 +764,7 @@ egress_allow = ["smtp.gmail.com"]
         let target_str = manifest_path.to_string_lossy().to_string();
 
         let result =
-            collect_aggregate_requirements(&target_str, None, ExecutionProfile::Dev).expect("collect");
+            collect_aggregate_requirements(&target_str, ExecutionProfile::Dev).expect("collect");
 
         for envelope in &result.requirements {
             if let InteractiveResolutionKind::ConsentRequired {
@@ -785,7 +824,7 @@ run = "python -m app"
         fs::write(&manifest_path, manifest).expect("write");
 
         let result =
-            collect_aggregate_requirements(&manifest_path.to_string_lossy(), None, ExecutionProfile::Dev)
+            collect_aggregate_requirements(&manifest_path.to_string_lossy(), ExecutionProfile::Dev)
                 .expect("collect");
 
         assert_eq!(result.visited_targets.len(), 1);
@@ -937,5 +976,47 @@ contract = "service@1"
             found.ends_with("capsule.toml"),
             "expected a path ending in capsule.toml, got {found:?}"
         );
+    }
+
+    #[test]
+    fn offline_manifest_resolver_accepts_github_run_shorthand() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let owner = "acme";
+        let repo = "MyRepo";
+        let cached_commit = "abc123deadbeef";
+        let ext_root = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join(owner)
+            .join(repo)
+            .join(cached_commit);
+        std::fs::create_dir_all(&ext_root).expect("create ext_root");
+        std::fs::write(ext_root.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let resolved = resolve_offline_manifest_path(&format!("github.com/{owner}/{repo}"))
+            .expect("github shorthand should resolve from cache");
+
+        assert!(
+            resolved.ends_with("capsule.toml"),
+            "expected a path ending in capsule.toml, got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn offline_manifest_resolver_rejects_registry_refs() {
+        let err = resolve_offline_manifest_path("acme/demo").expect_err("registry ref must fail");
+        match err {
+            PreflightError::UnsupportedTarget { input, reason } => {
+                assert_eq!(input, "acme/demo");
+                assert!(
+                    reason.contains("side-effect-free preflight"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected unsupported target error, got {other:?}"),
+        }
     }
 }
