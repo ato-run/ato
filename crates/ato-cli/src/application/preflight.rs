@@ -314,32 +314,27 @@ pub fn collect_aggregate_requirements(
             path: manifest_path.clone(),
             source,
         })?;
-        let consent_input =
-            capsule_core::engine::execution_graph::GraphConsentInput {
-                scoped_id: plan.consent.key.scoped_id.clone(),
-                version: plan.consent.key.version.clone(),
-                target_label: plan.consent.key.target_label.clone(),
-                policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-                provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
-            };
-        let bundle =
-            crate::application::graph_views::build_declared_only_bundle_with_consent(
-                &target_deps,
-                Some(manifest_path.display().to_string()),
-                None,
-                Vec::new(),
-                consent_input,
-            );
-        let view = crate::application::graph_views::ExecutionConsentView::from_bundle(
-            &bundle,
+        let consent_input = capsule_core::engine::execution_graph::GraphConsentInput {
+            scoped_id: plan.consent.key.scoped_id.clone(),
+            version: plan.consent.key.version.clone(),
+            target_label: plan.consent.key.target_label.clone(),
+            policy_segment_hash: plan.consent.policy_segment_hash.clone(),
+            provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+        };
+        let bundle = crate::application::graph_views::build_declared_only_bundle_with_consent(
+            &target_deps,
+            Some(manifest_path.display().to_string()),
+            None,
+            Vec::new(),
+            consent_input,
         );
-        let already_consented = has_consent(&plan)
-            .map_err(|err| PreflightError::ConsentStore { source: err })?;
+        let view = crate::application::graph_views::ExecutionConsentView::from_bundle(&bundle);
+        let already_consented =
+            has_consent(&plan).map_err(|err| PreflightError::ConsentStore { source: err })?;
         debug_assert!(
             {
-                let view_side =
-                    crate::application::auth::consent_store::has_consent_view(&view)
-                        .unwrap_or(already_consented);
+                let view_side = crate::application::auth::consent_store::has_consent_view(&view)
+                    .unwrap_or(already_consented);
                 // Plan-side short-circuits to true for
                 // zero-permission plans; view-side has no such
                 // knowledge and returns false until a record lands.
@@ -359,10 +354,7 @@ pub fn collect_aggregate_requirements(
                     scoped_id: view.scoped_id.clone().unwrap_or_default(),
                     version: view.version.clone().unwrap_or_default(),
                     target_label: view.target_label.clone().unwrap_or_default(),
-                    policy_segment_hash: view
-                        .policy_segment_hash
-                        .clone()
-                        .unwrap_or_default(),
+                    policy_segment_hash: view.policy_segment_hash.clone().unwrap_or_default(),
                     provisioning_policy_hash: view
                         .provisioning_policy_hash
                         .clone()
@@ -404,14 +396,15 @@ pub fn collect_aggregate_requirements(
 ///
 /// Resolution policy:
 ///
-/// 1. **`capsule://github.com/<owner>/<repo>`**: look for a previously
-///    fetched working tree under `${ATO_HOME}/tmp/gh-run/<repo>-*` and
-///    `${ATO_HOME}/external-capsules/github/<owner>/<repo>/*`,
-///    in that order. Use the most recently modified hit. This works
-///    only if `ato run`/`ato-desktop` has already cached the capsule
-///    once before — first-time fetching is intentionally out of scope
-///    for this slice (avoiding new network/git side effects in the
-///    preflight path is what makes preflight safe).
+/// 1. **`capsule://github.com/<owner>/<repo>`**: look only under
+///    `${ATO_HOME}/external-capsules/github/<owner>/<repo>/*`. When the
+///    repo segment is pinned as `repo@<sha>`, only the exact
+///    `<sha>/capsule.toml` cache entry is valid; no mtime fallback is
+///    allowed. Unpinned refs may use the most recently modified cached
+///    external snapshot. This works only if `ato run`/`ato-desktop` has
+///    already cached the capsule once before — first-time fetching is
+///    intentionally out of scope for this slice (avoiding new network/git
+///    side effects in the preflight path is what makes preflight safe).
 /// 2. **`github.com/<owner>/<repo>`**: normalize it exactly the way
 ///    `ato run` does, then reuse the same cache lookup.
 /// 3. **Local directory**: append `capsule.toml`.
@@ -471,10 +464,11 @@ fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError
 }
 
 /// Resolve a `capsule://github.com/<owner>/<repo>` ref to a cached
-/// working tree under `${ATO_HOME}/...`. Returns the most recently
-/// modified hit so a user who's iterating on a PR sees the latest
-/// cached snapshot. This intentionally never fetches over the network
-/// — preflight must stay side-effect-free.
+/// external snapshot under `${ATO_HOME}/external-capsules/github/...`.
+/// Pinned `repo@<sha>` refs require an exact `<sha>/capsule.toml`
+/// hit; unpinned refs use the most recently modified cached snapshot.
+/// This intentionally never fetches over the network — preflight must
+/// stay side-effect-free.
 fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> {
     let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() < 2 {
@@ -483,27 +477,11 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
         });
     }
     let owner = parts[0];
-    // Strip any commit-pin suffix (`repo@<sha>`) before using the repo
-    // name to locate cache directories. Without this, `repo@d8145039…`
-    // is treated as a literal repo name and every cache lookup misses.
-    let repo = parts[1].split('@').next().unwrap_or(parts[1]);
+    let (repo, pinned_ref) = match parts[1].split_once('@') {
+        Some((repo, pinned_ref)) if !pinned_ref.is_empty() => (repo, Some(pinned_ref)),
+        _ => (parts[1], None),
+    };
     let ato_home = capsule_core::common::paths::nacelle_home_dir_or_workspace_tmp();
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // Working trees fetched by `ato run` for the launch attempts the
-    // user has already made. These live under `~/.ato/tmp/gh-run/<repo>-*`
-    // (note: the prefix is the bare repo name, not owner/repo).
-    let gh_run_root = ato_home.join("tmp").join("gh-run");
-    if let Ok(entries) = std::fs::read_dir(&gh_run_root) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with(&format!("{repo}-")) {
-                candidates.push(entry.path());
-            }
-        }
-    }
 
     // The publisher-scoped external-capsule cache. Layout:
     // `${ATO_HOME}/external-capsules/github/<owner>/<repo>/<commit>/`.
@@ -512,6 +490,15 @@ fn resolve_cached_github_capsule(rest: &str) -> Result<PathBuf, PreflightError> 
         .join("github")
         .join(owner)
         .join(repo);
+    if let Some(pinned_ref) = pinned_ref {
+        let manifest = external_root.join(pinned_ref).join("capsule.toml");
+        if manifest.exists() {
+            return Ok(manifest);
+        }
+        return Err(PreflightError::ManifestMissing { path: manifest });
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&external_root) {
         for entry in entries.flatten() {
             candidates.push(entry.path());
@@ -936,19 +923,19 @@ contract = "service@1"
         }
     }
 
-    /// #146 regression: `repo@<sha>` in the URL must not be treated as a
-    /// literal repo name when scanning cache directories. Verify that the
-    /// `@sha` suffix is stripped before constructing the cache prefix.
+    /// #146 regression: `repo@<sha>` must resolve only from the exact
+    /// commit cache entry, not by falling back to some other cached
+    /// commit for the same owner/repo.
     #[test]
-    fn github_cache_resolver_strips_sha_suffix_from_repo() {
-        // Build an isolated ATO_HOME with a fake cached working tree whose
-        // directory name matches the bare repo slug (no sha suffix).
+    #[serial_test::serial]
+    fn github_cache_resolver_requires_exact_sha_match() {
         let ato_home = tempfile::TempDir::new().expect("ato_home");
         let repo = "MyRepo";
         let owner = "acme";
+        let requested_commit = "somecommitsha";
 
         // Populate external-capsules cache: ~/.ato/external-capsules/github/<owner>/<repo>/<sha>/
-        let cached_commit = "abc123deadbeef";
+        let cached_commit = requested_commit;
         let ext_root = ato_home
             .path()
             .join("external-capsules")
@@ -962,23 +949,70 @@ contract = "service@1"
 
         let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
 
-        // Request with a sha suffix — the resolver must strip the suffix and
-        // still find the cached manifest.
-        let rest = format!("{owner}/{repo}@somecommitsha");
+        let rest = format!("{owner}/{repo}@{requested_commit}");
         let result = resolve_cached_github_capsule(&rest);
 
         assert!(
             result.is_ok(),
-            "#146: repo@sha should resolve from cache (got {result:?})"
+            "#146: repo@sha should resolve only from the exact cached commit (got {result:?})"
         );
         let found = result.unwrap();
-        assert!(
-            found.ends_with("capsule.toml"),
-            "expected a path ending in capsule.toml, got {found:?}"
-        );
+        assert_eq!(found, ext_root.join("capsule.toml"));
     }
 
     #[test]
+    #[serial_test::serial]
+    fn github_cache_resolver_rejects_mismatched_sha_cache_hit() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let repo = "MyRepo";
+        let owner = "acme";
+
+        let ext_root = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join(owner)
+            .join(repo)
+            .join("abc123deadbeef");
+        std::fs::create_dir_all(&ext_root).expect("create ext_root");
+        std::fs::write(ext_root.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let result = resolve_cached_github_capsule(&format!("{owner}/{repo}@somecommitsha"));
+
+        assert!(matches!(
+            result,
+            Err(PreflightError::ManifestMissing { .. })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn github_cache_resolver_ignores_owner_blind_gh_run_checkout() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let repo = "MyRepo";
+
+        let gh_run = ato_home
+            .path()
+            .join("tmp")
+            .join("gh-run")
+            .join(format!("{repo}-123"));
+        std::fs::create_dir_all(&gh_run).expect("create gh-run");
+        std::fs::write(gh_run.join("capsule.toml"), "[package]\nname=\"x\"\n")
+            .expect("write manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let result = resolve_cached_github_capsule(&format!("acme/{repo}"));
+
+        assert!(matches!(
+            result,
+            Err(PreflightError::ManifestMissing { .. })
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn offline_manifest_resolver_accepts_github_run_shorthand() {
         let ato_home = tempfile::TempDir::new().expect("ato_home");
         let owner = "acme";
