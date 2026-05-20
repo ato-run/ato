@@ -1,0 +1,53 @@
+usecase: "Fill the CodeLab + Discover preview cards on the AppWindow mock dashboard so they read as 'code app' / 'analytics app' rather than blank rectangles"
+actor: "Autonomous Claude Operator looping host_take_screenshot → multimodal Read → code edit → rebuild → repeat"
+goal: "Both preview cards carry distinct, recognisable mock content matching the reference mockup intent"
+entry_point: "Focus View startup (ATO_DESKTOP_MULTI_WINDOW=1) in hermetic ATO_HOME"
+out_of_scope:
+  - "Real card data binding to AppState"
+  - "Card hover / click interactions"
+time_budget: "10 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Generalize `preview_card(label, icon, accent)` to accept a 4th argument `body: AnyElement`. The shared empty grey rect at the bottom of the card is removed; each call site supplies its own body."
+    observation: "Three-line API change. No behavioural change until each card passes a body."
+
+  - action: "Implement `code_preview_body()` — a slate-900 (#0f172a) dark block with 5 short horizontal rectangles per line, coloured to mimic syntax-highlighted tokens (purple keywords #a78bfa, white identifiers #e2e8f0, orange strings #fb923c, grey comments #94a3b8, cyan numbers #22d3ee)"
+    observation: "Function returns ~25 lines of GPUI div composition. Reads as a code editor frame from a distance."
+
+  - action: "Implement `chart_preview_body()` — a soft-blue (#eff6ff) panel with 5 vertical bars at varying heights (14-36px) and colours (blues #60a5fa / #3b82f6 / indigo #6366f1 / greens #10b981)"
+    observation: "Bars bottom-aligned via `items_end` and spaced via `justify_between`. Reads as a bar chart."
+
+  - action: "Wire `top_card_row` to pass the two bodies into the corresponding preview_card calls"
+    observation: "CodeLab gets code_preview_body, Discover gets chart_preview_body. Iconography (SquareTerminal vs ChartPie) on the header strip already reinforces each card's identity."
+
+  - action: "Build, restart hermetic Focus mode, host_take_screenshot, multimodal Read"
+    observation: |
+      See preview-cards-filled.png. Visible content:
+      - CodeLab card: dark code block with 5 varicoloured lines (purple-white-orange-cyan tokens). Distinguishable as a code preview at thumbnail size.
+      - Discover card: light-blue panel with 5 bottom-aligned vertical bars. Distinguishable as a chart preview at thumbnail size.
+      - Rest of the AppWindow layout (Safety summary, WasedaP2P title block, 4 bottom stat panels + Terminal) unchanged from R4.
+
+agent_observation:
+  user_visible_problem: |
+    None. The two cards now communicate their app type at a glance,
+    matching the reference mockup intent (the user does not have to
+    read the label — the body conveys it).
+
+  likely_cause: "n/a"
+
+  suggested_fix:
+    - "Already shipped: code_preview_body + chart_preview_body."
+    - "Next polish (optional): add a third preview card slot (DesignHub from the reference) — would need a new body builder, e.g. mocked colour-palette swatches."
+    - "Next data step (deferred): bind card content to real recent capsules from AppState so the dashboard updates as the user opens different routes."
+
+evidence:
+  - preview-cards-filled.png
+  - reference-comparison: |
+      Reference mockup (image 3): preview cards show CodeLab with
+      darker code-like content + Discover with bar chart. Our cards
+      now match that pattern at the thumbnail scale, though the
+      reference cards are slightly taller and show more lines.
+
+status: "fixed"

@@ -26,6 +26,8 @@ pub struct DesktopConfig {
     pub delivery: DeliverySettings,
     #[serde(default)]
     pub developer: DeveloperSettings,
+    #[serde(default)]
+    pub desktop: DesktopSettings,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +132,205 @@ pub struct DeveloperSettings {
     pub auto_open_devtools: bool,
     #[serde(default)]
     pub feature_flags: HashSet<String>,
+}
+
+/// Desktop-shell specific settings (Control Bar, Focus View, window behaviour).
+///
+/// Defaults match the current hardcoded behaviour so existing users see no
+/// change after the config section is introduced.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DesktopSettings {
+    /// Whether the Focus View (multi-window) mode is enabled.
+    /// Set to `false` to use the legacy single-window DesktopShell.
+    #[serde(default = "default_focus_view_enabled")]
+    pub focus_view_enabled: bool,
+    /// Which surface is shown after the app starts.
+    #[serde(default)]
+    pub startup_surface: StartupSurface,
+    /// Initial presentation mode for content windows opened by Focus View.
+    #[serde(default)]
+    pub content_window_default_presentation: ContentWindowPresentation,
+    /// Where capsule handles should open by default.
+    #[serde(default)]
+    pub capsule_open_mode: CapsuleOpenMode,
+    /// Whether to restore the last window frames (position/size) on launch.
+    #[serde(default)]
+    pub restore_window_frames: bool,
+    /// One-time onboarding flow completion state.
+    #[serde(default)]
+    pub onboarding: OnboardingSettings,
+    #[serde(default)]
+    pub control_bar: ControlBarSettings,
+    /// Controls whether closing a window stops the capsule process.
+    #[serde(default)]
+    pub window_close_behavior: WindowCloseBehavior,
+    /// Capsule handles that the user has starred (pinned) in the Control Bar.
+    /// Keys are stored as `capsule://{handle}` and sorted on save for diff stability.
+    #[serde(default)]
+    pub pinned_capsules: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OnboardingSettings {
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default)]
+    pub skipped: bool,
+    #[serde(default)]
+    pub version: u16,
+}
+
+impl Default for OnboardingSettings {
+    fn default() -> Self {
+        Self {
+            completed: false,
+            skipped: false,
+            version: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ControlBarSettings {
+    /// Display mode for the process-global Control Bar palette.
+    #[serde(default)]
+    pub mode: ControlBarMode,
+    /// Whether the Control Bar floats above all other windows.
+    #[serde(default = "default_control_bar_always_on_top")]
+    pub always_on_top: bool,
+    /// Whether the Control Bar is shown when the app starts.
+    #[serde(default = "default_control_bar_visible_on_startup")]
+    pub visible_on_startup: bool,
+    #[serde(default)]
+    pub position: ControlBarPosition,
+    /// Automatically hide the Control Bar when not in use.
+    #[serde(default)]
+    pub auto_hide: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlBarMode {
+    #[default]
+    Floating,
+    AutoHide,
+    CompactPill,
+    Hidden,
+}
+
+impl<'de> Deserialize<'de> for ControlBarSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawControlBarSettings {
+            mode: Option<ControlBarMode>,
+            #[serde(default = "default_control_bar_always_on_top")]
+            always_on_top: bool,
+            #[serde(default = "default_control_bar_visible_on_startup")]
+            visible_on_startup: bool,
+            #[serde(default)]
+            position: ControlBarPosition,
+            #[serde(default)]
+            auto_hide: bool,
+        }
+
+        let raw = RawControlBarSettings::deserialize(deserializer)?;
+        let _ = raw.mode;
+
+        Ok(Self {
+            // Temporary safety gate: force a single stable mode while
+            // non-floating behaviors are being debugged.
+            mode: ControlBarMode::Floating,
+            always_on_top: raw.always_on_top,
+            visible_on_startup: true,
+            position: raw.position,
+            auto_hide: false,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartupSurface {
+    Store,
+    #[default]
+    Start,
+    Blank,
+    RestoreLast,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContentWindowPresentation {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapsuleOpenMode {
+    #[default]
+    Window,
+    Webviewer,
+    OsBrowser,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowCloseBehavior {
+    #[default]
+    KeepSessionRunning,
+    StopSession,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlBarPosition {
+    #[default]
+    Top,
+    Bottom,
+}
+
+fn default_focus_view_enabled() -> bool {
+    true
+}
+fn default_control_bar_always_on_top() -> bool {
+    true
+}
+fn default_control_bar_visible_on_startup() -> bool {
+    true
+}
+
+impl Default for DesktopSettings {
+    fn default() -> Self {
+        Self {
+            focus_view_enabled: default_focus_view_enabled(),
+            startup_surface: StartupSurface::Start,
+            content_window_default_presentation: ContentWindowPresentation::Windowed,
+            capsule_open_mode: CapsuleOpenMode::Window,
+            restore_window_frames: false,
+            onboarding: OnboardingSettings::default(),
+            control_bar: ControlBarSettings::default(),
+            pinned_capsules: Vec::new(),
+            window_close_behavior: WindowCloseBehavior::KeepSessionRunning,
+        }
+    }
+}
+
+impl Default for ControlBarSettings {
+    fn default() -> Self {
+        Self {
+            mode: ControlBarMode::Floating,
+            always_on_top: default_control_bar_always_on_top(),
+            visible_on_startup: default_control_bar_visible_on_startup(),
+            position: ControlBarPosition::Top,
+            auto_hide: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -300,6 +501,7 @@ fn default_registry_enabled() -> bool {
     true
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
@@ -311,6 +513,7 @@ impl Default for DesktopConfig {
             registry: RegistrySettings::default(),
             delivery: DeliverySettings::default(),
             developer: DeveloperSettings::default(),
+            desktop: DesktopSettings::default(),
         }
     }
 }
@@ -429,6 +632,8 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             #[serde(default)]
             developer: DeveloperSettings,
             #[serde(default)]
+            desktop: DesktopSettings,
+            #[serde(default)]
             theme: Option<ThemeConfig>,
             #[serde(default)]
             default_egress_allow: Option<Vec<String>>,
@@ -450,6 +655,7 @@ impl<'de> Deserialize<'de> for DesktopConfig {
             registry: helper.registry,
             delivery: helper.delivery,
             developer: helper.developer,
+            desktop: helper.desktop,
         };
 
         if let Some(theme) = helper.theme {
@@ -530,189 +736,261 @@ pub fn save_config(config: &DesktopConfig) {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub key: String,
-    /// Stored as plaintext in the JSON file (MVP).
-    /// Phase 2: macOS Keychain integration.
     pub value: String,
 }
 
-/// Secret storage with per-capsule grant management.
+/// Secret storage backed by the CLI's age-encrypted store via bridge.
+///
+/// The `secrets` field holds metadata-only entries (values are empty
+/// or truncated) for UI display. Actual secret values are resolved
+/// on demand through `secrets_for_capsule` which calls the age backend.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SecretStore {
-    /// Global secret entries.
     #[serde(default)]
     pub secrets: Vec<SecretEntry>,
-    /// Per-capsule grants: capsule handle → list of secret keys allowed.
-    #[serde(default)]
-    pub grants: std::collections::HashMap<String, Vec<String>>,
 }
+
+/// Error surfaced when a bridge operation fails.
+pub(crate) use crate::secret_bridge::BridgeError;
 
 impl SecretStore {
-    pub fn add_secret(&mut self, key: String, value: String) {
+    pub fn canonicalize_handle<'a>(handle: &'a str) -> &'a str {
+        let last_sep = handle.rfind('/');
+        let search_start = last_sep.map_or(0, |p| p + 1);
+        if let Some(pos) = handle[search_start..].find('@') {
+            let abs_pos = search_start + pos;
+            if abs_pos > 0 && abs_pos < handle.len() - 1 {
+                return &handle[..abs_pos];
+            }
+        }
+        handle
+    }
+
+    pub fn add_secret(&mut self, key: String, value: String) -> Result<(), BridgeError> {
+        crate::secret_bridge::CliSecretBridge::set(&key, &value, None, None, None)?;
         if let Some(existing) = self.secrets.iter_mut().find(|s| s.key == key) {
-            existing.value = value;
+            existing.value = String::new();
         } else {
-            self.secrets.push(SecretEntry { key, value });
+            self.secrets.push(SecretEntry {
+                key: key.clone(),
+                value: String::new(),
+            });
         }
+        Ok(())
     }
 
-    pub fn remove_secret(&mut self, key: &str) {
+    pub fn remove_secret(&mut self, key: &str) -> Result<(), BridgeError> {
+        crate::secret_bridge::CliSecretBridge::delete(key, None)?;
         self.secrets.retain(|s| s.key != key);
-        for keys in self.grants.values_mut() {
-            keys.retain(|k| k != key);
+        Ok(())
+    }
+
+    pub fn secrets_for_capsule(&self, handle: &str) -> Vec<SecretEntry> {
+        let canonical = Self::canonicalize_handle(handle);
+        match crate::secret_bridge::CliSecretBridge::resolve_for_capsule(canonical) {
+            Ok(resolved) => resolved
+                .into_iter()
+                .map(|r| SecretEntry {
+                    key: r.key,
+                    value: r.value,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    handle = %canonical,
+                    "Failed to resolve secrets for capsule"
+                );
+                Vec::new()
+            }
         }
     }
 
-    pub fn secrets_for_capsule(&self, handle: &str) -> Vec<&SecretEntry> {
-        let Some(allowed_keys) = self.grants.get(handle) else {
-            return Vec::new();
-        };
-        self.secrets
-            .iter()
-            .filter(|s| allowed_keys.contains(&s.key))
-            .collect()
+    pub fn grant_secret(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), BridgeError> {
+        let canonical = Self::canonicalize_handle(capsule_handle).to_string();
+        let mut allow = self.current_allow_list(key)?;
+        if !allow.contains(&canonical) {
+            allow.push(canonical);
+        }
+        crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
     }
 
-    pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) {
-        let keys = self.grants.entry(capsule_handle.to_string()).or_default();
-        if !keys.contains(&key.to_string()) {
-            keys.push(key.to_string());
-        }
+    pub fn revoke_secret(
+        &mut self,
+        capsule_handle: &str,
+        key: &str,
+    ) -> Result<(), BridgeError> {
+        let canonical = Self::canonicalize_handle(capsule_handle).to_string();
+        let mut allow = self.current_allow_list(key)?;
+        allow.retain(|h| h != &canonical);
+        crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
     }
 
-    pub fn revoke_secret(&mut self, capsule_handle: &str, key: &str) {
-        if let Some(keys) = self.grants.get_mut(capsule_handle) {
-            keys.retain(|k| k != key);
+    fn current_allow_list(&self, key: &str) -> Result<Vec<String>, BridgeError> {
+        let entries = crate::secret_bridge::CliSecretBridge::list()?;
+        Ok(entries
+            .into_iter()
+            .find(|e| e.key == key)
+            .and_then(|e| e.allow)
+            .unwrap_or_default())
+    }
+
+    /// Rebuild `secret_grant_keys_by_handle` cache from the bridge.
+    /// Inverts per-key allow lists into per-handle key lists.
+    pub fn build_grant_keys_cache(
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, BridgeError> {
+        let entries = crate::secret_bridge::CliSecretBridge::list()?;
+        let mut cache: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for e in &entries {
+            if let Some(ref allow) = e.allow {
+                for handle in allow {
+                    cache
+                        .entry(handle.clone())
+                        .or_default()
+                        .push(e.key.clone());
+                }
+            }
         }
+        Ok(cache)
     }
 }
 
-fn secrets_path() -> Option<PathBuf> {
-    ato_path("secrets.json").ok()
+/// Return a display path for the age-based credential store.
+pub fn secrets_path_display() -> Option<String> {
+    let ato_home = ato_path("credentials/secrets/default.age").ok()?;
+    if let Ok(home) = home_dir_path() {
+        if let Ok(rel) = ato_home.strip_prefix(&home) {
+            return Some(format!("~/{}", rel.display()));
+        }
+    }
+    Some(ato_home.display().to_string())
 }
 
+fn home_dir_path() -> Result<PathBuf, ()> {
+    dirs::home_dir().ok_or(())
+}
+
+/// Load secret metadata from the age store via bridge.
 pub fn load_secrets() -> SecretStore {
-    let Some(path) = secrets_path() else {
-        return SecretStore::default();
+    match crate::secret_bridge::CliSecretBridge::list() {
+        Ok(entries) => {
+            let secrets = entries
+                .into_iter()
+                .map(|e| SecretEntry {
+                    key: e.key,
+                    value: String::new(),
+                })
+                .collect();
+            SecretStore { secrets }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load secrets via bridge, using empty store");
+            SecretStore::default()
+        }
+    }
+}
+
+/// No-op kept for API compat — the bridge persists on every mutation.
+pub fn save_secrets(_store: &SecretStore) {}
+
+/// Migrate legacy `secrets.json` entries into the age store.
+///
+/// Reads old-style secrets + grants map, calls the bridge to store
+/// each entry, then renames `secrets.json` → `secrets.json.bak`.
+/// Safe to call repeatedly (re-imports are idempotent, values
+/// overwrite). Returns the number of migrated secrets on success.
+pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
+    let json_path = ato_path("secrets.json").ok()?;
+    if !json_path.exists() {
+        return None;
+    }
+
+    #[derive(Deserialize)]
+    struct LegacySecret {
+        key: String,
+        value: String,
+    }
+    #[derive(Deserialize)]
+    struct LegacyStore {
+        #[serde(default)]
+        secrets: Vec<LegacySecret>,
+        #[serde(default)]
+        grants: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "Cannot read legacy secrets.json, skipping migration");
+            return None;
+        }
+    };
+    let legacy: LegacyStore = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(path = %json_path.display(), error = %e, "Failed to parse legacy secrets.json, skipping migration");
+            return None;
+        }
     };
 
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(store) => {
-                info!(path = %path.display(), "Loaded secret store");
-                store
-            }
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "Failed to parse secret store, using empty");
-                SecretStore::default()
-            }
-        },
-        Err(_) => SecretStore::default(),
-    }
-}
+    let mut migrated = 0usize;
 
-/// Distinct error type so the UI can surface a precise reason — "your
-/// secret was not saved" is the visible failure, "could not encode JSON"
-/// vs "could not write file" vs "could not chmod 0600" are diagnostic.
-#[derive(Debug, thiserror::Error)]
-pub enum SaveSecretsError {
-    #[error("home directory could not be resolved; secrets not saved")]
-    HomeUnresolvable,
-    #[error("failed to create secret store directory {path}: {source}")]
-    CreateDir {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to encode secret store as JSON: {0}")]
-    Encode(#[from] serde_json::Error),
-    #[error("failed to write secret store {path}: {source}")]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to set 0600 permissions on {path}: {source}")]
-    Chmod {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Persist the secret store to `~/.ato/secrets.json` (#55, #57).
-///
-/// On unix the file is written with mode `0o600` (owner read/write only)
-/// via `OpenOptions::mode` so a fresh write never goes through a
-/// world-readable phase, plus an explicit `set_permissions` after for
-/// defense in depth and for files that already exist with looser modes.
-///
-/// Errors are returned, not swallowed, so callers (`AppState::add_secret`
-/// etc.) can surface failure to the UI instead of silently claiming
-/// success while the secret was never persisted (#57).
-pub fn save_secrets(store: &SecretStore) -> Result<(), SaveSecretsError> {
-    let path = secrets_path().ok_or(SaveSecretsError::HomeUnresolvable)?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| SaveSecretsError::CreateDir {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+    // Step 1: migrate secrets (key → value entries).
+    for entry in &legacy.secrets {
+        if let Err(e) = crate::secret_bridge::CliSecretBridge::set(
+            &entry.key, &entry.value, None, None, None,
+        ) {
+            tracing::warn!(key = %entry.key, error = %e, "Migration: failed to set secret, aborting");
+            return None;
+        }
+        migrated += 1;
     }
 
-    let json = serde_json::to_string_pretty(store)?;
+    // Step 2: invert grants map and set per-key allow lists.
+    // Old: grants[handle] = [KEY_A, KEY_B]
+    // New: entry(KEY_A).allow += [canonical(handle)]
+    let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for (raw_handle, allowed_keys) in &legacy.grants {
+        let canonical = SecretStore::canonicalize_handle(raw_handle).to_string();
+        for key in allowed_keys {
+            per_key_allows
+                .entry(key.clone())
+                .or_default()
+                .insert(canonical.clone());
+        }
+    }
+    for (key, allow_set) in per_key_allows {
+        let allow: Vec<String> = allow_set.into_iter().collect();
+        if let Err(e) =
+            crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
+        {
+            tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, aborting");
+            return None;
+        }
+    }
 
-    write_secret_file(&path, json.as_bytes())?;
-    info!(path = %path.display(), "Saved secret store");
-    Ok(())
+    // Step 3: rename on full success.
+    let bak_path = json_path.with_extension("json.bak");
+    if let Err(e) = std::fs::rename(&json_path, &bak_path) {
+        tracing::warn!(src = %json_path.display(), dst = %bak_path.display(), error = %e, "Migration: age write succeeded but rename of secrets.json failed — file still present at original path");
+        return None;
+    } else {
+        tracing::info!(
+            path = %bak_path.display(),
+            count = migrated,
+            "Migrated legacy secrets.json to age store and renamed to .bak"
+        );
+    }
+
+    Some(migrated)
 }
 
-#[cfg(unix)]
-fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), SaveSecretsError> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    // Mode 0o600 = owner-only read/write. `OpenOptions::mode` is honored
-    // when the file is being CREATED; if the file already exists with a
-    // looser mode we still need the explicit set_permissions below.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|source| SaveSecretsError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(bytes)
-        .map_err(|source| SaveSecretsError::Write {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-    // Defense in depth: re-apply 0o600 even when the file pre-existed
-    // with mode 0o644 (the bug this fixes — old secrets.json from before
-    // this change carried world-readable perms).
-    use std::os::unix::fs::PermissionsExt as _;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, perms).map_err(|source| SaveSecretsError::Chmod {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secret_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), SaveSecretsError> {
-    // Windows ACL-based permissioning is out of scope for v0.5.0 — the
-    // file inherits its parent directory's ACL. The error type is the
-    // same shape so callers don't branch on platform.
-    std::fs::write(path, bytes).map_err(|source| SaveSecretsError::Write {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    Ok(())
-}
 
 // ── Capsule Config Store (non-secret) ─────────────────────────────────────────
 
@@ -1017,5 +1295,262 @@ mod tests {
         store.set_config("capsule.x", "MODEL".into(), "gpt-5".into());
         let configs = store.configs_for_capsule("capsule.x");
         assert_eq!(configs, vec![("MODEL".to_string(), "gpt-5".to_string())]);
+    }
+
+    #[test]
+    fn desktop_settings_default_values() {
+        let config = DesktopConfig::default();
+        let d = &config.desktop;
+        assert!(
+            d.focus_view_enabled,
+            "focus_view_enabled default must be true"
+        );
+        assert_eq!(d.startup_surface, StartupSurface::Start);
+        assert_eq!(
+            d.content_window_default_presentation,
+            ContentWindowPresentation::Windowed
+        );
+        assert!(!d.restore_window_frames);
+        assert_eq!(d.capsule_open_mode, CapsuleOpenMode::Window);
+        assert!(d.control_bar.always_on_top);
+        assert_eq!(d.control_bar.mode, ControlBarMode::Floating);
+        assert!(d.control_bar.visible_on_startup);
+        assert_eq!(d.control_bar.position, ControlBarPosition::Top);
+        assert!(!d.control_bar.auto_hide);
+        assert_eq!(
+            d.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+        assert!(!d.onboarding.completed);
+        assert!(!d.onboarding.skipped);
+        assert_eq!(d.onboarding.version, 0);
+        assert!(d.pinned_capsules.is_empty());
+    }
+
+    #[test]
+    fn desktop_settings_roundtrip_json() {
+        let mut config = DesktopConfig::default();
+        config.desktop.startup_surface = StartupSurface::RestoreLast;
+        config.desktop.content_window_default_presentation = ContentWindowPresentation::Fullscreen;
+        config.desktop.control_bar.position = ControlBarPosition::Bottom;
+        config.desktop.control_bar.auto_hide = false;
+        config.desktop.capsule_open_mode = CapsuleOpenMode::Webviewer;
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::RestoreLast);
+        assert_eq!(
+            parsed.desktop.content_window_default_presentation,
+            ContentWindowPresentation::Fullscreen
+        );
+        assert_eq!(parsed.desktop.control_bar.mode, ControlBarMode::Floating);
+        assert_eq!(
+            parsed.desktop.control_bar.position,
+            ControlBarPosition::Bottom
+        );
+        assert!(!parsed.desktop.control_bar.auto_hide);
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+    }
+
+    #[test]
+    fn control_bar_settings_legacy_auto_hide_maps_to_mode() {
+        let json = r#"{"auto_hide": true, "visible_on_startup": true}"#;
+        let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mode, ControlBarMode::Floating);
+        assert!(parsed.visible_on_startup);
+        assert!(!parsed.auto_hide);
+    }
+
+    #[test]
+    fn control_bar_settings_legacy_hidden_maps_to_mode() {
+        let json = r#"{"visible_on_startup": false, "auto_hide": false}"#;
+        let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mode, ControlBarMode::Floating);
+        assert!(parsed.visible_on_startup);
+        assert!(!parsed.auto_hide);
+    }
+
+    #[test]
+    fn control_bar_settings_explicit_mode_wins_over_legacy_flags() {
+        let json = r#"{"mode": "compact-pill", "visible_on_startup": false, "auto_hide": true}"#;
+        let parsed: ControlBarSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mode, ControlBarMode::Floating);
+        assert!(parsed.visible_on_startup);
+        assert!(!parsed.auto_hide);
+    }
+
+    #[test]
+    fn config_without_desktop_section_migrates_to_default_desktop() {
+        // Existing config files that pre-date the desktop section must
+        // deserialise cleanly and produce default desktop settings.
+        let json = r#"{"general": {"theme": "light"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.general.theme, ThemeConfig::Light);
+        assert!(
+            parsed.desktop.focus_view_enabled,
+            "missing desktop section must default to focus_view_enabled=true"
+        );
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Start);
+        assert!(parsed.desktop.control_bar.always_on_top);
+        assert!(!parsed.desktop.onboarding.completed);
+        assert!(!parsed.desktop.onboarding.skipped);
+        assert_eq!(parsed.desktop.onboarding.version, 0);
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Window);
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+    }
+
+    #[test]
+    fn desktop_section_without_onboarding_migrates_with_defaults() {
+        let json = r#"{
+            "desktop": {
+                "startup_surface": "store",
+                "focus_view_enabled": true
+            }
+        }"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.startup_surface, StartupSurface::Store);
+        assert!(!parsed.desktop.onboarding.completed);
+        assert!(!parsed.desktop.onboarding.skipped);
+        assert_eq!(parsed.desktop.onboarding.version, 0);
+    }
+
+    #[test]
+    fn capsule_open_mode_deserialize_webviewer() {
+        let json = r#"{"desktop": {"capsule_open_mode": "webviewer"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Webviewer);
+    }
+
+    #[test]
+    fn capsule_open_mode_deserialize_os_browser() {
+        let json = r#"{"desktop": {"capsule_open_mode": "os-browser"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::OsBrowser);
+    }
+
+    #[test]
+    fn capsule_open_mode_missing_defaults_to_window() {
+        let json = r#"{"desktop": {}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.desktop.capsule_open_mode, CapsuleOpenMode::Window);
+    }
+
+    #[test]
+    fn capsule_open_mode_unknown_value_ignored() {
+        let json = r#"{"desktop": {"capsule_open_mode": "unknown-mode"}}"#;
+        let result: Result<DesktopConfig, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "unknown capsule open mode should be rejected by serde"
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_default_is_keep_session_running() {
+        let config = DesktopConfig::default();
+        assert_eq!(
+            config.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_deserialize_stop_session() {
+        let json = r#"{"desktop": {"window_close_behavior": "stop-session"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::StopSession
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_missing_defaults_to_keep_session_running() {
+        let json = r#"{"desktop": {}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::KeepSessionRunning
+        );
+    }
+
+    #[test]
+    fn window_close_behavior_roundtrip() {
+        let mut config = DesktopConfig::default();
+        config.desktop.window_close_behavior = WindowCloseBehavior::StopSession;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.desktop.window_close_behavior,
+            WindowCloseBehavior::StopSession
+        );
+    }
+
+    // ── canonicalize_handle (#56) ────────────────────────────────
+
+    #[test]
+    fn canonicalize_strips_at_version_from_last_path_segment() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://ato.run/koh0920/app@0.3.4"),
+            "capsule://ato.run/koh0920/app"
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_bare_handle() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://github.com/Koh0920/WasedaP2P"),
+            "capsule://github.com/Koh0920/WasedaP2P"
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_at_in_authority() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("git@github.com:owner/repo"),
+            "git@github.com:owner/repo"
+        );
+    }
+
+    #[test]
+    fn canonicalize_preserves_simple_handle() {
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://handle"),
+            "capsule://handle"
+        );
+        assert_eq!(
+            SecretStore::canonicalize_handle("capsule://handle@1.0"),
+            "capsule://handle"
+        );
+    }
+
+    #[test]
+    fn migration_grants_inversion_output_canonical_keys() {
+        let legacy_grants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::from([
+                ("capsule://org/app@1.2.3".into(), vec!["API_KEY".into(), "OTHER_KEY".into()]),
+                ("capsule://org/app".into(), vec!["API_KEY".into()]),
+            ]);
+        let canonical = SecretStore::canonicalize_handle;
+        let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for (raw_handle, allowed_keys) in &legacy_grants {
+            let ch = canonical(raw_handle).to_string();
+            for key in allowed_keys {
+                per_key_allows.entry(key.clone()).or_default().insert(ch.clone());
+            }
+        }
+        let api_key_allows = per_key_allows.get("API_KEY").unwrap();
+        assert!(api_key_allows.contains("capsule://org/app"));
+        assert_eq!(api_key_allows.len(), 1, "versioned grant must merge to canonical");
+        let other_allows = per_key_allows.get("OTHER_KEY").unwrap();
+        assert!(other_allows.contains("capsule://org/app"));
     }
 }

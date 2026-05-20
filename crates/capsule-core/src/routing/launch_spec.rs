@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{CapsuleError, Result};
+use crate::foundation::types::command_spec::contains_shell_operators;
 use crate::router::ManifestData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,26 +32,44 @@ pub fn derive_launch_spec(plan: &ManifestData) -> Result<LaunchSpec> {
     let env_vars = plan.execution_env();
     let port = plan.execution_port();
 
-    if let Some(entrypoint) = plan
-        .execution_entrypoint()
-        .filter(|value| !value.trim().is_empty())
-    {
-        let working_dir = resolve_launch_working_dir(plan, &entrypoint);
-        let required_lockfile =
-            resolve_required_lockfile(plan, &working_dir, language.as_deref(), driver.as_deref());
+    // `run_command` is more specific than `entrypoint`: it encodes both the
+    // binary and arguments (e.g. "bun run dev").  When both are present in the
+    // lock — which happens for bun/npm-managed Node.js projects that store the
+    // package-manager binary as `entrypoint` — using the entrypoint path would
+    // call `targets_oci_cmd()`, which wraps `run_command` with `["sh","-lc",…]`
+    // and passes that shell snippet as a bun/npm script name.  Prefer
+    // `run_command` whenever it is explicitly set.
+    let has_run_command = plan
+        .execution_run_command()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
 
-        return Ok(LaunchSpec {
-            working_dir,
-            command: entrypoint,
-            args: plan.targets_oci_cmd(),
-            env_vars,
-            required_lockfile,
-            runtime,
-            driver,
-            language,
-            port,
-            source: LaunchSpecSource::Entrypoint,
-        });
+    if !has_run_command {
+        if let Some(entrypoint) = plan
+            .execution_entrypoint()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let working_dir = resolve_launch_working_dir(plan, &entrypoint);
+            let required_lockfile = resolve_required_lockfile(
+                plan,
+                &working_dir,
+                language.as_deref(),
+                driver.as_deref(),
+            );
+
+            return Ok(LaunchSpec {
+                working_dir,
+                command: entrypoint,
+                args: plan.targets_oci_cmd(),
+                env_vars,
+                required_lockfile,
+                runtime,
+                driver,
+                language,
+                port,
+                source: LaunchSpecSource::Entrypoint,
+            });
+        }
     }
 
     let run_command = plan
@@ -83,6 +102,29 @@ fn derive_run_command_launch_spec(
     env_vars: HashMap<String, String>,
     port: Option<u16>,
 ) -> Result<LaunchSpec> {
+    // When the run command contains shell operators (&&, ||, |, ;, env prefix,
+    // etc.), wrap the entire command in `sh -c` so it is interpreted correctly.
+    // Without this, `cd server && bun start` would launch `cd` as a binary
+    // with `server`, `&&`, `bun`, `start` as arguments — which is wrong.
+    if contains_shell_operators(run_command) {
+        let mut args = vec!["-c".to_string(), run_command.to_string()];
+        if !plan.targets_oci_cmd().is_empty() {
+            args.extend(plan.targets_oci_cmd());
+        }
+        return Ok(LaunchSpec {
+            working_dir: resolve_launch_working_dir(plan, run_command),
+            command: "sh".to_string(),
+            args,
+            env_vars,
+            required_lockfile: None,
+            runtime,
+            driver,
+            language,
+            port,
+            source: LaunchSpecSource::RunCommand,
+        });
+    }
+
     let tokens = shell_words::split(run_command).unwrap_or_else(|_| vec![run_command.to_string()]);
     let Some(first) = tokens.first().map(String::as_str) else {
         return Err(CapsuleError::Config("run_command is empty".into()));
@@ -128,10 +170,27 @@ fn derive_run_command_launch_spec(
                     tokens[0].clone(),
                     tokens.into_iter().skip(1).collect::<Vec<_>>(),
                 )
+            } else if matches!(
+                first,
+                "flask"
+                    | "uvicorn"
+                    | "gunicorn"
+                    | "streamlit"
+                    | "celery"
+                    | "hypercorn"
+                    | "daphne"
+                    | "waitress-serve"
+            ) {
+                // Python-managed WSGI/ASGI server tools are venv-installed binaries;
+                // treat them as direct commands (same as `npm` for Node).
+                (
+                    tokens[0].clone(),
+                    tokens.into_iter().skip(1).collect::<Vec<_>>(),
+                )
             } else {
                 if !matches!(first, "python" | "python3" | "uv") {
                     return Err(CapsuleError::Config(format!(
-                        "source/python run_command must start with 'python', 'python3', or 'uv', got '{}'",
+                        "source/python run_command must start with 'python', 'python3', 'uv', or a Python server tool (flask/uvicorn/gunicorn/streamlit), got '{}'",
                         first
                     )));
                 }
@@ -495,6 +554,41 @@ entrypoint = "server.py"
             spec.required_lockfile,
             Some(tmp.path().join("app").join("uv.lock"))
         );
+    }
+
+    /// Regression: bun-managed Node.js projects in the lock have both
+    /// `entrypoint = "bun"` and `run_command = "bun run dev"`.  The old code
+    /// took the entrypoint path and called `targets_oci_cmd()` which wraps
+    /// `run_command` in `["sh", "-lc", …]`, producing `bun sh -lc "bun run
+    /// dev"` — bun rejected "sh" as an unknown script name.  `run_command`
+    /// must take precedence when both fields are present.
+    #[test]
+    fn derive_launch_spec_prefers_run_command_over_entrypoint_when_both_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("bun.lock"), "").expect("write lock");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+entrypoint = "bun"
+run_command = "bun run dev"
+"#,
+        );
+
+        let spec = derive_launch_spec(&plan).expect("derive launch spec");
+
+        assert_eq!(
+            spec.command, "bun",
+            "command should be bun from run_command"
+        );
+        assert_eq!(
+            spec.args,
+            vec!["run", "dev"],
+            "args should be [run, dev], not [sh, -lc, ...]"
+        );
+        assert_eq!(spec.source, LaunchSpecSource::RunCommand);
     }
 
     #[test]

@@ -6,16 +6,24 @@ mod cli_install;
 mod config;
 mod egress_policy;
 mod egress_proxy;
+mod localization;
 mod logging;
 mod orchestrator;
 mod retention;
+mod secret_bridge;
 mod settings;
+mod source_import_api;
+mod source_import_runner;
+mod source_import_session;
+mod stable_origin_proxy;
 mod state;
 mod surface_timing;
+mod system_capsule;
 mod terminal;
 mod ui;
 mod userland;
 mod webview;
+mod window;
 
 fn main() {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
@@ -33,5 +41,12 @@ fn main() {
         "ato-desktop starting",
     );
 
-    app::run();
+    let skip_onboarding = std::env::args().any(|a| a == "--skip-onboarding");
+
+    match crate::orchestrator::resolve_ato_binary() {
+        Ok(path) => tracing::info!(?path, "resolved ato binary"),
+        Err(error) => tracing::warn!(?error, "could not resolve ato binary at startup"),
+    }
+
+    app::run(skip_onboarding);
 }

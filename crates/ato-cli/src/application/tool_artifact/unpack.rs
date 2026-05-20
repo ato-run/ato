@@ -140,11 +140,7 @@ fn unpack_tar<R: Read>(
     Ok(())
 }
 
-fn unpack_zip(
-    file: File,
-    dest_dir: &Path,
-    strip_prefix: &str,
-) -> Result<(), anyhow::Error> {
+fn unpack_zip(file: File, dest_dir: &Path, strip_prefix: &str) -> Result<(), anyhow::Error> {
     let mut archive = zip::ZipArchive::new(file).context("read zip")?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("zip entry")?;
@@ -170,8 +166,8 @@ fn unpack_zip(
             fs::create_dir_all(parent)
                 .with_context(|| format!("mkdir parent {}", parent.display()))?;
         }
-        let mut out = File::create(&out_path)
-            .with_context(|| format!("create {}", out_path.display()))?;
+        let mut out =
+            File::create(&out_path).with_context(|| format!("create {}", out_path.display()))?;
         std::io::copy(&mut entry, &mut out)
             .with_context(|| format!("write {}", out_path.display()))?;
         #[cfg(unix)]
@@ -240,7 +236,10 @@ fn ensure_safe_relative(path: &Path) -> Result<(), anyhow::Error> {
         match comp {
             Component::Normal(_) | Component::CurDir => continue,
             Component::ParentDir => {
-                bail!("archive entry escapes destination via '..': {}", path.display())
+                bail!(
+                    "archive entry escapes destination via '..': {}",
+                    path.display()
+                )
             }
             Component::RootDir | Component::Prefix(_) => {
                 bail!("archive entry has root component: {}", path.display())
@@ -343,8 +342,7 @@ mod tests {
         let archive = tmp.path().join("demo.tar.gz");
         fs::write(&archive, build_tar_gz_fixture()).unwrap();
         let dest = tmp.path().join("out");
-        unpack_archive(&fixture_manifest(ArchiveFormat::TarGz), &archive, &dest)
-            .expect("unpack");
+        unpack_archive(&fixture_manifest(ArchiveFormat::TarGz), &archive, &dest).expect("unpack");
         let demo = dest.join("bin/demo");
         assert!(demo.exists(), "bin/demo missing");
         #[cfg(unix)]
@@ -410,6 +408,9 @@ mod tests {
         let mut m = fixture_manifest(ArchiveFormat::TarGz);
         m.strip_prefix = Some("pgsql-16".into());
         unpack_archive(&m, &archive, &dest).expect("unpack");
-        assert!(dest.join("bin/demo").exists(), "strip_prefix did not drop top dir");
+        assert!(
+            dest.join("bin/demo").exists(),
+            "strip_prefix did not drop top dir"
+        );
     }
 }

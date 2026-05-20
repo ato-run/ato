@@ -599,6 +599,46 @@ pub(crate) struct RunPipelineState {
     /// PHASE-TIMING. None until run_build_phase populates it.
     pub(crate) build_decision_kind:
         Option<crate::application::build_materialization::BuildResultKind>,
+    /// PR-3b boundary plumbing: handle to the
+    /// `ReceiptEmissionContext::graph_id_sink` for this launch. Set by
+    /// the outer wrapper (`cli::commands::run::execute`) before the
+    /// pipeline runs — both Prepare (when the state is first built)
+    /// and Execute (defensive re-injection) call
+    /// [`attach_receipt_graph_id_sink`]. The Execute phase writes
+    /// declared/resolved ids to the sink immediately after
+    /// `build_prelaunch_receipt_document_with_graph` so the partial
+    /// receipt boundary observes the same ids on the failure path.
+    /// `None` for paths that don't go through the wrapper (legacy tests).
+    ///
+    /// Note: PR-3b deliberately does NOT carry the full
+    /// `LaunchGraphBundle` on the pipeline state. The bundle is owned
+    /// by the receipt builder and lives only inside the Execute
+    /// phase's local scope; the sink is the only handle that survives
+    /// the boundary. A future PR that needs the bundle later in the
+    /// pipeline can add the carrier explicitly — but adding the
+    /// field today without a reader would be a dead carrier (per
+    /// PR #180 review feedback).
+    pub(crate) receipt_graph_id_sink:
+        Option<crate::application::receipt_boundary::ReceiptGraphIdSink>,
+}
+
+/// PR-3b plumbing helper (PR #180 review fix): install the given
+/// boundary sink onto a [`RunPipelineState`].
+///
+/// Production paths set the sink at Prepare-phase exit AND re-inject
+/// it at Execute-phase entry. The re-injection at Execute is
+/// defensive — Build / Verify / DryRun mutate the state in place
+/// today and the sink survives, but a future refactor that
+/// reconstructs the state would silently drop the field. Calling
+/// this helper at both ends pins the contract: when the Execute
+/// phase reaches the receipt-emit site, `state.receipt_graph_id_sink`
+/// is `Some(...)` if the wrapper provided one.
+pub(crate) fn attach_receipt_graph_id_sink(
+    mut state: RunPipelineState,
+    sink: crate::application::receipt_boundary::ReceiptGraphIdSink,
+) -> RunPipelineState {
+    state.receipt_graph_id_sink = Some(sink);
+    state
 }
 
 #[derive(Debug)]
@@ -1294,7 +1334,33 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
         &ProcessHostEnv,
         preflight_action,
     )?;
-    verify_lockfile_external_dependencies(&plan.manifest, &compatibility_legacy_lock.lock)?;
+    // PR-4a: bundle-derived `DependencyContracts` is the primary
+    // pre-spawn gate. Legacy
+    // `verify_lockfile_external_dependencies(manifest, lock)` stays
+    // as a debug parity guard.
+    {
+        let external_dependencies =
+            manifest_external_capsule_dependencies(&plan.manifest)?;
+        let bundle = crate::application::graph_views::build_declared_only_bundle(
+            &external_dependencies,
+            Some(plan.manifest_path.display().to_string()),
+            None,
+            Vec::new(),
+        );
+        capsule_core::lockfile::verify_lockfile_against_contracts(
+            &bundle.derived.dependency_contracts,
+            &compatibility_legacy_lock.lock,
+        )?;
+        debug_assert!(
+            verify_lockfile_external_dependencies(
+                &plan.manifest,
+                &compatibility_legacy_lock.lock,
+            )
+            .is_ok(),
+            "PR-4a parity: legacy verifier disagrees with bundle-derived verifier \
+             at run.rs pre-spawn gate (compatibility branch)"
+        );
+    }
 
     let guard =
         start_dependency_contracts_for_run(prepared, plan, &compatibility_legacy_lock.lock).await?;
@@ -1640,8 +1706,12 @@ where
                 &capsule_toml,
                 validation_mode,
             ) {
+                let raw = reconcile_compat_manifest_targets(
+                    &loaded.raw,
+                    decision.plan.selected_target_label(),
+                );
                 if let Ok(bridge) =
-                    capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
+                    capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
                 {
                     decision.plan.compat_manifest = Some(bridge);
                 }
@@ -1730,10 +1800,30 @@ where
                     Some(CAPSULE_LOCK_FILE_NAME),
                 )
             })?;
-        verify_lockfile_external_dependencies(
-            &decision.plan.manifest,
-            &compatibility_legacy_lock.lock,
-        )?;
+        // PR-4a: bundle-derived primary, legacy parity in debug.
+        {
+            let external_dependencies =
+                manifest_external_capsule_dependencies(&decision.plan.manifest)?;
+            let bundle = crate::application::graph_views::build_declared_only_bundle(
+                &external_dependencies,
+                Some(decision.plan.manifest_path.display().to_string()),
+                None,
+                Vec::new(),
+            );
+            capsule_core::lockfile::verify_lockfile_against_contracts(
+                &bundle.derived.dependency_contracts,
+                &compatibility_legacy_lock.lock,
+            )?;
+            debug_assert!(
+                verify_lockfile_external_dependencies(
+                    &decision.plan.manifest,
+                    &compatibility_legacy_lock.lock,
+                )
+                .is_ok(),
+                "PR-4a parity: legacy verifier disagrees with bundle-derived verifier \
+                 at run.rs pre-spawn gate (external-capsules branch)"
+            );
+        }
         external_capsules = Some(
             crate::external_capsule::start_external_capsules(
                 &decision.plan,
@@ -1878,8 +1968,12 @@ where
                     &capsule_toml,
                     validation_mode,
                 ) {
+                    let raw = reconcile_compat_manifest_targets(
+                        &loaded.raw,
+                        decision.plan.selected_target_label(),
+                    );
                     if let Ok(bridge) =
-                        capsule_core::router::CompatManifestBridge::from_manifest_value(&loaded.raw)
+                        capsule_core::router::CompatManifestBridge::from_manifest_value(&raw)
                     {
                         decision.plan.compat_manifest = Some(bridge);
                     }
@@ -1928,6 +2022,7 @@ where
         native_nacelle: None,
         build_observation: None,
         build_decision_kind: None,
+        receipt_graph_id_sink: None,
     })
 }
 
@@ -2657,6 +2752,31 @@ fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspac
     }
 }
 
+/// Resolve `{{deps.<alias>.runtime_exports.<key>}}` templates using the
+/// dependency orchestrator's resolved exports. If the value is not a
+/// template, it is returned unchanged.
+fn resolve_dep_template_inner(
+    value: &str,
+    graph: &RunningGraph,
+) -> String {
+    if !value.contains("deps.") || !value.contains("runtime_exports.") {
+        return value.to_string();
+    }
+    let re = regex::Regex::new(r"\{\{deps\.(\w+)\.runtime_exports\.(\w+)\}\}").unwrap();
+    let mut result = value.to_string();
+    for cap in re.captures_iter(value) {
+        let alias = &cap[1];
+        let export_key = &cap[2];
+        if let Some(exports) = graph.runtime_exports(alias) {
+            if let Some(resolved) = exports.get(export_key) {
+                let pattern = format!("{{{{deps.{}.runtime_exports.{}}}}}", alias, export_key);
+                result = result.replace(&pattern, resolved);
+            }
+        }
+    }
+    result
+}
+
 pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -2687,6 +2807,7 @@ where
         native_nacelle,
         build_observation,
         build_decision_kind: _,
+        receipt_graph_id_sink,
     } = state;
 
     if decision.plan.is_orchestration_mode() {
@@ -2821,36 +2942,55 @@ where
             .await?;
     }
 
-    let execution_receipt_document =
-        crate::application::execution_receipt_builder::build_prelaunch_receipt_document(
+    let receipt_output =
+        crate::application::execution_receipt_builder::build_prelaunch_receipt_document_with_graph(
             &decision.plan,
             &execution_plan,
             &launch_ctx,
             build_observation.as_ref(),
         )?;
+    // PR-3b: publish declared/resolved ids to the boundary's
+    // `ReceiptGraphIdSink` IMMEDIATELY after the bundle is built — so
+    // if the rest of this function (writing the receipt, opening the
+    // workload, waiting for readiness) fails, the partial-receipt
+    // boundary wrapper still picks up the ids the would-be success
+    // receipt would have carried.
+    if let (Some(sink), Some(bundle)) = (
+        receipt_graph_id_sink.as_ref(),
+        receipt_output.launch_graph.as_ref(),
+    ) {
+        sink.set(crate::application::receipt_boundary::GraphIds {
+            declared_execution_id: Some(bundle.derived.execution_ids.declared_execution_id.clone()),
+            resolved_execution_id: Some(bundle.derived.execution_ids.resolved_execution_id.clone()),
+        });
+    }
+    let execution_receipt_document = receipt_output.document;
     let execution_receipt_path =
         crate::application::execution_receipts::write_receipt_document_atomic(
             &execution_receipt_document,
         )?;
-    if request.verbose {
-        let (execution_id, schema_label) = match &execution_receipt_document {
-            capsule_core::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
-                (receipt.execution_id.clone(), "v1")
-            }
-            capsule_core::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
-                (receipt.execution_id.clone(), "v2-experimental")
-            }
-        };
-        request
-            .reporter
-            .notify(format!(
-                "🧾 Execution receipt ({}): {} ({})",
-                schema_label,
-                execution_id,
-                execution_receipt_path.display()
-            ))
-            .await?;
-    }
+    let (execution_id, schema_label) = match &execution_receipt_document {
+        capsule_core::execution_identity::ExecutionReceiptDocument::V1(receipt) => {
+            (receipt.execution_id.clone(), "v1")
+        }
+        capsule_core::execution_identity::ExecutionReceiptDocument::V2(receipt) => {
+            (receipt.execution_id.clone(), "v2-experimental")
+        }
+    };
+    request
+        .reporter
+        .notify(format!(
+            "Execution receipt ({}): {} ({})",
+            schema_label,
+            execution_id,
+            execution_receipt_path.display()
+        ))
+        .await?;
+    // Stable machine-readable line for non-TTY callers (CI, scripts, MCP).
+    request
+        .reporter
+        .notify(format!("RECEIPT: {}", execution_receipt_path.display()))
+        .await?;
 
     let run_command_uses_specialized_executor = decision
         .plan
@@ -2964,8 +3104,61 @@ where
         }
     }
 
-    let consent_already_granted =
-        request.dangerously_skip_permissions || crate::consent_store::has_consent(&execution_plan)?;
+    // PR-4b: the consent gate stays on plan-direct `has_consent`
+    // because of the zero-permission short-circuit. The bundle-derived
+    // `ExecutionConsentView` is still built (for symmetry with
+    // preflight, and so the bundle becomes the canonical consent
+    // identity surface for future PRs). Debug parity guard pins the
+    // two surfaces agree outside the zero-permission case.
+    let consent_already_granted = if request.dangerously_skip_permissions {
+        true
+    } else {
+        let plan_granted = crate::consent_store::has_consent(&execution_plan)?;
+        debug_assert!(
+            {
+                let consent_deps =
+                    capsule_core::lockfile::manifest_external_capsule_dependencies(
+                        &decision.plan.manifest,
+                    )
+                    .ok();
+                let view_granted = consent_deps.map(|deps| {
+                    let consent_input =
+                        capsule_core::engine::execution_graph::GraphConsentInput {
+                            scoped_id: execution_plan.consent.key.scoped_id.clone(),
+                            version: execution_plan.consent.key.version.clone(),
+                            target_label: execution_plan.consent.key.target_label.clone(),
+                            policy_segment_hash: execution_plan
+                                .consent
+                                .policy_segment_hash
+                                .clone(),
+                            provisioning_policy_hash: execution_plan
+                                .consent
+                                .provisioning_policy_hash
+                                .clone(),
+                        };
+                    let bundle =
+                        crate::application::graph_views::build_declared_only_bundle_with_consent(
+                            &deps,
+                            Some(decision.plan.manifest_path.display().to_string()),
+                            None,
+                            Vec::new(),
+                            consent_input,
+                        );
+                    let view =
+                        crate::application::graph_views::ExecutionConsentView::from_bundle(
+                            &bundle,
+                        );
+                    crate::consent_store::has_consent_view(&view).unwrap_or(plan_granted)
+                });
+                view_granted
+                    .map(|view_granted| plan_granted || plan_granted == view_granted)
+                    .unwrap_or(true)
+            },
+            "PR-4b parity: has_consent_view disagrees with plan-direct has_consent \
+             at run.rs pre-launch gate (outside the zero-permission short-circuit)"
+        );
+        plan_granted
+    };
     if !consent_already_granted {
         if use_progressive_ui {
             crate::progressive_ui::render_execution_consent_summary(
@@ -3026,6 +3219,55 @@ where
     {
         crate::progressive_ui::show_cancel("Preview cancelled.")?;
         return Ok(());
+    }
+
+    // Run prestart_command after provider readiness and consent, before
+    // the main process launch (e.g., Prisma database migrations).
+    if let Some(command) = decision
+        .plan
+        .prestart_command_string()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        let prestart_cwd = crate::adapters::runtime::provisioning::dependency_root(&decision.plan);
+        tracing::info!(%command, cwd=%prestart_cwd.display(), "running prestart command");
+        let target_env: Vec<(String, String)> = decision.plan.execution_env().into_iter().collect();
+        // Resolve {{deps.X.runtime_exports.Y}} templates from the running dep graph.
+        let resolved_env: Vec<(String, String)> = {
+            let graph = dep_contracts.as_ref().and_then(DependencyContractGuard::graph);
+            target_env.into_iter().map(|(key, value)| {
+                let resolved = if let Some(g) = graph {
+                    resolve_dep_template_inner(&value, g)
+                } else {
+                    value.to_string()
+                };
+                (key, resolved)
+            }).collect()
+        };
+        tracing::info!(%command, cwd=%prestart_cwd.display(), env_count=%resolved_env.len(), has_graph=%dep_contracts.as_ref().and_then(DependencyContractGuard::graph).is_some(), "running prestart command");
+        // Debug: log DATABASE_URL value
+        if let Some((_, db_url)) = resolved_env.iter().find(|(k, _)| k == "DATABASE_URL") {
+            tracing::info!(%db_url, "prestart DATABASE_URL resolved");
+        }
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(&command)
+            .current_dir(&prestart_cwd)
+            .stdin(std::process::Stdio::null());
+        for (key, value) in &resolved_env {
+            cmd.env(key, value);
+        }
+        let mut child = cmd
+            .spawn()
+            .context("failed to spawn prestart command")?;
+        let status = child.wait().context("prestart command wait failed")?;
+        if !status.success() {
+            anyhow::bail!(
+                "prestart command exited with status {}: {}",
+                status,
+                command
+            );
+        }
     }
 
     match guard_result.executor_kind {
@@ -3751,15 +3993,65 @@ fn build_port_identity(
     }
 }
 
+/// Reconcile a capsule.toml `toml::Value` so that the lock's selected-target
+/// label can be used to look up lifecycle fields (build, runtime_tools, install)
+/// that the manifest declares under a different target name.
+///
+/// Source inference always assigns `label = "default"` to the inferred lock
+/// target regardless of the capsule.toml `default_target` value.  When the
+/// two labels differ (e.g. lock has `"default"` but capsule.toml declares
+/// `[targets.main]`), all `compat_str(&["targets", "default", …])` lookups
+/// return `None` and the lifecycle steps are silently skipped.
+///
+/// This function inserts `[targets.<lock_target>]` as an alias of the
+/// capsule.toml target so that both the lock-label path and the manifest-label
+/// path resolve correctly.  The alias is only added in-memory; the file on
+/// disk is never touched.
+fn reconcile_compat_manifest_targets(raw: &toml::Value, lock_target: &str) -> toml::Value {
+    let mut value = raw.clone();
+
+    // Determine the capsule.toml's intended target label: prefer explicit
+    // default_target, then fall back to the sole entry in [targets] if there
+    // is exactly one.
+    let capsule_target = value
+        .get("default_target")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            value
+                .get("targets")
+                .and_then(toml::Value::as_table)
+                .filter(|t| t.len() == 1)
+                .and_then(|t| t.keys().next())
+                .map(|s| s.to_string())
+        });
+
+    if let Some(ref capsule_target) = capsule_target {
+        if capsule_target != lock_target {
+            if let Some(targets) = value.get_mut("targets").and_then(toml::Value::as_table_mut) {
+                if let Some(real_target) = targets.get(capsule_target.as_str()).cloned() {
+                    // Only add the alias if the lock-label slot is not already occupied.
+                    targets
+                        .entry(lock_target.to_string())
+                        .or_insert(real_target);
+                }
+            }
+        }
+    }
+
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         normalize_existing_path, normalize_write_path, parent_package_id,
         parse_external_service_contracts, parse_reuse_if_present_service_preflights,
-        resolve_sandbox_grants, unavailable_service_message, validate_sandbox_grants_best_effort,
-        ConsumerRunRequest, DerivedBridgeManifest, ExternalServiceContract,
-        ExternalServiceHealthcheck, ExternalServiceHealthcheckKind, ExternalServiceMode,
-        PreparedRunContext, ServiceRequiredAsset,
+        reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
+        validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
+        ExternalServiceContract, ExternalServiceHealthcheck, ExternalServiceHealthcheckKind,
+        ExternalServiceMode,
+        PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -3784,6 +4076,129 @@ mod tests {
             .prefix(name)
             .tempdir_in(root)
             .expect("workspace tempdir")
+    }
+
+    /// PR-3b (PR #180 review fix): contract for the boundary plumbing
+    /// helper. The helper sets `receipt_graph_id_sink: Some(...)` AND
+    /// the resulting state shares the same `Arc`-backed cell as the
+    /// sink passed in — so a `sink.set(...)` call from the outer
+    /// wrapper is observable through the state-side handle the
+    /// Execute phase reads.
+    #[test]
+    fn attach_receipt_graph_id_sink_populates_pipeline_state() {
+        use crate::application::receipt_boundary::{GraphIds, ReceiptGraphIdSink};
+
+        let workspace = workspace_tempdir("attach-sink-fixture");
+        let manifest_dir = workspace.path().to_path_buf();
+        // Minimal manifest with a default target so
+        // `execution_descriptor_from_manifest_parts` succeeds.
+        let mut manifest = toml::map::Map::new();
+        manifest.insert(
+            "schema_version".to_string(),
+            toml::Value::String("0.3".to_string()),
+        );
+        manifest.insert(
+            "name".to_string(),
+            toml::Value::String("attach-sink-demo".to_string()),
+        );
+        manifest.insert(
+            "version".to_string(),
+            toml::Value::String("0.1.0".to_string()),
+        );
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
+        manifest.insert(
+            "default_target".to_string(),
+            toml::Value::String("default".to_string()),
+        );
+        let mut target = toml::map::Map::new();
+        target.insert(
+            "runtime".to_string(),
+            toml::Value::String("source".to_string()),
+        );
+        target.insert(
+            "driver".to_string(),
+            toml::Value::String("native".to_string()),
+        );
+        target.insert(
+            "run".to_string(),
+            toml::Value::String("/usr/bin/true".to_string()),
+        );
+        let mut targets = toml::map::Map::new();
+        targets.insert("default".to_string(), toml::Value::Table(target));
+        manifest.insert("targets".to_string(), toml::Value::Table(targets));
+
+        let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
+            toml::Value::Table(manifest),
+            manifest_dir.join("capsule.toml"),
+            manifest_dir.clone(),
+            capsule_core::router::ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("execution descriptor");
+
+        let decision = capsule_core::router::RuntimeDecision {
+            kind: capsule_core::router::RuntimeKind::Source,
+            reason: "test fixture".to_string(),
+            plan,
+        };
+        let prepared = PreparedRunContext::from_authoritative_input(
+            None,
+            &manifest_dir,
+            capsule_core::types::ValidationMode::Strict,
+            Some("default"),
+        )
+        .expect("prepared run context");
+
+        let state = RunPipelineState {
+            preview_session: None,
+            preview_mode: false,
+            use_progressive_ui: false,
+            prepared,
+            decision,
+            launch_ctx: crate::executors::launch_context::RuntimeLaunchContext::empty(),
+            external_capsules: None,
+            dep_contracts: None,
+            agent_attempted: false,
+            derived_execution: None,
+            compatibility_host_mode: None,
+            native_nacelle: None,
+            build_observation: None,
+            build_decision_kind: None,
+            receipt_graph_id_sink: None,
+        };
+
+        assert!(
+            state.receipt_graph_id_sink.is_none(),
+            "fixture sanity: freshly built state has no sink"
+        );
+
+        let sink = ReceiptGraphIdSink::new();
+        let state = super::attach_receipt_graph_id_sink(state, sink.clone());
+
+        assert!(
+            state.receipt_graph_id_sink.is_some(),
+            "PR-3b: attach_receipt_graph_id_sink must populate the field"
+        );
+
+        // Cross-Arc contract: a publish to the original `sink` must
+        // be visible to the state-side handle. This is what makes the
+        // helper meaningful — both sides observe the same cell.
+        sink.set(GraphIds {
+            declared_execution_id: Some("blake3:test-declared".to_string()),
+            resolved_execution_id: Some("blake3:test-resolved".to_string()),
+        });
+        let state_sink = state.receipt_graph_id_sink.as_ref().unwrap();
+        let snapshot = state_sink.snapshot();
+        assert_eq!(
+            snapshot.declared_execution_id.as_deref(),
+            Some("blake3:test-declared"),
+            "PR-3b: state-side sink must share the Arc with the input sink"
+        );
+        assert_eq!(
+            snapshot.resolved_execution_id.as_deref(),
+            Some("blake3:test-resolved")
+        );
     }
 
     #[test]
@@ -4289,5 +4704,175 @@ url = "http://127.0.0.1:8787/health"
             "Resolved against effective cwd: {}",
             effective.path().display()
         )));
+    }
+
+    // ── reconcile_compat_manifest_targets tests ──────────────────────────────
+
+    /// When capsule.toml declares `default_target = "main"` but the lock's
+    /// selected target is `"default"`, the helper must add `[targets.default]`
+    /// as an alias of `[targets.main]` so that build/runtime_tools lookups
+    /// succeed through the lock-label path.
+    #[test]
+    fn reconcile_adds_alias_when_lock_and_manifest_target_differ() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "demo"
+schema_version = "0.3"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "python"
+build = "npm install && npm run build"
+
+[targets.main.runtime_tools]
+node = "20"
+"#,
+        )
+        .expect("parse");
+
+        let reconciled = reconcile_compat_manifest_targets(&raw, "default");
+
+        // [targets.default] must be present after aliasing
+        let targets = reconciled
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .expect("targets table");
+        assert!(
+            targets.contains_key("default"),
+            "alias [targets.default] should have been inserted"
+        );
+        let default_target = targets.get("default").and_then(toml::Value::as_table).unwrap();
+        assert_eq!(
+            default_target.get("build").and_then(toml::Value::as_str),
+            Some("npm install && npm run build")
+        );
+        let node = default_target
+            .get("runtime_tools")
+            .and_then(toml::Value::as_table)
+            .and_then(|rt| rt.get("node"))
+            .and_then(toml::Value::as_str);
+        assert_eq!(node, Some("20"));
+        // Original [targets.main] must still be present
+        assert!(targets.contains_key("main"));
+    }
+
+    /// When capsule.toml `default_target` already matches the lock target, the
+    /// helper must be a no-op (no spurious alias added).
+    #[test]
+    fn reconcile_is_noop_when_labels_match() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "demo"
+schema_version = "0.3"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "python"
+build = "pip install -r requirements.txt"
+"#,
+        )
+        .expect("parse");
+
+        let reconciled = reconcile_compat_manifest_targets(&raw, "default");
+
+        let targets = reconciled
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .expect("targets table");
+        assert_eq!(targets.len(), 1, "no extra alias should be added");
+        assert!(targets.contains_key("default"));
+    }
+
+    /// When capsule.toml has no explicit `default_target` but has a single
+    /// named target (e.g. `[targets.app]`), the helper infers it as the
+    /// capsule target and adds the alias.
+    #[test]
+    fn reconcile_infers_single_target_when_no_default_target_field() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "demo"
+schema_version = "0.3"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+build = "npm run build"
+"#,
+        )
+        .expect("parse");
+
+        let reconciled = reconcile_compat_manifest_targets(&raw, "default");
+
+        let targets = reconciled
+            .get("targets")
+            .and_then(toml::Value::as_table)
+            .expect("targets table");
+        assert!(
+            targets.contains_key("default"),
+            "alias [targets.default] should be inferred from the sole target"
+        );
+        let build = targets
+            .get("default")
+            .and_then(toml::Value::as_table)
+            .and_then(|t| t.get("build"))
+            .and_then(toml::Value::as_str);
+        assert_eq!(build, Some("npm run build"));
+    }
+
+    /// After reconciliation, a `CompatManifestBridge` built from the aliased
+    /// manifest correctly exposes the build command via `build_lifecycle_build`
+    /// when the execution descriptor uses the lock target label.
+    #[test]
+    fn reconcile_enables_build_lifecycle_build_via_lock_target() {
+        use capsule_core::router::{execution_descriptor_from_manifest_parts, ExecutionProfile};
+        use std::path::PathBuf;
+
+        let tmp = workspace_tempdir("reconcile-build-test-");
+        let manifest_dir = tmp.path().to_path_buf();
+
+        // Raw capsule.toml: target is named "main", not "default"
+        let raw: toml::Value = toml::from_str(
+            r#"
+name = "myapp"
+version = "0.1.0"
+type = "app"
+schema_version = "0.3"
+default_target = "main"
+
+[targets.main]
+runtime = "source"
+driver = "python"
+run_command = "uvicorn app:main"
+build = "npm install && npm run build"
+
+[targets.main.runtime_tools]
+node = "20"
+"#,
+        )
+        .expect("parse manifest");
+
+        // Build a plan using the lock target label "default"
+        let plan = execution_descriptor_from_manifest_parts(
+            reconcile_compat_manifest_targets(&raw, "default"),
+            manifest_dir.join("capsule.toml"),
+            manifest_dir.clone(),
+            ExecutionProfile::Dev,
+            Some("default"),
+            std::collections::HashMap::new(),
+        )
+        .expect("build plan");
+
+        assert_eq!(
+            plan.build_lifecycle_build().as_deref(),
+            Some("npm install && npm run build"),
+            "build command should be visible via the aliased target label"
+        );
+        assert_eq!(
+            plan.execution_runtime_tool_version("node").as_deref(),
+            Some("20"),
+            "node runtime_tools should be visible via the aliased target label"
+        );
     }
 }

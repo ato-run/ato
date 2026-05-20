@@ -22,7 +22,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 
 use self::chrome::render_command_chrome;
-use self::panels::{render_settings_overlay, render_stage};
+use self::panels::render_stage;
 use self::sidebar::{
     favicon_candidate_urls, parse_link_icon_candidates, render_task_rail, FaviconState,
 };
@@ -31,13 +31,15 @@ use crate::logging::TARGET_FAVICON;
 use crate::app::{
     AllowPermissionForSession, AllowPermissionOnce, ApproveConsentForm, BrowserBack,
     BrowserForward, BrowserReload, CancelAuthHandoff, CancelConfigForm, CancelConsentForm,
-    CancelQuit, CheckForUpdates, CloseTask, ConfirmQuitClear, ConfirmQuitKeep, CycleHandle,
-    DenyPermissionPrompt, DismissTransient, ExpandSplit, FocusCommandBar, InstallCapsuleUpdate,
-    MoveTask, NativeCopy, NativeCut, NativePaste, NativeRedo, NativeSelectAll, NativeUndo,
-    NavigateToUrl, NewTab, NextTask, NextWorkspace, OpenAuthInBrowser, OpenCloudDock,
-    OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry, OpenUrlBridge, PreviousTask,
-    PreviousWorkspace, Quit, ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab,
-    SelectSettingsTab, SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
+    CancelQuit, CancelResolutionForm, CheckForUpdates, CloseTask, ConfirmQuitClear,
+    ConfirmQuitKeep, ConfirmQuitWithCleanup, CycleHandle, DenyPermissionPrompt, DismissTransient,
+    ExpandSplit,
+    FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
+    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
+    OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
+    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResolutionFormBack, ResolutionFormNext,
+    ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab, SelectSettingsTab, SelectTask,
+    ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm,
     ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
@@ -221,7 +223,7 @@ fn fetch_latest_release(current: &str) -> crate::state::UpdateCheck {
 /// macOS/Linux/Windows fan-out — we only ship to those three so
 /// that's the entire matrix. Errors bubble up so the caller can
 /// surface them in the activity rail.
-fn open_external_url(url: &str) -> std::io::Result<()> {
+pub(crate) fn open_external_url(url: &str) -> std::io::Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         std::process::Command::new("open")
     } else if cfg!(target_os = "windows") {
@@ -279,6 +281,16 @@ pub struct DesktopShell {
     /// identity tuple changes. Dropped when `pending_consent` returns
     /// to `None`.
     consent_modal: Option<modals::consent_form::ConsentModal>,
+    /// #117 — unified pre-launch resolution modal. Reconciled against
+    /// `state.pending_resolution` on every render: created on the
+    /// `None → Some` transition, patched in place when new
+    /// requirements are merged into the same `PendingResolutionRequest`,
+    /// rebuilt only when the handle changes or a previously-input
+    /// field disappears. Dropped when `pending_resolution` returns
+    /// to `None`. Takes precedence over `config_modal` /
+    /// `consent_modal` in the render gate so we never render the
+    /// legacy single-slot overlays alongside the unified one.
+    resolution_modal: Option<modals::resolution_form::ResolutionModal>,
 }
 
 impl DesktopShell {
@@ -312,6 +324,9 @@ impl DesktopShell {
         }
 
         let mut webviews = WebViewManager::new(window.window_handle(), cx.to_async());
+        // Expose the AutomationHost as a GPUI global so that other windows
+        // (e.g. the dock) can clone it to register page-load handlers.
+        cx.set_global(webviews.automation_host());
         // Channel for the per-pane capsule update check. The Sender goes
         // into the webview manager (cloned per worker thread); the
         // Receiver lives on this shell and is drained by
@@ -406,6 +421,7 @@ impl DesktopShell {
             capsule_update_rx,
             config_modal: None,
             consent_modal: None,
+            resolution_modal: None,
         }
     }
 
@@ -637,7 +653,6 @@ impl DesktopShell {
     }
 
     fn on_show_settings(&mut self, _: &ShowSettings, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.settings_panel_open = false;
         self.state.open_settings_task();
         crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, true);
@@ -864,13 +879,15 @@ impl DesktopShell {
     fn on_quit(&mut self, _: &Quit, _window: &mut Window, cx: &mut Context<Self>) {
         // Surface the keep-or-clear dialog instead of quitting
         // straight away; ConfirmQuitKeep / ConfirmQuitClear /
-        // CancelQuit resolve the prompt.
+        // CancelQuit / ConfirmQuitWithCleanup resolve the prompt.
         self.state.pending_quit_confirmation = true;
+        self.state.cleanup_preview = Some(crate::orchestrator::preview_host_cleanup());
         cx.notify();
     }
 
     fn on_cancel_quit(&mut self, _: &CancelQuit, _window: &mut Window, cx: &mut Context<Self>) {
         self.state.pending_quit_confirmation = false;
+        self.state.cleanup_preview = None;
         cx.notify();
     }
 
@@ -1207,6 +1224,42 @@ impl DesktopShell {
         }
     }
 
+    /// #117 — reconcile `self.resolution_modal` with
+    /// `state.pending_resolution`. Differs from the legacy modal sync
+    /// in that we *patch* the existing modal in place when new
+    /// requirements are merged in (preserving keystroke state for
+    /// already-shown secret fields), and only rebuild wholesale when
+    /// the handle changes or a previously-shown field disappears.
+    fn sync_resolution_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match (
+            &self.state.pending_resolution,
+            self.resolution_modal.as_mut(),
+        ) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                self.resolution_modal = None;
+            }
+            (Some(req), None) => {
+                self.resolution_modal = Some(modals::resolution_form::ResolutionModal::new(
+                    req.clone(),
+                    window,
+                    cx,
+                ));
+            }
+            (Some(req), Some(modal)) => {
+                if modal.should_rebuild_for(req) {
+                    self.resolution_modal = Some(modals::resolution_form::ResolutionModal::new(
+                        req.clone(),
+                        window,
+                        cx,
+                    ));
+                } else {
+                    modal.merge_inputs_for(req.clone(), window, cx);
+                }
+            }
+        }
+    }
+
     /// Handler for `ApproveConsentForm`. Calls
     /// `apply_capsule_consent` (which routes through
     /// `ato internal consent approve-execution-plan` on the CLI) and
@@ -1417,6 +1470,223 @@ impl DesktopShell {
         cx.notify();
     }
 
+    /// #117 — handler for `SubmitResolutionForm`. Persists every
+    /// secret in `pending_resolution.secrets`, approves every consent
+    /// in `pending_resolution.consents`, then clears the unified
+    /// pending request so `ensure_pending_local_launch` re-arms the
+    /// launch on the next render. Iteration order: secrets first,
+    /// then consents — secrets are runtime input that the consents'
+    /// ExecutionPlans expect to see in env, but the CLI rederives
+    /// plans on retry so the order is informational here, not load-
+    /// bearing.
+    ///
+    /// On the first error (a secret that fails to persist, or a CLI
+    /// invocation that fails to record consent), we surface an
+    /// activity entry and bail — the modal stays open with the
+    /// remaining work intact so the user can retry without losing the
+    /// secrets / approvals that already succeeded.
+    fn on_submit_resolution_form(
+        &mut self,
+        _: &SubmitResolutionForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.resolution_modal.as_ref() else {
+            return;
+        };
+        let request = modal.request.clone();
+        let handle = request.handle.clone();
+
+        // Snapshot everything we need before mutating AppState, since
+        // the submit path borrows `cx` to read input values.
+        struct PendingSecretWrite {
+            target: Option<String>,
+            field_name: String,
+            kind: ConfigKind,
+            value: String,
+        }
+        let mut secret_writes: Vec<PendingSecretWrite> = Vec::new();
+        for item in &request.secrets {
+            for field in &item.fields {
+                let Some(value) = modal.read_input(item.target.as_deref(), &field.name, cx) else {
+                    continue;
+                };
+                if value.is_empty() {
+                    // Same gating as the legacy save handler: an empty
+                    // value would round-trip into an empty env var and
+                    // fail preflight again. Halt so the user can fill
+                    // in the field rather than dismissing the modal.
+                    return;
+                }
+                if let ConfigKind::Enum { choices } = &field.kind {
+                    if !choices.iter().any(|c| c == &value) {
+                        self.state.push_activity(
+                            ActivityTone::Warning,
+                            format!(
+                                "'{value}' is not a valid choice for {}. Allowed: {}",
+                                field.name,
+                                choices.join(", ")
+                            ),
+                        );
+                        return;
+                    }
+                }
+                secret_writes.push(PendingSecretWrite {
+                    target: item.target.clone(),
+                    field_name: field.name.clone(),
+                    kind: field.kind.clone(),
+                    value,
+                });
+            }
+        }
+
+        // Persist secrets and grant them to the capsule. Same as the
+        // legacy save handler — secret-typed fields go to the
+        // SecretStore + grant table; non-secret config goes to the
+        // capsule-config map keyed by handle. The `target` is purely
+        // informational at the schema level; the secret store key is
+        // the field name.
+        for write in secret_writes {
+            match write.kind {
+                ConfigKind::Secret => {
+                    if let Err(error) = self.state.add_secret(write.field_name.clone(), write.value)
+                    {
+                        self.state.push_activity(
+                            ActivityTone::Error,
+                            format!("Failed to save secret '{}': {error}", write.field_name),
+                        );
+                        return;
+                    }
+                    if let Err(error) = self
+                        .state
+                        .grant_secret_to_capsule(&handle, &write.field_name)
+                    {
+                        self.state.push_activity(
+                            ActivityTone::Error,
+                            format!(
+                                "Failed to grant secret '{}' to {handle}: {error}",
+                                write.field_name
+                            ),
+                        );
+                        return;
+                    }
+                }
+                ConfigKind::String | ConfigKind::Number | ConfigKind::Enum { .. } => {
+                    self.state
+                        .add_capsule_config(&handle, write.field_name, write.value);
+                }
+            }
+            // `target` is intentionally unused at write time — the
+            // schema groups by target for display, but the SecretStore
+            // and CapsuleConfigStore key on (handle, name).
+            let _ = write.target;
+        }
+
+        // Approve every consent item via the same CLI plumbing the
+        // legacy modal's Approve button uses. We call the orchestrator
+        // helper directly with each item's identity tuple instead of
+        // routing through `apply_capsule_consent` (which pulls from
+        // the legacy single-slot `pending_consent`).
+        for consent in &request.consents {
+            if let Err(error) = crate::orchestrator::approve_execution_plan_consent(
+                &consent.scoped_id,
+                &consent.version,
+                &consent.target_label,
+                &consent.policy_segment_hash,
+                &consent.provisioning_policy_hash,
+            ) {
+                self.state.push_activity(
+                    ActivityTone::Error,
+                    format!(
+                        "Failed to record consent for target {}: {error:#}",
+                        consent.target_label
+                    ),
+                );
+                return;
+            }
+            self.state
+                .mark_consent_retry_consumed(&handle, &consent.target_label);
+        }
+
+        let secret_count: usize = request.secrets.iter().map(|s| s.fields.len()).sum();
+        let consent_count = request.consents.len();
+        self.state.clear_pending_resolution();
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!(
+                "Approved {} secret{} and {} ExecutionPlan{}; relaunching {handle}…",
+                secret_count,
+                if secret_count == 1 { "" } else { "s" },
+                consent_count,
+                if consent_count == 1 { "" } else { "s" },
+            ),
+        );
+        cx.notify();
+    }
+
+    /// #117 step UI — advance from consent review to secrets entry.
+    /// No-op when the modal is already on the secrets step or when
+    /// the request has no secrets to advance to (single-step mode,
+    /// where the Submit button is the right action). The mutation is
+    /// on the modal's local state only — `pending_resolution` itself
+    /// is unchanged so a concurrent merge-in still lands cleanly.
+    fn on_resolution_form_next(
+        &mut self,
+        _: &ResolutionFormNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(modal) = self.resolution_modal.as_mut() {
+            modal.advance_step();
+            cx.notify();
+        }
+    }
+
+    /// #117 step UI — go back from secrets entry to consent review.
+    /// No-op when the request has no consents (single-step mode).
+    /// Input state for the secrets form is preserved across the
+    /// round-trip via the existing `inputs` map, so users don't lose
+    /// keystrokes by stepping back to re-read a policy summary.
+    fn on_resolution_form_back(
+        &mut self,
+        _: &ResolutionFormBack,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(modal) = self.resolution_modal.as_mut() {
+            modal.retreat_step();
+            cx.notify();
+        }
+    }
+
+    /// #117 — handler for `CancelResolutionForm`. Drops the unified
+    /// pending request and marks the active web pane `LaunchFailed`
+    /// so `ensure_pending_local_launch` doesn't immediately re-trip
+    /// the same requirements. The user re-opens the launch via the
+    /// omnibar.
+    fn on_cancel_resolution_form(
+        &mut self,
+        _: &CancelResolutionForm,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(modal) = self.resolution_modal.as_ref() else {
+            return;
+        };
+        let handle = modal.request.handle.clone();
+        self.state.clear_pending_resolution();
+        if let Some(active) = self.state.active_web_pane() {
+            let pane_id = active.pane_id;
+            self.state
+                .sync_web_session_state(pane_id, crate::state::WebSessionState::LaunchFailed);
+        }
+        self.state.push_activity(
+            ActivityTone::Info,
+            format!("Cancelled launch resolution for {handle}."),
+        );
+        cx.notify();
+    }
+
     fn sync_favicons(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Two icon families share the cache: external-URL favicons
         // (key = origin, request URL = "{origin}/favicon.ico") and
@@ -1569,16 +1839,128 @@ impl DesktopShell {
         }
         true
     }
+
+    /// Drains host-level action requests queued by the MCP automation
+    /// socket (`host_dispatch_action`). Each entry is invoked here so
+    /// the originating Operator never needed macOS Accessibility
+    /// permission. Bound to the redesign's window-open helpers; unknown
+    /// names log a warning rather than panic.
+    fn drain_pending_host_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.pending_host_actions.is_empty() {
+            return;
+        }
+        let actions: Vec<String> = self.state.pending_host_actions.drain(..).collect();
+        for name in actions {
+            tracing::info!(action = %name, "host action dispatched via automation socket");
+            match name.as_str() {
+                "OpenAppWindowExperiment" => {
+                    window.dispatch_action(Box::new(crate::app::OpenAppWindowExperiment), cx);
+                }
+                // "OpenLauncherWindow" was retired in Stage D of the
+                // system-capsule refactor — ShowSettings now reaches
+                // the ato-settings system capsule directly.
+                "OpenCardSwitcher" => {
+                    window.dispatch_action(Box::new(crate::app::OpenCardSwitcher), cx);
+                }
+                "OpenStartWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenStartWindow), cx);
+                }
+                "OpenGithubRunWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenGithubRunWindow), cx);
+                }
+                "GithubRunFindCandidates" => {
+                    // In DesktopShell mode there is no app_handle to pass extra URL params,
+                    // so we look up ActiveGithubRunShell directly.
+                    if let Some(shell_weak) = cx
+                        .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                        .and_then(|s| s.0.clone())
+                    {
+                        if let Some(shell) = shell_weak.upgrade() {
+                            let mock = serde_json::json!({
+                                "ok": true,
+                                "candidates": [{
+                                    "title": "mock/candidate",
+                                    "version": "0.1.0",
+                                    "description": "AODD mock candidate (DesktopShell mode)",
+                                    "author": "mock",
+                                    "status": "community",
+                                    "source": "github",
+                                    "toml": "[capsule]\nname = \"mock\"\nversion = \"0.1.0\"\n",
+                                    "repo": "mock/candidate",
+                                }]
+                            });
+                            shell.read(cx).inject_github_candidates(&mock);
+                        }
+                    }
+                }
+                "OpenStoreWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenStoreWindow), cx);
+                }
+                "ShowSettings" => {
+                    window.dispatch_action(Box::new(crate::app::ShowSettings), cx);
+                }
+                "OpenDockWindow" => {
+                    window.dispatch_action(Box::new(crate::app::OpenDockWindow), cx);
+                }
+                other => {
+                    tracing::warn!(
+                        action = %other,
+                        "host action not recognized — extend drain_pending_host_actions to add it"
+                    );
+                }
+            }
+        }
+    }
+
+    fn drain_pending_close_panes(&mut self, cx: &mut Context<Self>) {
+        if self.state.pending_close_panes.is_empty() {
+            return;
+        }
+        use crate::window::content_windows::OpenContentWindows;
+        let pane_ids: Vec<usize> = self.state.pending_close_panes.drain(..).collect();
+        for pane_id in pane_ids {
+            let handle = cx
+                .try_global::<OpenContentWindows>()
+                .and_then(|ocw| ocw.get(pane_id as u64).map(|e| e.handle));
+            if let Some(h) = handle {
+                let _ = h.update(cx, |_, window, _| window.remove_window());
+                tracing::info!(pane_id, "closed pane via automation");
+            } else {
+                tracing::warn!(pane_id, "close_pane: pane not found");
+            }
+        }
+    }
 }
 
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drain_pending_host_actions(window, cx);
+        self.drain_pending_close_panes(cx);
         let handled_open_urls = self.drain_open_urls();
         let size = window.bounds().size;
         let stage_bounds =
             compute_stage_bounds(&self.state, f32::from(size.width), f32::from(size.height));
         self.state.set_active_bounds(stage_bounds);
+
+        // Update dock_is_open flag *before* sync_from_state so that
+        // ListPanes automation commands return the correct pane list.
+        let dock_entity = cx
+            .try_global::<crate::window::dock::DockEntitySlot>()
+            .and_then(|s| s.0.clone());
+        self.webviews.set_dock_open(dock_entity.is_some());
+
         self.webviews.sync_from_state(window, &mut self.state);
+
+        // Dispatch automation commands targeting the dock WebView.
+        if let Some(entity) = dock_entity {
+            let dock_ref = entity.read(cx);
+            self.webviews
+                .dispatch_dock_automation_requests(&mut self.state, Some(&dock_ref.webview));
+        } else {
+            self.webviews
+                .dispatch_dock_automation_requests(&mut self.state, None);
+        }
+
         self.sync_omnibar_with_state(window, cx, false);
         if handled_open_urls {
             self.sync_focus_target(window, cx);
@@ -1590,6 +1972,7 @@ impl Render for DesktopShell {
         self.poll_capsule_updates();
         self.sync_config_modal(window, cx);
         self.sync_consent_modal();
+        self.sync_resolution_modal(window, cx);
         let omnibar_value = self.omnibar.read(cx).value().to_string();
         self.maybe_trigger_capsule_search(&omnibar_value);
         let omnibar_suggestions = self.state.omnibar_suggestions(&omnibar_value);
@@ -1606,32 +1989,9 @@ impl Render for DesktopShell {
             || self.state.pending_consent.is_some()
             || self.state.active_permission_prompt().is_some()
             || self.state.pending_quit_confirmation
-            || self.state.route_metadata_popover_open
-            || self.state.settings_panel_open;
+            || self.state.route_metadata_popover_open;
         self.webviews
             .set_overlay_hides_webview(hide_for_overlay, &mut self.state);
-        let route_metadata_overlay_route = if self.state.route_metadata_popover_open {
-            self.state
-                .active_capsule_detail_host_panel_route()
-                .map(|route| route.url())
-        } else {
-            None
-        };
-        let route_metadata_overlay_bounds = route_metadata_overlay_route
-            .as_ref()
-            .map(|_| route_metadata_overlay_webview_bounds(stage_bounds));
-        let route_metadata_overlay_payload = if self.state.route_metadata_popover_open {
-            crate::webview::overlay_host_panel_payload(&self.state)
-        } else {
-            None
-        };
-        self.webviews.sync_overlay_host_panel(
-            window,
-            route_metadata_overlay_route,
-            route_metadata_overlay_bounds,
-            route_metadata_overlay_payload,
-            &mut self.state,
-        );
         let theme = Theme::from_mode(self.state.theme_mode);
 
         let body = div()
@@ -1657,38 +2017,58 @@ impl Render for DesktopShell {
                     .when(self.state.active_permission_prompt().is_some(), |this| {
                         this.child(render_permission_prompt_overlay(&self.state, &theme))
                     })
-                    .when(self.config_modal.is_some(), |this| {
-                        // The modal renders only when AppState requested
-                        // it AND `sync_config_modal` has populated the
-                        // local entity — both must be true. The
-                        // `Option::as_ref().unwrap()` is safe because the
-                        // `is_some()` guard above runs before this child
-                        // call inside `.when`.
+                    // #117 — the unified resolution modal takes
+                    // precedence over the legacy single-slot modals.
+                    // When `pending_resolution` is set the orchestrator
+                    // drain has already merged any E103/E302 surfaces
+                    // into it; we explicitly skip the legacy overlays
+                    // so the user never sees two modals stacked.
+                    .when(self.resolution_modal.is_some(), |this| {
                         let modal = self
-                            .config_modal
+                            .resolution_modal
                             .as_ref()
-                            .expect("config_modal checked above");
-                        this.child(modals::config_form::render_config_modal_overlay(
+                            .expect("resolution_modal checked above");
+                        this.child(modals::resolution_form::render_resolution_modal_overlay(
                             modal, &theme,
                         ))
                     })
-                    .when(self.consent_modal.is_some(), |this| {
-                        // Same guard model as the config modal: only
-                        // render once both AppState's `pending_consent`
-                        // AND the local snapshot have populated.
-                        let modal = self
-                            .consent_modal
-                            .as_ref()
-                            .expect("consent_modal checked above");
-                        this.child(modals::consent_form::render_consent_modal_overlay(
-                            modal, &theme,
-                        ))
-                    })
+                    .when(
+                        self.resolution_modal.is_none() && self.config_modal.is_some(),
+                        |this| {
+                            // Fallback: the legacy E103 modal renders
+                            // only when no unified resolution modal is
+                            // in flight. In practice the orchestrator
+                            // drain stopped writing to `pending_config`
+                            // with #117, so this branch is dead today —
+                            // it stays as a safety net for any caller
+                            // that still calls `set_pending_config`
+                            // directly (e.g. tests).
+                            let modal = self
+                                .config_modal
+                                .as_ref()
+                                .expect("config_modal checked above");
+                            this.child(modals::config_form::render_config_modal_overlay(
+                                modal, &theme,
+                            ))
+                        },
+                    )
+                    .when(
+                        self.resolution_modal.is_none() && self.consent_modal.is_some(),
+                        |this| {
+                            // Fallback for legacy consent surface — see
+                            // the config-modal branch above for why
+                            // this is now dead in production.
+                            let modal = self
+                                .consent_modal
+                                .as_ref()
+                                .expect("consent_modal checked above");
+                            this.child(modals::consent_form::render_consent_modal_overlay(
+                                modal, &theme,
+                            ))
+                        },
+                    )
                     .when(self.state.route_metadata_popover_open, |this| {
                         this.child(render_route_metadata_popover(&self.state, &theme))
-                    })
-                    .when(self.state.settings_panel_open, |this| {
-                        this.child(render_settings_overlay(&self.state, &theme))
                     }),
             );
 
@@ -1749,6 +2129,10 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_cancel_config_form))
             .on_action(cx.listener(Self::on_approve_consent_form))
             .on_action(cx.listener(Self::on_cancel_consent_form))
+            .on_action(cx.listener(Self::on_submit_resolution_form))
+            .on_action(cx.listener(Self::on_cancel_resolution_form))
+            .on_action(cx.listener(Self::on_resolution_form_next))
+            .on_action(cx.listener(Self::on_resolution_form_back))
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_open_latest_release_page))
             .on_action(cx.listener(Self::on_open_external_link))
@@ -1781,17 +2165,26 @@ impl Render for DesktopShell {
             })
             .child(body)
             .when(self.state.pending_quit_confirmation, |this| {
-                this.child(render_quit_dialog(&theme))
+                let preview = self.state.cleanup_preview.as_ref();
+                this.child(render_quit_dialog(&theme, preview))
             })
     }
 }
 
-fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
+fn render_quit_dialog(
+    theme: &theme::Theme,
+    cleanup_preview: Option<&crate::orchestrator::CleanupPreview>,
+) -> impl IntoElement {
     let backdrop = hsla(0.0, 0.0, 0.0, 0.45);
     let panel_bg = theme.settings_panel_bg;
     let panel_border = theme.panel_border;
     let text_primary = theme.text_primary;
     let text_secondary = theme.text_secondary;
+    let warn_color = theme.traffic_amber;
+
+    let show_cleanup = cleanup_preview
+        .map(|p| p.needs_cleanup)
+        .unwrap_or(false);
 
     div()
         .id("quit-confirm-overlay")
@@ -1808,7 +2201,7 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
         .child(
             div()
                 .id("quit-confirm-dialog")
-                .w(px(420.0))
+                .w(px(440.0))
                 .p(px(24.0))
                 .rounded(px(12.0))
                 .bg(panel_bg)
@@ -1832,6 +2225,57 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
                 .child(div().text_size(px(13.0)).text_color(text_secondary).child(
                     "Keep your current tabs for the next launch, or clear them and start fresh?",
                 ))
+                .when(show_cleanup, |outer| {
+                    outer.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .p(px(10.0))
+                            .rounded(px(8.0))
+                            .bg(theme.settings_card_bg)
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(warn_color)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Stale resources found:"),
+                            )
+                            .child({
+                                let mut lines = div().flex().flex_col().gap(px(2.0)).text_size(px(12.0)).text_color(text_secondary);
+                                if let Some(p) = cleanup_preview {
+                                    if !p.postgres_pids.is_empty() {
+                                        lines = lines.child(format!(
+                                            "  • {} postgres worker process{}",
+                                            p.postgres_pids.len(),
+                                            if p.postgres_pids.len() > 1 { "es" } else { "" },
+                                        ));
+                                    }
+                                    if !p.bun_server_pids.is_empty() {
+                                        lines = lines.child(format!(
+                                            "  • {} bun server process{}",
+                                            p.bun_server_pids.len(),
+                                            if p.bun_server_pids.len() > 1 { "es" } else { "" },
+                                        ));
+                                    }
+                                    if !p.port_1111_pids.is_empty() {
+                                        lines = lines.child(format!(
+                                            "  • port 1111 in use (pid{})",
+                                            if p.port_1111_pids.len() > 1 { "s" } else { "" },
+                                        ));
+                                    }
+                                    if p.shm_segments > 0 {
+                                        lines = lines.child(format!(
+                                            "  • {} System V shared memory segment{}",
+                                            p.shm_segments,
+                                            if p.shm_segments > 1 { "s" } else { "" },
+                                        ));
+                                    }
+                                }
+                                lines
+                            }),
+                    )
+                })
                 .child(
                     div()
                         .flex()
@@ -1860,7 +2304,20 @@ fn render_quit_dialog(theme: &theme::Theme) -> impl IntoElement {
                             |window, cx| {
                                 window.dispatch_action(Box::new(ConfirmQuitKeep), cx);
                             },
-                        )),
+                        ))
+                        .when(show_cleanup, |r| {
+                            r.child(quit_dialog_button(
+                                "Clean up & Quit",
+                                theme,
+                                QuitDialogButtonKind::Danger,
+                                |window, cx| {
+                                    window.dispatch_action(
+                                        Box::new(ConfirmQuitWithCleanup),
+                                        cx,
+                                    );
+                                },
+                            ))
+                        }),
                 ),
         )
 }
@@ -2521,19 +2978,6 @@ fn compute_stage_bounds(_state: &AppState, width: f32, height: f32) -> PaneBound
     }
 }
 
-fn inset_bounds(bounds: PaneBounds, inset: f32) -> PaneBounds {
-    PaneBounds {
-        x: bounds.x + inset,
-        y: bounds.y + inset,
-        width: (bounds.width - inset * 2.0).max(1.0),
-        height: (bounds.height - inset * 2.0).max(1.0),
-    }
-}
-
-fn route_metadata_overlay_webview_bounds(stage_bounds: PaneBounds) -> PaneBounds {
-    stage_bounds
-}
-
 fn render_boot_progress_strip(progress: f32, theme: &Theme) -> impl IntoElement {
     // 2px strip flush against the chrome's bottom border. Filled
     // section uses theme.accent; track uses surface_hover so the
@@ -2634,10 +3078,6 @@ fn render_capsule_update_section(
 }
 
 fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement {
-    if let Some(route) = state.active_capsule_detail_host_panel_route() {
-        return render_route_metadata_host_panel_overlay(&route, theme).into_any_element();
-    }
-
     let active_web = state.active_web_pane();
     let active = state.active_capsule_pane().or_else(|| {
         active_web
@@ -2760,44 +3200,6 @@ fn render_route_metadata_popover(state: &AppState, theme: &Theme) -> AnyElement 
         })
         .child(panel)
         .into_any_element()
-}
-
-fn render_route_metadata_host_panel_overlay(
-    route: &crate::state::HostPanelRoute,
-    theme: &Theme,
-) -> impl IntoElement {
-    div()
-        .id("route-metadata-backdrop")
-        .absolute()
-        .inset_0()
-        .bg(hsla(0.0, 0.0, 0.0, 0.0))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            window.dispatch_action(Box::new(ToggleRouteMetadataPopover), cx);
-        })
-        .child(
-            div()
-                .id("route-metadata-panel")
-                .size_full()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .flex()
-                .items_start()
-                .justify_end()
-                .p(px(14.0))
-                .child(
-                    div()
-                        .rounded(px(999.0))
-                        .bg(theme.panel_bg)
-                        .border_1()
-                        .border_color(theme.border_subtle)
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_secondary)
-                        .child(route.label()),
-                ),
-        )
 }
 
 fn render_capsule_detail_header(
@@ -2976,8 +3378,8 @@ fn render_capsule_detail_body(
         .collect();
 
     div()
-        .flex_1()
         .overflow_y_scrollbar()
+        .flex_1()
         .px(px(20.0))
         .pb(px(20.0))
         .child(match state.route_metadata_active_tab {
@@ -3141,9 +3543,8 @@ fn render_capsule_permissions_page(
     network_logs: &[&crate::state::NetworkLogEntry],
     theme: &Theme,
 ) -> Div {
-    let granted_envs = state
-        .secret_store
-        .grants
+    let granted_envs: Vec<String> = state
+        .secret_grant_keys_by_handle
         .get(canonical_handle)
         .cloned()
         .unwrap_or_default();
@@ -3483,9 +3884,8 @@ fn render_capsule_api_page(
     network_logs: &[&crate::state::NetworkLogEntry],
     theme: &Theme,
 ) -> Div {
-    let granted_envs = state
-        .secret_store
-        .grants
+    let granted_envs: Vec<String> = state
+        .secret_grant_keys_by_handle
         .get(canonical_handle)
         .cloned()
         .unwrap_or_default();

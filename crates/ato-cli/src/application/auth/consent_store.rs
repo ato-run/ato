@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use capsule_core::common::paths::ato_path;
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::execution_plan::model::ExecutionPlan;
+use capsule_core::execution_plan::model::{ConsentKey, ExecutionPlan};
 use capsule_core::AtoError;
+
+use crate::application::graph_views::ExecutionConsentView;
 
 const CONSENT_FILE_NAME: &str = "executionplan_v1.jsonl";
 
@@ -24,15 +26,29 @@ struct ConsentRecord {
     approved_at: String,
 }
 
-fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
+/// PR-4b core: build a ConsentRecord from the (key, policy hashes)
+/// primitive shared by both plan-taking and view-taking call sites.
+fn consent_record_for_key(
+    key: &ConsentKey,
+    policy_segment_hash: &str,
+    provisioning_policy_hash: &str,
+) -> ConsentRecord {
     ConsentRecord {
-        scoped_id: plan.consent.key.scoped_id.clone(),
-        version: plan.consent.key.version.clone(),
-        target_label: plan.consent.key.target_label.clone(),
-        policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-        provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+        scoped_id: key.scoped_id.clone(),
+        version: key.version.clone(),
+        target_label: key.target_label.clone(),
+        policy_segment_hash: policy_segment_hash.to_string(),
+        provisioning_policy_hash: provisioning_policy_hash.to_string(),
         approved_at: String::new(),
     }
+}
+
+fn consent_record_for_plan(plan: &ExecutionPlan) -> ConsentRecord {
+    consent_record_for_key(
+        &ConsentKey::from_execution_plan(plan),
+        &plan.consent.policy_segment_hash,
+        &plan.consent.provisioning_policy_hash,
+    )
 }
 
 pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), AtoExecutionError> {
@@ -50,17 +66,43 @@ pub fn require_consent(plan: &ExecutionPlan, _assume_yes: bool) -> Result<(), At
         // on. Older consumers keep classifying this as a generic
         // execution-contract error and fall through to the existing
         // fatal-toast path.
+        let scoped_id = plan.consent.key.scoped_id.clone();
+        let version = plan.consent.key.version.clone();
+        let target_label = plan.consent.key.target_label.clone();
+        let policy_segment_hash = plan.consent.policy_segment_hash.clone();
+        let provisioning_policy_hash = plan.consent.provisioning_policy_hash.clone();
+
+        let approve_command = format!(
+            "ato internal consent approve-execution-plan \\\n  \
+             --scoped-id {scoped_id} \\\n  \
+             --version {version} \\\n  \
+             --target-label {target_label} \\\n  \
+             --policy-segment-hash {policy_segment_hash} \\\n  \
+             --provisioning-policy-hash {provisioning_policy_hash}",
+        );
+
+        let message = format!(
+            "ExecutionPlan consent required for target={target_label} of \
+             {scoped_id}@{version}. Approve via the desktop modal, a TTY \
+             prompt, or `ato internal consent approve-execution-plan` \
+             (the same identity fields are emitted as a JSON envelope on \
+             stderr in non-TTY mode).",
+        );
+
+        let hint = format!(
+            "Approve from CLI:\n  {approve_command}\n\
+             Or open the launching app and click Approve in the modal.",
+        );
+
         return Err(AtoExecutionError::from_ato_error(
             AtoError::ExecutionPlanConsentRequired {
-                message: "ExecutionPlan consent required for this capsule. Approve via the desktop modal or a TTY prompt before retrying.".to_string(),
-                hint: Some(
-                    "Desktop の承認モーダル、または TTY 上で対話的に承認してから再実行してください。".to_string(),
-                ),
-                scoped_id: plan.consent.key.scoped_id.clone(),
-                version: plan.consent.key.version.clone(),
-                target_label: plan.consent.key.target_label.clone(),
-                policy_segment_hash: plan.consent.policy_segment_hash.clone(),
-                provisioning_policy_hash: plan.consent.provisioning_policy_hash.clone(),
+                message,
+                hint: Some(hint),
+                scoped_id,
+                version,
+                target_label,
+                policy_segment_hash,
+                provisioning_policy_hash,
                 summary: consent_summary(plan),
             },
         ));
@@ -94,6 +136,60 @@ pub fn record_consent(plan: &ExecutionPlan) -> Result<(), AtoExecutionError> {
 
     store.append_consent(record)?;
     Ok(())
+}
+
+/// PR-4b: view-taking sibling of [`has_consent`]. Returns `Ok(true)`
+/// when the consent log has a matching `(ConsentKey, policy hashes)`
+/// record. The view's 5 consent-identity fields must be populated —
+/// returns `Ok(true)` for unpopulated views by convention (treat as
+/// "no consent needed" / zero-permission), matching the plan-side
+/// `is_zero_permission_plan` short-circuit.
+#[allow(dead_code)] // wired by call sites in preflight.rs / run.rs in this PR
+pub fn has_consent_view(view: &ExecutionConsentView) -> Result<bool, AtoExecutionError> {
+    let record = match consent_record_for_view(view) {
+        Some(record) => record,
+        // View has no consent identity facets populated — treat as
+        // "no consent to record" (same short-circuit as the
+        // zero-permission plan branch).
+        None => return Ok(true),
+    };
+    let store = ConsentStore::new()?;
+    store.is_consented(&record)
+}
+
+/// PR-4b: view-taking sibling of [`record_consent`].
+#[allow(dead_code)] // wired by call sites in preflight.rs / run.rs in this PR
+pub fn record_consent_view(view: &ExecutionConsentView) -> Result<(), AtoExecutionError> {
+    let Some(record) = consent_record_for_view(view) else {
+        return Ok(());
+    };
+    let store = ConsentStore::new()?;
+    if store.is_consented(&record)? {
+        return Ok(());
+    }
+    store.append_consent(record)?;
+    Ok(())
+}
+
+/// PR-4b helper: project an `ExecutionConsentView` into a
+/// `ConsentRecord`. Returns `None` if any of the 5 identity facets is
+/// missing (the view wasn't built with consent input).
+fn consent_record_for_view(view: &ExecutionConsentView) -> Option<ConsentRecord> {
+    let scoped_id = view.scoped_id.as_deref()?;
+    let version = view.version.as_deref()?;
+    let target_label = view.target_label.as_deref()?;
+    let policy_segment_hash = view.policy_segment_hash.as_deref()?;
+    let provisioning_policy_hash = view.provisioning_policy_hash.as_deref()?;
+    let key = ConsentKey {
+        scoped_id: scoped_id.to_string(),
+        version: version.to_string(),
+        target_label: target_label.to_string(),
+    };
+    Some(consent_record_for_key(
+        &key,
+        policy_segment_hash,
+        provisioning_policy_hash,
+    ))
 }
 
 pub fn consent_summary(plan: &ExecutionPlan) -> String {
@@ -483,6 +579,112 @@ mod tests {
         );
     }
 
+    /// #126 — the non-TTY message and hint must give CLI users a
+    /// concrete approval recipe. Without this, a CLI caller hitting
+    /// E302 has no documented way to proceed (the receipt at
+    /// claudedocs/aodd-receipts/117-cli-baseline-local-* shows this is
+    /// the reason CLI runs of WasedaP2P were a true dead-end before
+    /// this change). Anchored on actual content so future drift fails
+    /// loudly at this site instead of silently regressing the CLI UX.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn non_tty_consent_message_carries_approve_command_recipe() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+        let err = require_consent(&plan, false).expect_err("must emit consent envelope");
+
+        let message = err.message.as_str();
+        assert!(
+            message.contains("ato internal consent approve-execution-plan"),
+            "non-TTY consent message must mention the CLI approval command; got: {message}"
+        );
+        assert!(
+            message.contains(&plan.consent.key.scoped_id),
+            "non-TTY consent message must name the capsule scoped_id; got: {message}"
+        );
+        assert!(
+            message.contains(&plan.consent.key.target_label),
+            "non-TTY consent message must name the target_label; got: {message}"
+        );
+
+        let hint = err
+            .hint
+            .as_deref()
+            .expect("non-TTY consent error must carry a hint");
+        for field_value in [
+            plan.consent.key.scoped_id.as_str(),
+            plan.consent.key.version.as_str(),
+            plan.consent.key.target_label.as_str(),
+            plan.consent.policy_segment_hash.as_str(),
+            plan.consent.provisioning_policy_hash.as_str(),
+        ] {
+            assert!(
+                hint.contains(field_value),
+                "non-TTY consent hint must embed identity field {field_value:?} so the user \
+                 can copy-paste the approval command; got hint: {hint}"
+            );
+        }
+    }
+
+    /// #126 — the typed error's `details` JSON (the same shape the
+    /// non-TTY-without-`--json` envelope writes to stderr) must carry
+    /// the five identity fields plus the `execution_plan_consent_required`
+    /// discriminator. Locks the wire shape so callers scraping stderr
+    /// can rely on it across releases.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn non_tty_consent_envelope_details_carry_identity_tuple() {
+        let _serial = env_lock().lock().unwrap();
+        let home = TempDir::new().expect("create temporary HOME");
+        let home_path = home.path().to_string_lossy().to_string();
+        let _home_guard = EnvVarGuard::set("HOME", Some(home_path.as_str()));
+
+        let plan = non_trivial_plan();
+        let err = require_consent(&plan, false).expect_err("must emit consent envelope");
+
+        let details = err
+            .details
+            .as_ref()
+            .expect("non-TTY consent error must populate details");
+        assert_eq!(
+            details.get("reason").and_then(|value| value.as_str()),
+            Some("execution_plan_consent_required"),
+            "details.reason must be the consent discriminator; got: {details}"
+        );
+        for (field, expected) in [
+            ("scoped_id", plan.consent.key.scoped_id.as_str()),
+            ("version", plan.consent.key.version.as_str()),
+            ("target_label", plan.consent.key.target_label.as_str()),
+            (
+                "policy_segment_hash",
+                plan.consent.policy_segment_hash.as_str(),
+            ),
+            (
+                "provisioning_policy_hash",
+                plan.consent.provisioning_policy_hash.as_str(),
+            ),
+        ] {
+            let actual = details.get(field).and_then(|value| value.as_str());
+            assert_eq!(
+                actual,
+                Some(expected),
+                "details.{field} must be present in the envelope so non-TTY callers can scrape it; \
+                 got: {details}"
+            );
+        }
+        assert!(
+            err.interactive_resolution,
+            "ExecutionPlanConsentRequired must report interactive_resolution=true so the \
+             non-TTY envelope helper picks it up"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     #[serial_test::serial]
@@ -590,5 +792,69 @@ mod tests {
 
         assert_eq!(dir_mode, 0o700);
         assert_eq!(file_mode, 0o600);
+    }
+
+    /// Regression for #116: a test fixture must be able to isolate its
+    /// consent state by setting `ATO_HOME=$tmp` alone, without touching
+    /// the user's real `HOME`. The receipt that surfaced #116 reported
+    /// the opposite — that `executionplan_v1.jsonl` lived under
+    /// `~/.ato/consent/` regardless of `ATO_HOME`. That observation was
+    /// a misattribution (the E302 reappearance came from the
+    /// per-desktop-process retry-once budget, not the on-disk consent
+    /// log), but there was no consent-store-level test that locked the
+    /// invariant in. This is that test: a fresh `ATO_HOME` produces an
+    /// isolated consent log, and writes never land under `HOME/.ato/`.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn approve_execution_plan_consent_isolates_via_ato_home() {
+        let _serial = env_lock().lock().unwrap();
+        let real_home = TempDir::new().expect("create temporary HOME");
+        let ato_home = TempDir::new().expect("create temporary ATO_HOME");
+
+        // Set HOME to a *different* temp dir so a regression that
+        // anchors consent to `~/.ato` would land there visibly instead
+        // of silently passing because HOME and ATO_HOME happened to
+        // coincide.
+        let _home_guard = EnvVarGuard::set("HOME", Some(&real_home.path().to_string_lossy()));
+        let _ato_home_guard =
+            EnvVarGuard::set("ATO_HOME", Some(&ato_home.path().to_string_lossy()));
+
+        approve_execution_plan_consent("publisher/app", "1.0.0", "cli", "blake3:aaa", "blake3:bbb")
+            .expect("approve under ATO_HOME");
+
+        let ato_home_consent = ato_home.path().join("consent").join(CONSENT_FILE_NAME);
+        assert!(
+            ato_home_consent.exists(),
+            "consent record must land under ATO_HOME ({}), not HOME ({})",
+            ato_home.path().display(),
+            real_home.path().display(),
+        );
+        let home_consent = real_home
+            .path()
+            .join(".ato")
+            .join("consent")
+            .join(CONSENT_FILE_NAME);
+        assert!(
+            !home_consent.exists(),
+            "consent record must NOT leak into HOME/.ato/consent when ATO_HOME is set; found: {}",
+            home_consent.display(),
+        );
+
+        // Re-reading via has_consent must agree — proves the read path
+        // and the write path resolve the same ATO_HOME-anchored file.
+        let plan = non_trivial_plan();
+        approve_execution_plan_consent(
+            &plan.consent.key.scoped_id,
+            &plan.consent.key.version,
+            &plan.consent.key.target_label,
+            &plan.consent.policy_segment_hash,
+            &plan.consent.provisioning_policy_hash,
+        )
+        .expect("approve plan under ATO_HOME");
+        assert!(
+            has_consent(&plan).expect("has_consent under ATO_HOME"),
+            "approve write + has_consent read must agree under ATO_HOME isolation"
+        );
     }
 }

@@ -1,0 +1,114 @@
+usecase: "Stage D — retire the legacy Launcher window. The Control Bar's Settings cog reaches the `ato-settings` system capsule directly; `OpenLauncherWindow` is gone from the action surface; `launcher.rs` is deleted. The `ato-web-viewer` system capsule's asset directory is created with a stub documenting the upcoming chrome migration."
+actor: "Autonomous Claude Operator + Inspector — build clean, grep audit, MCP probe of the retired action."
+goal: |
+  (a) `OpenLauncherWindow` no longer exists as a registered action,
+  key binding, focus_dispatcher route, or app handler.
+  (b) `crate::window::launcher` module deleted; `pub mod launcher`
+  and `pub use launcher::*` removed; no other module references
+  surviving Launcher symbols.
+  (c) `ContentWindowKind::Launcher` renamed to
+  `ContentWindowKind::Settings` so the registry's variant matches
+  the new identity. `ato_windows`'s `kind_tag` / `glyph_for` and
+  `switcher.html`'s previewLauncher → previewSettings updated.
+  (d) Control Bar's Settings cog dispatches `ShowSettings` only.
+  (e) MCP probe of `OpenLauncherWindow` returns
+  `unknown action` — the route is gone, no silent no-op.
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-staged"
+out_of_scope:
+  - "Migrating WebLinkView's GPUI chrome strip (back / forward / reload / URL pill / menu) to the new ato-web-viewer HTML. The migration needs per-window WebView access from the broker — substantial enough to warrant a follow-up. The HTML stub at `assets/system/ato-web-viewer/index.html` declares the capsule identity and documents the deferred work."
+  - "Removing `crates/ato-desktop/src/window/web_bridge.rs`. Still marked deprecated; safe to delete in a follow-up once `cargo grep web_bridge` finds zero references."
+  - "Cleaning the legacy single-window `DesktopShell` path's `OpenLauncherWindow` references in `ui/mod.rs` — touched the one location that compiled against the deleted action, but the broader legacy shell remains untouched."
+time_budget: "70 minutes"
+
+result: "complete"
+
+steps:
+  - action: "Rename `ContentWindowKind::Launcher` to `Settings`"
+    observation: |
+      `content_windows.rs::ContentWindowKind` variant renamed. All
+      consumers updated:
+        - card_switcher.rs `kind_tag` returns "Settings"
+        - card_switcher.rs `glyph_for` matches `Settings` → "panel"
+        - settings_window.rs constructs entries with the new variant
+        - assets/system/ato-windows/index.html: `previewLauncher` →
+          `previewSettings`; switch arm matches `'Settings'`.
+
+  - action: "Delete `OpenLauncherWindow` from the action surface"
+    observation: |
+      Removed from:
+        - app.rs actions! macro block (line ~93)
+        - app.rs key binding (`cmd-shift-k`)
+        - app.rs cx.set_global init (LauncherWindowSlot, LauncherViewState)
+        - app.rs on_window_closed cleanup (LauncherWindowSlot eviction)
+        - app.rs cx.on_action handler
+        - control_bar.rs `pill_button(ActionTarget::Settings)` — the
+          dispatch is now `ShowSettings` only (was `OpenLauncherWindow +
+          ShowSettings` two-step)
+        - control_bar.rs use crate::app::{...} import
+        - focus_dispatcher.rs use crate::app::{...} import + match arm
+        - ui/mod.rs string-dispatch table arm (legacy DesktopShell path)
+        - bin/ato_desktop_mcp.rs tool description string
+
+  - action: "Delete `crates/ato-desktop/src/window/launcher.rs`"
+    observation: |
+      `rm` and `pub mod launcher;` removed from `window/mod.rs`.
+      `pub use launcher::{open_launcher_window, LauncherShellPlaceholder};`
+      also removed. Build clean — no other consumers existed.
+
+  - action: "Stage D web-viewer scaffolding"
+    observation: |
+      Created `crates/ato-desktop/assets/system/ato-web-viewer/index.html`
+      as a stub documenting the deferred chrome migration. The
+      ato-web-viewer manifest (allowlist + WebViewerCommand
+      vocabulary) was already in place from Stage A.
+
+  - action: "Build + hermetic launch"
+    observation: |
+      `cargo build --bin ato-desktop --bin ato-desktop-mcp` — clean.
+      114 warnings, all pre-existing dead-code lints not related to
+      this stage.
+
+  - action: "Probe `OpenLauncherWindow` retirement via MCP"
+    observation: |
+      Sequence: ShowSettings (passes — opens ato-settings window),
+      then OpenLauncherWindow.
+      MCP response for OpenLauncherWindow:
+        `{"isError":true,"content":[{"type":"text","text":"unknown
+        action 'OpenLauncherWindow' — add it to focus_dispatcher::start"}]}`
+      The route is GONE — the system honestly rejects the call
+      rather than silently no-op'ing.
+      Log shows the focus_dispatcher trace for `ShowSettings` but
+      NOT for `OpenLauncherWindow` (the action is unparseable
+      before the dispatcher sees it).
+      settings-after-launcher-retirement.png shows the Settings
+      window rendering full HTML content (left nav active on
+      セキュリティ; main panel with security card + stats +
+      toggles + publishers + privacy summary) — identical to
+      Stage C visually.
+
+  - action: "Audit"
+    observation: |
+      `grep -rn 'OpenLauncherWindow' crates/ato-desktop/src/ --include='*.rs' | grep -v '//'`
+        → empty.
+      `ls crates/ato-desktop/src/window/launcher.rs`
+        → No such file or directory.
+      `grep '^pub mod launcher' crates/ato-desktop/src/`
+        → empty.
+      `grep 'ContentWindowKind::Launcher\\b' crates/ato-desktop/src/`
+        → empty.
+      All four invariants from the plan hold.
+
+agent_observation:
+  user_visible_problem: "Resolved. The Launcher window concept is gone from the codebase, the action surface, and the focus dispatcher. The Settings cog reaches the ato-settings system capsule in one hop. Users see no regression — Settings still renders the same UI."
+  likely_cause: "Stage C left the Launcher window technically reachable via OpenLauncherWindow even though its only useful view (Settings) had already migrated to ato-settings. Stage D removes the dead surface to make the system-capsule architecture the only path."
+  suggested_fix:
+    - "Already shipped Stage D subtractive: Launcher window retired, action removed, file deleted, references audited."
+    - "Already shipped Stage D scaffolding: ato-web-viewer asset directory with documented stub."
+    - "Follow-up: migrate WebLinkView's GPUI chrome strip to the ato-web-viewer HTML. This needs broker → WebLinkView per-window plumbing — substantial enough for its own iteration."
+    - "Follow-up: delete `web_bridge.rs` (still marked deprecated; final consumer cleanup pending a `cargo grep` sweep)."
+    - "Phase 2 (separate from this refactor): TOML manifest, signed updates, dev mode, hot reload, user-installable system capsules."
+
+evidence:
+  - settings-after-launcher-retirement.png
+
+status: "fixed"

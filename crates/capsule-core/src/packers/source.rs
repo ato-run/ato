@@ -8,6 +8,7 @@ use crate::error::{CapsuleError, Result};
 use crate::lockfile;
 use crate::packers::bundle::{build_bundle, PackBundleArgs};
 use crate::packers::capsule as capsule_packer;
+use crate::packers::pack_filter::PublishProfile;
 use crate::resource::cas::create_cas_client_from_env;
 use crate::router::{CompatManifestBridge, CompatProjectInput, ManifestData};
 use crate::runtime_config;
@@ -28,6 +29,9 @@ pub struct SourcePackOptions {
     pub standalone: bool,
     pub strict_manifest: bool,
     pub timings: bool,
+    /// Controls which files are included in the capsule archive.
+    /// Defaults to [`PublishProfile::Source`] which excludes dependency outputs.
+    pub publish_profile: PublishProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +221,7 @@ pub fn pack(
                 config_path: opts.config_path,
                 lockfile_path,
                 signing_key: None,
+                publish_profile: opts.publish_profile,
             },
             reporter.clone(),
         ))?;

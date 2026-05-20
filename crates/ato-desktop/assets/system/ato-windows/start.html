@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>新しいウィンドウ</title>
+<style>
+  :root {
+    /* White-based palette — matches the Store / AppWindow tone. The
+       only colour outside black/white is a tiny indigo accent for
+       the header puck and the keyboard hints. */
+    --bg-base:    #ffffff;
+    --bg-tint:    #fafafa;      /* used for very subtle surface accents */
+    --card:       #ffffff;
+    --border:     #ececf1;
+    --border-soft:#f4f4f7;
+    --text:       #18181b;
+    --muted:      #6b6b78;
+    --soft:       #a3a3b0;
+    --accent:     #6366f1;
+    --accent-2:   #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    /* Single near-white surface — no wash blobs. The accent comes
+       only from the indigo header puck and the per-tile glyph pucks. */
+    background: var(--bg-base);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+    overflow-y: auto;
+  }
+  .container {
+    width: min(1080px, 100%);
+    padding: 36px 56px 24px;
+    display: flex; flex-direction: column; gap: 24px;
+  }
+
+  /* HEADER */
+  .header { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .header-puck {
+    width: 56px; height: 56px; border-radius: 14px;
+    background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 10px 24px rgba(99, 102, 241, 0.32);
+  }
+  .header-puck svg { width: 26px; height: 26px; }
+  .header h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.012em; }
+  .header p { margin: 0; font-size: 14px; color: var(--muted); }
+
+  /* SEARCH */
+  .search {
+    height: 56px; padding: 0 18px;
+    display: flex; align-items: center; gap: 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 6px 22px rgba(28, 25, 65, 0.06);
+  }
+  .search-globe { width: 20px; height: 20px; color: var(--soft); flex-shrink: 0; }
+  .search input {
+    flex: 1; border: 0; outline: 0; background: transparent;
+    font: inherit; color: var(--text); font-size: 14px;
+  }
+  .search input::placeholder { color: var(--soft); }
+  .kbd {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 11.5px; font-weight: 600; color: var(--muted);
+    padding: 4px 10px;
+    background: var(--border-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-family: "SF Mono", ui-monospace, monospace;
+  }
+
+  /* QUICK ACTIONS — LARGE, SPACIOUS */
+  .quick-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .qa-tile {
+    padding: 22px 20px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    display: flex; flex-direction: column; align-items: flex-start; gap: 16px;
+    cursor: pointer;
+    transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    box-shadow: 0 4px 14px rgba(28, 25, 65, 0.04);
+  }
+  .qa-tile:hover {
+    transform: translateY(-3px);
+    border-color: rgba(99, 102, 241, 0.4);
+    box-shadow: 0 14px 30px rgba(99, 102, 241, 0.12);
+  }
+  .qa-puck {
+    width: 52px; height: 52px; border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .qa-puck svg { width: 26px; height: 26px; }
+  .qa-text { display: flex; flex-direction: column; gap: 4px; }
+  .qa-title { font-size: 15px; font-weight: 700; color: var(--text); }
+  .qa-sub { font-size: 12px; color: var(--muted); }
+
+  /* QA accent variants — soft gradient bg with white-coloured glyph */
+  .qa-sky    { background: linear-gradient(135deg, #dbeafe 0%, #c7d2fe 100%); color: #3b82f6; }
+  .qa-amber  { background: linear-gradient(135deg, #fef3c7 0%, #fed7aa 100%); color: #d97706; }
+  .qa-violet { background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%); color: #7c3aed; }
+  .qa-indigo { background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%); color: #4f46e5; }
+
+  /* COLUMNS — each column is a card containing a header + list */
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px 16px 12px;
+    box-shadow: 0 4px 14px rgba(28, 25, 65, 0.04);
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .panel-title { font-size: 13.5px; font-weight: 700; color: var(--text); }
+  .panel-more { color: var(--accent); font-size: 11.5px; font-weight: 500; cursor: pointer; }
+  .panel-list { display: flex; flex-direction: column; }
+  .row {
+    height: 56px;
+    padding: 0 6px;
+    display: flex; align-items: center; gap: 12px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+  .row:hover { background: var(--border-soft); }
+  .row-icon {
+    width: 36px; height: 36px; border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .row-icon svg { width: 18px; height: 18px; }
+  .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .row-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+  .row-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-time { font-size: 11.5px; color: var(--soft); padding-right: 6px; }
+  .row-chev { color: var(--soft); }
+  .row-chev svg { width: 14px; height: 14px; }
+
+  /* Row icon backgrounds */
+  .ic-blue    { background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); color: #2563eb; }
+  .ic-zinc    { background: linear-gradient(135deg, #e5e5ea 0%, #d4d4d8 100%); color: #18181b; }
+  .ic-emerald { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); color: #059669; }
+  .ic-violet  { background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%); color: #7c3aed; }
+  .ic-indigo  { background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%); color: #4f46e5; }
+  .ic-teal    { background: linear-gradient(135deg, #ccfbf1 0%, #99f6e4 100%); color: #0d9488; }
+
+  /* DOCK */
+  .dock-wrap { display: flex; justify-content: center; margin-top: 12px; }
+  .dock {
+    display: flex; gap: 22px; align-items: flex-start;
+    padding: 16px 24px 18px;
+    background: rgba(255,255,255,0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    box-shadow: 0 10px 30px rgba(28, 25, 65, 0.10);
+  }
+  .dock-cell { display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; }
+  .dock-icon {
+    width: 56px; height: 56px; border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 14px rgba(28, 25, 65, 0.18);
+    transition: transform 0.14s ease;
+    position: relative;
+  }
+  .dock-icon svg { width: 28px; height: 28px; }
+  .dock-cell:hover .dock-icon { transform: translateY(-3px) scale(1.04); }
+  .dock-label { font-size: 11.5px; color: var(--text); font-weight: 500; }
+  .dock-icon.plus {
+    background: var(--card);
+    border: 1px dashed var(--border);
+    color: var(--accent);
+    box-shadow: 0 4px 10px rgba(99,102,241,0.10);
+  }
+  .dock-icon.plus svg { width: 26px; height: 26px; }
+  .dock-icon.plus .dot {
+    position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* FOOTER */
+  .footer {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 12px; color: var(--muted);
+  }
+  .footer svg { width: 14px; height: 14px; color: var(--soft); }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-puck">
+      <!-- "panel" icon — two rectangles split vertically -->
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="8" height="16" rx="1.6"/>
+        <rect x="14" y="4" width="7" height="7" rx="1.6"/>
+        <rect x="14" y="14" width="7" height="6" rx="1.6"/>
+      </svg>
+    </div>
+    <h1>新しいウィンドウ</h1>
+    <p>カプセルを開く、探す、または新しく始めましょう</p>
+  </div>
+
+  <!-- SEARCH -->
+  <div class="search">
+    <svg class="search-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/>
+      <line x1="3" y1="12" x2="21" y2="12"/>
+      <path d="M12 3a14 14 0 0 1 4 9 14 14 0 0 1-4 9 14 14 0 0 1-4-9 14 14 0 0 1 4-9z"/>
+    </svg>
+    <input id="start-search" placeholder="カプセル名、URL、またはコマンドを入力" autofocus autocomplete="off" spellcheck="false">
+    <span class="kbd">⌘ <span>K</span></span>
+  </div>
+
+  <!-- QUICK ACTIONS -->
+  <div class="quick-actions">
+    <div class="qa-tile" data-action="OpenAppWindow">
+      <div class="qa-puck qa-sky">
+        <!-- globe with link -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/>
+          <path d="M3 12h18"/>
+          <path d="M12 3a14 14 0 0 1 4 9 14 14 0 0 1-4 9 14 14 0 0 1-4-9 14 14 0 0 1 4-9z"/>
+        </svg>
+      </div>
+      <div class="qa-text">
+        <div class="qa-title">URLから開く</div>
+        <div class="qa-sub">Webリンクを開く</div>
+      </div>
+    </div>
+    <div class="qa-tile" data-action="OpenAppWindow">
+      <div class="qa-puck qa-amber">
+        <!-- folder -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+      </div>
+      <div class="qa-text">
+        <div class="qa-title">ローカルから開く</div>
+        <div class="qa-sub">ファイルやフォルダを開く</div>
+      </div>
+    </div>
+    <div class="qa-tile" data-action="OpenStore">
+      <div class="qa-puck qa-violet">
+        <!-- shopping bag -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 8z"/>
+          <path d="M9 8a3 3 0 0 1 6 0"/>
+        </svg>
+      </div>
+      <div class="qa-text">
+        <div class="qa-title">ストアで探す</div>
+        <div class="qa-sub">Ato ストアを検索</div>
+      </div>
+    </div>
+    <div class="qa-tile" data-action="OpenAppWindow">
+      <div class="qa-puck qa-indigo">
+        <!-- sparkle / wand -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v3"/>
+          <path d="M12 18v3"/>
+          <path d="M3 12h3"/>
+          <path d="M18 12h3"/>
+          <path d="M5.6 5.6l2.1 2.1"/>
+          <path d="M16.3 16.3l2.1 2.1"/>
+          <path d="M5.6 18.4l2.1-2.1"/>
+          <path d="M16.3 7.7l2.1-2.1"/>
+        </svg>
+      </div>
+      <div class="qa-text">
+        <div class="qa-title">新しく始める</div>
+        <div class="qa-sub">空のワークスペースを作成</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TWO COLUMNS: RECENTS + RECOMMENDED -->
+  <div class="columns">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">最近使ったカプセル</span>
+        <span class="panel-more">すべて表示</span>
+      </div>
+      <div class="panel-list" id="recent-list"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">おすすめ</span>
+        <span class="panel-more">すべて表示</span>
+      </div>
+      <div class="panel-list" id="suggest-list"></div>
+    </div>
+  </div>
+
+  <!-- DOCK -->
+  <div class="dock-wrap">
+    <div class="dock" id="dock"></div>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 18h6"/>
+      <path d="M10 21h4"/>
+      <path d="M12 2a7 7 0 0 1 4 12.7c-.6.5-1 1.2-1 2v.3H9v-.3c0-.8-.4-1.5-1-2A7 7 0 0 1 12 2z"/>
+    </svg>
+    <span>Dockからカプセルを切り替えたり、新しいウィンドウを追加できます</span>
+  </div>
+</div>
+
+<script>
+  // System-capsule IPC envelope: `{capsule, command}`. The quick-
+  // action tiles in this page span TWO capsules: window-creation
+  // belongs to ato-windows, store navigation belongs to ato-store.
+  // We dispatch by `data-action` name → envelope mapping below.
+  const POST = (window.ipc && window.ipc.postMessage)
+    ? (m) => window.ipc.postMessage(JSON.stringify(m))
+    : (m) => console.log('[no bridge]', m);
+  function dispatchAction(action) {
+    let envelope;
+    switch (action) {
+      case 'OpenAppWindow':
+        envelope = { capsule: 'ato-windows', command: { kind: 'open_app_window' } };
+        break;
+      case 'OpenStore':
+        envelope = { capsule: 'ato-store', command: { kind: 'open' } };
+        break;
+      case 'CloseStartWindow':
+        envelope = { capsule: 'ato-windows', command: { kind: 'close_start_window' } };
+        break;
+      default:
+        console.warn('start.html: unknown action', action);
+        return;
+    }
+    POST(envelope);
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  // --- SVG glyph library — keeps the row icons recognisable
+  // without bundling per-app brand assets ---
+  const GLYPH = {
+    chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="8"/><line x1="18" y1="20" x2="18" y2="11"/></svg>',
+    terminal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 8 10 12 6 16"/><line x1="13" y1="16" x2="18" y2="16"/></svg>',
+    search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+    chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-8 8 8.5 8.5 0 0 1-3.6-.8L4 21l1.6-4.4A8 8 0 0 1 5 12a8 8 0 0 1 16 0z"/></svg>',
+    cpu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1.4"/><rect x="9" y="9" width="6" height="6" rx="0.5"/><line x1="3" y1="9" x2="6" y2="9"/><line x1="3" y1="15" x2="6" y2="15"/><line x1="18" y1="9" x2="21" y2="9"/><line x1="18" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="6"/><line x1="15" y1="3" x2="15" y2="6"/><line x1="9" y1="18" x2="9" y2="21"/><line x1="15" y1="18" x2="15" y2="21"/></svg>',
+    code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/></svg>',
+  };
+
+  // --- DATA ---
+  const RECENT = [
+    { name: 'WasedaP2P',    sub: 'データ共有・可視化',     time: '2分前',   icon: 'chart',    cls: 'ic-blue'    },
+    { name: 'CodeLab',      sub: 'コードエディタ・開発環境', time: '15分前',  icon: 'terminal', cls: 'ic-zinc'    },
+    { name: 'QueryKit',     sub: 'データ検索・SQL クエリ',  time: '1時間前', icon: 'search',   cls: 'ic-emerald' },
+    { name: 'Local AI Chat',sub: 'ローカルAIアシスタント',  time: '3時間前', icon: 'chat',     cls: 'ic-violet'  },
+  ];
+  const SUGGEST = [
+    { name: 'データ分析',     sub: 'データを読み込み、分析して可視化します', icon: 'chart', cls: 'ic-blue'   },
+    { name: 'AIアシスタント', sub: 'AIとチャットして作業をサポート',         icon: 'cpu',   cls: 'ic-emerald'},
+    { name: '開発ツール',     sub: 'コード作成やデバッグを効率化',           icon: 'code',  cls: 'ic-violet' },
+  ];
+  // Dock entries — same as recents + a trailing "new window" cell.
+  const DOCK = RECENT.map((r) => ({ name: r.name, icon: r.icon, cls: r.cls }));
+
+  // --- RENDER ---
+  function renderRows(target, items, withTime, action) {
+    items.forEach((it) => {
+      const time = withTime && it.time
+        ? `<div class="row-time">${escapeHtml(it.time)}</div>` : '';
+      target.insertAdjacentHTML('beforeend', `
+        <div class="row" data-action="${action}">
+          <div class="row-icon ${it.cls}">${GLYPH[it.icon] || ''}</div>
+          <div class="row-text">
+            <div class="row-title">${escapeHtml(it.name)}</div>
+            <div class="row-sub">${escapeHtml(it.sub)}</div>
+          </div>
+          ${time}
+          <div class="row-chev">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+        </div>`);
+    });
+  }
+  renderRows(document.getElementById('recent-list'), RECENT, true,  'OpenAppWindow');
+  renderRows(document.getElementById('suggest-list'), SUGGEST, false, 'OpenStore');
+
+  const dockEl = document.getElementById('dock');
+  DOCK.forEach((d) => {
+    dockEl.insertAdjacentHTML('beforeend', `
+      <div class="dock-cell" data-action="OpenAppWindow">
+        <div class="dock-icon ${d.cls}">${GLYPH[d.icon] || ''}</div>
+        <div class="dock-label">${escapeHtml(d.name)}</div>
+      </div>`);
+  });
+  dockEl.insertAdjacentHTML('beforeend', `
+    <div class="dock-cell" data-action="OpenAppWindow">
+      <div class="dock-icon plus">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        <span class="dot"></span>
+      </div>
+      <div class="dock-label">新しいウィンドウ</div>
+    </div>`);
+
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-action]');
+    if (!t) return;
+    dispatchAction(t.getAttribute('data-action'));
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') dispatchAction('CloseStartWindow');
+  });
+</script>
+
+</body>
+</html>

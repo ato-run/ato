@@ -1,0 +1,57 @@
+usecase: "Window-opening Control Bar buttons (Settings, Store) should focus the existing window on a 2nd+ click instead of spawning duplicates"
+actor: "Autonomous Claude Operator via Focus-mode MCP socket — dispatching `OpenLauncherWindow` twice in a row to verify open / focus behaviour"
+goal: "First click opens; second click activates the existing Launcher (no duplicate window, no toggle-off). After explicit user close, next click opens fresh."
+entry_point: "Hermetic Focus mode (ATO_DESKTOP_MULTI_WINDOW=1)"
+out_of_scope:
+  - "Settings tab routing inside the Launcher placeholder (still relies on the deferred DesktopShell → LauncherShell rename)"
+  - "Card Switcher behaviour — that one is a TOGGLE (close on 2nd click), wired in R14"
+time_budget: "15 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User reports: Store / Settings buttons spawn duplicate Launcher windows on every click; expected 2nd+ click to focus the existing window"
+    observation: "`open_launcher_window` unconditionally called `cx.open_window` with no tracking. The Card Switcher already had a similar fix (R14, toggle) — Launcher needs the focus variant since the user wants the existing window in front, not closed."
+
+  - action: "Add `LauncherWindowSlot(Option<AnyWindowHandle>)` global in `window/launcher.rs`; seed in `app::run`"
+    observation: "Mirrors the Card Switcher pattern (R14) but for the focus path."
+
+  - action: "Rewrite `open_launcher_window` to focus-on-existing"
+    observation: |
+      Flow:
+        - If slot.0 == Some(handle):
+            handle.update(cx, |_, window, _| window.activate_window())
+              → Ok: focused, return (no new window)
+              → Err: handle stale, clear slot, fall through
+        - Open new window, stash handle in slot
+
+  - action: "Wire close cleanup in `app::on_window_closed`"
+    observation: |
+      After the AppWindow registry eviction, check both Launcher and
+      Card Switcher slots. If the closed window matches either slot's
+      `WindowId`, clear that slot so the next click opens fresh.
+      This means closing the Launcher via its red traffic light leaves
+      no stale handle.
+
+  - action: "AODD: dispatch host_dispatch_action OpenLauncherWindow twice, screenshot between"
+    observation: |
+      - call-1-open.png: a single Launcher window appears showing the
+        placeholder text. cx.windows() count went up by one.
+      - call-2-focus.png: the SAME Launcher window remains (same
+        position, same content). No second window stacked on top.
+      Desktop log records two `focus dispatcher routes action
+      action=OpenLauncherWindow` lines with no "open new" lines from
+      `cx.open_window` between them.
+
+agent_observation:
+  user_visible_problem: "Resolved. Settings / Store now behave like canonical macOS app icons: first click summons, subsequent clicks raise."
+  likely_cause: "Initial scaffolding shipped without window-handle tracking on the Launcher spawn path."
+  suggested_fix:
+    - "Already shipped: LauncherWindowSlot global, focus-on-existing in open_launcher_window, slot cleanup in on_window_closed."
+    - "Future: when an `addChildWindow:`-style relationship is restored between the Control Bar and a focused AppWindow, the same focus-on-existing pattern could route additional Settings clicks to the Launcher's settings tab instead of just raising the window."
+
+evidence:
+  - call-1-open.png
+  - call-2-focus.png
+
+status: "fixed"

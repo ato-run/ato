@@ -1,9 +1,10 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,9 +14,8 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
-use http::header::{CONTENT_TYPE, COOKIE};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST};
 use http::{HeaderMap, HeaderValue};
-use include_dir::{include_dir, Dir};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
@@ -26,7 +26,7 @@ use objc2::{msg_send, sel, ClassType};
 use objc2_app_kit::NSView;
 #[cfg(target_os = "macos")]
 use objc2_foundation::MainThreadMarker;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wry::http::{Request, Response};
 #[cfg(target_os = "macos")]
@@ -46,21 +46,18 @@ use crate::orchestrator::{
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
     LaunchError, SpawnKind, SpawnSpec,
 };
+use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::state::{
-    ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry, AuthSessionStatus,
-    BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PendingConfigRequest,
-    PendingConsentRequest, ShellMode, WebSessionState,
+    session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
+    AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
+    PendingConfigRequest, PendingConsentRequest, ShellMode, WebSessionState,
 };
 use crate::terminal::{TerminalCore, TryRecvOutput};
-use crate::ui::share::{resolve_share_icon, web_favicon_origin, ShareIconSource};
+use crate::ui::share::{resolve_share_icon, ShareIconSource};
 use capsule_wire::handle::CapsuleDisplayStrategy;
 use tracing::{debug, error, info, warn};
 
 const DEVTOOLS_DEBUG_ENV: &str = "ATO_DESKTOP_DEVTOOLS_DEBUG";
-const HOST_PANEL_SCHEME: &str = "capsule-host";
-const HOST_PANEL_PROFILE: &str = "host-panel";
-const HOST_PANEL_OVERLAY_PANE_ID: usize = usize::MAX;
-static HOST_PANEL_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/frontend/dist");
 
 /// Preload injected into `terminal://` WebViews so xterm.js can reach the host.
 ///
@@ -134,7 +131,6 @@ struct AuthHandoffSignal {
 
 pub struct WebViewManager {
     views: HashMap<usize, ManagedWebView>,
-    overlay_host_panel: Option<ManagedWebView>,
     pending_launches: HashMap<String, PendingLaunch>,
     active_pane_id: Option<usize>,
     responder_target: Option<ResponderTarget>,
@@ -186,6 +182,7 @@ pub struct WebViewManager {
     /// background threads so the UI never blocks on
     /// `ato app session stop`.
     retention: crate::retention::RetentionTable,
+    webview_retention: WebViewRetentionTable,
     /// Last successful launch for each capsule handle. Persists across
     /// WebView rebuilds so the UI-stop path can find the live session
     /// even when the per-pane WebView's `launched_session` reference
@@ -195,14 +192,26 @@ pub struct WebViewManager {
     /// `drain_pending_launches`'s success arm; consumed (cleared) in
     /// `stop_active_session` after a successful stop.
     handle_to_session: HashMap<String, GuestLaunchSession>,
+    /// Whether the dock window is currently open. Used by `ListPanes`
+    /// to expose the dock pane to automation callers.
+    dock_is_open: bool,
+    stable_origin_routes: StableOriginRouteTable,
 }
+
+/// Reserved pane ID for the dock window's WebView.
+/// Never collides with real pane IDs (which start at 1 and are
+/// assigned sequentially by `generate_pane_id`).
+pub const DOCK_AUTOMATION_PANE_ID: usize = 999_000;
 
 struct ManagedWebView {
     pane_id: usize,
+    /// Mutable pane binding used by async handlers (IPC/page-load/title-change)
+    /// so a retained WebView can be reattached to a new pane without keeping
+    /// stale pane_id captures alive in closure environments.
+    pane_binding: Arc<AtomicUsize>,
     route: GuestRoute,
     route_key: String,
     bounds: PaneBounds,
-    host_panel_payload_json: Option<String>,
     launched_session: Option<GuestLaunchSession>,
     webview: WebView,
     #[cfg(target_os = "macos")]
@@ -217,27 +226,27 @@ struct DesktopAuthHandoff {
     session_token: String,
     site_base_url: String,
     api_base_url: String,
+    #[serde(default)]
+    publisher_handle: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct HostPanelIpcEnvelope {
-    #[serde(rename = "__ato_host_panel__")]
-    message: HostPanelIpcMessage,
-    #[serde(rename = "paneId")]
-    pane_id: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HostPanelIpcMessage {
-    kind: String,
-    path: Option<String>,
-    command: Option<String>,
-    payload: Option<Value>,
-    #[serde(rename = "requestId")]
-    request_id: Option<String>,
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct AuthStatusResponse {
+    signed_in: bool,
+    api_base_url: String,
+    account_hint: Option<String>,
 }
 
 impl ManagedWebView {
+    fn bound_pane_id(&self) -> usize {
+        self.pane_binding.load(Ordering::Relaxed)
+    }
+
+    fn rebind_pane_id(&mut self, pane_id: usize) {
+        self.pane_binding.store(pane_id, Ordering::Relaxed);
+        self.pane_id = pane_id;
+    }
+
     fn actual_bounds(&self) -> Option<PaneBounds> {
         #[cfg(target_os = "macos")]
         if let Some(frame_host) = &self.frame_host {
@@ -311,6 +320,84 @@ struct PendingLaunchResult {
     session: Result<GuestLaunchSession, LaunchError>,
 }
 
+struct RetainedWebView {
+    stable_origin_key: String,
+    current_session_id: Option<String>,
+    webview: ManagedWebView,
+    retained_at: Instant,
+}
+
+struct WebViewRetentionTable {
+    entries: Vec<RetainedWebView>,
+    ttl: Duration,
+    max_size: usize,
+}
+
+impl WebViewRetentionTable {
+    fn with_defaults() -> Self {
+        Self {
+            entries: Vec::new(),
+            ttl: crate::retention::DEFAULT_TTL,
+            max_size: crate::retention::DEFAULT_MAX_RETAINED,
+        }
+    }
+
+    fn retain(&mut self, mut entry: RetainedWebView, now: Instant) -> Vec<RetainedWebView> {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|item| item.stable_origin_key == entry.stable_origin_key)
+        {
+            existing.current_session_id = entry.current_session_id.take();
+            existing.retained_at = now;
+            existing.webview = entry.webview;
+            return Vec::new();
+        }
+
+        entry.retained_at = now;
+        self.entries.push(entry);
+
+        let mut evicted = Vec::new();
+        while self.entries.len() > self.max_size {
+            evicted.push(self.entries.remove(0));
+        }
+        evicted
+    }
+
+    fn take_by_key(&mut self, stable_origin_key: &str) -> Option<RetainedWebView> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|item| item.stable_origin_key == stable_origin_key)?;
+        Some(self.entries.remove(idx))
+    }
+
+    fn take_by_session_id(&mut self, session_id: &str) -> Option<RetainedWebView> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|item| item.current_session_id.as_deref() == Some(session_id))?;
+        Some(self.entries.remove(idx))
+    }
+
+    fn evict_expired(&mut self, now: Instant) -> Vec<RetainedWebView> {
+        let mut evicted = Vec::new();
+        let mut i = 0;
+        while i < self.entries.len() {
+            if now.duration_since(self.entries[i].retained_at) >= self.ttl {
+                evicted.push(self.entries.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        evicted
+    }
+
+    fn drain(&mut self) -> Vec<RetainedWebView> {
+        self.entries.drain(..).collect()
+    }
+}
+
 impl WebViewManager {
     pub fn new(window_handle: AnyWindowHandle, async_app: AsyncApp) -> Self {
         let automation = AutomationHost::new();
@@ -322,13 +409,15 @@ impl WebViewManager {
             use std::sync::atomic::Ordering;
             use std::time::Duration;
             let has_pending = Arc::clone(&automation.has_pending);
+            let pending = Arc::clone(&automation.pending);
             let fe = async_app.foreground_executor().clone();
             let be = async_app.background_executor().clone();
             let async_app_poll = async_app.clone();
             fe.spawn(async move {
                 loop {
                     be.timer(Duration::from_millis(50)).await;
-                    if has_pending.swap(false, Ordering::Relaxed) {
+                    let queued = pending.lock().map(|q| !q.is_empty()).unwrap_or(false);
+                    if has_pending.swap(false, Ordering::Relaxed) || queued {
                         notify_window(async_app_poll.clone(), window_handle);
                     }
                 }
@@ -342,7 +431,6 @@ impl WebViewManager {
 
         Self {
             views: HashMap::new(),
-            overlay_host_panel: None,
             pending_launches: HashMap::new(),
             active_pane_id: None,
             responder_target: None,
@@ -363,7 +451,10 @@ impl WebViewManager {
             web_context,
             capsule_update_tx: None,
             retention: crate::retention::RetentionTable::with_defaults(),
+            webview_retention: WebViewRetentionTable::with_defaults(),
             handle_to_session: HashMap::new(),
+            dock_is_open: false,
+            stable_origin_routes: StableOriginRouteTable::default(),
         }
     }
 
@@ -377,6 +468,17 @@ impl WebViewManager {
         tx: std::sync::mpsc::Sender<(usize, crate::state::CapsuleUpdate)>,
     ) {
         self.capsule_update_tx = Some(tx);
+    }
+
+    /// Mark the dock window as open (`true`) or closed (`false`).
+    /// Affects `ListPanes` output and dock automation dispatch.
+    pub fn set_dock_open(&mut self, open: bool) {
+        self.dock_is_open = open;
+    }
+
+    /// Clone the automation host (cheap — all state is behind `Arc`).
+    pub fn automation_host(&self) -> crate::automation::AutomationHost {
+        self.automation.clone()
     }
 
     /// Build a 1×1 throwaway WebView pointed at about:blank so the
@@ -423,6 +525,7 @@ impl WebViewManager {
         // Idle apps may keep a session past its TTL until the next
         // render — `Drop` covers any leftover at process exit.
         self.sweep_expired_retention(state);
+        self.sweep_expired_webview_retention();
 
         // Drain ato:// / capsule:// deep links seen by the WebView
         // navigation handler so OAuth callbacks delivered through
@@ -510,6 +613,11 @@ impl WebViewManager {
             })
             .unwrap_or(WebViewReuseAction::Rebuild);
 
+        // Tracks whether the Navigate branch's `load_url` call below failed,
+        // so the post-reuse `Mounted` cleanup can skip force-promoting a
+        // pane whose new navigation never actually started (#143 review).
+        let mut navigate_load_url_failed = false;
+
         if matches!(reuse_action, WebViewReuseAction::Rebuild) {
             if let Some(previous) = self.views.remove(&active.pane_id) {
                 self.automation.fail_requests_for_pane(active.pane_id);
@@ -518,62 +626,71 @@ impl WebViewManager {
                 state.sync_web_session_state(previous.pane_id, WebSessionState::Closed);
             }
 
-            match &active.route {
-                GuestRoute::CapsuleHandle { handle, .. } => {
-                    self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+            let stable_origin_key = stable_origin_key_for_route(&active.route);
+            if let Some(mut retained) = stable_origin_key
+                .as_deref()
+                .and_then(|key| self.webview_retention.take_by_key(key))
+            {
+                if let Some(session_id) = retained.current_session_id.as_deref() {
+                    let _ = self.retention.take_by_session_id(session_id);
                 }
-                _ if active.profile == HOST_PANEL_PROFILE => {
-                    let payload = crate::settings::host_panel_payload_for_url(state, &route_key);
-                    match self.build_host_panel_child_webview(
+                let restored_session = retained.webview.launched_session.clone();
+                retained.webview.rebind_pane_id(active.pane_id);
+                retained.webview.route = active.route.clone();
+                retained.webview.route_key = route_key.clone();
+                if let Err(error) = retained.webview.apply_bounds(content_bounds(active.bounds)) {
+                    state.push_activity(
+                        ActivityTone::Error,
+                        format!("Failed to resize retained webview: {error}"),
+                    );
+                }
+                self.views.insert(active.pane_id, retained.webview);
+                if let Some(session) = restored_session.as_ref() {
+                    self.handle_to_session
+                        .insert(session.handle.clone(), session.clone());
+                    apply_launch_session_metadata(state, active.pane_id, session);
+                    self.spawn_capsule_update_check(active.pane_id, session, state);
+                    self.start_log_follower(active.pane_id, session);
+                }
+                state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                self.automation.mark_page_loaded(active.pane_id);
+            } else {
+                match &active.route {
+                    GuestRoute::CapsuleHandle { handle, .. } => {
+                        self.ensure_pending_local_launch(active.pane_id, &route_key, handle, state);
+                    }
+                    _ => match self.build_webview(
                         window,
-                        active.pane_id,
-                        active.route.clone(),
-                        active.bounds,
-                        Some(payload),
+                        &active,
+                        None,
+                        state.auth_policy_registry.clone(),
                     ) {
                         Ok(webview) => {
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
+                            if !route_requires_ready_signal(&active.route) {
+                                state.sync_web_session_state(
+                                    active.pane_id,
+                                    WebSessionState::Mounted,
+                                );
+                            }
                             self.bridge.log(
                                 ActivityTone::Info,
-                                format!("Built host panel WebView for {}", active.route),
+                                format!("Built child webview for {}", active.route),
                             );
                             self.views.insert(active.pane_id, webview);
                         }
                         Err(error) => {
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
+                            state.sync_web_session_state(
+                                active.pane_id,
+                                WebSessionState::Closed,
+                            );
                             state.push_activity(
                                 ActivityTone::Error,
-                                format!("Failed to build host panel WebView: {error}"),
+                                format!("Failed to build child webview: {error}"),
                             );
                             return;
                         }
-                    }
+                    },
                 }
-                _ => match self.build_webview(
-                    window,
-                    &active,
-                    None,
-                    state.auth_policy_registry.clone(),
-                ) {
-                    Ok(webview) => {
-                        if !route_requires_ready_signal(&active.route) {
-                            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
-                        }
-                        self.bridge.log(
-                            ActivityTone::Info,
-                            format!("Built child webview for {}", active.route),
-                        );
-                        self.views.insert(active.pane_id, webview);
-                    }
-                    Err(error) => {
-                        state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
-                        state.push_activity(
-                            ActivityTone::Error,
-                            format!("Failed to build child webview: {error}"),
-                        );
-                        return;
-                    }
-                },
             }
         } else if matches!(reuse_action, WebViewReuseAction::Navigate) {
             if let Some(existing) = self.views.get_mut(&active.pane_id) {
@@ -582,11 +699,36 @@ impl WebViewManager {
                         ActivityTone::Error,
                         format!("Failed to navigate child webview: {error}"),
                     );
+                    // load_url failed: don't force-promote to Mounted below —
+                    // the new navigation never happened and the user should
+                    // see something other than a confidently-mounted stale
+                    // page.
+                    navigate_load_url_failed = true;
                 } else {
                     existing.route = active.route.clone();
                     existing.route_key = route_key.clone();
                 }
             }
+        }
+
+        // navigate_to_url always resets the focused pane to
+        // `WebSessionState::Launching`. The Rebuild branch above
+        // immediately transitions back to `Mounted` for routes that
+        // don't need a guest ready signal — but Navigate (URL change in
+        // an already-built ExternalUrl WebView) and Keep (same URL
+        // re-typed into the omnibar) skipped that transition, leaving
+        // the launching overlay (`render_generic_loading_overlay` →
+        // "Starting app…") permanently on top of the live WebView.
+        // Mirror the Rebuild logic for the reuse paths so omnibar
+        // navigation between web pages clears the overlay (#143).
+        if !navigate_load_url_failed
+            && should_force_mounted_after_reuse(
+                reuse_action,
+                self.views.contains_key(&active.pane_id),
+                &active.route,
+            )
+        {
+            state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
         }
 
         let webview_bounds = content_bounds(active.bounds);
@@ -630,13 +772,6 @@ impl WebViewManager {
                         format_bounds(webview_bounds)
                     ));
                 }
-            }
-
-            if active.profile == HOST_PANEL_PROFILE {
-                let payload = crate::settings::host_panel_payload_for_url(state, &route_key);
-                let payload_json =
-                    serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string());
-                sync_host_panel_payload(existing, &payload_json, state);
             }
         }
 
@@ -827,15 +962,27 @@ impl WebViewManager {
             // Commands that don't require a live WebView.
             match &req.command {
                 ListPanes => {
-                    let panes: Vec<serde_json::Value> = self
+                    let mut panes: Vec<serde_json::Value> = self
                         .views
                         .keys()
                         .map(|id| serde_json::json!({ "pane_id": id }))
                         .collect();
+                    if self.dock_is_open {
+                        panes.push(serde_json::json!({
+                            "pane_id": DOCK_AUTOMATION_PANE_ID,
+                            "kind": "dock",
+                            "url": "ato://dock",
+                        }));
+                    }
                     req.send(Ok(serde_json::json!({ "panes": panes })));
                     continue;
                 }
                 FocusPane { .. } => {
+                    req.send(Ok(serde_json::json!({ "ok": true })));
+                    continue;
+                }
+                ClosePane { pane_id } => {
+                    state.pending_close_panes.push_back(*pane_id);
                     req.send(Ok(serde_json::json!({ "ok": true })));
                     continue;
                 }
@@ -894,6 +1041,60 @@ impl WebViewManager {
                     })));
                     continue;
                 }
+                HostDispatchAction { action, .. } => {
+                    // Push onto the queue; `DesktopShell::render` drains
+                    // it on the next paint and invokes the matching
+                    // window::open_* helper. This bypasses macOS
+                    // Accessibility permission entirely.
+                    state.pending_host_actions.push_back(action.clone());
+                    // The render loop is event-driven — without an
+                    // explicit notify the shell might not repaint until
+                    // some other event fires (user input, timer). Kick
+                    // a refresh so the queued action gets drained
+                    // promptly.
+                    notify_window(self.async_app.clone(), self.window_handle);
+                    req.send(Ok(serde_json::json!({
+                        "ok": true,
+                        "queued_action": action,
+                    })));
+                    continue;
+                }
+                ListSessions => {
+                    let entries = self
+                        .async_app
+                        .update(|cx| cx.global::<SessionRegistry>().view_entries());
+                    match serde_json::to_value(&entries) {
+                        Ok(sessions) => {
+                            req.send(Ok(serde_json::json!({ "sessions": sessions })));
+                        }
+                        Err(e) => {
+                            req.send(Err(format!("serialize sessions failed: {e}")));
+                        }
+                    }
+                    continue;
+                }
+                AuthStatus => {
+                    let status = match crate::orchestrator::resolve_ato_binary() {
+                        Ok(ato_bin) => {
+                            match Command::new(&ato_bin)
+                                .arg("desktop-auth-handoff")
+                                .output()
+                            {
+                                Ok(output) if output.status.success() => {
+                                    auth_status_from_handoff_stdout(&output.stdout)
+                                }
+                                _ => signed_out_auth_status(),
+                            }
+                        }
+                        Err(_) => signed_out_auth_status(),
+                    };
+                    match serde_json::to_value(status) {
+                        Ok(json) => req.send(Ok(json)),
+                        Err(_) => req.send(Ok(serde_json::to_value(signed_out_auth_status())
+                            .unwrap_or_default())),
+                    };
+                    continue;
+                }
                 _ => {}
             }
 
@@ -910,6 +1111,13 @@ impl WebViewManager {
                 req.pane_id
             };
 
+            // Dock pane requests are routed to `dispatch_dock_automation_requests`
+            // which is called from DesktopShell::render() after this method returns.
+            if pane_id == DOCK_AUTOMATION_PANE_ID {
+                requeue.push(req);
+                continue;
+            }
+
             // Navigation commands don't need a loaded page; all JS commands do.
             let needs_loaded = !matches!(
                 &req.command,
@@ -917,12 +1125,10 @@ impl WebViewManager {
             );
 
             if needs_loaded && !self.automation.is_page_loaded(pane_id) {
-                if req.wait_deadline.map_or(false, |d| Instant::now() < d)
-                    || matches!(req.command, WaitFor { .. })
-                {
+                if req.wait_deadline.map_or(false, |d| Instant::now() < d) {
                     requeue.push(req);
                 } else {
-                    req.send(Err("page not yet loaded".into()));
+                    req.send(Err(page_not_loaded_message(state, pane_id)));
                 }
                 continue;
             }
@@ -936,6 +1142,74 @@ impl WebViewManager {
         }
 
         self.automation.requeue(requeue);
+    }
+
+    /// Dispatch automation requests targeting the dock pane (`DOCK_AUTOMATION_PANE_ID`).
+    ///
+    /// Called from `DesktopShell::render()` after `sync_from_state` so we have
+    /// access to the dock `WebView` via the GPUI entity.  `dock_view` is `None`
+    /// when the dock window is not currently open.
+    pub fn dispatch_dock_automation_requests(
+        &mut self,
+        state: &mut AppState,
+        dock_view: Option<&WebView>,
+    ) {
+        use std::time::Instant;
+        use AutomationCommand::*;
+
+        // Separate dock-targeted requests from everything else.
+        let all = self.automation.drain_requests();
+        if all.is_empty() {
+            return;
+        }
+
+        let mut non_dock: Vec<PendingAutomationRequest> = Vec::new();
+
+        for req in all {
+            if req.pane_id != DOCK_AUTOMATION_PANE_ID {
+                non_dock.push(req);
+                continue;
+            }
+
+            if req.is_expired() {
+                req.send(Err("automation command timed out".into()));
+                continue;
+            }
+
+            let needs_loaded = !matches!(
+                &req.command,
+                Navigate { .. } | NavigateBack | NavigateForward | Screenshot
+            );
+
+            if needs_loaded && !self.automation.is_page_loaded(DOCK_AUTOMATION_PANE_ID) {
+                // Give the dock HTML page time to finish loading before failing.
+                // Re-enqueue; the 50 ms polling loop will retry on the next frame.
+                if !req.is_expired() {
+                    non_dock.push(req); // will be requeued below
+                } else {
+                    req.send(Err("dock page not loaded".into()));
+                }
+                continue;
+            }
+
+            match dock_view {
+                Some(webview) => {
+                    dispatch_automation_command(
+                        req,
+                        webview,
+                        DOCK_AUTOMATION_PANE_ID,
+                        &self.automation,
+                    );
+                }
+                None => {
+                    req.send(Err("dock is not open".into()));
+                }
+            }
+        }
+
+        // Return non-dock requests (and any dock retries mixed in) to the queue.
+        self.automation.requeue(non_dock);
+        let _ = state; // may be used for diagnostics in future
     }
 
     pub fn open_devtools_for_active_pane(&mut self, state: &mut AppState) {
@@ -1070,21 +1344,6 @@ impl WebViewManager {
     fn apply_shell_events(&mut self, events: &[ShellEvent], state: &AppState) {
         for event in events {
             match event {
-                ShellEvent::HostPanelRouteChanged { pane_id, path } => {
-                    let full_url = format!("{HOST_PANEL_SCHEME}://panel{path}");
-                    if let Ok(parsed) = full_url.parse() {
-                        if *pane_id == HOST_PANEL_OVERLAY_PANE_ID {
-                            if let Some(view) = self.overlay_host_panel.as_mut() {
-                                view.route = GuestRoute::ExternalUrl(parsed);
-                                view.route_key = full_url;
-                            }
-                        } else if let Some(view) = self.views.get_mut(pane_id) {
-                            view.route = GuestRoute::ExternalUrl(parsed);
-                            view.route_key = full_url;
-                        }
-                    }
-                }
-                ShellEvent::HostPanelCommand { .. } => {}
                 ShellEvent::UrlChanged { pane_id, url } => {
                     if let Some(view) = self.views.get_mut(pane_id) {
                         if let Ok(parsed) = url.parse() {
@@ -1374,10 +1633,8 @@ impl WebViewManager {
                                     // where the WebView is built but
                                     // the drain success arm took a
                                     // different branch.
-                                    self.handle_to_session.insert(
-                                        session.handle.clone(),
-                                        session.clone(),
-                                    );
+                                    self.handle_to_session
+                                        .insert(session.handle.clone(), session.clone());
                                     match resolve_share_icon(session) {
                                         Some(ShareIconSource::Direct(icon)) => {
                                             info!(
@@ -1458,7 +1715,12 @@ impl WebViewManager {
                         field_count = fields.len(),
                         "guest session needs config; surfacing modal"
                     );
-                    state.set_pending_config(PendingConfigRequest {
+                    // #117 — route into the unified resolution request.
+                    // The legacy `pending_config` slot is left untouched
+                    // (callers that still observe it stay correct); the
+                    // unified resolution modal takes precedence in the
+                    // ui/modals render gate when both are populated.
+                    state.merge_config_into_resolution(PendingConfigRequest {
                         handle,
                         target,
                         fields,
@@ -1511,7 +1773,12 @@ impl WebViewManager {
                             target = %target_label,
                             "guest session needs ExecutionPlan consent; surfacing modal"
                         );
-                        state.set_pending_consent(PendingConsentRequest {
+                        // #117 — route into the unified resolution
+                        // request, same as the E103 arm above. The
+                        // retry-budget gate stays per-target so a
+                        // post-Approve loop still surfaces a fatal
+                        // toast rather than re-opening the modal.
+                        state.merge_consent_into_resolution(PendingConsentRequest {
                             handle,
                             scoped_id,
                             version,
@@ -1521,6 +1788,58 @@ impl WebViewManager {
                             summary,
                             original_secrets,
                         });
+                    }
+                }
+                Err(LaunchError::PreflightAggregate {
+                    handle,
+                    requirements,
+                    original_secrets,
+                }) => {
+                    // #117 — eager preflight returned the full set of
+                    // pending requirements before any provisioning ran.
+                    // Convert each envelope into the existing per-error
+                    // PendingConfig / PendingConsent shapes and route
+                    // through `merge_*_into_resolution`, so the
+                    // unified resolution modal sees one populated
+                    // request with everything visible at once instead
+                    // of accumulating across N launch retries.
+                    use capsule_core::interactive_resolution::InteractiveResolutionKind;
+                    info!(
+                        pane_id,
+                        handle = %handle,
+                        requirement_count = requirements.len(),
+                        "preflight surfaced aggregate requirements; populating unified modal"
+                    );
+                    for envelope in requirements {
+                        match envelope.kind {
+                            InteractiveResolutionKind::SecretsRequired { target, schema } => {
+                                state.merge_config_into_resolution(PendingConfigRequest {
+                                    handle: handle.clone(),
+                                    target,
+                                    fields: schema,
+                                    original_secrets: original_secrets.clone(),
+                                });
+                            }
+                            InteractiveResolutionKind::ConsentRequired {
+                                scoped_id,
+                                version,
+                                target_label,
+                                policy_segment_hash,
+                                provisioning_policy_hash,
+                                summary,
+                            } => {
+                                state.merge_consent_into_resolution(PendingConsentRequest {
+                                    handle: handle.clone(),
+                                    scoped_id,
+                                    version,
+                                    target_label,
+                                    policy_segment_hash,
+                                    provisioning_policy_hash,
+                                    summary,
+                                    original_secrets: original_secrets.clone(),
+                                });
+                            }
+                        }
                     }
                 }
                 Err(LaunchError::Other(message)) => {
@@ -1581,6 +1900,23 @@ impl WebViewManager {
             }
         }
 
+        // #117 — same gate for the unified resolution modal. Without
+        // this, every render frame after `LaunchError::PreflightAggregate`
+        // would re-spawn the launch worker (the legacy single-slot
+        // gates above don't trip because `pending_resolution` is the
+        // populated field, not `pending_config` / `pending_consent`).
+        // The result before this gate was an info!/error! pair every
+        // few tens of ms while the user was filling in the modal —
+        // log spam plus wasted preflight subprocess spawns. The
+        // Submit/Cancel handlers clear `pending_resolution`, which
+        // collapses this guard on the next render so the freshly-
+        // resolved retry can fire exactly once.
+        if let Some(pending) = &state.pending_resolution {
+            if pending.handle == handle {
+                return;
+            }
+        }
+
         info!(pane_id, handle, "queuing guest session launch");
         let (sender, receiver) = channel();
         let route_key = route_key.to_string();
@@ -1593,10 +1929,7 @@ impl WebViewManager {
         // Collect secrets granted for this capsule handle before moving into the async block.
         let secrets: Vec<SecretEntry> = state
             .secret_store
-            .secrets_for_capsule(&handle)
-            .into_iter()
-            .cloned()
-            .collect();
+            .secrets_for_capsule(&handle);
         // Same idea for plaintext config — capture a snapshot now so
         // the background thread doesn't reach back into AppState.
         let plain_configs: Vec<(String, String)> =
@@ -1611,6 +1944,7 @@ impl WebViewManager {
                 receiver,
             },
         );
+        state.sync_web_session_state(pane_id, WebSessionState::Resolving);
         state.push_activity(
             ActivityTone::Info,
             format!("Launching guest session for {route_key}"),
@@ -1624,11 +1958,37 @@ impl WebViewManager {
             let result = PendingLaunchResult {
                 route_key: route_key.clone(),
                 handle: handle.clone(),
-                session: resolve_and_start_guest(&handle, &secrets, &plain_configs).inspect_err(
-                    |err| {
-                        error!(handle = %handle, error = %err, "guest session launch failed");
-                    },
-                ),
+                session: resolve_and_start_guest(&handle, &secrets, &plain_configs, None)
+                    .inspect_err(|err| {
+                        // #117 — interactive-resolution errors
+                        // (preflight aggregate, missing config,
+                        // missing consent) are expected states, not
+                        // failures. Log them at info so the user-side
+                        // log stream stays readable while the modal
+                        // is open; reserve `error!` for genuinely
+                        // unexpected breakage. The orchestrator
+                        // upstream already logs at warn when it
+                        // recognises these cases, so info here keeps
+                        // both sides at-or-below-warn.
+                        match err {
+                            LaunchError::MissingConfig { .. }
+                            | LaunchError::MissingConsent { .. }
+                            | LaunchError::PreflightAggregate { .. } => {
+                                info!(
+                                    handle = %handle,
+                                    error = %err,
+                                    "guest session launch awaiting user input"
+                                );
+                            }
+                            LaunchError::Other(_) => {
+                                error!(
+                                    handle = %handle,
+                                    error = %err,
+                                    "guest session launch failed"
+                                );
+                            }
+                        }
+                    }),
             };
             if result.session.is_ok() {
                 info!(handle = %handle, route_key = %result.route_key, "guest session launched");
@@ -1656,10 +2016,6 @@ impl WebViewManager {
         local_session: Option<GuestLaunchSession>,
         auth_policy: AuthPolicyRegistry,
     ) -> Result<ManagedWebView> {
-        if pane.profile == HOST_PANEL_PROFILE {
-            return self.build_host_panel_webview(window, pane);
-        }
-
         let scheme = if matches!(pane.route, GuestRoute::Terminal { .. }) {
             "terminal".to_string()
         } else {
@@ -1673,6 +2029,7 @@ impl WebViewManager {
         // for raw web app (WebUrl) sessions rather than relying on PageLoadEvent::Finished.
         let mut inject_window_ready_signal = false;
 
+        let pane_binding = Arc::new(AtomicUsize::new(pane.pane_id));
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
                 session,
@@ -1756,6 +2113,7 @@ impl WebViewManager {
                 // we inject a minimal window.onload script + dedicated IPC handler so SessionReady
                 // only fires after all scripts have run and the page has actually rendered.
                 if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    let mut use_stable_origin_proxy = false;
                     build_flags = BuildFlags {
                         inject_bridge: false,
                         enable_ipc: false,
@@ -1764,10 +2122,42 @@ impl WebViewManager {
                         observe_title_changes: true,
                     };
                     inject_window_ready_signal = true;
-                    let url = session.local_url.clone().ok_or_else(|| {
+                    let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    (url, None, Vec::new(), RouteContent::External, None)
+                    let url = match stable_origin_url_for_capsule_web_url(
+                        &pane.route,
+                        &scheme,
+                        &local_url,
+                        &self.stable_origin_routes,
+                    ) {
+                        Ok(Some(stable_url)) => {
+                            use_stable_origin_proxy = true;
+                            stable_url
+                        }
+                        Ok(None) => local_url,
+                        Err(error) => {
+                            warn!(
+                                route = %pane.route,
+                                session_id = %session.session_id,
+                                error = %error,
+                                "failed to configure stable-origin proxy route; falling back to direct local_url"
+                            );
+                            local_url
+                        }
+                    };
+                    build_flags.enable_custom_protocol = use_stable_origin_proxy;
+                    (
+                        url,
+                        None,
+                        Vec::new(),
+                        if use_stable_origin_proxy {
+                            RouteContent::StableOriginProxy(self.stable_origin_routes.clone())
+                        } else {
+                            RouteContent::External
+                        },
+                        None,
+                    )
                 } else {
                     let session_id = session.session_id.clone();
                     let frontend_path = session
@@ -1891,12 +2281,14 @@ impl WebViewManager {
             builder =
                 builder.with_initialization_script_for_main_only(ready_script.to_string(), true);
             let bridge = self.bridge.clone();
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
             builder = builder.with_ipc_handler(move |request| {
                 if request.body().contains("__ato_ready__") {
-                    bridge.push_shell_event(ShellEvent::SessionReady { pane_id });
+                    bridge.push_shell_event(ShellEvent::SessionReady {
+                        pane_id: pane_binding.load(Ordering::Relaxed),
+                    });
                     notify_window(async_app.clone(), window_handle);
                 }
                 // All other IPC messages from the raw web app are silently ignored.
@@ -1951,7 +2343,7 @@ impl WebViewManager {
         {
             let bridge = self.bridge.clone();
             let automation = self.automation.clone();
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let page_load_behavior = build_flags.page_load_behavior;
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
@@ -1971,7 +2363,7 @@ impl WebViewManager {
                         None => base_extras.clone(),
                     };
                     crate::surface_timing::emit_stage("navigation_start", "ok", 0, None, &extras);
-                    automation.mark_page_unloaded(pane_id);
+                    automation.mark_page_unloaded(pane_binding.load(Ordering::Relaxed));
                 }
                 PageLoadEvent::Finished => {
                     // navigation_finished. Note: PageLoadEvent::Finished
@@ -2008,6 +2400,7 @@ impl WebViewManager {
                             &base_extras,
                         );
                     }
+                    let pane_id = pane_binding.load(Ordering::Relaxed);
                     automation.mark_page_loaded(pane_id);
                     match page_load_behavior {
                         PageLoadBehavior::UpdateExternalUrl => {
@@ -2025,18 +2418,21 @@ impl WebViewManager {
 
         if build_flags.observe_title_changes {
             let bridge = self.bridge.clone();
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let async_app = self.async_app.clone();
             let window_handle = self.window_handle;
             builder = builder.with_document_title_changed_handler(move |title| {
-                bridge.push_shell_event(ShellEvent::TitleChanged { pane_id, title });
+                bridge.push_shell_event(ShellEvent::TitleChanged {
+                    pane_id: pane_binding.load(Ordering::Relaxed),
+                    title,
+                });
                 notify_window(async_app.clone(), window_handle);
             });
         }
 
         // For external URLs, intercept navigations that require browser-side auth.
         if let GuestRoute::ExternalUrl(_) = &pane.route {
-            let pane_id = pane.pane_id;
+            let pane_binding = pane_binding.clone();
             let signals = self.pending_auth_handoffs.clone();
             let callback_queue = self.pending_callback_urls.clone();
             let auth_flow = pane.auth_flow;
@@ -2057,6 +2453,7 @@ impl WebViewManager {
                 // WebContext. Untrusted capsule WebViews still hand
                 // those URLs off to the system browser.
                 if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
+                    let pane_id = pane_binding.load(Ordering::Relaxed);
                     if let Ok(mut q) = signals.lock() {
                         if !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id) {
                             q.push(AuthHandoffSignal { pane_id, url: uri });
@@ -2133,161 +2530,11 @@ impl WebViewManager {
 
         Ok(ManagedWebView {
             pane_id: pane.pane_id,
+            pane_binding,
             route: pane.route.clone(),
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
-            host_panel_payload_json: None,
             launched_session,
-            webview,
-            #[cfg(target_os = "macos")]
-            frame_host,
-        })
-    }
-
-    fn build_host_panel_webview(
-        &mut self,
-        window: &Window,
-        pane: &ActiveWebPane,
-    ) -> Result<ManagedWebView> {
-        self.build_host_panel_child_webview(
-            window,
-            pane.pane_id,
-            pane.route.clone(),
-            pane.bounds,
-            None,
-        )
-    }
-
-    fn build_host_panel_overlay_webview(
-        &mut self,
-        window: &Window,
-        route: url::Url,
-        bounds: PaneBounds,
-        payload: Option<Value>,
-    ) -> Result<ManagedWebView> {
-        self.build_host_panel_child_webview(
-            window,
-            HOST_PANEL_OVERLAY_PANE_ID,
-            GuestRoute::ExternalUrl(route),
-            bounds,
-            payload,
-        )
-    }
-
-    fn build_host_panel_child_webview(
-        &mut self,
-        window: &Window,
-        pane_id: usize,
-        route: GuestRoute,
-        bounds: PaneBounds,
-        payload: Option<Value>,
-    ) -> Result<ManagedWebView> {
-        let url = route.to_string();
-        let webview_bounds = content_bounds(bounds);
-        let payload_json = serde_json::to_string(&payload.unwrap_or(Value::Null))
-            .unwrap_or_else(|_| "null".to_string());
-        let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
-            .with_bounds(bounds_to_rect(webview_bounds));
-
-        builder = builder.with_user_agent(&format!(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
-             (KHTML, like Gecko) Version/17.0 Safari/605.1.15 AtoDesktop/{}",
-            env!("CARGO_PKG_VERSION")
-        ));
-        builder = builder.with_initialization_script_for_main_only(
-            format!(
-                "window.__ATO_DESKTOP__ = {{ version: \"{}\", platform: \"{}\" }};",
-                env!("CARGO_PKG_VERSION"),
-                std::env::consts::OS,
-            ),
-            true,
-        );
-        builder = builder.with_initialization_script_for_main_only(
-            host_panel_bootstrap_script(pane_id, &payload_json),
-            true,
-        );
-
-        let protocol = self.protocol_router.clone();
-        let bridge = self.bridge.clone();
-        builder = builder.with_asynchronous_custom_protocol(
-            HOST_PANEL_SCHEME.to_string(),
-            move |_webview_id, request, responder| {
-                protocol.handle_async(
-                    HOST_PANEL_SCHEME,
-                    request,
-                    responder,
-                    bridge.clone(),
-                    Vec::new(),
-                    None,
-                    RouteContent::External,
-                )
-            },
-        );
-
-        let dev_base = host_panel_dev_base_url();
-        builder = builder.with_navigation_handler(move |uri: String| {
-            url::Url::parse(&uri)
-                .ok()
-                .is_some_and(|url| allow_host_panel_navigation(&url, dev_base.as_ref()))
-        });
-        let bridge = self.bridge.clone();
-        let async_app = self.async_app.clone();
-        let window_handle = self.window_handle;
-        builder = builder.with_ipc_handler(move |request| {
-            let Ok(envelope) = serde_json::from_str::<HostPanelIpcEnvelope>(request.body()) else {
-                return;
-            };
-            if envelope.message.kind == "route-change" {
-                if let Some(path) = envelope.message.path {
-                    bridge.push_shell_event(ShellEvent::HostPanelRouteChanged {
-                        pane_id: envelope.pane_id.unwrap_or(pane_id),
-                        path,
-                    });
-                    notify_window(async_app.clone(), window_handle);
-                }
-            } else if envelope.message.kind == "settings-command" {
-                if let Some(command) = envelope.message.command {
-                    bridge.push_shell_event(ShellEvent::HostPanelCommand {
-                        pane_id: envelope.pane_id.unwrap_or(pane_id),
-                        command,
-                        payload: envelope.message.payload.unwrap_or(Value::Null),
-                        request_id: envelope.message.request_id,
-                    });
-                    notify_window(async_app.clone(), window_handle);
-                }
-            }
-        });
-        builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
-
-        // Phase 0 (RFC: SURFACE_MATERIALIZATION §3.1) — host panel
-        // WebView creation cost. Same bracketing as the capsule path
-        // above; emitted with the same stage names so a SURFACE-TIMING
-        // log can be filtered with one rule regardless of which
-        // call site fired.
-        crate::surface_timing::emit_stage(
-            "webview_create_start",
-            "ok",
-            0,
-            None,
-            &crate::surface_timing::SurfaceExtras::default(),
-        );
-        let create_timer = crate::surface_timing::SurfaceStageTimer::start("webview_create_end");
-        let webview = builder
-            .with_url(&url)
-            .build_as_child(window)
-            .with_context(|| format!("unable to create Wry child host panel webview for {url}"))?;
-        create_timer.finish_ok();
-
-        #[cfg(target_os = "macos")]
-        let frame_host = Some(install_macos_frame_host(&webview)?);
-
-        Ok(ManagedWebView {
-            pane_id,
-            route,
-            route_key: url,
-            bounds: webview_bounds,
-            host_panel_payload_json: Some(payload_json),
-            launched_session: None,
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
@@ -2316,12 +2563,14 @@ impl WebViewManager {
             self.automation.mark_page_unloaded(pane_id);
             if let Some(view) = self.views.remove(&pane_id) {
                 self.retain_launched_session(&view, state);
+                self.retain_webview(view);
             }
             self.visibility_cache.remove(&pane_id);
         }
         // Opportunistic TTL sweep: any pane close is a natural place
         // to spot expired retentions (cheap O(n) over ≤ cap entries).
         self.sweep_expired_retention(state);
+        self.sweep_expired_webview_retention();
     }
 
     /// Demote `view`'s launched session into the retention table
@@ -2390,6 +2639,27 @@ impl WebViewManager {
         }
     }
 
+    fn retain_webview(&mut self, view: ManagedWebView) {
+        if !is_webview_retention_eligible_route(&view.route) {
+            return;
+        }
+        let Some(stable_origin_key) = stable_origin_key_for_webview(&view) else {
+            return;
+        };
+        let _ = view.set_visible(false);
+        let current_session_id = view.launched_session.as_ref().map(|s| s.session_id.clone());
+        let evicted = self.webview_retention.retain(
+            RetainedWebView {
+                stable_origin_key,
+                current_session_id,
+                webview: view,
+                retained_at: Instant::now(),
+            },
+            Instant::now(),
+        );
+        drop(evicted);
+    }
+
     /// Sweep expired retention entries and graceful-stop them.
     /// Called from `sync_from_state` (every render) and from
     /// `prune_panes` so idle time alone keeps retention bounded.
@@ -2404,6 +2674,11 @@ impl WebViewManager {
             );
             crate::retention::spawn_graceful_stop(entry, reason);
         }
+    }
+
+    fn sweep_expired_webview_retention(&mut self) {
+        let evicted = self.webview_retention.evict_expired(Instant::now());
+        drop(evicted);
     }
 
     /// Number of capsule sessions currently sitting in the retention
@@ -2565,6 +2840,45 @@ impl WebViewManager {
         // stop without losing the reference.
         if stopped {
             self.handle_to_session.remove(&handle);
+            if let Some(retained) = self.webview_retention.take_by_session_id(&session_id) {
+                drop(retained);
+            } else if let Some(retained) = self
+                .webview_retention
+                .take_by_key(&format!("handle:{handle}"))
+            {
+                drop(retained);
+            }
+        };
+
+        // Stop SUCCEEDED (Ok(true) = process terminated) or the session
+        // was already inactive (Ok(false) = workload was gone before
+        // the call). Mirror the cleanup that the Rebuild branch in
+        // `sync_from_state` runs (`webview.rs:504-509`): drop the
+        // cached WebView, fail any pending automation requests for the
+        // pane, mark the page unloaded.
+        //
+        // Sync `WebSessionState::LaunchFailed` (NOT `Closed`) on the
+        // pane: with the cached view evicted, the next render would
+        // otherwise enter `sync_from_state`'s Rebuild branch and call
+        // `ensure_pending_local_launch` immediately, auto-relaunching
+        // the capsule the user just stopped. The same gate at
+        // `webview.rs:1521-1525` already uses LaunchFailed as the
+        // sentinel that blocks re-fire (the comment at the launch-fail
+        // site reads "Use LaunchFailed (not Closed) to prevent
+        // ensure_pending_local_launch from re-firing"). An explicit
+        // `state.navigate_to_url(<url>)` resets the surface to
+        // `WebSessionState::Resolving`, which clears LaunchFailed and
+        // lets the launch re-arm — that is exactly what the user's
+        // omnibar entry / `browser_navigate` MCP call does, and it is
+        // what #112 needs from this fix.
+        if let Some(_previous) = self.views.remove(&active_pane_id) {
+            self.automation.fail_requests_for_pane(active_pane_id);
+            self.automation.mark_page_unloaded(active_pane_id);
+            tracing::debug!(
+                pane_id = active_pane_id,
+                session_id = %session_id,
+                "stop_active_session: evicted cached WebView so same-URL re-navigate retriggers Rebuild"
+            );
         }
         state.sync_web_session_state(active_pane_id, WebSessionState::LaunchFailed);
 
@@ -2578,6 +2892,7 @@ impl WebViewManager {
     /// before the underlying session can be stopped via this path.
     /// Returns the number of sessions queued for stop.
     pub fn stop_all_retained_sessions(&mut self) -> usize {
+        self.webview_retention.drain();
         let drained = self.retention.drain();
         let count = drained.len();
         for (entry, _reason) in drained {
@@ -2698,56 +3013,6 @@ impl WebViewManager {
         self.set_cached_visibility(active_pane_id, !hide, state);
     }
 
-    pub fn sync_overlay_host_panel(
-        &mut self,
-        window: &Window,
-        route: Option<url::Url>,
-        bounds: Option<PaneBounds>,
-        payload: Option<Value>,
-        state: &mut AppState,
-    ) {
-        let Some(route) = route else {
-            self.overlay_host_panel = None;
-            return;
-        };
-        let Some(bounds) = bounds else {
-            self.overlay_host_panel = None;
-            return;
-        };
-
-        let route_key = route.to_string();
-        let webview_bounds = content_bounds(bounds);
-        let payload_json = serde_json::to_string(&payload.clone().unwrap_or(Value::Null))
-            .unwrap_or_else(|_| "null".to_string());
-
-        if let Some(existing) = self.overlay_host_panel.as_mut() {
-            if existing.route_key == route_key {
-                if bounds_changed(existing.bounds, webview_bounds) {
-                    if let Err(error) = existing.apply_bounds(webview_bounds) {
-                        state.push_activity(
-                            ActivityTone::Error,
-                            format!("Failed to resize overlay host panel: {error}"),
-                        );
-                    }
-                }
-                sync_host_panel_payload(existing, &payload_json, state);
-                return;
-            }
-        }
-
-        self.overlay_host_panel = None;
-
-        match self.build_host_panel_overlay_webview(window, route, bounds, payload) {
-            Ok(view) => {
-                self.overlay_host_panel = Some(view);
-            }
-            Err(error) => state.push_activity(
-                ActivityTone::Error,
-                format!("Failed to create overlay host panel: {error}"),
-            ),
-        }
-    }
-
     fn set_cached_visibility(&mut self, pane_id: usize, visible: bool, state: &mut AppState) {
         let cached = self
             .visibility_cache
@@ -2846,6 +3111,7 @@ impl Drop for WebViewManager {
             );
             let _ = stop_guest_session(&entry.session_id);
         }
+        self.webview_retention.drain();
 
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
         for existing in self.views.drain().map(|(_, existing)| existing) {
@@ -3055,6 +3321,31 @@ fn should_install_ato_auth_cookies(url: &str) -> bool {
         return false;
     };
     parsed.host_str() == Some("ato.run") && parsed.path().starts_with("/dock")
+}
+
+pub(crate) fn default_api_base_url() -> String {
+    std::env::var("ATO_API_BASE_URL")
+        .or_else(|_| std::env::var("ATO_STORE_API_URL"))
+        .unwrap_or_else(|_| "https://api.ato.run".to_string())
+}
+
+pub(crate) fn signed_out_auth_status() -> AuthStatusResponse {
+    AuthStatusResponse {
+        signed_in: false,
+        api_base_url: default_api_base_url(),
+        account_hint: None,
+    }
+}
+
+pub(crate) fn auth_status_from_handoff_stdout(stdout: &[u8]) -> AuthStatusResponse {
+    match serde_json::from_slice::<DesktopAuthHandoff>(stdout) {
+        Ok(handoff) => AuthStatusResponse {
+            signed_in: true,
+            api_base_url: handoff.api_base_url,
+            account_hint: handoff.publisher_handle,
+        },
+        Err(_) => signed_out_auth_status(),
+    }
 }
 
 fn load_desktop_auth_handoff() -> Result<DesktopAuthHandoff> {
@@ -3343,6 +3634,21 @@ fn route_requires_ready_signal(route: &GuestRoute) -> bool {
     )
 }
 
+/// True when `sync_from_state` reused (Navigate or Keep) an existing
+/// child WebView whose route does not need a guest "ready" signal — the
+/// caller must then force-transition the pane to `WebSessionState::Mounted`
+/// so the launching overlay set by `AppState::navigate_to_url` clears
+/// (#143). The Rebuild branch already handles its own transition.
+fn should_force_mounted_after_reuse(
+    reuse_action: WebViewReuseAction,
+    has_existing_view: bool,
+    route: &GuestRoute,
+) -> bool {
+    !matches!(reuse_action, WebViewReuseAction::Rebuild)
+        && has_existing_view
+        && !route_requires_ready_signal(route)
+}
+
 fn should_show_webview(
     route: &GuestRoute,
     session: &WebSessionState,
@@ -3363,12 +3669,10 @@ fn active_web_session(state: &AppState, pane_id: usize) -> Option<WebSessionStat
 
         match &pane.surface {
             crate::state::PaneSurface::Web(web) => Some(web.session.clone()),
-            crate::state::PaneSurface::HostPanel(_) => None,
-            crate::state::PaneSurface::Native { .. }
+            crate::state::PaneSurface::HostPanel(_)
             | crate::state::PaneSurface::CapsuleStatus(_)
             | crate::state::PaneSurface::Inspector
             | crate::state::PaneSurface::DevConsole
-            | crate::state::PaneSurface::Launcher
             | crate::state::PaneSurface::Terminal(_)
             | crate::state::PaneSurface::AuthHandoff { .. } => None,
         }
@@ -3407,6 +3711,7 @@ enum RouteContent {
     GuestAssets(GuestLaunchSession),
     External,
     TerminalAssets,
+    StableOriginProxy(StableOriginRouteTable),
 }
 
 impl ProtocolRouter {
@@ -3422,6 +3727,19 @@ impl ProtocolRouter {
     ) {
         let host = request.uri().host().unwrap_or("welcome").to_string();
         let path = request.uri().path().to_string();
+
+        if let RouteContent::StableOriginProxy(routes) = &content {
+            let response =
+                handle_stable_origin_proxy_request(request, routes).unwrap_or_else(|error| {
+                    Response::builder()
+                        .status(500)
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(Cow::Owned(error.to_string().into_bytes()))
+                        .expect("stable-origin proxy error response should build")
+                });
+            responder.respond(response);
+            return;
+        }
 
         // Bridge RPC is routed separately from asset serving because it carries structured host messages.
         if path == "/__ato/bridge" {
@@ -3467,10 +3785,6 @@ impl ProtocolRouter {
         path: &str,
         content: &RouteContent,
     ) -> Result<Response<Cow<'static, [u8]>>> {
-        if scheme == HOST_PANEL_SCHEME {
-            return serve_host_panel_asset(path);
-        }
-
         match content {
             RouteContent::EmbeddedWelcome => handle_embedded_welcome(scheme, host, path),
             RouteContent::GuestAssets(session) => serve_guest_asset(session, host, path),
@@ -3480,6 +3794,11 @@ impl ProtocolRouter {
                 "text/plain; charset=utf-8",
             ),
             RouteContent::TerminalAssets => serve_terminal_asset(path),
+            RouteContent::StableOriginProxy(_) => build_plain_response(
+                500,
+                "stable-origin proxy should be handled in async request path".to_string(),
+                "text/plain; charset=utf-8",
+            ),
         }
     }
 
@@ -3550,138 +3869,6 @@ fn handle_embedded_welcome(
     }
 }
 
-fn serve_host_panel_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
-    if let Some(dev_base) = host_panel_dev_base_url() {
-        return proxy_host_panel_asset(&dev_base, path);
-    }
-
-    let Some(asset_path) = resolve_host_panel_asset_path(path)? else {
-        return build_plain_response(
-            404,
-            format!("host panel asset not found: {path}"),
-            "text/plain; charset=utf-8",
-        );
-    };
-
-    let file = HOST_PANEL_DIST
-        .get_file(&asset_path)
-        .with_context(|| format!("missing embedded host panel asset: {asset_path}"))?;
-
-    Response::builder()
-        .status(200)
-        .header(CONTENT_TYPE, host_panel_content_type(&asset_path))
-        .body(Cow::Borrowed(file.contents()))
-        .context("failed to build host panel asset response")
-}
-
-fn proxy_host_panel_asset(dev_base: &url::Url, path: &str) -> Result<Response<Cow<'static, [u8]>>> {
-    let request_url = host_panel_request_url(dev_base, path)?;
-    let response = match ureq::get(request_url.as_str()).call() {
-        Ok(response) => response,
-        Err(error) => {
-            return build_plain_response(
-                502,
-                format!("failed to proxy host panel asset from dev server: {error}"),
-                "text/plain; charset=utf-8",
-            );
-        }
-    };
-
-    let status = response.status();
-    let content_type = response
-        .header("content-type")
-        .unwrap_or_else(|| host_panel_content_type(request_url.path()))
-        .to_string();
-    let mut reader = response.into_reader();
-    let mut body = Vec::new();
-    reader
-        .read_to_end(&mut body)
-        .context("failed to read proxied host panel asset body")?;
-
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, content_type)
-        .body(Cow::Owned(body))
-        .context("failed to build proxied host panel asset response")
-}
-
-fn host_panel_dev_base_url() -> Option<url::Url> {
-    std::env::var("ATO_DESKTOP_FRONTEND_DEV_URL")
-        .ok()
-        .and_then(|value| url::Url::parse(value.trim()).ok())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn allow_host_panel_navigation(url: &url::Url, dev_base: Option<&url::Url>) -> bool {
-    if url.scheme() == HOST_PANEL_SCHEME {
-        return true;
-    }
-
-    let Some(dev_base) = dev_base else {
-        return false;
-    };
-
-    url.scheme() == dev_base.scheme()
-        && url.host_str() == dev_base.host_str()
-        && url.port_or_known_default() == dev_base.port_or_known_default()
-}
-
-fn host_panel_request_url(dev_base: &url::Url, path: &str) -> Result<url::Url> {
-    let trimmed = path.trim_start_matches('/');
-    if trimmed.is_empty() {
-        return Ok(dev_base.clone());
-    }
-
-    dev_base
-        .join(trimmed)
-        .with_context(|| format!("failed to resolve host panel dev asset path: {path}"))
-}
-
-fn resolve_host_panel_asset_path(path: &str) -> Result<Option<String>> {
-    let trimmed = path.trim_start_matches('/');
-
-    if trimmed
-        .split('/')
-        .any(|segment| segment == ".." || segment.contains('\\'))
-    {
-        anyhow::bail!("parent traversal is not allowed for host panel assets: {path}");
-    }
-
-    let candidate = if trimmed.is_empty() {
-        "index.html".to_string()
-    } else {
-        trimmed.to_string()
-    };
-
-    if HOST_PANEL_DIST.get_file(&candidate).is_some() {
-        return Ok(Some(candidate));
-    }
-
-    if Path::new(&candidate).extension().is_some() {
-        return Ok(None);
-    }
-
-    Ok(Some("index.html".to_string()))
-}
-
-fn host_panel_content_type(path: &str) -> &'static str {
-    match Path::new(path).extension().and_then(|value| value.to_str()) {
-        Some("css") => "text/css; charset=utf-8",
-        Some("html") => "text/html; charset=utf-8",
-        Some("ico") => "image/x-icon",
-        Some("jpeg") | Some("jpg") => "image/jpeg",
-        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("map") => "application/json; charset=utf-8",
-        Some("png") => "image/png",
-        Some("svg") => "image/svg+xml",
-        Some("ttf") => "font/ttf",
-        Some("woff") => "font/woff",
-        Some("woff2") => "font/woff2",
-        _ => "text/plain; charset=utf-8",
-    }
-}
-
 fn build_embedded_response(
     body: &'static str,
     content_type: &'static str,
@@ -3735,6 +3922,95 @@ fn serve_terminal_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
         )
         .body(Cow::Borrowed(body))
         .context("failed to build terminal asset response")
+}
+
+fn stable_origin_url_for_capsule_web_url(
+    route: &GuestRoute,
+    scheme: &str,
+    local_url: &str,
+    stable_routes: &StableOriginRouteTable,
+) -> Result<Option<String>> {
+    let Some(logical_key) = logical_capsule_key_for_stable_origin(route) else {
+        return Ok(None);
+    };
+
+    let upstream = url::Url::parse(local_url)
+        .with_context(|| format!("invalid local_url for stable-origin proxy: {local_url}"))?;
+    let route = stable_routes
+        .register_or_swap(logical_key, upstream.clone())
+        .with_context(|| format!("failed to register stable-origin proxy route for {upstream}"))?;
+
+    let mut stable_url = url::Url::parse(&format!("{scheme}://{}/", route.stable_host_label))
+        .context("failed to build stable-origin URL")?;
+    stable_url.set_path(upstream.path());
+    stable_url.set_query(upstream.query());
+    Ok(Some(stable_url.to_string()))
+}
+
+fn handle_stable_origin_proxy_request(
+    request: Request<Vec<u8>>,
+    routes: &StableOriginRouteTable,
+) -> Result<Response<Cow<'static, [u8]>>> {
+    let host = request
+        .uri()
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("stable-origin request is missing host"))?;
+    let resolved = routes.validate_and_resolve_host(host)?;
+    let target_url = stable_origin_proxy_target_url(&resolved.upstream, request.uri())?;
+
+    let mut upstream_request = ureq::request(request.method().as_str(), target_url.as_str());
+    for (name, value) in request.headers() {
+        if name == HOST || name == CONTENT_LENGTH {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            upstream_request = upstream_request.set(name.as_str(), value);
+        }
+    }
+
+    let upstream_response = if request.body().is_empty() {
+        upstream_request.call()
+    } else {
+        upstream_request.send_bytes(request.body())
+    };
+
+    let (status, response) = match upstream_response {
+        Ok(response) => (response.status(), response),
+        Err(ureq::Error::Status(status, response)) => (status, response),
+        Err(ureq::Error::Transport(error)) => {
+            return build_plain_response(
+                502,
+                format!("stable-origin upstream transport error: {error}"),
+                "text/plain; charset=utf-8",
+            );
+        }
+    };
+
+    let content_type = response
+        .header("content-type")
+        .map(str::to_string)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let mut reader = response.into_reader();
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .context("failed to read stable-origin upstream response body")?;
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, content_type)
+        .body(Cow::Owned(body))
+        .context("failed to build stable-origin proxy response")
+}
+
+fn stable_origin_proxy_target_url(
+    upstream: &url::Url,
+    request_uri: &http::Uri,
+) -> Result<url::Url> {
+    let mut target = upstream.clone();
+    target.set_path(request_uri.path());
+    target.set_query(request_uri.query());
+    Ok(target)
 }
 
 fn build_plain_response(
@@ -3802,32 +4078,6 @@ fn rect_to_bounds(rect: Rect) -> PaneBounds {
     }
 }
 
-fn host_panel_bootstrap_script(pane_id: usize, payload_json: &str) -> String {
-    format!(
-        "(function(){{\n  const initialPayload = {payload_json};\n  const paneId = {pane_id};\n  window.__ATO_HOST_PANEL_PAYLOAD__ = initialPayload;\n  window.__ATO_HOST_PANEL_HYDRATE__ = function(payload) {{\n    window.__ATO_HOST_PANEL_PAYLOAD__ = payload;\n    window.dispatchEvent(new CustomEvent('ato-host-panel-payload', {{ detail: payload }}));\n  }};\n  window.__ATO_HOST_PANEL_NOTIFY__ = function(message) {{\n    try {{\n      if (window.ipc && typeof window.ipc.postMessage === 'function') {{\n        window.ipc.postMessage(JSON.stringify({{ __ato_host_panel__: message, paneId }}));\n      }}\n    }} catch (_error) {{}}\n  }};\n}})();"
-    )
-}
-
-fn sync_host_panel_payload(view: &mut ManagedWebView, payload_json: &str, state: &mut AppState) {
-    if view.host_panel_payload_json.as_deref() == Some(payload_json) {
-        return;
-    }
-
-    let script = format!(
-        "(function(payload){{ if (window.__ATO_HOST_PANEL_HYDRATE__) {{ window.__ATO_HOST_PANEL_HYDRATE__(payload); }} else {{ window.__ATO_HOST_PANEL_PAYLOAD__ = payload; window.dispatchEvent(new CustomEvent('ato-host-panel-payload', {{ detail: payload }})); }} }} )({payload_json});"
-    );
-
-    if let Err(error) = view.webview.evaluate_script(&script) {
-        state.push_activity(
-            ActivityTone::Error,
-            format!("Failed to update host panel payload: {error}"),
-        );
-        return;
-    }
-
-    view.host_panel_payload_json = Some(payload_json.to_string());
-}
-
 fn resolve_icon_source_for_payload(raw: &str) -> Option<String> {
     if raw.starts_with("http://")
         || raw.starts_with("https://")
@@ -3854,130 +4104,84 @@ fn resolve_icon_source_for_payload(raw: &str) -> Option<String> {
     Some(format!("data:{mime};base64,{encoded}"))
 }
 
-pub(crate) fn overlay_host_panel_payload(state: &AppState) -> Option<Value> {
-    let inspector = state.active_capsule_inspector()?;
-    let capabilities = state
-        .active_web_pane()
-        .filter(|pane| pane.pane_id == inspector.pane_id)
-        .map(|pane| {
-            pane.capabilities
-                .iter()
-                .map(|capability| capability.as_str().to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let logs = inspector
-        .logs
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "stage": entry.stage.as_str(),
-                "tone": activity_tone_label(entry.tone.clone()),
-                "message": entry.message,
-            })
-        })
-        .collect::<Vec<_>>();
-    let network = state
-        .network_logs
-        .iter()
-        .filter(|entry| entry.pane_id == inspector.pane_id)
-        .rev()
-        .take(12)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|entry| {
-            serde_json::json!({
-                "method": entry.method,
-                "url": entry.url,
-                "status": entry.status,
-                "durationMs": entry.duration_ms,
-            })
-        })
-        .collect::<Vec<_>>();
-    let update = state
-        .capsule_updates
-        .get(&inspector.pane_id)
-        .map(|update| match update {
-            crate::state::CapsuleUpdate::Idle => serde_json::json!({ "kind": "idle" }),
-            crate::state::CapsuleUpdate::Checking => serde_json::json!({ "kind": "checking" }),
-            crate::state::CapsuleUpdate::UpToDate { current } => serde_json::json!({
-                "kind": "up-to-date",
-                "current": current,
-            }),
-            crate::state::CapsuleUpdate::Available {
-                current,
-                latest,
-                target_handle,
-            } => serde_json::json!({
-                "kind": "available",
-                "current": current,
-                "latest": latest,
-                "targetHandle": target_handle,
-            }),
-            crate::state::CapsuleUpdate::Failed { message } => serde_json::json!({
-                "kind": "failed",
-                "message": message,
-            }),
-        });
-    let trust_label = inspector.trust_state.clone().unwrap_or_else(|| {
-        if inspector.restricted {
-            "untrusted".to_string()
-        } else {
-            "pending".to_string()
-        }
-    });
-    let quick_open_url = inspector
-        .local_url
-        .clone()
-        .or_else(|| inspector.invoke_url.clone())
-        .or_else(|| inspector.healthcheck_url.clone());
-    let icon_source = state
-        .pane_icons
-        .get(&inspector.pane_id)
-        .and_then(|raw| resolve_icon_source_for_payload(raw))
-        .or_else(|| {
-            // No manifest icon — fall back to the capsule's web favicon.
-            // The host panel WebView has no img-src CSP restriction, so an
-            // http://127.0.0.1 URL is loadable as long as the capsule is running.
-            inspector
-                .local_url
-                .as_deref()
-                .and_then(|u| web_favicon_origin(u))
-                .map(|origin| format!("{origin}/favicon.ico"))
-        });
+fn page_not_loaded_message(state: &AppState, pane_id: PaneId) -> String {
+    let Some(inspector) = state.capsule_inspector_by_pane_id(pane_id) else {
+        return "page not yet loaded".to_string();
+    };
 
-    Some(serde_json::json!({
-        "capsuleDetail": {
-            "paneId": inspector.pane_id,
-            "title": inspector.title,
-            "handle": inspector.handle,
-            "canonicalHandle": inspector.canonical_handle,
-            "sourceLabel": inspector.source_label,
-            "trustLabel": trust_label,
-            "restricted": inspector.restricted,
-            "versionLabel": inspector.snapshot_label.unwrap_or_else(|| "unversioned".to_string()),
-            "sessionLabel": web_session_state_label(inspector.session_state),
-            "sessionId": inspector.session_id,
-            "adapter": inspector.adapter,
-            "runtimeLabel": inspector.runtime_label,
-            "displayStrategy": inspector.display_strategy,
-            "servedBy": inspector.served_by,
-            "routeLabel": inspector.handle,
-            "manifestPath": inspector.manifest_path,
-            "logPath": inspector.log_path,
-            "localUrl": inspector.local_url,
-            "healthcheckUrl": inspector.healthcheck_url,
-            "invokeUrl": inspector.invoke_url,
-            "quickOpenUrl": quick_open_url,
-            "capabilities": capabilities,
-            "logs": logs,
-            "network": network,
-            "update": update,
-            "iconSource": icon_source,
+    let session_state = inspector.session_state.clone();
+    let session_label = web_session_state_label(session_state.clone());
+    let pending_suffix = pending_prelaunch_requirement_message(state, &inspector.handle)
+        .map(|message| format!("; {message}"))
+        .unwrap_or_default();
+    match session_state {
+        crate::state::WebSessionState::Resolving
+        | crate::state::WebSessionState::Materializing
+        | crate::state::WebSessionState::Launching => {
+            format!(
+                "page not yet loaded (session: {session_label}; launch still in progress{pending_suffix})"
+            )
         }
-    }))
+        _ => format!("page not yet loaded (session: {session_label}{pending_suffix})"),
+    }
+}
+
+fn pending_prelaunch_requirement_message(state: &AppState, handle: &str) -> Option<String> {
+    let mut labels = Vec::new();
+
+    if let Some(request) = state
+        .pending_resolution
+        .as_ref()
+        .filter(|request| request.handle == handle)
+    {
+        labels.extend(
+            request
+                .secrets
+                .iter()
+                .map(|item| match item.target.as_deref() {
+                    Some(target) if !target.is_empty() => format!("config:{target}"),
+                    _ => "config".to_string(),
+                }),
+        );
+        labels.extend(request.consents.iter().map(|item| {
+            if item.target_label.is_empty() {
+                "consent".to_string()
+            } else {
+                format!("consent:{}", item.target_label)
+            }
+        }));
+    } else {
+        if let Some(request) = state
+            .pending_config
+            .as_ref()
+            .filter(|request| request.handle == handle)
+        {
+            labels.push(match request.target.as_deref() {
+                Some(target) if !target.is_empty() => format!("config:{target}"),
+                _ => "config".to_string(),
+            });
+        }
+        if let Some(request) = state
+            .pending_consent
+            .as_ref()
+            .filter(|request| request.handle == handle)
+        {
+            labels.push(if request.target_label.is_empty() {
+                "consent".to_string()
+            } else {
+                format!("consent:{}", request.target_label)
+            });
+        }
+    }
+
+    if labels.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "awaiting pre-launch requirements: {}",
+            labels.join(", ")
+        ))
+    }
 }
 
 fn web_session_state_label(state: crate::state::WebSessionState) -> &'static str {
@@ -3999,7 +4203,6 @@ fn activity_tone_label(tone: crate::state::ActivityTone) -> &'static str {
         crate::state::ActivityTone::Error => "error",
     }
 }
-
 #[cfg(target_os = "macos")]
 fn install_macos_frame_host(webview: &WebView) -> Result<Retained<NSView>> {
     let mtm =
@@ -4119,10 +4322,38 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
         GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
-        GuestRoute::Capsule { .. }
-        | GuestRoute::ExternalUrl(_)
-        | GuestRoute::Terminal { .. } => None,
+        GuestRoute::Capsule { .. } | GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
+            None
+        }
     }
+}
+
+fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
+    match route {
+        GuestRoute::CapsuleHandle { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::CapsuleUrl { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::Capsule { session, .. } => Some(format!("session:{session}")),
+        GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => None,
+    }
+}
+
+fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
+    matches!(
+        route,
+        GuestRoute::Capsule { .. }
+            | GuestRoute::CapsuleHandle { .. }
+            | GuestRoute::CapsuleUrl { .. }
+    )
+}
+
+fn stable_origin_key_for_webview(view: &ManagedWebView) -> Option<String> {
+    if !is_webview_retention_eligible_route(&view.route) {
+        return None;
+    }
+    if let Some(session) = view.launched_session.as_ref() {
+        return Some(format!("handle:{}", session.handle));
+    }
+    stable_origin_key_for_route(&view.route)
 }
 
 fn compact(value: &str) -> String {
@@ -4251,7 +4482,8 @@ fn mime_for_path(path: &Path) -> &'static str {
 /// Approve the pending ExecutionPlan consent for `handle`: invoke
 /// `ato internal consent approve-execution-plan` (the CLI writer
 /// owns the JSONL append), mark the per-handle retry-once budget as
-/// consumed, and clear `AppState::pending_consent` so
+/// consumed, and clear the matching legacy `pending_consent` or
+/// unified `pending_resolution.consents` entry so
 /// `ensure_pending_local_launch` re-arms the launch on the next
 /// render. Used by:
 ///
@@ -4263,37 +4495,114 @@ fn mime_for_path(path: &Path) -> &'static str {
 /// invocation fails, the modal stays open and the budget is NOT
 /// consumed (the user can retry the same Approve).
 pub(crate) fn apply_capsule_consent(state: &mut AppState, handle: &str) -> Result<(), String> {
-    let request = state
+    if let Some(request) = state
         .pending_consent
         .as_ref()
         .filter(|r| r.handle == handle)
         .cloned()
-        .ok_or_else(|| {
-            format!(
-                "no pending ExecutionPlan consent matches handle '{handle}' \
-                 (the modal is either closed or pinned to a different handle)"
-            )
-        })?;
+    {
+        crate::orchestrator::approve_execution_plan_consent(
+            &request.scoped_id,
+            &request.version,
+            &request.target_label,
+            &request.policy_segment_hash,
+            &request.provisioning_policy_hash,
+        )
+        .map_err(|err| format!("failed to record consent: {err:#}"))?;
 
-    crate::orchestrator::approve_execution_plan_consent(
-        &request.scoped_id,
-        &request.version,
-        &request.target_label,
-        &request.policy_segment_hash,
-        &request.provisioning_policy_hash,
-    )
-    .map_err(|err| format!("failed to record consent: {err:#}"))?;
+        state.mark_consent_retry_consumed(handle, &request.target_label);
+        state.clear_pending_consent();
+        return Ok(());
+    }
 
-    state.mark_consent_retry_consumed(handle, &request.target_label);
-    state.clear_pending_consent();
-    Ok(())
+    if apply_pending_resolution_consents(state, handle, |consent| {
+        crate::orchestrator::approve_execution_plan_consent(
+            &consent.scoped_id,
+            &consent.version,
+            &consent.target_label,
+            &consent.policy_segment_hash,
+            &consent.provisioning_policy_hash,
+        )
+        .map_err(|err| format!("failed to record consent: {err:#}"))
+    })? {
+        return Ok(());
+    }
+
+    Err(format!(
+        "no pending ExecutionPlan consent matches handle '{handle}' \
+         (the modal is either closed or pinned to a different handle)"
+    ))
+}
+
+fn apply_pending_resolution_consents<F>(
+    state: &mut AppState,
+    handle: &str,
+    mut approve: F,
+) -> Result<bool, String>
+where
+    F: FnMut(&crate::state::PendingConsentItem) -> Result<(), String>,
+{
+    let consents = state
+        .pending_resolution
+        .as_ref()
+        .filter(|request| request.handle == handle)
+        .map(|request| request.consents.clone())
+        .unwrap_or_default();
+
+    if consents.is_empty() {
+        return Ok(false);
+    }
+
+    for consent in &consents {
+        approve(consent)?;
+        state.mark_consent_retry_consumed(handle, &consent.target_label);
+    }
+
+    if let Some(request) = state
+        .pending_resolution
+        .as_mut()
+        .filter(|request| request.handle == handle)
+    {
+        request.consents.clear();
+        if request.is_empty() {
+            state.clear_pending_resolution();
+        }
+    }
+
+    Ok(true)
+}
+
+fn clear_matching_pending_resolution_secrets(
+    state: &mut AppState,
+    handle: &str,
+    resolved_secret_keys: &std::collections::BTreeSet<String>,
+) {
+    let Some(request) = state
+        .pending_resolution
+        .as_mut()
+        .filter(|request| request.handle == handle)
+    else {
+        return;
+    };
+
+    request.secrets.retain(|item| {
+        item.fields.iter().any(|field| match &field.kind {
+            capsule_wire::config::ConfigKind::Secret => !resolved_secret_keys.contains(&field.name),
+            _ => true,
+        })
+    });
+
+    if request.is_empty() {
+        state.clear_pending_resolution();
+    }
 }
 
 // ── Automation command dispatch ───────────────────────────────────────────────
 
 /// Apply a batch of secrets for `handle` and (optionally) clear an open
-/// `pending_config` modal pointing at the same handle so the next render
-/// re-arms the launch.
+/// legacy `pending_config` modal or any fully-resolved secret sections in
+/// the unified `pending_resolution` request for the same handle so the next
+/// render re-arms the launch.
 ///
 /// Returns the keys that were applied (in input order) on success. On the
 /// first persist failure, returns `Err(message)` — earlier secrets that
@@ -4321,6 +4630,7 @@ pub(crate) fn apply_capsule_secrets(
     }
 
     if clear_pending_config {
+        let resolved_secret_keys = applied.iter().cloned().collect();
         let matches = state
             .pending_config
             .as_ref()
@@ -4329,6 +4639,7 @@ pub(crate) fn apply_capsule_secrets(
         if matches {
             state.clear_pending_config();
         }
+        clear_matching_pending_resolution_secrets(state, handle, &resolved_secret_keys);
     }
 
     Ok(applied)
@@ -4336,7 +4647,7 @@ pub(crate) fn apply_capsule_secrets(
 
 /// Execute a single automation command against a live WebView.
 /// Called from `WebViewManager::dispatch_automation_requests` on the GPUI main thread.
-fn dispatch_automation_command(
+pub(crate) fn dispatch_automation_command(
     req: PendingAutomationRequest,
     webview: &WebView,
     pane_id: usize,
@@ -4351,8 +4662,7 @@ fn dispatch_automation_command(
             let tx = $req.clone_tx();
             let js_str: String = $js;
             if let Err(e) = webview.evaluate_script_with_callback(&js_str, move |result| {
-                let v = serde_json::from_str::<Value>(&result)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw": result }));
+                let v = decode_js_callback_value(&result);
                 if let Ok(mut guard) = tx.lock() {
                     if let Some(sender) = guard.take() {
                         let _ = sender.send(Ok(v));
@@ -4373,6 +4683,13 @@ fn dispatch_automation_command(
                     "window.__atoAgent.click({})",
                     serde_json::to_string(ref_id).unwrap()
                 ),
+                req
+            );
+        }
+        ClickAt { x, y } => {
+            js_call!(
+                format!(
+                    "(function(){{var el=document.elementFromPoint({x},{y});if(!el)return JSON.stringify({{ok:false,error:'no element at ({x},{y})'}});el.dispatchEvent(new MouseEvent('click',{{bubbles:true,cancelable:true,clientX:{x},clientY:{y}}}));return JSON.stringify({{ok:true}});}})()"),
                 req
             );
         }
@@ -4491,9 +4808,9 @@ fn dispatch_automation_command(
             let selector_clone = selector.clone();
 
             if let Err(e) = webview.evaluate_script_with_callback(&js, move |result| {
-                let found = serde_json::from_str::<Value>(&result)
-                    .ok()
-                    .and_then(|v| v.get("found").and_then(|f| f.as_bool()))
+                let found = decode_js_callback_value(&result)
+                    .get("found")
+                    .and_then(|f| f.as_bool())
                     .unwrap_or(false);
 
                 if found {
@@ -4581,12 +4898,26 @@ fn dispatch_automation_command(
         // Handled in dispatch_automation_requests before reaching here.
         ListPanes
         | FocusPane { .. }
+        | ClosePane { .. }
         | OpenUrl { .. }
         | SetCapsuleSecrets { .. }
         | ApproveExecutionPlanConsent { .. }
-        | StopActiveSession => {
+        | StopActiveSession
+        | HostDispatchAction { .. }
+        | ListSessions
+        | AuthStatus => {
             unreachable!()
         }
+    }
+}
+
+fn decode_js_callback_value(result: &str) -> Value {
+    match serde_json::from_str::<Value>(result) {
+        Ok(Value::String(inner)) => {
+            serde_json::from_str::<Value>(&inner).unwrap_or_else(|_| Value::String(inner))
+        }
+        Ok(value) => value,
+        Err(_) => Value::String(result.to_string()),
     }
 }
 
@@ -4668,6 +4999,7 @@ mod tests {
             session_token: "secret".to_string(),
             site_base_url: "https://ato.run".to_string(),
             api_base_url: "https://api.ato.run".to_string(),
+            publisher_handle: Some("koh".to_string()),
         };
 
         assert_eq!(
@@ -4821,6 +5153,20 @@ mod tests {
     }
 
     #[test]
+    fn decode_js_callback_value_unwraps_double_encoded_object() {
+        let value = decode_js_callback_value("\"{\\\"found\\\":true}\"");
+
+        assert_eq!(value.get("found").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn decode_js_callback_value_preserves_plain_strings() {
+        let value = decode_js_callback_value("\"not-json\"");
+
+        assert_eq!(value.as_str(), Some("not-json"));
+    }
+
+    #[test]
     fn reuse_action_navigates_between_external_urls_in_same_pane() {
         let existing =
             GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
@@ -4882,6 +5228,194 @@ mod tests {
     }
 
     #[test]
+    fn stable_origin_key_uses_handle_for_capsule_routes() {
+        let handle_route = GuestRoute::CapsuleHandle {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+        };
+        let url_route = GuestRoute::CapsuleUrl {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+            url: url::Url::parse("http://127.0.0.1:3000").expect("url"),
+        };
+
+        assert_eq!(
+            stable_origin_key_for_route(&handle_route),
+            Some("handle:capsule://org/demo@1.0.0".to_string())
+        );
+        assert_eq!(
+            stable_origin_key_for_route(&url_route),
+            Some("handle:capsule://org/demo@1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn stable_origin_key_is_not_created_for_external_or_terminal_routes() {
+        let external =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let terminal = GuestRoute::Terminal {
+            session_id: "term-1".to_string(),
+        };
+
+        assert_eq!(stable_origin_key_for_route(&external), None);
+        assert_eq!(stable_origin_key_for_route(&terminal), None);
+    }
+
+    #[test]
+    fn stable_origin_web_url_is_created_for_capsule_handle_routes() {
+        let route = GuestRoute::CapsuleHandle {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+        };
+        let table = StableOriginRouteTable::default();
+
+        let stable_url = stable_origin_url_for_capsule_web_url(
+            &route,
+            "capsuletest",
+            "http://127.0.0.1:4173/app?mode=dev",
+            &table,
+        )
+        .expect("stable origin URL should resolve")
+        .expect("capsule route should be in stable-origin scope");
+
+        let parsed = url::Url::parse(&stable_url).expect("stable URL should parse");
+        let expected_host = crate::stable_origin_proxy::stable_host_label_for_key(
+            "handle:capsule://org/demo@1.0.0",
+        );
+        assert_eq!(parsed.scheme(), "capsuletest");
+        assert_eq!(parsed.path(), "/app");
+        assert_eq!(parsed.query(), Some("mode=dev"));
+        assert_eq!(parsed.host_str(), Some(expected_host.as_str()));
+    }
+
+    #[test]
+    fn stable_origin_web_url_scope_excludes_capsule_url_and_external_routes() {
+        let capsule_url_route = GuestRoute::CapsuleUrl {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+            url: url::Url::parse("http://127.0.0.1:4173/app").expect("url"),
+        };
+        let external_route =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let table = StableOriginRouteTable::default();
+
+        assert_eq!(
+            stable_origin_url_for_capsule_web_url(
+                &capsule_url_route,
+                "capsuletest",
+                "http://127.0.0.1:4173/app",
+                &table,
+            )
+            .expect("capsule url route should return Ok(None)"),
+            None
+        );
+        assert_eq!(
+            stable_origin_url_for_capsule_web_url(
+                &external_route,
+                "capsuletest",
+                "https://example.com",
+                &table,
+            )
+            .expect("external route should return Ok(None)"),
+            None
+        );
+    }
+
+    #[test]
+    fn webview_retention_scope_keeps_capsule_backed_routes_only() {
+        let capsule_handle_route = GuestRoute::CapsuleHandle {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+        };
+        let capsule_session_route = GuestRoute::Capsule {
+            session: "session-1".to_string(),
+            entry_path: "/index.html".to_string(),
+        };
+        let capsule_url_route = GuestRoute::CapsuleUrl {
+            handle: "capsule://org/demo@1.0.0".to_string(),
+            label: "demo".to_string(),
+            url: url::Url::parse("http://127.0.0.1:4173/app").expect("url"),
+        };
+        let external_route =
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let terminal_route = GuestRoute::Terminal {
+            session_id: "term-1".to_string(),
+        };
+
+        assert!(is_webview_retention_eligible_route(&capsule_handle_route));
+        assert!(is_webview_retention_eligible_route(&capsule_session_route));
+        assert!(is_webview_retention_eligible_route(&capsule_url_route));
+        assert!(!is_webview_retention_eligible_route(&external_route));
+        assert!(!is_webview_retention_eligible_route(&terminal_route));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_clears_overlay_for_external_url_navigate() {
+        // Regression for #143. navigate_to_url resets the focused pane to
+        // `WebSessionState::Launching`; in the Navigate path the WebView
+        // is reused (load_url) so the build_webview branch's mounted
+        // transition never runs, leaving the launching overlay stuck
+        // ("Starting app…") on top of a live external page.
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url"));
+        assert!(should_force_mounted_after_reuse(
+            WebViewReuseAction::Navigate,
+            true,
+            &route,
+        ));
+        assert!(should_force_mounted_after_reuse(
+            WebViewReuseAction::Keep,
+            true,
+            &route,
+        ));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_skips_when_no_existing_view() {
+        // Without a cached entry in WebViewManager.views the Rebuild
+        // branch will run and own its own mounted transition, so the
+        // post-reuse cleanup must not run.
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url"));
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Navigate,
+            false,
+            &route,
+        ));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_skips_capsule_routes() {
+        // CapsuleHandle / Capsule routes need an explicit guest "ready"
+        // signal before the overlay clears. Forcing Mounted here would
+        // unhide the WebView before the guest has wired its bridge.
+        let route = GuestRoute::CapsuleHandle {
+            handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+            label: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+        };
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Navigate,
+            true,
+            &route,
+        ));
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Keep,
+            true,
+            &route,
+        ));
+    }
+
+    #[test]
+    fn force_mounted_after_reuse_skips_rebuild_branch() {
+        // The Rebuild branch already owns its own state transition; doing
+        // it twice is harmless but signals confused ownership.
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://docs.rs").expect("url"));
+        assert!(!should_force_mounted_after_reuse(
+            WebViewReuseAction::Rebuild,
+            true,
+            &route,
+        ));
+    }
+
+    #[test]
     fn terminal_bridge_preload_defines_ato_terminal_bridge() {
         // The preload must define window.__ato_terminal_bridge; without it the
         // xterm.js page has no channel to the host and keystrokes are dropped.
@@ -4899,91 +5433,519 @@ mod tests {
         assert!(super::TERMINAL_BRIDGE_PRELOAD.contains("kind"));
     }
 
-    #[test]
-    fn capsule_host_root_serves_frontend_index() {
-        let response = serve_host_panel_asset("/").expect("host panel asset");
+    // ── apply_capsule_secrets (used by automation MCP `set_capsule_secrets`) ──
+    //
+    // These tests pin the contract that the MCP path is wire-compatible with
+    // the modal Save handler in `ui/mod.rs::save_pending_config`. They share
+    // an env_lock because save_secrets reads ATO_HOME, and parallel tests
+    // would otherwise see each other's tempdir.
+    mod apply_capsule_secrets {
+        use super::*;
+        use crate::state::{
+            PendingConfigRequest, PendingConsentItem, PendingResolutionRequest, PendingSecretsItem,
+        };
+        use capsule_wire::config::{ConfigField, ConfigKind};
+        use std::ffi::OsString;
+        use std::sync::{Mutex, MutexGuard, OnceLock};
 
-        assert_eq!(response.status(), 200);
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/html; charset=utf-8")
-        );
-        let body = std::str::from_utf8(response.body().as_ref()).expect("utf8");
-        assert!(body.contains("<div id=\"root\"></div>"));
+        fn env_lock() -> MutexGuard<'static, ()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("env lock")
+        }
+
+        struct EnvVarGuard {
+            key: &'static str,
+            previous: Option<OsString>,
+        }
+
+        impl EnvVarGuard {
+            fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+                let previous = std::env::var_os(key);
+                std::env::set_var(key, value);
+                Self { key, previous }
+            }
+        }
+
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                if let Some(value) = &self.previous {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+
+        fn isolated_state() -> (tempfile::TempDir, EnvVarGuard, AppState) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let ato_home = temp.path().join("ato-home");
+            std::fs::create_dir_all(ato_home.join("run")).expect("run dir");
+            let guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
+            // load_secrets / load_config / load_capsule_configs read under
+            // ATO_HOME — initial() returns a state with no secrets pre-set.
+            let state = AppState::initial();
+            (temp, guard, state)
+        }
+
+        fn pending(handle: &str) -> PendingConfigRequest {
+            PendingConfigRequest {
+                handle: handle.to_string(),
+                target: None,
+                fields: Vec::new(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        fn secret_field(name: &str) -> ConfigField {
+            ConfigField {
+                name: name.to_string(),
+                label: None,
+                description: None,
+                kind: ConfigKind::Secret,
+                default: None,
+                placeholder: None,
+            }
+        }
+
+        fn string_field(name: &str) -> ConfigField {
+            ConfigField {
+                name: name.to_string(),
+                label: None,
+                description: None,
+                kind: ConfigKind::String,
+                default: None,
+                placeholder: None,
+            }
+        }
+
+        fn consent_item(target_label: &str) -> PendingConsentItem {
+            PendingConsentItem {
+                scoped_id: format!("publisher/{target_label}"),
+                version: "1.0.0".to_string(),
+                target_label: target_label.to_string(),
+                policy_segment_hash: format!("blake3:{target_label}-policy"),
+                provisioning_policy_hash: format!("blake3:{target_label}-prov"),
+                summary: format!("Consent for {target_label}"),
+            }
+        }
+
+        #[test]
+        fn persists_each_secret_grants_to_handle_and_returns_keys_in_order() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+
+            let secrets = vec![
+                ("PG_PASSWORD".to_string(), "pgpw".to_string()),
+                ("SECRET_KEY".to_string(), "sk".to_string()),
+            ];
+
+            let applied =
+                apply_capsule_secrets(&mut state, "github.com/Koh0920/WasedaP2P", &secrets, true)
+                    .expect("apply");
+
+            assert_eq!(applied, vec!["PG_PASSWORD", "SECRET_KEY"]);
+
+            let granted = state
+                .secret_store
+                .secrets_for_capsule("github.com/Koh0920/WasedaP2P");
+            let mut keys: Vec<&str> = granted.iter().map(|e| e.key.as_str()).collect();
+            keys.sort();
+            assert_eq!(keys, vec!["PG_PASSWORD", "SECRET_KEY"]);
+        }
+
+        #[test]
+        fn clears_pending_config_when_handle_matches_and_flag_is_true() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.set_pending_config(pending("h"));
+
+            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], true)
+                .expect("apply");
+
+            assert!(state.pending_config.is_none(), "pending_config must clear");
+        }
+
+        #[test]
+        fn leaves_pending_config_intact_when_flag_is_false() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.set_pending_config(pending("h"));
+
+            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], false)
+                .expect("apply");
+
+            assert!(
+                state.pending_config.is_some(),
+                "pending_config must persist when flag=false"
+            );
+        }
+
+        #[test]
+        fn leaves_pending_config_intact_when_handle_mismatches() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.set_pending_config(pending("other"));
+
+            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], true)
+                .expect("apply");
+
+            assert!(
+                state.pending_config.is_some(),
+                "modal for a different handle must not be dismissed"
+            );
+        }
+
+        #[test]
+        fn clears_matching_pending_resolution_secret_sections() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![PendingSecretsItem {
+                    target: Some("app".to_string()),
+                    fields: vec![secret_field("SECRET_KEY")],
+                }],
+                consents: Vec::new(),
+            });
+
+            apply_capsule_secrets(
+                &mut state,
+                "capsule://github.com/Koh0920/WasedaP2P",
+                &[("SECRET_KEY".into(), "v".into())],
+                true,
+            )
+            .expect("apply");
+
+            assert!(
+                state.pending_resolution.is_none(),
+                "resolved secrets-only pending_resolution must clear"
+            );
+        }
+
+        #[test]
+        fn keeps_remaining_resolution_items_after_secret_apply() {
+            let _lock = env_lock();
+            let (_tmp, _guard, mut state) = isolated_state();
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: "capsule://github.com/Koh0920/WasedaP2P".to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![
+                    PendingSecretsItem {
+                        target: Some("app".to_string()),
+                        fields: vec![secret_field("SECRET_KEY")],
+                    },
+                    PendingSecretsItem {
+                        target: Some("web".to_string()),
+                        fields: vec![string_field("APP_MODE")],
+                    },
+                ],
+                consents: vec![consent_item("web")],
+            });
+
+            apply_capsule_secrets(
+                &mut state,
+                "capsule://github.com/Koh0920/WasedaP2P",
+                &[("SECRET_KEY".into(), "v".into())],
+                true,
+            )
+            .expect("apply");
+
+            let pending = state
+                .pending_resolution
+                .as_ref()
+                .expect("consent + non-secret config must remain");
+            assert_eq!(pending.secrets.len(), 1);
+            assert_eq!(pending.secrets[0].target.as_deref(), Some("web"));
+            assert_eq!(pending.consents.len(), 1);
+        }
+    }
+
+    // ── apply_capsule_consent (UI handler + MCP automation share path) ───
+    //
+    // These tests exercise the routing logic in `apply_capsule_consent`
+    // — the handle-match check, the "no pending consent" error path,
+    // and the success-path side effects on AppState. The actual CLI
+    // invocation (`ato internal consent approve-execution-plan`) is
+    // out of unit-test scope: it lives in `crate::orchestrator::
+    // approve_execution_plan_consent`, gated behind `resolve_ato_binary`,
+    // and is covered by an integration test (`tests/...`) that drives
+    // the full plumbing surface.
+    mod apply_capsule_consent {
+        use super::*;
+        use crate::state::{PendingConsentItem, PendingConsentRequest, PendingResolutionRequest};
+
+        fn pending(handle: &str) -> PendingConsentRequest {
+            PendingConsentRequest {
+                handle: handle.to_string(),
+                scoped_id: "publisher/app".to_string(),
+                version: "1.0.0".to_string(),
+                target_label: "app".to_string(),
+                policy_segment_hash: "blake3:aaa".to_string(),
+                provisioning_policy_hash: "blake3:bbb".to_string(),
+                summary: "Capsule: publisher/app@1.0.0".to_string(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        fn consent_item(target_label: &str) -> PendingConsentItem {
+            PendingConsentItem {
+                scoped_id: format!("publisher/{target_label}"),
+                version: "1.0.0".to_string(),
+                target_label: target_label.to_string(),
+                policy_segment_hash: format!("blake3:{target_label}-policy"),
+                provisioning_policy_hash: format!("blake3:{target_label}-prov"),
+                summary: format!("Consent for {target_label}"),
+            }
+        }
+
+        #[test]
+        fn errors_when_no_pending_consent_matches_handle() {
+            let mut state = AppState::initial();
+            // No pending_consent at all.
+            let err = apply_capsule_consent(&mut state, "any-handle").unwrap_err();
+            assert!(
+                err.contains("no pending ExecutionPlan consent"),
+                "expected no-match error, got: {err}"
+            );
+
+            // Pending consent for a *different* handle must also reject —
+            // approving by accident would leak consent to a capsule the
+            // user never reviewed.
+            state.set_pending_consent(pending("other-handle"));
+            let err = apply_capsule_consent(&mut state, "wrong-handle").unwrap_err();
+            assert!(
+                err.contains("no pending ExecutionPlan consent"),
+                "handle mismatch must error, got: {err}"
+            );
+        }
+
+        /// Regression for the v0.5.0 per-target budget bug surfaced
+        /// by #92 verification: a multi-target orchestration capsule
+        /// (WasedaP2P → app + web) trips one E302 per target, each
+        /// with its own policy hashes. Approving target=app must NOT
+        /// poison the budget for target=web on the same handle.
+        #[test]
+        fn retry_budget_is_per_target_not_per_handle() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+
+            // No budget consumed at the start.
+            assert!(!state.consent_retry_already_consumed(handle, "app"));
+            assert!(!state.consent_retry_already_consumed(handle, "web"));
+
+            // Approving target=app marks ONLY (handle, "app") as
+            // consumed. (handle, "web") is still untouched — its
+            // E302 must still surface the modal next time.
+            state.mark_consent_retry_consumed(handle, "app");
+            assert!(state.consent_retry_already_consumed(handle, "app"));
+            assert!(
+                !state.consent_retry_already_consumed(handle, "web"),
+                "web budget must NOT be poisoned by app's approve"
+            );
+
+            // Now approve target=web too.
+            state.mark_consent_retry_consumed(handle, "web");
+            assert!(state.consent_retry_already_consumed(handle, "app"));
+            assert!(state.consent_retry_already_consumed(handle, "web"));
+
+            // Reset (e.g. on Cancel or successful launch) clears
+            // ALL targets under the handle.
+            state.reset_consent_retry_budget(handle);
+            assert!(!state.consent_retry_already_consumed(handle, "app"));
+            assert!(!state.consent_retry_already_consumed(handle, "web"));
+        }
+
+        #[test]
+        fn resolves_matching_pending_resolution_consents() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: handle.to_string(),
+                original_secrets: Vec::new(),
+                secrets: Vec::new(),
+                consents: vec![consent_item("app"), consent_item("web")],
+            });
+
+            let handled =
+                apply_pending_resolution_consents(&mut state, handle, |_| Ok(())).expect("approve");
+
+            assert!(
+                handled,
+                "matching pending_resolution consents must be handled"
+            );
+            assert!(
+                state.pending_resolution.is_none(),
+                "all consents resolved -> clear"
+            );
+            assert!(state.consent_retry_already_consumed(handle, "app"));
+            assert!(state.consent_retry_already_consumed(handle, "web"));
+        }
+
+        #[test]
+        fn preserves_other_resolution_requirements_when_approving_consents() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: handle.to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![crate::state::PendingSecretsItem {
+                    target: Some("app".to_string()),
+                    fields: Vec::new(),
+                }],
+                consents: vec![consent_item("app")],
+            });
+
+            apply_pending_resolution_consents(&mut state, handle, |_| Ok(())).expect("approve");
+
+            let pending = state
+                .pending_resolution
+                .as_ref()
+                .expect("remaining secrets must keep pending_resolution open");
+            assert_eq!(pending.secrets.len(), 1);
+            assert!(pending.consents.is_empty());
+        }
+    }
+
+    mod pending_prelaunch_requirement_message {
+        use super::*;
+        use crate::state::{
+            PendingConfigRequest, PendingConsentItem, PendingConsentRequest,
+            PendingResolutionRequest, PendingSecretsItem,
+        };
+
+        fn pending_config(handle: &str, target: Option<&str>) -> PendingConfigRequest {
+            PendingConfigRequest {
+                handle: handle.to_string(),
+                target: target.map(str::to_string),
+                fields: Vec::new(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        fn pending_consent(handle: &str, target_label: &str) -> PendingConsentRequest {
+            PendingConsentRequest {
+                handle: handle.to_string(),
+                scoped_id: "publisher/app".to_string(),
+                version: "1.0.0".to_string(),
+                target_label: target_label.to_string(),
+                policy_segment_hash: "blake3:policy".to_string(),
+                provisioning_policy_hash: "blake3:prov".to_string(),
+                summary: "Consent summary".to_string(),
+                original_secrets: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn summarizes_legacy_pending_config_and_consent() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.set_pending_config(pending_config(handle, Some("app")));
+            state.set_pending_consent(pending_consent(handle, "web"));
+
+            let message = pending_prelaunch_requirement_message(&state, handle)
+                .expect("legacy requirements message");
+
+            assert_eq!(
+                message,
+                "awaiting pre-launch requirements: config:app, consent:web"
+            );
+        }
+
+        #[test]
+        fn summarizes_unified_pending_resolution_items() {
+            let mut state = AppState::initial();
+            let handle = "capsule://github.com/Koh0920/WasedaP2P";
+            state.pending_resolution = Some(PendingResolutionRequest {
+                handle: handle.to_string(),
+                original_secrets: Vec::new(),
+                secrets: vec![PendingSecretsItem {
+                    target: Some("app".to_string()),
+                    fields: Vec::new(),
+                }],
+                consents: vec![
+                    PendingConsentItem {
+                        scoped_id: "publisher/app".to_string(),
+                        version: "1.0.0".to_string(),
+                        target_label: "app".to_string(),
+                        policy_segment_hash: "blake3:app-policy".to_string(),
+                        provisioning_policy_hash: "blake3:app-prov".to_string(),
+                        summary: "Consent app".to_string(),
+                    },
+                    PendingConsentItem {
+                        scoped_id: "publisher/web".to_string(),
+                        version: "1.0.0".to_string(),
+                        target_label: "web".to_string(),
+                        policy_segment_hash: "blake3:web-policy".to_string(),
+                        provisioning_policy_hash: "blake3:web-prov".to_string(),
+                        summary: "Consent web".to_string(),
+                    },
+                ],
+            });
+
+            let message = pending_prelaunch_requirement_message(&state, handle)
+                .expect("unified requirements message");
+
+            assert_eq!(
+                message,
+                "awaiting pre-launch requirements: config:app, consent:app, consent:web"
+            );
+        }
     }
 
     #[test]
-    fn capsule_host_route_like_path_falls_back_to_index() {
-        let root = serve_host_panel_asset("/").expect("host panel asset");
-        let response = serve_host_panel_asset("/launcher").expect("host panel asset");
+    fn auth_status_sanitizes_handoff_without_exposing_session_token() {
+        let stdout = br#"{
+            "session_token": "secret-token",
+            "site_base_url": "https://ato.run",
+            "api_base_url": "https://api.ato.run",
+            "publisher_handle": "koh"
+        }"#;
 
-        assert_eq!(response.status(), 200);
-        assert_eq!(response.body().as_ref(), root.body().as_ref());
+        let status = auth_status_from_handoff_stdout(stdout);
+        let json = serde_json::to_value(&status).unwrap();
+
+        assert_eq!(json["signed_in"], true);
+        assert_eq!(json["api_base_url"], "https://api.ato.run");
+        assert_eq!(json["account_hint"], "koh");
+        assert!(json.get("session_token").is_none());
+        assert!(!json.to_string().contains("secret-token"));
     }
 
     #[test]
-    fn capsule_host_missing_static_asset_returns_not_found() {
-        let response = serve_host_panel_asset("/assets/missing.js").expect("host panel asset");
-
-        assert_eq!(response.status(), 404);
+    fn auth_status_returns_signed_out_on_handoff_failure() {
+        let status = auth_status_from_handoff_stdout(b"not json");
+        assert!(!status.signed_in);
+        assert_eq!(status.api_base_url, default_api_base_url());
+        assert!(status.account_hint.is_none());
     }
 
     #[test]
-    fn capsule_host_rejects_parent_traversal() {
-        let error = serve_host_panel_asset("/../secret.txt").expect_err("should reject traversal");
+    fn auth_status_returns_signed_out_on_missing_publisher_handle() {
+        let stdout = br#"{
+            "session_token": "secret-token",
+            "site_base_url": "https://ato.run",
+            "api_base_url": "https://api.ato.run"
+        }"#;
 
-        assert!(error.to_string().contains("parent traversal"));
+        let status = auth_status_from_handoff_stdout(stdout);
+        assert!(status.signed_in);
+        assert_eq!(status.api_base_url, "https://api.ato.run");
+        assert!(status.account_hint.is_none());
     }
 
     #[test]
-    fn host_panel_request_url_uses_base_for_root() {
-        let base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
-
-        let resolved = host_panel_request_url(&base, "/").expect("request url");
-
-        assert_eq!(resolved.as_str(), "http://127.0.0.1:4174/");
-    }
-
-    #[test]
-    fn host_panel_request_url_joins_nested_asset_paths() {
-        let base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
-
-        let resolved = host_panel_request_url(&base, "/assets/main.js").expect("request url");
-
-        assert_eq!(resolved.as_str(), "http://127.0.0.1:4174/assets/main.js");
-    }
-
-    #[test]
-    fn host_panel_navigation_allows_capsule_host_scheme() {
-        let target = url::Url::parse("capsule-host://host/launcher").expect("url");
-
-        assert!(allow_host_panel_navigation(&target, None));
-    }
-
-    #[test]
-    fn host_panel_navigation_rejects_external_origins_without_dev_url() {
-        let target = url::Url::parse("https://example.com/settings").expect("url");
-
-        assert!(!allow_host_panel_navigation(&target, None));
-    }
-
-    #[test]
-    fn host_panel_navigation_allows_configured_dev_origin() {
-        let target = url::Url::parse("http://127.0.0.1:4174/launcher").expect("url");
-        let dev_base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
-
-        assert!(allow_host_panel_navigation(&target, Some(&dev_base)));
-    }
-
-    #[test]
-    fn host_panel_navigation_rejects_other_dev_origins() {
-        let target = url::Url::parse("http://127.0.0.1:4175/launcher").expect("url");
-        let dev_base = url::Url::parse("http://127.0.0.1:4174/").expect("url");
-
-        assert!(!allow_host_panel_navigation(&target, Some(&dev_base)));
+    fn auth_status_response_does_not_contain_token_field() {
+        let status = AuthStatusResponse {
+            signed_in: true,
+            api_base_url: "https://api.ato.run".to_string(),
+            account_hint: Some("koh".to_string()),
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(json.get("session_token").is_none());
+        assert!(json.get("token").is_none());
     }
 
     // ── apply_capsule_secrets (used by automation MCP `set_capsule_secrets`) ──

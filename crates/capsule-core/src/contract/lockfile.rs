@@ -564,7 +564,14 @@ pub async fn ensure_lockfile_for_compat_input(
     let lock_path = lockfile_output_path(manifest_dir);
     let inputs =
         open_lockfile_inputs_for_compat_input(manifest_dir, compat_input.manifest_value())?;
-    let manifest_hash = semantic_manifest_hash_from_text(compat_input.manifest_text())?;
+    // Use the raw on-disk capsule.toml text for the hash so that the cache hit
+    // check is consistent with verify_lockfile_manifest (which reads the raw
+    // file).  Flat v0.3 manifests are normalised by the compat bridge and the
+    // bridge text differs from the raw file text → different hash → always a
+    // cache miss unless we align them here.
+    let raw_manifest_text = fs::read_to_string(manifest_dir.join("capsule.toml"))
+        .unwrap_or_else(|_| compat_input.manifest_text().to_string());
+    let manifest_hash = semantic_manifest_hash_from_text(&raw_manifest_text)?;
 
     if lock_path.exists()
         && verify_lockfile_manifest_hash(&lock_path, &manifest_hash).is_ok()
@@ -1422,6 +1429,81 @@ pub fn verify_lockfile_external_dependencies(
     Ok(())
 }
 
+/// PR-4a: graph-derived equivalent of
+/// [`verify_lockfile_external_dependencies`]. Takes a bundle-projected
+/// [`DerivedDependencyContracts`] view as input instead of re-parsing
+/// the manifest TOML. The 6-field equality check
+/// (source / source_type / contract / injection_bindings / parameters
+/// / credentials) is byte-for-byte identical to the legacy verifier,
+/// because the bundle-derived view re-uses the same `ParamValue` /
+/// `TemplatedString` types the manifest grammar uses.
+///
+/// Empty `contracts.providers` is treated as a no-op (matches the
+/// legacy verifier's short-circuit on manifests without external
+/// dependencies).
+///
+/// **Credential safety:** `DerivedDependencyContracts` carries
+/// `TemplatedString` credential templates only, never resolved env
+/// values. See `GraphDependencyInput`'s safety rule docstring.
+pub fn verify_lockfile_against_contracts(
+    contracts: &crate::engine::execution_graph::DerivedDependencyContracts,
+    lockfile: &CapsuleLock,
+) -> Result<()> {
+    if contracts.providers.is_empty() {
+        return Ok(());
+    }
+
+    for provider in &contracts.providers {
+        let Some(locked) = lockfile
+            .capsule_dependencies
+            .iter()
+            .find(|item| item.name == provider.alias)
+        else {
+            return Err(CapsuleError::Config(format!(
+                "{} is missing capsule dependency '{}'",
+                CAPSULE_LOCK_FILE_NAME, provider.alias
+            )));
+        };
+        // The bundle-derived view stores `source` / `source_type` /
+        // `contract` as `Option<String>` (defaulted to `None` for
+        // back-compat callers that haven't migrated). The legacy
+        // verifier compares against `String` / `Option<String>`
+        // shape. Treat `None` on the contract side as "manifest
+        // didn't declare the field" — match the empty / absent value
+        // accordingly.
+        let source_match = provider
+            .source
+            .as_deref()
+            .map(|s| s == locked.source.as_str())
+            .unwrap_or(false);
+        let source_type_match = provider
+            .source_type
+            .as_deref()
+            .map(|t| t == locked.source_type.as_str())
+            .unwrap_or(false);
+        let contract_match = provider.contract == locked.contract;
+        let bindings_match = provider.injection_bindings == locked.injection_bindings;
+        let parameters_match = provider.parameters == locked.parameters;
+        let credentials_match = provider.credentials == locked.credentials;
+        if !source_match
+            || !source_type_match
+            || !contract_match
+            || !bindings_match
+            || !parameters_match
+            || !credentials_match
+        {
+            return Err(CapsuleError::Config(format!(
+                "{} capsule dependency '{}' does not match manifest source '{}'",
+                CAPSULE_LOCK_FILE_NAME,
+                provider.alias,
+                provider.source.as_deref().unwrap_or("")
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn infer_contract_dependency_source_type(source: &str) -> Option<String> {
     let raw = source.trim();
     if raw.starts_with("capsule://store/")
@@ -1705,11 +1787,19 @@ async fn finalize_lockfile_from_draft(
         Some(tools)
     };
 
+    // Use the raw on-disk capsule.toml text for the hash so that
+    // verify_lockfile_manifest (which always reads the raw file) sees the same
+    // hash.  When the caller came through the compat bridge the `manifest_text`
+    // argument is the *normalised* TOML, which deserialises to a different
+    // CapsuleManifest struct than the original flat v0.3 file — causing E207.
+    let raw_manifest_text = fs::read_to_string(manifest_dir.join("capsule.toml"))
+        .unwrap_or_else(|_| manifest_text.to_string());
+
     Ok(CapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: Utc::now().to_rfc3339(),
-            manifest_hash: semantic_manifest_hash_from_text(manifest_text)?,
+            manifest_hash: semantic_manifest_hash_from_text(&raw_manifest_text)?,
         },
         allowlist,
         capsule_dependencies,

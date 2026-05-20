@@ -10,7 +10,7 @@ use tracing::{debug, error};
 use super::command::{
     AutomationCommand, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PendingAutomationRequest,
 };
-use super::policy::{AUTOMATION_CONNECTION_IO_TIMEOUT, AUTOMATION_DISPATCH_TIMEOUT};
+use super::policy::AUTOMATION_CONNECTION_IO_TIMEOUT;
 
 pub type PendingQueue = Arc<Mutex<Vec<PendingAutomationRequest>>>;
 pub type NotifyFn = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -412,9 +412,9 @@ fn handle_connection(
         }
 
         let (id, response_json) = match dispatch_request(&line, &pending, &notify, &active_pane) {
-            Ok(rx) => {
+            Ok((rx, response_timeout)) => {
                 // Block waiting for GPUI to process the request.
-                match rx.recv_timeout(AUTOMATION_DISPATCH_TIMEOUT) {
+                match rx.recv_timeout(response_timeout) {
                     Ok(Ok(value)) => {
                         let id = extract_id(&line);
                         (
@@ -467,7 +467,13 @@ fn dispatch_request(
     pending: &PendingQueue,
     notify: &NotifyFn,
     active_pane: &ActivePaneSnapshot,
-) -> Result<std::sync::mpsc::Receiver<Result<Value, String>>, String> {
+) -> Result<
+    (
+        std::sync::mpsc::Receiver<Result<Value, String>>,
+        std::time::Duration,
+    ),
+    String,
+> {
     let rpc: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
@@ -512,13 +518,14 @@ fn dispatch_request(
 
     let (tx, rx) = channel();
     let req = PendingAutomationRequest::new(pane_id, command, tx);
+    let response_timeout = req.response_timeout();
 
     if let Ok(mut q) = pending.lock() {
         q.push(req);
     }
     notify();
 
-    Ok(rx)
+    Ok((rx, response_timeout))
 }
 
 fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, String> {
@@ -610,11 +617,33 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         // entry points, so MCP and UI exit through the exact same
         // code path (refs #92 AC-step 6).
         "stop_active_session" => Ok(AutomationCommand::StopActiveSession),
+        "host_dispatch_action" => Ok(AutomationCommand::HostDispatchAction {
+            action: s("action")?,
+            url: params.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        }),
+        "list_sessions" => Ok(AutomationCommand::ListSessions),
+        "auth_status" => Ok(AutomationCommand::AuthStatus),
         "focus_pane" => Ok(AutomationCommand::FocusPane {
             pane_id: params
                 .get("pane_id")
                 .and_then(|v| v.as_u64())
                 .ok_or("missing required param 'pane_id'")? as usize,
+        }),
+        "close_pane" => Ok(AutomationCommand::ClosePane {
+            pane_id: params
+                .get("pane_id")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required param 'pane_id'")? as usize,
+        }),
+        "click_at" => Ok(AutomationCommand::ClickAt {
+            x: params
+                .get("x")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing required param 'x'")?,
+            y: params
+                .get("y")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing required param 'y'")?,
         }),
         other => Err(format!("unknown automation method: {other}")),
     }

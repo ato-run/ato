@@ -10,8 +10,13 @@ tracks the current implementation first.
 
 | Term | Current meaning |
 |---|---|
-| **Capsule** | The execution unit described by `capsule.toml` and routed through one of the supported runtime kinds |
-| **`capsule.toml`** | The main authoring manifest surface for local projects |
+| **Source** | Raw input material for a recipe: Git repository, local directory, source snapshot, generated build output, or declared artifact |
+| **Recipe** | The executable interpretation of source inputs. A recipe defines how source inputs are arranged, built, configured, permissioned, and launched. The Store shares recipes, not source code or app binaries |
+| **`capsule.toml`** | The local file format for an Ato recipe. Not necessarily one-to-one with a repository — a repository may have many recipes |
+| **Execution** | A resolved launch produced from source inputs, a recipe, and the user environment |
+| **Execution Identity** | A content-addressed fingerprint of the resolved launch world, including recipe snapshot, source snapshots, runtime, environment, filesystem grants, network policy, capability policy, and entrypoint |
+| **Session** | A managed, running or reusable execution |
+| **Capsule** | A runnable unit materialized from a recipe. In current docs, prefer "recipe" when discussing authoring, sharing, review, or Store entries |
 | **Target** | A named execution surface under `[targets.<label>]` |
 | **`default_target`** | The target selected when the caller does not specify one |
 | **Runtime kind** | The routed runtime family: `source`, `wasm`, `oci`, or `web` |

@@ -1,0 +1,52 @@
+---
+// Launchpad-style app icon grid for quick access
+---
+<div>
+  <div class="flex items-center justify-between px-1 mb-4">
+    <div class="flex items-center gap-2 text-[14px] font-bold text-slate-700">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+      </svg>
+      Quick Launch
+    </div>
+  </div>
+
+  <div class="grid grid-cols-6 gap-3 mb-8">
+    <!-- ato.run -->
+    <div class="launchpad-tile flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer hover:shadow-md hover:border-slate-300 transition-all hover:-translate-y-0.5" data-action="open_query" data-query="https://ato.run/">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-rose-400 to-rose-500 text-white text-2xl flex items-center justify-center shadow-inner shrink-0">🌐</div>
+      <span class="text-[11px] font-medium text-slate-700 text-center leading-tight">ato.run</span>
+    </div>
+
+    <!-- Store -->
+    <div class="launchpad-tile flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer hover:shadow-md hover:border-slate-300 transition-all hover:-translate-y-0.5" data-action="open_store">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-400 to-blue-500 text-white text-2xl flex items-center justify-center shadow-inner shrink-0">🛒</div>
+      <span class="text-[11px] font-medium text-slate-700 text-center leading-tight">Store</span>
+    </div>
+
+    <!-- Dashboard (shadcn-admin) -->
+    <div class="launchpad-tile flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer hover:shadow-md hover:border-slate-300 transition-all hover:-translate-y-0.5" data-action="open_query" data-query="github.com/koh0920/shadcn-admin">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-400 to-indigo-500 text-white text-2xl flex items-center justify-center shadow-inner shrink-0">📊</div>
+      <span class="text-[11px] font-medium text-slate-700 text-center leading-tight">Dashboard</span>
+    </div>
+
+    <!-- 3D iPhone -->
+    <div class="launchpad-tile flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer hover:shadow-md hover:border-slate-300 transition-all hover:-translate-y-0.5" data-action="open_query" data-query="github.com/koh0920/iphone-3d">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-orange-400 to-orange-500 text-white text-2xl flex items-center justify-center shadow-inner shrink-0">📱</div>
+      <span class="text-[11px] font-medium text-slate-700 text-center leading-tight">3D iPhone</span>
+    </div>
+
+    <!-- Kanban -->
+    <div class="launchpad-tile flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer hover:shadow-md hover:border-slate-300 transition-all hover:-translate-y-0.5" data-action="open_query" data-query="github.com/koh0920/react-dnd-kanban">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-400 to-emerald-500 text-white text-2xl flex items-center justify-center shadow-inner shrink-0">🗂️</div>
+      <span class="text-[11px] font-medium text-slate-700 text-center leading-tight">Kanban</span>
+    </div>
+
+    <!-- Settings -->
+    <div class="launchpad-tile flex flex-col items-center gap-2 p-3 rounded-xl border border-slate-200 bg-white shadow-sm cursor-pointer hover:shadow-md hover:border-slate-300 transition-all hover:-translate-y-0.5" data-action="open_settings">
+      <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-slate-400 to-slate-500 text-white text-2xl flex items-center justify-center shadow-inner shrink-0">⚙️</div>
+      <span class="text-[11px] font-medium text-slate-700 text-center leading-tight">Settings</span>
+    </div>
+  </div>
+</div>

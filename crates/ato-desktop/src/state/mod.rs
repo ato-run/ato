@@ -1,4 +1,11 @@
+mod app_window;
 pub(crate) mod persistence;
+pub(crate) mod session;
+
+// `ShellSurface` is re-exported now so #169 can flip the renderer over to it
+// without churning the public path. It is intentionally unused in this PR.
+#[allow(unused_imports)]
+pub use app_window::{AppWindow, AppWindowId, AppWindowRegistry, ShellSurface};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -143,7 +150,6 @@ pub enum HostPanelRoute {
     },
     CapsuleDetail {
         pane_id: PaneId,
-        tab: CapsuleDetailTab,
     },
 }
 
@@ -155,29 +161,10 @@ impl HostPanelRoute {
             Self::Settings {
                 section: Some(section),
             } => format!("Settings · {}", section.label()),
-            Self::CapsuleDetail { pane_id, tab } => {
-                format!("Capsule detail · pane {} · {}", pane_id, tab.label())
+            Self::CapsuleDetail { pane_id } => {
+                format!("Capsule detail · pane {}", pane_id)
             }
         }
-    }
-
-    pub fn url(&self) -> Url {
-        let value = match self {
-            Self::Launcher => "capsule-host://panel/launcher".to_string(),
-            Self::Settings { section: None } => "capsule-host://panel/settings".to_string(),
-            Self::Settings {
-                section: Some(section),
-            } => format!(
-                "capsule-host://panel/settings/{}",
-                settings_tab_route_segment(*section)
-            ),
-            Self::CapsuleDetail { pane_id, tab } => format!(
-                "capsule-host://panel/capsule/{}/{}",
-                pane_id,
-                capsule_detail_tab_route_segment(*tab)
-            ),
-        };
-        Url::parse(&value).expect("host panel route should always be a valid URL")
     }
 }
 
@@ -551,13 +538,9 @@ pub struct AuthSession {
 pub enum PaneSurface {
     Web(WebPane),
     HostPanel(HostPanelRoute),
-    Native {
-        body: String,
-    },
     CapsuleStatus(CapsuleStatusPane),
     Inspector,
     DevConsole,
-    Launcher,
     AuthHandoff {
         session_id: String,
         origin: String,
@@ -891,6 +874,121 @@ pub struct PendingConsentRequest {
     pub original_secrets: Vec<SecretEntry>,
 }
 
+/// One missing-env requirement, scoped to a specific orchestration
+/// target. Carries the rich field schema the dynamic form renders.
+/// Equivalent of the old `PendingConfigRequest` but stripped of the
+/// per-launch context (`handle`, `original_secrets`) — that lives once
+/// on the parent [`PendingResolutionRequest`] so multiple secret
+/// requirements can share it.
+#[derive(Clone, Debug)]
+pub struct PendingSecretsItem {
+    pub target: Option<String>,
+    pub fields: Vec<ConfigField>,
+}
+
+/// One consent requirement for a specific ExecutionPlan. Equivalent of
+/// the old `PendingConsentRequest` but stripped of the per-launch
+/// context (`handle`, `original_secrets`) so multiple consent items can
+/// share it on the parent [`PendingResolutionRequest`].
+#[derive(Clone, Debug)]
+pub struct PendingConsentItem {
+    pub scoped_id: String,
+    pub version: String,
+    pub target_label: String,
+    pub policy_segment_hash: String,
+    pub provisioning_policy_hash: String,
+    pub summary: String,
+}
+
+/// #117 — unified pre-launch resolution request. Replaces the previous
+/// pair of single-slot `pending_config` (E103) + `pending_consent`
+/// (E302) modals with one accumulating modal that handles both kinds
+/// at once.
+///
+/// Today the CLI still surfaces requirements one at a time (E103 first,
+/// then E302 per target after each retry). Instead of opening a fresh
+/// modal each time, the orchestrator drain merges the new requirement
+/// into the existing `PendingResolutionRequest` so the user sees ONE
+/// modal that progressively becomes complete, then submits once.
+///
+/// The legacy `PendingConfigRequest` / `PendingConsentRequest` types
+/// stay in this module as the wire shape from the orchestrator drain;
+/// they are converted into [`PendingSecretsItem`] / [`PendingConsentItem`]
+/// during the merge.
+#[derive(Clone, Debug, Default)]
+pub struct PendingResolutionRequest {
+    /// The capsule handle the user asked to launch. Authoritative for
+    /// the retry call once all requirements are resolved.
+    pub handle: String,
+    /// Snapshot of secrets passed to the original `start_capsule`
+    /// call. Cloned at request-construction time so a concurrent
+    /// secret-store mutation can't corrupt the retry. Carried at the
+    /// request level (not per-item) so the retry path is identical
+    /// regardless of whether secrets, consents, or both were missing.
+    pub original_secrets: Vec<SecretEntry>,
+    /// Missing secret schemas across all targets. Order is
+    /// arrival-order (first-merged-first); the modal renders sections
+    /// in this order. A target only appears once in this list — a
+    /// merge with the same `target` replaces the previous fields
+    /// rather than appending duplicates.
+    pub secrets: Vec<PendingSecretsItem>,
+    /// Pending ExecutionPlan consents across all targets, identified by
+    /// the five-tuple. Same de-duplication policy as `secrets`: a merge
+    /// with an identical identity tuple replaces rather than duplicates
+    /// (e.g. if the CLI re-derives the same plan after a retry).
+    pub consents: Vec<PendingConsentItem>,
+}
+
+impl PendingResolutionRequest {
+    /// Merge one secrets requirement (typically converted from a
+    /// `PendingConfigRequest` produced by the orchestrator drain).
+    /// If a section for the same `target` already exists, replace it
+    /// with the new schema (the CLI may emit a refined schema after a
+    /// partial retry). Otherwise, append.
+    pub fn merge_secrets(&mut self, item: PendingSecretsItem) {
+        if let Some(existing) = self.secrets.iter_mut().find(|s| s.target == item.target) {
+            existing.fields = item.fields;
+        } else {
+            self.secrets.push(item);
+        }
+    }
+
+    /// Merge one consent requirement. Identity tuple
+    /// `(scoped_id, version, target_label, policy_segment_hash,
+    /// provisioning_policy_hash)` is the merge key — a re-emit for the
+    /// same plan replaces the prior summary text in case the CLI
+    /// rendered it differently the second time.
+    pub fn merge_consent(&mut self, item: PendingConsentItem) {
+        let key = (
+            item.scoped_id.clone(),
+            item.version.clone(),
+            item.target_label.clone(),
+            item.policy_segment_hash.clone(),
+            item.provisioning_policy_hash.clone(),
+        );
+        if let Some(existing) = self.consents.iter_mut().find(|c| {
+            (
+                c.scoped_id.clone(),
+                c.version.clone(),
+                c.target_label.clone(),
+                c.policy_segment_hash.clone(),
+                c.provisioning_policy_hash.clone(),
+            ) == key
+        }) {
+            existing.summary = item.summary;
+        } else {
+            self.consents.push(item);
+        }
+    }
+
+    /// Whether the request has nothing left to resolve. Used by the
+    /// submit handler to decide when to clear the modal and retry the
+    /// launch.
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty() && self.consents.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveWebPane {
     pub workspace_id: WorkspaceId,
@@ -994,7 +1092,25 @@ pub struct AppState {
     /// `ato internal consent approve-execution-plan` and clears it via
     /// `AppState::clear_pending_consent`, after which
     /// `ensure_pending_local_launch` re-arms the launch.
+    ///
+    /// **Deprecated as of #117.** The orchestrator drain no longer
+    /// writes to this field directly — both E103 and E302 surfaces
+    /// are merged into [`pending_resolution`] which the unified
+    /// resolution modal consumes. The field is kept as a fallback
+    /// rendering surface during migration: the legacy
+    /// [`crate::ui::modals::consent_form`] renders only when
+    /// `pending_resolution.is_none() && pending_consent.is_some()`.
     pub pending_consent: Option<PendingConsentRequest>,
+    /// #117 — unified pre-launch resolution request that replaces the
+    /// pair of single-slot `pending_config` + `pending_consent` modals
+    /// with one accumulating modal handling both E103 and E302 in a
+    /// single panel. Set by the orchestrator drain when the first
+    /// missing requirement surfaces; subsequent requirements (typically
+    /// a per-target E302 after the user fills in secrets) are merged
+    /// into the same request rather than replacing it. Cleared on
+    /// Submit (writes everything atomically + re-arms launch) or
+    /// Cancel.
+    pub pending_resolution: Option<PendingResolutionRequest>,
     /// (handle, target_label) pairs for which a post-Approve retry
     /// has already been consumed. If a second E302 surfaces for the
     /// same (handle, target_label) in the same session, the desktop
@@ -1013,15 +1129,13 @@ pub struct AppState {
     /// Set when the user requests Quit so the shell can render a
     /// confirm dialog asking whether to keep or clear persisted tabs.
     pub pending_quit_confirmation: bool,
+    /// Computed when the quit dialog opens; shows stale resources.
+    pub cleanup_preview: Option<crate::orchestrator::CleanupPreview>,
     /// Toggle for the route-metadata popover anchored to the chrome's
     /// info chip. The popover surfaces source/runtime/trust/snapshot
     /// fields that previously cluttered the chrome as inline tags.
     pub route_metadata_popover_open: bool,
     pub route_metadata_active_tab: CapsuleDetailTab,
-    /// Whether the settings overlay panel is currently visible.
-    /// Managed by `show_settings_panel()` (toggle). No sidebar tab
-    /// is created — the overlay is rendered on top of the stage.
-    pub settings_panel_open: bool,
     pub settings_active_tab: SettingsTab,
     /// Status of the most recent GitHub-release version check. Drives
     /// the Updates card in the settings panel — the actual fetch is
@@ -1046,10 +1160,11 @@ pub struct AppState {
     pub auth_policy_registry: AuthPolicyRegistry,
     pub console_logs: Vec<ConsoleLogEntry>,
     pub network_logs: Vec<NetworkLogEntry>,
-    pub host_panel_payload_revision: u64,
-    pub host_panel_last_response: Option<serde_json::Value>,
     pub config: crate::config::DesktopConfig,
     pub secret_store: crate::config::SecretStore,
+    /// Handle → granted secret keys cache, built from bridge list().allow
+    /// so the render path never spawns the CLI bridge.
+    pub secret_grant_keys_by_handle: std::collections::HashMap<String, Vec<String>>,
     /// Per-capsule plaintext configuration (model name, port, etc.)
     /// — anything that came in via a non-secret `ConfigField`. The
     /// orchestrator merges this into the child process env at launch
@@ -1063,14 +1178,29 @@ pub struct AppState {
     pub capsule_policy_overrides: crate::config::CapsulePolicyOverrideStore,
     pub capsule_search_results: Vec<CapsuleSearchResult>,
     pub capsule_search_query: String,
+    /// Multi-window registry — layer 1 of the Focus View redesign (#167).
+    /// Empty until #169 wires the orchestrator to populate it; today it
+    /// is unread by the renderer.
+    #[allow(dead_code)]
+    pub app_windows: AppWindowRegistry,
+    /// FIFO queue of host-level GPUI actions requested by the
+    /// automation socket (MCP `host_dispatch_action`). Drained on
+    /// every `DesktopShell::render` pass. Bypasses macOS Accessibility
+    /// permission requirements that block osascript-based keystroke
+    /// synthesis.
+    pub pending_host_actions: VecDeque<String>,
+    /// Pane (content window) IDs queued for close by the automation
+    /// socket (`browser_close_tab`). Drained on every
+    /// `DesktopShell::render` pass with access to the GPUI `cx`.
+    pub pending_close_panes: VecDeque<usize>,
     next_task_id: TaskSetId,
     next_pane_id: PaneId,
     next_new_tab_index: usize,
 }
 
 impl AppState {
-    /// Boot state for end users: a single Ato Store tab pointed at
-    /// https://ato.run. `demo()` (below) is kept intact because the
+    /// Boot state for end users: a Launchpad task and an Ato Store
+    /// WebView tab. `demo()` (below) is kept intact because the
     /// rendering tests + `ui/panels/launcher_v2.rs` assertions rely
     /// on its 3-task graph; switching the production boot path here
     /// avoids touching that test surface.
@@ -1078,13 +1208,33 @@ impl AppState {
         let store = GuestRoute::ExternalUrl(
             url::Url::parse("https://ato.run/").expect("https://ato.run/ is a valid URL"),
         );
-        let store_task = TaskSet {
+
+        let launcher_task = TaskSet {
             id: 1,
-            title: "Ato".to_string(),
+            title: "Launchpad".to_string(),
             focused_pane: 1,
             pane_tree: PaneTree::Leaf(1),
             panes: vec![Pane {
                 id: 1,
+                title: "Launchpad".to_string(),
+                role: PaneRole::Primary,
+                visible: true,
+                bounds: PaneBounds::empty(),
+                surface: PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            }],
+            split_ratio: 0.5,
+            route_candidates: vec![],
+            route_index: 0,
+            preview: "Launchpad".to_string(),
+        };
+
+        let ato_task = TaskSet {
+            id: 2,
+            title: "Ato".to_string(),
+            focused_pane: 2,
+            pane_tree: PaneTree::Leaf(2),
+            panes: vec![Pane {
+                id: 2,
                 title: store.to_string(),
                 role: PaneRole::Primary,
                 visible: true,
@@ -1124,11 +1274,11 @@ impl AppState {
             active_workspace: 1,
             workspaces: vec![Workspace {
                 id: 1,
-                title: "Ato".to_string(),
+                title: "Home".to_string(),
                 active_task: 1,
-                tasks: vec![store_task],
+                tasks: vec![launcher_task, ato_task],
             }],
-            command_bar_text: "https://ato.run/".to_string(),
+            command_bar_text: String::new(),
             activity: Vec::new(),
             retention_count: 0,
             capsule_logs: HashMap::new(),
@@ -1136,6 +1286,7 @@ impl AppState {
             pending_permission_prompt: None,
             pending_config: None,
             pending_consent: None,
+            pending_resolution: None,
             consent_retry_consumed: HashSet::new(),
             theme_mode: ThemeMode::Light,
             desktop_auth: DesktopAuthState {
@@ -1144,9 +1295,9 @@ impl AppState {
                 last_login_origin: None,
             },
             pending_quit_confirmation: false,
+            cleanup_preview: None,
             route_metadata_popover_open: false,
             route_metadata_active_tab: CapsuleDetailTab::Overview,
-            settings_panel_open: false,
             settings_active_tab: SettingsTab::General,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
@@ -1156,14 +1307,20 @@ impl AppState {
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             console_logs: Vec::new(),
             network_logs: Vec::new(),
-            host_panel_payload_revision: 0,
-            host_panel_last_response: None,
             config: crate::config::load_config(),
-            secret_store: crate::config::load_secrets(),
+            secret_store: {
+                let _ = crate::config::migrate_legacy_secrets_if_present();
+                crate::config::load_secrets()
+            },
+            secret_grant_keys_by_handle: crate::config::SecretStore::build_grant_keys_cache()
+                .unwrap_or_default(),
             capsule_config_store: crate::config::load_capsule_configs(),
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
+            app_windows: AppWindowRegistry::default(),
+            pending_host_actions: VecDeque::new(),
+            pending_close_panes: VecDeque::new(),
             next_task_id: 2,
             next_pane_id: 2,
             next_new_tab_index: 1,
@@ -1207,7 +1364,7 @@ impl AppState {
                 role: PaneRole::Primary,
                 visible: true,
                 bounds: PaneBounds::empty(),
-                surface: PaneSurface::Launcher,
+                surface: PaneSurface::HostPanel(HostPanelRoute::Launcher),
             }],
             split_ratio: 0.5,
             route_candidates: vec![],
@@ -1322,9 +1479,11 @@ impl AppState {
             capsule_logs: HashMap::new(),
             browser_commands: VecDeque::new(),
             pending_permission_prompt: None,
+            pending_resolution: None,
             pending_config: None,
             pending_consent: None,
             consent_retry_consumed: HashSet::new(),
+            cleanup_preview: None,
             theme_mode: ThemeMode::Light, // synced below from config
             desktop_auth: DesktopAuthState {
                 status: DesktopAuthStatus::SignedOut,
@@ -1334,7 +1493,6 @@ impl AppState {
             pending_quit_confirmation: false,
             route_metadata_popover_open: false,
             route_metadata_active_tab: CapsuleDetailTab::Overview,
-            settings_panel_open: false,
             settings_active_tab: SettingsTab::General,
             update_check: UpdateCheck::Idle,
             pane_icons: HashMap::new(),
@@ -1344,20 +1502,53 @@ impl AppState {
             auth_policy_registry: AuthPolicyRegistry::default_third_party(),
             console_logs: Vec::new(),
             network_logs: Vec::new(),
-            host_panel_payload_revision: 0,
-            host_panel_last_response: None,
             config: crate::config::load_config(),
-            secret_store: crate::config::load_secrets(),
+            secret_store: {
+                let _ = crate::config::migrate_legacy_secrets_if_present();
+                crate::config::load_secrets()
+            },
+            secret_grant_keys_by_handle: crate::config::SecretStore::build_grant_keys_cache()
+                .unwrap_or_default(),
             capsule_config_store: crate::config::load_capsule_configs(),
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
+            app_windows: AppWindowRegistry::default(),
+            pending_host_actions: VecDeque::new(),
+            pending_close_panes: VecDeque::new(),
             next_task_id: 4,
             next_pane_id: 4,
             next_new_tab_index: 2,
         };
         state.sync_theme_from_config();
         state
+    }
+
+    /// Allocate an `AppWindow` for the given route in the multi-window
+    /// registry (#167). Returns the new id, which is also marked as
+    /// most-recently focused. Currently unused by the renderer — wired
+    /// up in #169.
+    pub fn open_app_window(&mut self, route: GuestRoute) -> AppWindowId {
+        self.app_windows.open(route)
+    }
+
+    /// Mark an `AppWindow` as most-recently focused. Returns true if the
+    /// id existed.
+    pub fn focus_window(&mut self, id: AppWindowId) -> bool {
+        self.app_windows.focus(id)
+    }
+
+    /// Remove the `AppWindow` from the registry. Returns the removed
+    /// record (so callers can demote its session to retention before
+    /// dropping it).
+    pub fn close_window(&mut self, id: AppWindowId) -> Option<AppWindow> {
+        self.app_windows.close(id)
+    }
+
+    /// Currently-open `AppWindow`s ordered most-recently-focused first.
+    /// Drives the future Card Switcher (#173).
+    pub fn app_window_mru_order(&self) -> Vec<AppWindowId> {
+        self.app_windows.mru_order()
     }
 
     pub fn toggle_theme(&mut self) {
@@ -1400,9 +1591,17 @@ impl AppState {
         &mut self,
         key: String,
         value: String,
-    ) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.add_secret(key, value);
-        crate::config::save_secrets(&self.secret_store)
+    ) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.add_secret(key, value)?;
+        self.rebuild_grant_cache();
+        Ok(())
+    }
+
+    fn rebuild_grant_cache(&mut self) {
+        match crate::config::SecretStore::build_grant_keys_cache() {
+            Ok(cache) => self.secret_grant_keys_by_handle = cache,
+            Err(e) => tracing::warn!(error = %e, "Failed to rebuild grant key cache, keeping stale"),
+        }
     }
 
     /// Set or overwrite a single non-secret config value for a
@@ -1454,6 +1653,63 @@ impl AppState {
         self.pending_consent = None;
     }
 
+    /// #117 — merge an incoming missing-config request into the
+    /// unified [`PendingResolutionRequest`]. Creates the unified
+    /// request if absent, otherwise appends to the existing one.
+    ///
+    /// The legacy `pending_config` field is left untouched so any
+    /// in-flight render that references it still finishes cleanly,
+    /// but the unified modal takes precedence in the render gate
+    /// (see `ui/modals/mod.rs`).
+    pub fn merge_config_into_resolution(&mut self, request: PendingConfigRequest) {
+        let pending = self
+            .pending_resolution
+            .get_or_insert_with(|| PendingResolutionRequest {
+                handle: request.handle.clone(),
+                original_secrets: request.original_secrets.clone(),
+                ..PendingResolutionRequest::default()
+            });
+        // Latest secrets snapshot wins — the orchestrator's drain path
+        // re-emits the snapshot on every retry attempt, so the most
+        // recent value is the one we should use to retry the launch.
+        pending.original_secrets = request.original_secrets;
+        pending.merge_secrets(PendingSecretsItem {
+            target: request.target,
+            fields: request.fields,
+        });
+    }
+
+    /// #117 — merge an incoming missing-consent request into the
+    /// unified [`PendingResolutionRequest`]. Same accumulation policy
+    /// as [`Self::merge_config_into_resolution`].
+    pub fn merge_consent_into_resolution(&mut self, request: PendingConsentRequest) {
+        let pending = self
+            .pending_resolution
+            .get_or_insert_with(|| PendingResolutionRequest {
+                handle: request.handle.clone(),
+                original_secrets: request.original_secrets.clone(),
+                ..PendingResolutionRequest::default()
+            });
+        pending.original_secrets = request.original_secrets;
+        pending.merge_consent(PendingConsentItem {
+            scoped_id: request.scoped_id,
+            version: request.version,
+            target_label: request.target_label,
+            policy_segment_hash: request.policy_segment_hash,
+            provisioning_policy_hash: request.provisioning_policy_hash,
+            summary: request.summary,
+        });
+    }
+
+    /// Clear the unified pending resolution request. Called from the
+    /// resolution modal's Submit handler after every requirement has
+    /// been persisted (secrets → SecretStore, consents → consent JSONL
+    /// via the existing `ato internal consent approve-execution-plan`
+    /// plumbing) and the launch is being re-armed.
+    pub fn clear_pending_resolution(&mut self) {
+        self.pending_resolution = None;
+    }
+
     /// Record that a post-Approve retry has been consumed for the
     /// `(handle, target_label)` ExecutionPlan. If the next launch
     /// trips E302 for the same `(handle, target_label)`, the caller
@@ -1487,29 +1743,30 @@ impl AppState {
     }
 
     /// Remove a secret and persist to disk (#57).
-    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.remove_secret(key);
-        crate::config::save_secrets(&self.secret_store)
+    pub fn remove_secret(&mut self, key: &str) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.remove_secret(key)?;
+        self.rebuild_grant_cache();
+        Ok(())
     }
 
-    /// Grant a secret to a capsule and persist (#57).
     pub fn grant_secret_to_capsule(
         &mut self,
         capsule_handle: &str,
         key: &str,
-    ) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.grant_secret(capsule_handle, key);
-        crate::config::save_secrets(&self.secret_store)
+    ) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.grant_secret(capsule_handle, key)?;
+        self.rebuild_grant_cache();
+        Ok(())
     }
 
-    /// Revoke a secret from a capsule and persist (#57).
     pub fn revoke_secret_from_capsule(
         &mut self,
         capsule_handle: &str,
         key: &str,
-    ) -> Result<(), crate::config::SaveSecretsError> {
-        self.secret_store.revoke_secret(capsule_handle, key);
-        crate::config::save_secrets(&self.secret_store)
+    ) -> Result<(), crate::config::BridgeError> {
+        self.secret_store.revoke_secret(capsule_handle, key)?;
+        self.rebuild_grant_cache();
+        Ok(())
     }
 
     pub fn focus_command_bar(&mut self) {
@@ -1630,41 +1887,10 @@ impl AppState {
         self.update_active_capsule_detail_host_panel_route();
     }
 
-    fn apply_host_panel_route_path(&mut self, path: &str) {
-        let segments: Vec<&str> = path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect();
-        let Some(first) = segments.first().copied() else {
-            return;
-        };
-
-        match first {
-            "settings" => {
-                if let Some(section) = segments
-                    .get(1)
-                    .and_then(|value| parse_settings_tab_route_segment(value))
-                {
-                    self.set_settings_tab(section);
-                }
-            }
-            "capsule" => {
-                if let Some(tab) = segments
-                    .get(2)
-                    .and_then(|value| parse_capsule_detail_tab_route_segment(value))
-                {
-                    self.set_route_metadata_tab(tab);
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub fn active_capsule_detail_host_panel_route(&self) -> Option<HostPanelRoute> {
         let active = self.active_capsule_pane()?;
         Some(HostPanelRoute::CapsuleDetail {
             pane_id: active.pane_id,
-            tab: self.route_metadata_active_tab,
         })
     }
 
@@ -1848,7 +2074,6 @@ impl AppState {
         }
 
         if let Some(title) = selected_title {
-            self.settings_panel_open = false;
             self.sync_command_bar_with_active_route();
             self.push_activity(ActivityTone::Info, format!("Switched task to {title}"));
         }
@@ -1959,7 +2184,11 @@ impl AppState {
                                 handle: label.clone(),
                                 label,
                             },
-                            vec![CapabilityGrant::ReadFile, CapabilityGrant::WorkspaceInfo],
+                            vec![
+                                CapabilityGrant::ReadFile,
+                                CapabilityGrant::WorkspaceInfo,
+                                CapabilityGrant::Automation,
+                            ],
                             route_profile_for_source(canonical.source_label()).to_string(),
                             Some(canonical.source_label().to_string()),
                             Some(if canonical.source_label() == "local" {
@@ -2135,7 +2364,10 @@ impl AppState {
         self.command_bar_text = start_url;
 
         self.update_pane(pane_id, |pane| {
-            let original_surface = std::mem::replace(&mut pane.surface, PaneSurface::Launcher);
+            let original_surface = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            );
             pane.title = "Sign in to ato.run".to_string();
             pane.surface = PaneSurface::AuthHandoff {
                 session_id: session_id.clone(),
@@ -2253,10 +2485,6 @@ impl AppState {
                 );
             }
         }
-    }
-
-    pub fn show_settings_panel(&mut self) {
-        self.settings_panel_open = !self.settings_panel_open;
     }
 
     pub fn set_settings_tab(&mut self, tab: SettingsTab) {
@@ -2550,22 +2778,6 @@ impl AppState {
                         ActivityTone::Info,
                         "Capsule frontend mounted",
                     );
-                }
-                ShellEvent::HostPanelRouteChanged { pane_id: _, path } => {
-                    self.apply_host_panel_route_path(&path);
-                }
-                ShellEvent::HostPanelCommand {
-                    pane_id,
-                    command,
-                    payload,
-                    request_id,
-                } => {
-                    let response = crate::settings::handle_host_panel_command(
-                        self, pane_id, &command, payload, request_id,
-                    );
-                    self.host_panel_payload_revision =
-                        self.host_panel_payload_revision.saturating_add(1);
-                    self.host_panel_last_response = Some(response);
                 }
                 ShellEvent::PermissionDenied {
                     pane_id,
@@ -2881,39 +3093,10 @@ impl AppState {
                 auth_flow: web.auth_flow,
                 bounds: pane.bounds,
             }),
-            PaneSurface::HostPanel(route) => Some(ActiveWebPane {
-                workspace_id: workspace.id,
-                task_id: task.id,
-                pane_id: pane.id,
-                title: pane.title.clone(),
-                route: GuestRoute::ExternalUrl(route.url()),
-                partition_id: format!("host-panel-{}", pane.id),
-                profile: "host-panel".to_string(),
-                capabilities: Vec::new(),
-                session: WebSessionState::Launching,
-                source_label: Some("host-panel".to_string()),
-                trust_state: Some("host".to_string()),
-                restricted: false,
-                snapshot_label: None,
-                canonical_handle: None,
-                session_id: None,
-                adapter: None,
-                manifest_path: None,
-                runtime_label: None,
-                display_strategy: None,
-                log_path: None,
-                local_url: None,
-                healthcheck_url: None,
-                invoke_url: None,
-                served_by: None,
-                auth_flow: false,
-                bounds: pane.bounds,
-            }),
-            PaneSurface::Native { .. }
+            PaneSurface::HostPanel(_)
             | PaneSurface::CapsuleStatus(_)
             | PaneSurface::DevConsole
             | PaneSurface::Inspector
-            | PaneSurface::Launcher
             | PaneSurface::AuthHandoff { .. } => None,
             PaneSurface::Terminal(terminal) => Some(ActiveWebPane {
                 workspace_id: workspace.id,
@@ -3395,11 +3578,9 @@ impl AppState {
             .map(|pane| match &pane.surface {
                 PaneSurface::Web(web) => web.route.to_string(),
                 PaneSurface::HostPanel(route) => route.label(),
-                PaneSurface::Native { .. } => pane.title.clone(),
                 PaneSurface::CapsuleStatus(capsule) => capsule.route.to_string(),
                 PaneSurface::DevConsole => "Developer console".to_string(),
                 PaneSurface::Inspector => "Capsule inspector".to_string(),
-                PaneSurface::Launcher => "Launchpad".to_string(),
                 PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
                 PaneSurface::Terminal(terminal) => {
                     format!("terminal://{}/", terminal.session_id)
@@ -3686,7 +3867,10 @@ impl AppState {
             created_at: std::time::SystemTime::now(),
         });
         self.update_pane(pane_id, |pane| {
-            let original_surface = std::mem::replace(&mut pane.surface, PaneSurface::Launcher);
+            let original_surface = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            );
             if matches!(original_surface, PaneSurface::Web(_)) {
                 pane.surface = PaneSurface::AuthHandoff {
                     session_id: session_id.clone(),
@@ -3707,8 +3891,10 @@ impl AppState {
         self.update_pane(pane_id, |pane| {
             if let PaneSurface::AuthHandoff {
                 original_surface, ..
-            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
-            {
+            } = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            ) {
                 pane.surface = *original_surface;
             }
         });
@@ -3736,8 +3922,10 @@ impl AppState {
         self.update_pane(pane_id, |pane| {
             if let PaneSurface::AuthHandoff {
                 original_surface, ..
-            } = std::mem::replace(&mut pane.surface, PaneSurface::Launcher)
-            {
+            } = std::mem::replace(
+                &mut pane.surface,
+                PaneSurface::HostPanel(HostPanelRoute::Launcher),
+            ) {
                 pane.surface = *original_surface;
             }
         });
@@ -4026,14 +4214,11 @@ fn sidebar_icon_for_task(
         },
         PaneSurface::DevConsole => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Console),
         PaneSurface::Terminal(_) => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Terminal),
-        PaneSurface::Launcher => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Launcher),
         PaneSurface::Inspector => SidebarTaskIconSpec::SystemIcon(SystemPageIcon::Inspector),
         PaneSurface::CapsuleStatus(_) => {
             SidebarTaskIconSpec::SystemIcon(SystemPageIcon::CapsuleStatus)
         }
-        PaneSurface::Native { .. } | PaneSurface::AuthHandoff { .. } => {
-            SidebarTaskIconSpec::Monogram(short_label(&task.title))
-        }
+        PaneSurface::AuthHandoff { .. } => SidebarTaskIconSpec::Monogram(short_label(&task.title)),
     }
 }
 
@@ -4056,11 +4241,9 @@ fn task_route_label(task: &TaskSet) -> String {
     match &pane.surface {
         PaneSurface::Web(web) => web.route.to_string(),
         PaneSurface::HostPanel(route) => route.label(),
-        PaneSurface::Native { .. } => "Native settings panel".to_string(),
         PaneSurface::CapsuleStatus(capsule) => capsule.route.to_string(),
         PaneSurface::DevConsole => "Developer console".to_string(),
         PaneSurface::Inspector => "Capsule inspector".to_string(),
-        PaneSurface::Launcher => "Launchpad".to_string(),
         PaneSurface::AuthHandoff { origin, .. } => format!("Signing in to {origin}…"),
         PaneSurface::Terminal(terminal) => format!("terminal://{}/", terminal.session_id),
     }
@@ -4072,56 +4255,6 @@ fn demo_local_capsule(name: &str) -> String {
         .join(name)
         .display()
         .to_string()
-}
-
-fn settings_tab_route_segment(tab: SettingsTab) -> &'static str {
-    match tab {
-        SettingsTab::General => "general",
-        SettingsTab::Account => "account",
-        SettingsTab::Runtime => "runtime",
-        SettingsTab::Sandbox => "sandbox",
-        SettingsTab::Trust => "trust",
-        SettingsTab::Registry => "registry",
-        SettingsTab::Projection => "projection",
-        SettingsTab::Developer => "developer",
-        SettingsTab::About => "about",
-    }
-}
-
-fn parse_settings_tab_route_segment(value: &str) -> Option<SettingsTab> {
-    match value {
-        "general" => Some(SettingsTab::General),
-        "account" => Some(SettingsTab::Account),
-        "runtime" => Some(SettingsTab::Runtime),
-        "sandbox" => Some(SettingsTab::Sandbox),
-        "trust" => Some(SettingsTab::Trust),
-        "registry" => Some(SettingsTab::Registry),
-        "projection" => Some(SettingsTab::Projection),
-        "developer" => Some(SettingsTab::Developer),
-        "about" => Some(SettingsTab::About),
-        _ => None,
-    }
-}
-
-fn capsule_detail_tab_route_segment(tab: CapsuleDetailTab) -> &'static str {
-    match tab {
-        CapsuleDetailTab::Overview => "overview",
-        CapsuleDetailTab::Permissions => "permissions",
-        CapsuleDetailTab::Logs => "logs",
-        CapsuleDetailTab::Update => "update",
-        CapsuleDetailTab::Api => "api",
-    }
-}
-
-fn parse_capsule_detail_tab_route_segment(value: &str) -> Option<CapsuleDetailTab> {
-    match value {
-        "overview" => Some(CapsuleDetailTab::Overview),
-        "permissions" => Some(CapsuleDetailTab::Permissions),
-        "logs" => Some(CapsuleDetailTab::Logs),
-        "update" => Some(CapsuleDetailTab::Update),
-        "api" => Some(CapsuleDetailTab::Api),
-        _ => None,
-    }
 }
 
 impl AppState {
@@ -4381,6 +4514,7 @@ mod tests {
         assert_eq!(pane.source_label.as_deref(), Some("registry"));
         assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
         assert!(pane.restricted);
+        assert!(pane.capabilities.contains(&CapabilityGrant::Automation));
         assert_eq!(state.command_bar_text, "capsule://ato.run/acme/chat");
     }
 
@@ -4395,6 +4529,7 @@ mod tests {
         assert_eq!(pane.source_label.as_deref(), Some("registry"));
         assert_eq!(pane.trust_state.as_deref(), Some("untrusted"));
         assert!(pane.restricted);
+        assert!(pane.capabilities.contains(&CapabilityGrant::Automation));
         assert_eq!(state.command_bar_text, "capsule://localhost:8787/acme/chat");
     }
 
@@ -4527,32 +4662,6 @@ mod tests {
     }
 
     #[test]
-    fn show_settings_panel_toggles_open_flag() {
-        let mut state = AppState::demo();
-        let original_task_count = state.active_workspace().expect("workspace").tasks.len();
-
-        assert!(!state.settings_panel_open);
-
-        state.show_settings_panel();
-
-        // Flag toggled on; no new tab was created
-        assert!(state.settings_panel_open);
-        assert_eq!(
-            state.active_workspace().expect("workspace").tasks.len(),
-            original_task_count,
-        );
-
-        state.show_settings_panel();
-
-        // Toggled off again
-        assert!(!state.settings_panel_open);
-        assert_eq!(
-            state.active_workspace().expect("workspace").tasks.len(),
-            original_task_count,
-        );
-    }
-
-    #[test]
     fn settings_tab_defaults_to_general_and_updates() {
         let mut state = AppState::demo();
 
@@ -4630,7 +4739,6 @@ mod tests {
             route,
             HostPanelRoute::CapsuleDetail {
                 pane_id: 2,
-                tab: CapsuleDetailTab::Permissions,
             }
         );
     }
@@ -4655,12 +4763,11 @@ mod tests {
         let workspace = state.active_workspace().expect("workspace");
         assert_eq!(workspace.tasks.len(), original_count + 1);
         let task = workspace.active_task().expect("task");
-        assert_eq!(task.title, "Capsule detail · pane 2 · Overview");
+        assert_eq!(task.title, "Capsule detail · pane 2");
         assert!(task.panes.iter().any(|pane| matches!(
             pane.surface,
             PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
                 pane_id: 2,
-                tab: CapsuleDetailTab::Overview,
             })
         )));
     }
@@ -4680,38 +4787,13 @@ mod tests {
             .iter()
             .find(|task| task.title.contains("Capsule detail"))
             .expect("capsule detail task");
-        assert_eq!(task.title, "Capsule detail · pane 2 · Logs");
+        assert_eq!(task.title, "Capsule detail · pane 2");
         assert!(task.panes.iter().any(|pane| matches!(
             pane.surface,
             PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
                 pane_id: 2,
-                tab: CapsuleDetailTab::Logs,
             })
         )));
-    }
-
-    #[test]
-    fn host_panel_route_change_updates_capsule_detail_tab() {
-        let mut state = AppState::demo();
-
-        state.apply_shell_events(vec![ShellEvent::HostPanelRouteChanged {
-            pane_id: 999,
-            path: "/capsule/2/logs".to_string(),
-        }]);
-
-        assert_eq!(state.route_metadata_active_tab, CapsuleDetailTab::Logs);
-    }
-
-    #[test]
-    fn host_panel_route_change_updates_settings_tab() {
-        let mut state = AppState::demo();
-
-        state.apply_shell_events(vec![ShellEvent::HostPanelRouteChanged {
-            pane_id: 999,
-            path: "/settings/developer".to_string(),
-        }]);
-
-        assert_eq!(state.settings_active_tab, SettingsTab::Developer);
     }
 
     #[test]
@@ -4722,17 +4804,6 @@ mod tests {
 
         assert_eq!(state.active_task().expect("task").id, 3);
         assert_eq!(state.command_bar_text, "https://ato.run/");
-    }
-
-    #[test]
-    fn select_task_closes_settings_panel() {
-        let mut state = AppState::demo();
-        state.show_settings_panel();
-
-        state.select_task(3);
-
-        assert_eq!(state.active_task().expect("task").id, 3);
-        assert!(!state.settings_panel_open);
     }
 
     #[test]
@@ -4751,7 +4822,7 @@ mod tests {
     }
 
     #[test]
-    fn create_new_tab_projects_launcher_host_panel_to_capsule_host_url() {
+    fn create_new_tab_uses_native_launcher_host_panel() {
         let mut state = AppState::demo();
 
         state.create_new_tab();
@@ -4764,9 +4835,7 @@ mod tests {
             pane.surface,
             PaneSurface::HostPanel(HostPanelRoute::Launcher)
         ));
-        let active = state.active_web_pane().expect("pane");
-        assert_eq!(active.profile, "host-panel");
-        assert_eq!(active.route.to_string(), "capsule-host://panel/launcher");
+        assert!(state.active_web_pane().is_none());
     }
 
     #[test]

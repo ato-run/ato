@@ -1,0 +1,86 @@
+usecase: "Card Switcher uses a dark-gray Mission-Control-style backdrop; StartWindow uses a white-based palette to match Store / AppWindow tone."
+actor: "Autonomous Claude Operator via Focus-mode MCP socket"
+goal: "Two surfaces with intentionally different colour identity: Switcher = system mode (dark), Start = content mode (white)."
+entry_point: "Hermetic Focus mode under ATO_HOME=/tmp/ato-r36"
+out_of_scope:
+  - "Adapting the dark switcher to OS light/dark mode preferences — always dark by design."
+  - "Auto-detecting brand accent per content window to dynamically theme the dark switcher."
+time_budget: "20 minutes"
+
+result: "complete"
+
+steps:
+  - action: "User requests two colour swaps: switcher → dark gray, StartWindow → white-based to match other content windows"
+    observation: "Previous palette had both surfaces on a pale-violet wash, which lacked visual contrast between 'system mode' (switcher overlay) and 'content mode' (StartWindow)."
+
+  - action: "Swap switcher.html palette to dark"
+    observation: |
+      Root vars now:
+        --bg-base: #1f1f23  (zinc-ish dark)
+        --bg-blob: #2a2a31  (subtle radial)
+        --text-on-dark / --muted-on-dark / --soft-on-dark variants
+        --accent: #818cf8   (indigo-400 readable on dark)
+      Body bg is two radial-gradient blobs over the dark base.
+      Header text uses --text-on-dark; subtitle uses --muted-on-dark.
+      Header puck switched from violet-pastel-gradient to true
+      indigo-gradient (#818cf8 → #6366f1) so it pops against dark.
+
+  - action: "Adjust card / new-window-tile / dock styling for the dark backdrop"
+    observation: |
+      White cards: deeper shadow (rgba(0,0,0,0.35) base + 0.45 hover)
+      so they read as "lifted" against the dark surface, similar to
+      Mission Control's card stacking.
+      Active card: indigo border + indigo glow shadow.
+      New-window tile: translucent white fill (5% alpha) + dashed
+      white-translucent border (18% alpha); the indigo plus puck sits
+      on rgba(129, 140, 248, 0.18) so it glows on dark.
+      Dock pill: frosted-glass effect via rgba(255,255,255,0.06) +
+      backdrop-filter blur(14) + light translucent border.
+      Dock plus tile uses rgba(129, 140, 248, 0.20) to stay readable.
+
+  - action: "Strip the lavender wash from start.html"
+    observation: |
+      Removed:
+        - Two radial-gradient blobs (top-right and bottom-left)
+        - Lavender base (#f7f5fb)
+        - --bg-blob-1 / --bg-blob-2 vars
+      Replaced body background with a single pure-white surface
+      (#ffffff). Kept the indigo header puck and the per-tile accent
+      pucks — accent now comes only from the affordance, not the
+      surface.
+      Card / panel / row styles are unchanged: they still use
+      --card #ffffff with --border #ececf1, which provides the
+      necessary subtle definition against the pure-white body.
+
+  - action: "Build + screencap switcher"
+    observation: |
+      switcher-dark.png shows the dark Mission-Control-like overlay:
+      pale-zinc backdrop with two radial blobs of subtle highlight,
+      bright white cards with deep shadows, active Launcher card with
+      indigo border + glow, frosted-glass dock pill at bottom, muted
+      footer text. Each card preview (chart / nav rail / mini start
+      page / store row list) still readable because the cards are
+      light and the previews use accent-coloured fills.
+
+  - action: "Screencap StartWindow"
+    observation: |
+      start-white.png shows the pure-white StartWindow: no wash,
+      indigo header puck remains as the sole accent, quick-action
+      pucks retain their per-tile accent gradients (sky / amber /
+      violet / indigo), panel cards have soft borders, dock pill at
+      bottom is white with frosted-glass effect (faint but the icons
+      and labels are clearly visible). Footer light-bulb hint visible.
+
+agent_observation:
+  user_visible_problem: "Resolved. Switcher and Start now have visually distinct identities: dark system mode vs white content mode. Matches the user's tone-and-manner direction for the Store / AppWindow chain."
+  likely_cause: "Previous palette was uniform across all surfaces, making the switcher feel like 'just another window' rather than an overlay. Switching to dark gives it system-affordance weight; pure-white StartWindow lines up with the content surfaces it sits next to."
+  suggested_fix:
+    - "Already shipped: dark switcher palette + white StartWindow palette + appropriate contrast adjustments for cards / new-window tile / dock on dark."
+    - "Future: extend the dark theme to other 'system overlay' surfaces if any new ones get added (e.g. a future quick-launch HUD)."
+    - "Future: consider a subtle shadow under each card on StartWindow to make panels more visible on pure white if user feedback indicates it's too flat."
+
+evidence:
+  - switcher-dark.png
+  - start-white.png
+
+status: "fixed"

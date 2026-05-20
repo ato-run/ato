@@ -46,6 +46,20 @@ References:
 - [`rfcs/accepted/NACELLE_SPEC.md`](rfcs/accepted/NACELLE_SPEC.md)
 - [`rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md`](rfcs/accepted/ADR-007-macos-sandbox-api-strategy.md)
 
+## Recipe permissions
+
+A recipe can request filesystem access, environment variables, network egress,
+services, and host bridge capabilities. These requested surfaces are declared in
+`capsule.toml` and become part of the launch graph.
+
+Because requested permissions are part of the launch graph, they are also part of
+execution identity. A launch with network egress allowed and a launch without
+network egress are not the same execution — they produce different execution IDs
+even if source, runtime, and entrypoint are identical.
+
+Treat third-party recipes with the same care as third-party source code. A recipe
+controls what the execution is allowed to access.
+
 ## Design Notes
 
 Sandboxing stays in the engine to preserve Smart Build / Dumb Runtime. The host

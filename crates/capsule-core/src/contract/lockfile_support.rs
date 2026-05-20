@@ -14,12 +14,7 @@ use crate::error::{CapsuleError, Result};
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
-use super::{platform_triple, METADATA_CACHE_DIR_NAME, PNPM_VERSION, UV_VERSION};
-
-pub(super) struct PnpmCommand {
-    pub(super) program: PathBuf,
-    pub(super) args_prefix: Vec<String>,
-}
+use super::{platform_triple, METADATA_CACHE_DIR_NAME, UV_VERSION};
 
 pub(super) async fn ensure_uv(reporter: Arc<dyn CapsuleReporter + 'static>) -> Result<PathBuf> {
     if let Ok(found) = which::which("uv") {
@@ -60,51 +55,6 @@ pub(super) async fn ensure_node(
     }
     let fetcher = RuntimeFetcher::new_with_reporter(reporter)?;
     fetcher.ensure_node(version).await
-}
-
-// TODO(tools-registry, ato-run/ato#29): the lockfile-generation path still
-// fetches pnpm via this private helper. The preflight (ato run) path now goes
-// through `crate::tools::ensure_runtime_tool(&PNPM, ...)`, so for the moment
-// pnpm has two parallel fetch sites with shared `PNPM_VERSION` constants. The
-// next slice migrates this caller to the registry and deletes the duplicate.
-pub(super) async fn ensure_pnpm(
-    node_path: &Path,
-    reporter: Arc<dyn CapsuleReporter + 'static>,
-) -> Result<PnpmCommand> {
-    if let Ok(found) = which::which("pnpm") {
-        return Ok(PnpmCommand {
-            program: found,
-            args_prefix: Vec::new(),
-        });
-    }
-    let boundary =
-        BootstrapBoundary::network_tool("pnpm", BootstrapVerificationKind::ChecksumUnavailable);
-    let version = PNPM_VERSION;
-    reporter
-        .notify(format!("⬇️  Downloading pnpm {}", version))
-        .await?;
-    let tools_dir = toolchain_cache_dir()?
-        .join("tools")
-        .join(boundary.subject_name.as_str())
-        .join(version);
-    std::fs::create_dir_all(&tools_dir)
-        .map_err(|e| CapsuleError::Pack(format!("Failed to create pnpm tools directory: {}", e)))?;
-    let archive_path = tools_dir.join(format!("pnpm-{}.tgz", version));
-    let url = format!("https://registry.npmjs.org/pnpm/-/pnpm-{}.tgz", version);
-    download_file(&url, &archive_path).await?;
-    extract_tgz(&archive_path, &tools_dir)?;
-
-    let script = tools_dir.join("package").join("bin").join("pnpm.cjs");
-    if !script.exists() {
-        return Err(CapsuleError::Pack(
-            "pnpm.cjs not found after extraction".to_string(),
-        ));
-    }
-
-    Ok(PnpmCommand {
-        program: node_path.to_path_buf(),
-        args_prefix: vec![script.to_string_lossy().to_string()],
-    })
 }
 
 pub(super) async fn download_file(url: &str, dest: &Path) -> Result<()> {

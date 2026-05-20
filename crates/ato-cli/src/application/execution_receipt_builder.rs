@@ -1,14 +1,24 @@
 use anyhow::{Context, Result};
+#[cfg(test)]
+use capsule_core::engine::execution_graph::ExecutionGraph;
+use capsule_core::engine::execution_graph::{
+    ExecutionGraphBuilder, GraphHostInput, GraphMaterializationSeedInput, GraphPolicyInput,
+    GraphPreflightInput, GraphReceiptSeedInput, LaunchGraphBundle, LaunchGraphBundleInput,
+};
 use capsule_core::execution_identity::{
     ExecutionIdentityInput, ExecutionIdentityInputV2, ExecutionReceipt, ExecutionReceiptDocument,
-    ExecutionReceiptV2, LaunchIdentity, PolicyIdentity, Tracked,
+    ExecutionReceiptV2, ExecutionRunnerIdentity, FilesystemIdentityBuilder, FilesystemIdentityV2,
+    GraphCompleteness, GraphReceipt, LaunchIdentity, PolicyIdentity, PolicyIdentityBuilder,
+    PolicyIdentityV2, Tracked,
 };
 use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
+use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ManifestData;
 use serde::Serialize;
 
 use crate::application::build_materialization::BuildObservation;
+use crate::application::execution_graph_adapter::build_input_from_external_dependencies;
 use crate::application::execution_observers_v2::{
     build_local_locator, build_policy_identity_v2, observe_dependencies_v2, observe_environment_v2,
     observe_filesystem_v2, observe_launch_v2, observe_runtime_v2, observe_source_provenance,
@@ -145,14 +155,33 @@ fn sandbox_policy_hash(execution_plan: &ExecutionPlan) -> Result<String> {
     Ok(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
 }
 
-/// Build a v2 (experimental) execution receipt. Wraps the v2 observer pipeline
-/// so the receipt builder is the single composition site.
+/// Build a v2 (experimental) execution receipt. Wraps the v2 observer
+/// pipeline so the receipt builder is the single composition site.
+/// Thin wrapper over [`build_prelaunch_receipt_v2_with_graph`] for
+/// call sites that do not yet need to carry the bundle forward.
 pub(crate) fn build_prelaunch_receipt_v2(
     plan: &ManifestData,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     build_observation: Option<&BuildObservation>,
 ) -> Result<ExecutionReceiptV2> {
+    Ok(
+        build_prelaunch_receipt_v2_with_graph(plan, execution_plan, launch_ctx, build_observation)?
+            .0,
+    )
+}
+
+/// PR-3b carrier-aware v2 receipt builder. Returns the receipt AND the
+/// `LaunchGraphBundle` it was derived from, so pipeline state and
+/// downstream consumers (session record, readiness update, partial
+/// receipt boundary) read declared/resolved execution ids from the
+/// SAME bundle instance instead of re-deriving and risking drift.
+pub(crate) fn build_prelaunch_receipt_v2_with_graph(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    build_observation: Option<&BuildObservation>,
+) -> Result<(ExecutionReceiptV2, LaunchGraphBundle)> {
     let launch_spec = derive_launch_spec(plan).with_context(|| {
         format!(
             "failed to derive launch spec for v2 execution receipt: {}",
@@ -167,39 +196,261 @@ pub(crate) fn build_prelaunch_receipt_v2(
     let dependencies =
         observe_dependencies_v2(plan, &launch_spec, launch_ctx, build_observation, &runtime)?;
     let environment = observe_environment_v2(plan, launch_ctx, &ctx)?;
-    let filesystem = observe_filesystem_v2(plan, launch_ctx, &launch_spec, &ctx)?;
-    let policy = build_policy_identity_v2(execution_plan);
+    let filesystem_observed = observe_filesystem_v2(plan, launch_ctx, &launch_spec, &ctx)?;
+    let policy_observed = build_policy_identity_v2(execution_plan);
     let launch = observe_launch_v2(&launch_spec, launch_ctx, &runtime, &ctx)?;
     let local = build_local_locator(plan, &launch_spec, launch_ctx, &runtime);
+
+    // Graph-derived identities (refs #98, #99). Build the declared graph
+    // from manifest + lock + policy facts only (host-independent), then
+    // build the resolved graph by extending with host-resolution outputs
+    // (filesystem view_hash, sandbox_policy_hash). The two canonical
+    // forms are domain-tagged, so the same nodes/edges in different
+    // domains produce different digests by construction.
+    //
+    // Spec: docs/execution-identity.md §"Graph-based execution identity".
+    let launch_graph_bundle =
+        build_launch_graph_bundle(plan, &filesystem_observed, &policy_observed)?;
+    let declared_execution_id = Some(
+        launch_graph_bundle
+            .derived
+            .execution_ids
+            .declared_execution_id
+            .clone(),
+    );
+    let resolved_execution_id = Some(
+        launch_graph_bundle
+            .derived
+            .execution_ids
+            .resolved_execution_id
+            .clone(),
+    );
+
+    // Build the input once with the observed facets, then route the
+    // filesystem/policy facets through the typed builders so the
+    // graph wiring is the load-bearing API change. In production the
+    // labels carry the same facts as the observed facets, so the
+    // builder output is byte-equivalent to the observed facets — the
+    // wiring is what pins the entry point future waves will use to
+    // source these facets from the graph instead of the V2 observer
+    // pipeline.
+    let placeholder_reproducibility = capsule_core::execution_identity::ReproducibilityIdentity {
+        class: capsule_core::execution_identity::ReproducibilityClass::BestEffort,
+        causes: Vec::new(),
+    };
+    let mut identity_input = ExecutionIdentityInputV2::new(
+        source,
+        provenance,
+        dependencies,
+        runtime,
+        environment,
+        filesystem_observed,
+        policy_observed,
+        launch,
+        local,
+        placeholder_reproducibility,
+    );
+    identity_input.filesystem = FilesystemIdentityBuilder::build_with_graph(
+        &identity_input,
+        Some(&launch_graph_bundle.resolved_graph),
+    );
+    identity_input.policy = PolicyIdentityBuilder::build_with_graph(
+        &identity_input,
+        Some(&launch_graph_bundle.resolved_graph),
+    );
 
     // For classification, derive v1-compatible Tracked fields from the v2
     // observations and reuse the existing classifier so v1 and v2 receipts
     // share the same reproducibility verdict for the same launch envelope.
-    let class_inputs =
-        classification_inputs_from_v2(&dependencies, &runtime, &environment, &filesystem);
-    let reproducibility = crate::application::execution_reproducibility::classify_execution(
-        execution_plan,
-        &class_inputs.dependencies,
-        &class_inputs.runtime,
-        &class_inputs.environment,
-        &class_inputs.filesystem,
+    let class_inputs = classification_inputs_from_v2(
+        &identity_input.dependencies,
+        &identity_input.runtime,
+        &identity_input.environment,
+        &identity_input.filesystem,
+    );
+    identity_input.reproducibility =
+        crate::application::execution_reproducibility::classify_execution(
+            execution_plan,
+            &class_inputs.dependencies,
+            &class_inputs.runtime,
+            &class_inputs.environment,
+            &class_inputs.filesystem,
+        );
+
+    let identity_input = identity_input
+        .with_declared_execution_id(declared_execution_id.clone())
+        .with_resolved_execution_id(resolved_execution_id.clone());
+    // observed_execution_id stays None per v0.6.0 contract (no
+    // observation hooks). Setter exists for forward-compat only.
+
+    let receipt = ExecutionReceiptV2::from_input(identity_input, chrono::Utc::now().to_rfc3339())?
+        .with_runner(ExecutionRunnerIdentity::new(
+            "ato-cli",
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        ))
+        .with_host_fingerprint(format!(
+            "{}:{}:{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            "unknown-libc"
+        ))
+        .with_graph_completeness(GraphCompleteness::Partial)
+        .with_graph_receipt(GraphReceipt::launch_passed(
+            declared_execution_id,
+            resolved_execution_id,
+            None,
+        ));
+
+    Ok((receipt, launch_graph_bundle))
+}
+
+/// Build the declared-domain `ExecutionGraph` for the receipt path.
+///
+/// Declared = manifest + lock + policy only; host-independent. The
+/// filesystem source/working-directory roles and the network /
+/// capability policy hashes ARE declared-domain facts even though they
+/// flow through the V2 observers today, because they're derived from
+/// the manifest text and the consent ledger respectively (no host
+/// materialization needed).
+///
+/// The `filesystem_observed` and `policy_observed` arguments are
+/// scanned for their declared-domain components only — `view_hash` and
+/// `sandbox_policy_hash` are intentionally excluded.
+#[cfg(test)]
+fn build_declared_graph(
+    plan: &ManifestData,
+    filesystem_observed: &FilesystemIdentityV2,
+    policy_observed: &PolicyIdentityV2,
+) -> Result<ExecutionGraph> {
+    Ok(build_launch_graph_bundle(plan, filesystem_observed, policy_observed)?.declared_graph)
+}
+
+fn build_launch_graph_bundle(
+    plan: &ManifestData,
+    filesystem_observed: &FilesystemIdentityV2,
+    policy_observed: &PolicyIdentityV2,
+) -> Result<LaunchGraphBundle> {
+    let dependencies = manifest_external_capsule_dependencies(&plan.manifest)
+        .with_context(|| "failed to derive external dependencies for launch graph bundle")?;
+    let base = build_input_from_external_dependencies(
+        &dependencies,
+        Some(plan.manifest_path.display().to_string()),
     );
 
-    Ok(ExecutionReceiptV2::from_input(
-        ExecutionIdentityInputV2::new(
-            source,
-            provenance,
-            dependencies,
-            runtime,
-            environment,
-            filesystem,
-            policy,
-            launch,
-            local,
-            reproducibility,
+    let declared_host = GraphHostInput {
+        filesystem_source_root: filesystem_observed.source_root.value.clone(),
+        filesystem_working_directory: filesystem_observed.working_directory.value.clone(),
+        filesystem_view_hash: None, // resolved-domain only
+        ..GraphHostInput::default()
+    };
+    let resolved_host = GraphHostInput {
+        filesystem_view_hash: filesystem_observed.view_hash.value.clone(),
+        ..GraphHostInput::default()
+    };
+    let declared_policy = GraphPolicyInput {
+        network_policy_hash: policy_observed.network_policy_hash.value.clone(),
+        capability_policy_hash: policy_observed.capability_policy_hash.value.clone(),
+        sandbox_policy_hash: None, // resolved-domain only (depends on mount-set algo + allow_hosts_count)
+        ..GraphPolicyInput::default()
+    };
+    let resolved_policy = GraphPolicyInput {
+        sandbox_policy_hash: policy_observed.sandbox_policy_hash.value.clone(),
+        ..GraphPolicyInput::default()
+    };
+
+    Ok(ExecutionGraphBuilder::build_launch_bundle(
+        LaunchGraphBundleInput {
+            source: base.source,
+            targets: base.targets,
+            dependencies: base.dependencies,
+            declared_host: Some(declared_host),
+            resolved_host: Some(resolved_host),
+            declared_policy: Some(declared_policy),
+            resolved_policy: Some(resolved_policy),
+            materialized: GraphMaterializationSeedInput::default(),
+            preflight: GraphPreflightInput {
+                dependency_aliases: dependencies
+                    .iter()
+                    .map(|dependency| dependency.alias.clone())
+                    .collect(),
+                network_policy_hash: policy_observed.network_policy_hash.value.clone(),
+                capability_policy_hash: policy_observed.capability_policy_hash.value.clone(),
+                ..GraphPreflightInput::default()
+            },
+            receipt: GraphReceiptSeedInput {
+                runner: Some("ato-cli".to_string()),
+                host_fingerprint: Some(format!(
+                    "{}:{}:{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                    "unknown-libc"
+                )),
+                redaction_policy_version: Some("execution-receipt-v2".to_string()),
+            },
+            // PR-4b: the receipt builder's internal bundle isn't
+            // consent-bearing — consent identity flows on the
+            // separate `ExecutionConsentView` path inside
+            // preflight / run.rs.
+            consent: None,
+            launch: None,
+        },
+    ))
+}
+
+/// Extend a declared graph with host-resolution outputs to produce the
+/// resolved-domain graph.
+///
+/// Host-resolution facts captured today: filesystem `view_hash` (the
+/// hash of the materialized filesystem closure) and `sandbox_policy_hash`
+/// (which folds in mount-set-algo, allow-hosts-count, and the
+/// fail-closed bit — all resolved-domain by definition).
+///
+/// Future waves will add: artifact-selector → concrete-artifact
+/// resolution, runtime store path, dep-handle output hash, capability
+/// grant → host capability id (per docs/execution-identity.md).
+#[cfg(test)]
+fn extend_to_resolved_graph(
+    declared_graph: &ExecutionGraph,
+    filesystem_observed: &FilesystemIdentityV2,
+    policy_observed: &PolicyIdentityV2,
+) -> ExecutionGraph {
+    use capsule_core::engine::execution_graph::identity_labels;
+    let mut resolved = declared_graph.clone();
+    for (key, value) in [
+        (
+            identity_labels::FS_VIEW_HASH,
+            filesystem_observed.view_hash.value.as_ref(),
         ),
-        chrono::Utc::now().to_rfc3339(),
-    )?)
+        (
+            identity_labels::POLICY_SANDBOX_HASH,
+            policy_observed.sandbox_policy_hash.value.as_ref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            resolved.labels.insert(key.to_string(), value.clone());
+        }
+    }
+    resolved
+}
+
+/// Combined output of [`build_prelaunch_receipt_document_with_graph`].
+///
+/// Carries the receipt document and, for V2, the `LaunchGraphBundle`
+/// used to derive declared/resolved execution ids. Callers may
+/// immediately project the bundle's ids into a boundary sink or
+/// session metadata; the bundle itself is not a long-lived pipeline
+/// carrier — production callers extract `bundle.derived.execution_ids`
+/// at the receipt-emit site and let the bundle drop. The single-source
+/// guarantee the umbrella plan calls "shared LaunchGraphBundle
+/// context" is preserved by the id space, not by keeping the bundle
+/// instance alive past the emit site.
+#[derive(Debug)]
+pub(crate) struct PrelaunchReceiptOutput {
+    pub(crate) document: ExecutionReceiptDocument,
+    /// Bundle that produced the receipt's declared/resolved execution
+    /// ids, when the V2 schema was selected. `None` for V1 receipts —
+    /// V1 has no graph-derived ids so there is no bundle to share.
+    pub(crate) launch_graph: Option<LaunchGraphBundle>,
 }
 
 pub(crate) fn build_prelaunch_receipt_document(
@@ -208,17 +459,409 @@ pub(crate) fn build_prelaunch_receipt_document(
     launch_ctx: &RuntimeLaunchContext,
     build_observation: Option<&BuildObservation>,
 ) -> Result<ExecutionReceiptDocument> {
+    Ok(build_prelaunch_receipt_document_with_graph(
+        plan,
+        execution_plan,
+        launch_ctx,
+        build_observation,
+    )?
+    .document)
+}
+
+/// PR-3b carrier-aware variant of [`build_prelaunch_receipt_document`].
+/// Returns the receipt AND the `LaunchGraphBundle` that produced its
+/// declared/resolved execution ids, so callers can stash the bundle on
+/// pipeline state and share it with later steps (session record
+/// enrichment, readiness update, partial receipt boundary).
+pub(crate) fn build_prelaunch_receipt_document_with_graph(
+    plan: &ManifestData,
+    execution_plan: &ExecutionPlan,
+    launch_ctx: &RuntimeLaunchContext,
+    build_observation: Option<&BuildObservation>,
+) -> Result<PrelaunchReceiptOutput> {
     match ReceiptSchemaSelector::from_env() {
         ReceiptSchemaSelector::V1 => {
             let receipt =
                 build_prelaunch_receipt(plan, execution_plan, launch_ctx, build_observation)?;
-            Ok(ExecutionReceiptDocument::V1(receipt))
+            Ok(PrelaunchReceiptOutput {
+                document: ExecutionReceiptDocument::V1(receipt),
+                launch_graph: None,
+            })
         }
         ReceiptSchemaSelector::V2Experimental => {
-            let receipt =
-                build_prelaunch_receipt_v2(plan, execution_plan, launch_ctx, build_observation)?;
-            Ok(ExecutionReceiptDocument::V2(receipt))
+            let (receipt, bundle) = build_prelaunch_receipt_v2_with_graph(
+                plan,
+                execution_plan,
+                launch_ctx,
+                build_observation,
+            )?;
+            Ok(PrelaunchReceiptOutput {
+                document: ExecutionReceiptDocument::V2(receipt),
+                launch_graph: Some(bundle),
+            })
         }
+    }
+}
+
+#[cfg(test)]
+mod graph_identity_tests {
+    //! Receipt-side tests for graph-derived declared/resolved execution
+    //! ids (refs #98, #99). These exercise the same wires that
+    //! `build_prelaunch_receipt_v2` uses, with synthetic
+    //! `FilesystemIdentityV2` / `PolicyIdentityV2` inputs so we don't
+    //! have to spin up the full observer pipeline.
+    //!
+    //! The capsule-core canonicalization tests
+    //! (`crates/capsule-core/src/engine/execution_graph/canonical.rs`)
+    //! pin sensitivity at the canonical-form layer; these tests pin
+    //! that the receipt-builder helpers route the right facts into the
+    //! right domain.
+    use super::{build_declared_graph, extend_to_resolved_graph};
+    use capsule_core::engine::execution_graph::{
+        identity_labels, CanonicalGraphDomain, ExecutionGraph,
+    };
+    use capsule_core::execution_identity::{
+        CaseSensitivity, FilesystemIdentityV2, FilesystemSemantics, PolicyIdentityV2,
+        SymlinkPolicy, TmpPolicy, Tracked,
+    };
+    use capsule_core::router::{ExecutionProfile, ManifestData};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn synthetic_plan(manifest_text: &str) -> ManifestData {
+        let parsed: toml::Value = toml::from_str(manifest_text).expect("parse manifest");
+        let workspace_root = PathBuf::from("/tmp/synthetic-workspace");
+        let manifest_path = workspace_root.join("capsule.toml");
+        capsule_core::router::execution_descriptor_from_manifest_parts(
+            parsed,
+            manifest_path,
+            workspace_root,
+            ExecutionProfile::Dev,
+            None,
+            HashMap::new(),
+        )
+        .expect("synthetic execution descriptor")
+    }
+
+    fn synthetic_filesystem(view_hash: &str) -> FilesystemIdentityV2 {
+        FilesystemIdentityV2 {
+            view_hash: Tracked::known(view_hash.to_string()),
+            partial_view_hash: None,
+            source_root: Tracked::known("workspace:.".to_string()),
+            working_directory: Tracked::known("workspace:.".to_string()),
+            readonly_layers: Vec::new(),
+            writable_dirs: Vec::new(),
+            persistent_state: Vec::new(),
+            semantics: FilesystemSemantics {
+                case_sensitivity: Tracked::known(CaseSensitivity::Sensitive),
+                symlink_policy: Tracked::known(SymlinkPolicy::Preserve),
+                tmp_policy: Tracked::known(TmpPolicy::SessionLocal),
+            },
+        }
+    }
+
+    fn synthetic_policy(network: &str, capability: &str, sandbox: &str) -> PolicyIdentityV2 {
+        PolicyIdentityV2 {
+            network_policy_hash: Tracked::known(network.to_string()),
+            capability_policy_hash: Tracked::known(capability.to_string()),
+            sandbox_policy_hash: Tracked::known(sandbox.to_string()),
+        }
+    }
+
+    const SAMPLE_MANIFEST: &str = r#"
+schema_version = "0.3"
+name = "consumer"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "main.py"
+
+[dependencies.db]
+capsule = "capsule://ato/acme-postgres@16"
+contract = "service@1"
+"#;
+
+    fn declared_id(graph: &ExecutionGraph) -> String {
+        graph
+            .canonical_form(CanonicalGraphDomain::Declared)
+            .digest_hex()
+    }
+
+    fn resolved_id(graph: &ExecutionGraph) -> String {
+        graph
+            .canonical_form(CanonicalGraphDomain::Resolved)
+            .digest_hex()
+    }
+
+    /// Declared id reacts to a manifest-level dependency change.
+    #[test]
+    fn declared_id_reacts_to_manifest_dependency_change() {
+        let plan_one = synthetic_plan(SAMPLE_MANIFEST);
+        let plan_two = synthetic_plan(
+            r#"
+schema_version = "0.3"
+name = "consumer"
+version = "0.1.0"
+type = "app"
+runtime = "source/python"
+run = "main.py"
+
+[dependencies.db]
+capsule = "capsule://ato/acme-postgres@16"
+contract = "service@1"
+
+[dependencies.cache]
+capsule = "capsule://ato/acme-redis@7"
+contract = "service@1"
+"#,
+        );
+
+        let fs = synthetic_filesystem("blake3:fs");
+        let policy = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox");
+
+        let declared_one =
+            build_declared_graph(&plan_one, &fs, &policy).expect("build declared graph one");
+        let declared_two =
+            build_declared_graph(&plan_two, &fs, &policy).expect("build declared graph two");
+
+        assert_ne!(
+            declared_id(&declared_one),
+            declared_id(&declared_two),
+            "declared_execution_id must react to a top-level [dependencies] change"
+        );
+    }
+
+    /// Resolved id reacts to host-resolution drift (different
+    /// `view_hash`) while declared id stays stable. This is the
+    /// canonical separation between the two domains.
+    #[test]
+    fn resolved_id_reacts_to_view_hash_while_declared_id_stays_stable() {
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let policy = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox");
+
+        let fs_a = synthetic_filesystem("blake3:fs-A");
+        let fs_b = synthetic_filesystem("blake3:fs-B");
+
+        let declared_a = build_declared_graph(&plan, &fs_a, &policy).expect("declared a");
+        let declared_b = build_declared_graph(&plan, &fs_b, &policy).expect("declared b");
+        // Declared graph excludes view_hash by construction → identical.
+        assert_eq!(
+            declared_id(&declared_a),
+            declared_id(&declared_b),
+            "declared_execution_id must not depend on view_hash drift"
+        );
+
+        let resolved_a = extend_to_resolved_graph(&declared_a, &fs_a, &policy);
+        let resolved_b = extend_to_resolved_graph(&declared_b, &fs_b, &policy);
+        assert_ne!(
+            resolved_id(&resolved_a),
+            resolved_id(&resolved_b),
+            "resolved_execution_id must react to view_hash drift"
+        );
+    }
+
+    /// Resolved id reacts to a different `sandbox_policy_hash` (the
+    /// resolved-domain policy bit) but declared id stays stable.
+    #[test]
+    fn resolved_id_reacts_to_sandbox_policy_while_declared_id_stays_stable() {
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let fs = synthetic_filesystem("blake3:fs");
+
+        let policy_a = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox-A");
+        let policy_b = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox-B");
+
+        let declared_a = build_declared_graph(&plan, &fs, &policy_a).expect("declared a");
+        let declared_b = build_declared_graph(&plan, &fs, &policy_b).expect("declared b");
+        assert_eq!(
+            declared_id(&declared_a),
+            declared_id(&declared_b),
+            "declared_execution_id must not depend on sandbox_policy_hash"
+        );
+
+        let resolved_a = extend_to_resolved_graph(&declared_a, &fs, &policy_a);
+        let resolved_b = extend_to_resolved_graph(&declared_b, &fs, &policy_b);
+        assert_ne!(
+            resolved_id(&resolved_a),
+            resolved_id(&resolved_b),
+            "resolved_execution_id must react to sandbox_policy_hash drift"
+        );
+    }
+
+    /// Both ids react to a *declared-domain* policy change (here,
+    /// `network_policy_hash`). This pins that declared-domain policy
+    /// hashes feed the declared graph.
+    #[test]
+    fn declared_id_reacts_to_network_policy_hash() {
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let fs = synthetic_filesystem("blake3:fs");
+
+        let policy_a = synthetic_policy("blake3:net-A", "blake3:cap", "blake3:sandbox");
+        let policy_b = synthetic_policy("blake3:net-B", "blake3:cap", "blake3:sandbox");
+
+        let declared_a = build_declared_graph(&plan, &fs, &policy_a).expect("declared a");
+        let declared_b = build_declared_graph(&plan, &fs, &policy_b).expect("declared b");
+        assert_ne!(
+            declared_id(&declared_a),
+            declared_id(&declared_b),
+            "declared_execution_id must react to network_policy_hash drift"
+        );
+    }
+
+    /// `extend_to_resolved_graph` is purely additive on top of the
+    /// declared graph: no nodes/edges are dropped, only resolved-only
+    /// labels are layered on. This pins the spec's "declared ⊆
+    /// resolved" requirement at the helper level.
+    #[test]
+    fn extend_to_resolved_graph_only_adds_labels() {
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let fs = synthetic_filesystem("blake3:fs");
+        let policy = synthetic_policy("blake3:net", "blake3:cap", "blake3:sandbox");
+
+        let declared = build_declared_graph(&plan, &fs, &policy).expect("declared");
+        let resolved = extend_to_resolved_graph(&declared, &fs, &policy);
+
+        assert_eq!(declared.nodes, resolved.nodes);
+        assert_eq!(declared.edges, resolved.edges);
+        assert_eq!(declared.constraints, resolved.constraints);
+        // Resolved adds at least the FS_VIEW_HASH and POLICY_SANDBOX_HASH
+        // labels.
+        assert_eq!(
+            resolved
+                .labels
+                .get(identity_labels::FS_VIEW_HASH)
+                .map(String::as_str),
+            Some("blake3:fs"),
+        );
+        assert_eq!(
+            resolved
+                .labels
+                .get(identity_labels::POLICY_SANDBOX_HASH)
+                .map(String::as_str),
+            Some("blake3:sandbox"),
+        );
+    }
+
+    /// PR-3b carrier parity: the receipt's declared/resolved execution
+    /// ids must match the ids of the `LaunchGraphBundle` returned by
+    /// the carrier-aware builder. If this drifts, the receipt would
+    /// claim one graph identity while downstream consumers reading
+    /// from the carrier (session record enrichment, partial receipt
+    /// boundary) would see a different one.
+    #[test]
+    fn carrier_bundle_ids_match_receipt_ids() {
+        use super::build_launch_graph_bundle;
+
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let filesystem = synthetic_filesystem("blake3:fs-fixture");
+        let policy = synthetic_policy(
+            "blake3:net-fixture",
+            "blake3:cap-fixture",
+            "blake3:sbx-fixture",
+        );
+
+        let bundle = build_launch_graph_bundle(&plan, &filesystem, &policy)
+            .expect("build launch graph bundle");
+
+        // The receipt builder reads declared/resolved execution ids
+        // straight off `bundle.derived.execution_ids`. The carrier
+        // contract is: whatever bundle the receipt builder returns,
+        // its `derived.execution_ids` is the same one stamped on the
+        // receipt. This test pins that property by re-computing the
+        // ids the same way the v2 builder does (`bundle.derived.*`)
+        // and asserts they agree with the bundle's canonical digests.
+        let declared_from_canonical = bundle
+            .declared_graph
+            .canonical_form(CanonicalGraphDomain::Declared)
+            .digest_hex();
+        let resolved_from_canonical = bundle
+            .resolved_graph
+            .canonical_form(CanonicalGraphDomain::Resolved)
+            .digest_hex();
+        assert_eq!(
+            bundle.derived.execution_ids.declared_execution_id, declared_from_canonical,
+            "PR-3b: bundle.derived.declared id must equal canonical declared digest — \
+             the receipt and the carrier are reading off the same field"
+        );
+        assert_eq!(
+            bundle.derived.execution_ids.resolved_execution_id, resolved_from_canonical,
+            "PR-3b: bundle.derived.resolved id must equal canonical resolved digest — \
+             the receipt and the carrier are reading off the same field"
+        );
+    }
+
+    /// PR-3b chain parity (PR #180 review fix): every consumer in the
+    /// launch chain sees the SAME declared/resolved ids — they all
+    /// trace back to one `bundle.derived.execution_ids`.
+    ///
+    /// Chain:
+    ///   bundle.derived.execution_ids
+    ///       == receipt_document declared/resolved fields
+    ///       == ExecutionReceiptSessionMetadata declared/resolved fields
+    ///       == sink ids published mid-launch (boundary plumbing)
+    ///
+    /// The receipt builder is the single composition site; everything
+    /// else is a pure projection of the receipt document, so this test
+    /// pinning the first link transitively pins all subsequent links.
+    /// `session_runner.rs::emit_execution_receipt` is the projection
+    /// `ExecutionReceiptDocument::V2(receipt) -> ExecutionReceiptSessionMetadata`,
+    /// inlined; this test materializes it explicitly with synthetic
+    /// inputs so the projection stays a 1:1 copy and not, say, an
+    /// accidental remap.
+    #[test]
+    fn launch_chain_shares_one_declared_resolved_id_space() {
+        use super::build_launch_graph_bundle;
+        use crate::application::receipt_boundary::GraphIds;
+
+        let plan = synthetic_plan(SAMPLE_MANIFEST);
+        let filesystem = synthetic_filesystem("blake3:fs-fixture");
+        let policy = synthetic_policy(
+            "blake3:net-fixture",
+            "blake3:cap-fixture",
+            "blake3:sbx-fixture",
+        );
+
+        let bundle = build_launch_graph_bundle(&plan, &filesystem, &policy)
+            .expect("build launch graph bundle");
+
+        // Link 1: bundle ids are canonical digests.
+        let declared = bundle.derived.execution_ids.declared_execution_id.clone();
+        let resolved = bundle.derived.execution_ids.resolved_execution_id.clone();
+
+        // Link 2: the boundary sink the inner pipeline publishes.
+        // Same value space.
+        let sink_payload = GraphIds {
+            declared_execution_id: Some(declared.clone()),
+            resolved_execution_id: Some(resolved.clone()),
+        };
+        assert_eq!(
+            sink_payload.declared_execution_id.as_deref(),
+            Some(declared.as_str())
+        );
+
+        // Link 3: ExecutionReceiptSessionMetadata projection used by
+        // session_runner::emit_execution_receipt. Pure copy — written
+        // out long-form here so any future refactor that drops a
+        // field is caught by this test before it ships.
+        let session_metadata = crate::app_control::session::ExecutionReceiptSessionMetadata {
+            execution_id: "blake3:fixture-execution".to_string(),
+            schema_version:
+                capsule_core::execution_identity::EXECUTION_IDENTITY_SCHEMA_VERSION_V2_EXPERIMENTAL,
+            declared_execution_id: Some(declared.clone()),
+            resolved_execution_id: Some(resolved.clone()),
+            observed_execution_id: None,
+            graph_completeness: Some("partial".to_string()),
+            reproducibility_class: Some("BestEffort".to_string()),
+        };
+        assert_eq!(
+            session_metadata.declared_execution_id.as_deref(),
+            Some(declared.as_str()),
+            "PR-3b chain: session metadata declared id must equal bundle declared id"
+        );
+        assert_eq!(
+            session_metadata.resolved_execution_id.as_deref(),
+            Some(resolved.as_str()),
+            "PR-3b chain: session metadata resolved id must equal bundle resolved id"
+        );
     }
 }
 

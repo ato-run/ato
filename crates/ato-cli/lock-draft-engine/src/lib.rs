@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod leip;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -338,6 +340,23 @@ mod wasm_exports {
     #[wasm_bindgen(js_name = lockDraftSchemaJson)]
     pub fn lock_draft_schema_json_wasm() -> String {
         lock_draft_schema_json()
+    }
+
+    /// Primary LEIP v1 inference API.
+    /// Accepts a `LeipInput` JSON string and returns a `LeipResult` JSON string.
+    #[wasm_bindgen(js_name = evaluateLaunchGraphsJson)]
+    pub fn evaluate_launch_graphs_json_wasm(input_json: &str) -> Result<String, JsValue> {
+        leip::evaluate_launch_graphs_json(input_json)
+            .map_err(|err| JsValue::from_str(&err.to_string()))
+    }
+
+    /// Compatibility LEIP wrapper.
+    /// Accepts a `LockDraftInput` JSON string (maps `selected_target` → `target_hint`)
+    /// and returns a `LeipResult` JSON string.
+    #[wasm_bindgen(js_name = evaluateLaunchEnvelopesJson)]
+    pub fn evaluate_launch_envelopes_json_wasm(input_json: &str) -> Result<String, JsValue> {
+        leip::evaluate_launch_envelopes_json(input_json)
+            .map_err(|err| JsValue::from_str(&err.to_string()))
     }
 }
 

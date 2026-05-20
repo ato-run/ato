@@ -71,24 +71,26 @@ jobs:
           # don't trample each other's incremental artifacts.
           key: desktop-release-${{ matrix.target }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "10.15.0"
-
-      - name: Build frontend
-        # ato-desktop/build.rs panics if frontend/dist is missing; vite
-        # output must exist before `cargo run -- bundle` triggers the
-        # ato-desktop build script.
-        working-directory: crates/ato-desktop/frontend
+      - name: Build system capsule dists
         run: |
+          set -euxo pipefail
+          for capsule in ato-onboarding ato-start ato-dock; do
+            cd crates/ato-desktop/assets/system/$capsule
+            npm install
+            npm run build
+            test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
+            cd -
+          done
+          # ato-store from apps/ato-web
+          cd apps/ato-web
+          npm install -g pnpm@latest
           pnpm install --frozen-lockfile
-          pnpm run build
+          pnpm run build:desktop-store
+          test -f dist/index.html || { echo "ERROR: ato-store dist/index.html missing after build"; exit 1; }
+          rm -rf ../../crates/ato-desktop/assets/system/ato-store/dist
+          cp -r dist ../../crates/ato-desktop/assets/system/ato-store/dist
+          test -f ../../crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store dest copy failed"; exit 1; }
+          cd -
 
       - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
@@ -140,31 +142,34 @@ jobs:
         with:
           key: desktop-release-${{ matrix.target }}
 
+      - name: Build system capsule dists
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for capsule in ato-onboarding ato-start ato-dock; do
+            cd crates/ato-desktop/assets/system/$capsule
+            npm install
+            npm run build
+            test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
+            cd -
+          done
+          # ato-store from apps/ato-web
+          cd apps/ato-web
+          npm install -g pnpm@latest
+          pnpm install --frozen-lockfile
+          pnpm run build:desktop-store
+          test -f dist/index.html || { echo "ERROR: ato-store dist/index.html missing after build"; exit 1; }
+          rm -rf ../../crates/ato-desktop/assets/system/ato-store/dist
+          cp -r dist ../../crates/ato-desktop/assets/system/ato-store/dist
+          test -f ../../crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store dest copy failed"; exit 1; }
+          cd -
+
       - name: Install WiX Toolset 3.x
         # candle/light are required by xtask::package_msi. WiX 3.14 is
         # the v0.5 baseline. windows-2022 runners ship WiX 3.14.x
         # preinstalled; --allow-downgrade lets choco no-op gracefully
         # when the preinstalled version is newer than 3.14.0.
         run: choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "10.15.0"
-
-      - name: Build frontend
-        # ato-desktop/build.rs panics if frontend/dist is missing; vite
-        # output must exist before `cargo run -- bundle` triggers the
-        # ato-desktop build script.
-        working-directory: crates/ato-desktop/frontend
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
 
       - name: Bundle and package .msi + .zip
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
@@ -209,6 +214,27 @@ jobs:
         with:
           key: desktop-release-${{ matrix.target }}
 
+      - name: Build system capsule dists
+        run: |
+          set -euxo pipefail
+          for capsule in ato-onboarding ato-start ato-dock; do
+            cd crates/ato-desktop/assets/system/$capsule
+            npm install
+            npm run build
+            test -f dist/index.html || { echo "ERROR: $capsule dist/index.html missing after build"; exit 1; }
+            cd -
+          done
+          # ato-store from apps/ato-web
+          cd apps/ato-web
+          npm install -g pnpm@latest
+          pnpm install --frozen-lockfile
+          pnpm run build:desktop-store
+          test -f dist/index.html || { echo "ERROR: ato-store dist/index.html missing after build"; exit 1; }
+          rm -rf ../../crates/ato-desktop/assets/system/ato-store/dist
+          cp -r dist ../../crates/ato-desktop/assets/system/ato-store/dist
+          test -f ../../crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store dest copy failed"; exit 1; }
+          cd -
+
       - name: Install AppImage build deps
         # appimagetool is shipped as a single AppImage; we drop it on
         # PATH so xtask::package_appimage's Command::new("appimagetool")
@@ -235,25 +261,6 @@ jobs:
             "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${arch_suffix}.AppImage"
           chmod +x "$RUNNER_TEMP/appimagetool"
           sudo mv "$RUNNER_TEMP/appimagetool" /usr/local/bin/appimagetool
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "10.15.0"
-
-      - name: Build frontend
-        # ato-desktop/build.rs panics if frontend/dist is missing; vite
-        # output must exist before `cargo run -- bundle` triggers the
-        # ato-desktop build script.
-        working-directory: crates/ato-desktop/frontend
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
 
       - name: Bundle and package .AppImage
         working-directory: crates/ato-desktop/xtask
