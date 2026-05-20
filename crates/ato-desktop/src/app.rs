@@ -109,6 +109,11 @@ actions!(
         // window" surface that the Card Switcher's new-window tile
         // routes to. Always spawns a new window (no slot reuse).
         OpenStartWindow,
+        // Opens the GitHub repository execution wizard — accepts a
+        // GitHub URL or owner/repo shorthand, looks up capsule.toml
+        // candidates (metadata-only, no clone), and walks the user
+        // through candidate review and consent before launching.
+        OpenGithubRunWindow,
         // Identity / Account menu trigger — fired from the Control
         // Bar's right-end Identity button. Phase 1 logs the click;
         // Phase 2 will open a real popover (Profile / Account /
@@ -1040,6 +1045,12 @@ pub fn run(skip_onboarding: bool) {
         cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
             if let Err(err) = crate::window::start_window::open_start_window(cx) {
                 tracing::error!(error = %err, "failed to open start window");
+            }
+        });
+
+        cx.on_action(|_: &OpenGithubRunWindow, cx: &mut App| {
+            if let Err(err) = crate::window::launch_window::open_github_run_window(cx) {
+                tracing::error!(error = %err, "failed to open github run window");
             }
         });
 
