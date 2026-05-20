@@ -701,7 +701,14 @@ pub(crate) fn enforce_sandbox_mode_flags(
     const ENV_ALLOW_UNSAFE: &str = "CAPSULE_ALLOW_UNSAFE";
 
     if matches!(enforcement, EnforcementMode::BestEffort) {
-        anyhow::bail!("--enforcement best-effort is no longer supported; use --enforcement strict");
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::SecurityPolicyViolation {
+                message: "--enforcement best-effort is no longer supported".to_string(),
+                hint: Some("Use --enforcement strict (the default) instead.".to_string()),
+                resource: None,
+                blocked_host: None,
+            },
+        )));
     }
 
     if matches!(enforcement, EnforcementMode::Strict) && sandbox_requested {
@@ -714,9 +721,14 @@ pub(crate) fn enforce_sandbox_mode_flags(
     }
 
     if dangerously_skip_permissions && compatibility_fallback.is_some() {
-        anyhow::bail!(
-            "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive"
-        );
+        return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+            AtoError::SecurityPolicyViolation {
+                message: "--dangerously-skip-permissions and --compatibility-fallback are mutually exclusive".to_string(),
+                hint: Some("Remove one of the two flags before retrying.".to_string()),
+                resource: None,
+                blocked_host: None,
+            },
+        )));
     }
 
     if dangerously_skip_permissions {
@@ -807,6 +819,31 @@ pub(crate) async fn resolve_run_target_or_install(
     let raw = path.to_string_lossy().to_string();
     let export_invocation = raw.trim().starts_with('@');
     let expanded_local = crate::local_input::expand_local_path(&raw);
+
+    // Guard: reject paths that point into the Ato home directory.  These are
+    // Ato's own internal state (store, runs, tmp …) and running them directly
+    // would fail with a confusing E999.  Emit a helpful typed error instead.
+    if let Ok(ato_home) = capsule_core::common::paths::nacelle_home_dir() {
+        if expanded_local.starts_with(&ato_home) {
+            let capsule_name = expanded_local
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "my-capsule".to_string());
+            return Err(anyhow::Error::new(AtoExecutionError::from_ato_error(
+                AtoError::EntrypointInvalid {
+                    message: format!(
+                        "'{}' is inside Ato's internal state directory and cannot be used as a run target",
+                        raw
+                    ),
+                    hint: Some(format!(
+                        "Copy the capsule to a local directory first:\n  cp -r {} ./{}\n  ato run ./{}",
+                        raw, capsule_name, capsule_name
+                    )),
+                    field: None,
+                },
+            )));
+        }
+    }
     match install::provider_target::classify_run_target(&raw, &expanded_local)? {
         install::provider_target::ParsedRunTarget::LocalPath(local_path) => {
             if provider_toolchain != ProviderToolchain::Auto {
@@ -2978,5 +3015,52 @@ target = "app"
             .collect::<Vec<_>>()
             .join("\n");
         assert!(details.contains("must reference a source/python target"));
+    }
+
+    #[tokio::test]
+    async fn resolve_run_target_rejects_ato_home_paths_with_helpful_error() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let internal_path = ato_home.path().join("store").join("mycapsule");
+        std::fs::create_dir_all(&internal_path).expect("create internal path");
+
+        let _guard = EnvVarGuard::set_path("ATO_HOME", ato_home.path());
+
+        let reporter = Arc::new(reporters::CliReporter::new(false));
+        let err = resolve_run_target_or_install(
+            internal_path.clone(),
+            true,
+            ProviderToolchain::Auto,
+            None,
+            false,
+            None,
+            false,
+            None,
+            reporter,
+        )
+        .await
+        .expect_err("path under ato home must be rejected");
+
+        let msg = format!(
+            "{}\n{}",
+            err.to_string(),
+            err.chain()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            msg.contains("internal state directory"),
+            "error should mention internal state: {msg}"
+        );
+        // The hint with cp -r is stored in the AtoExecutionError hint field;
+        // verify it via the typed downcast.
+        let exe_err = err
+            .downcast_ref::<capsule_core::engine::execution_plan::error::AtoExecutionError>()
+            .expect("error should downcast to AtoExecutionError");
+        assert!(
+            exe_err.hint.as_deref().unwrap_or("").contains("cp -r"),
+            "hint should suggest cp workaround: {:?}",
+            exe_err.hint
+        );
     }
 }

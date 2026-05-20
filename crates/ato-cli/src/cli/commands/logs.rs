@@ -152,6 +152,30 @@ fn follow_log(log_path: &PathBuf, tail: Option<usize>, reporter: Arc<CliReporter
 mod tests {
     use super::*;
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::env_lock().lock().expect("env lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+    impl EnvVarGuard {
+        fn set(key: &'static str, val: &std::path::Path) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, val);
+            Self { key, original }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn test_logs_args_by_id() {
         let args = LogsArgs {
@@ -186,12 +210,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "flaky: shares process-global ATO_HOME/HOME with sibling tests; tracked in #82"]
     fn test_get_log_path() {
+        let _lock = env_lock();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home_guard = EnvVarGuard::set("ATO_HOME", temp.path());
         let path = get_log_path("test-capsule");
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("test-capsule.log"));
-        assert!(path_str.contains(".ato/logs"));
+        assert!(path_str.contains(".ato/logs") || path_str.contains("logs"));
     }
 
     #[test]

@@ -1662,9 +1662,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "flaky: depends on shared provider-workspace classification state; tracked in #82"]
     fn sandbox_source_entrypoint_keeps_shell_entrypoints_relative_off_linux() {
         let dir = tempdir().expect("tempdir");
+        // Create run.sh so the path-exists branch fires deterministically,
+        // avoiding dependence on provider-workspace classification of sibling tests.
+        fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho ok\n")
+            .expect("write run.sh");
         let plan = plan_from_manifest(
             &dir,
             r#"
