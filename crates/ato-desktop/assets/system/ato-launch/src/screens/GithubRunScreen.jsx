@@ -45,22 +45,23 @@ export function GithubRunScreen({ onCandidatesFound }) {
     setLoading(true);
     setError(null);
 
-    // Send IPC request to Rust to find candidates
-    bridge({ kind: "github_find_candidates", repo: validRepo });
-
-    // Rust will respond via window.dispatchEvent('ato:navigate') or
-    // via window.__ato_github_candidates_result(candidates)
-    // For now, register a one-time handler
+    // Install callback BEFORE sending IPC so we never miss the response.
     const timeout = setTimeout(() => {
       setLoading(false);
       setError("タイムアウトしました。もう一度お試しください。");
+      delete window.__ato_github_candidates_result;
     }, 30000);
 
-    window.__ato_github_candidates_result = (candidates) => {
+    window.__ato_github_candidates_result = (result) => {
       clearTimeout(timeout);
       setLoading(false);
       delete window.__ato_github_candidates_result;
-      onCandidatesFound(candidates || [], validRepo);
+      if (result && result.ok) {
+        onCandidatesFound(result.candidates || [], validRepo);
+      } else {
+        const msg = (result && result.error) ? result.error : "候補の取得に失敗しました。";
+        setError(msg);
+      }
     };
 
     abortRef.current = () => {
@@ -68,6 +69,9 @@ export function GithubRunScreen({ onCandidatesFound }) {
       delete window.__ato_github_candidates_result;
       setLoading(false);
     };
+
+    // Send IPC request to Rust to find candidates (after callback is ready).
+    bridge({ kind: "github_find_candidates", repo: validRepo });
   };
 
   const handleKeyDown = (e) => {
