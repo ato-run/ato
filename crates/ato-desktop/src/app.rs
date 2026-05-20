@@ -763,18 +763,16 @@ pub fn run(skip_onboarding: bool) {
         // directly, which opens the `ato-settings` system capsule
         // in its own window.
 
-        // Identity / Account menu trigger from the Control Bar's
-        // right-end avatar button. Opens the `ato-identity` system
-        // capsule. The popover renders an honest Phase-1 surface:
-        // Store / Settings rows are live (hand off to the existing
-        // system capsules), while Profile / Account / Workspace /
-        // Trust rows are visibly disabled with "近日公開" pills.
+        // Backward-compatible alias: OpenIdentityMenu now routes to
+        // the Dock window. The Control Bar avatar button dispatches
+        // OpenDockWindow directly, but external callers may still
+        // send OpenIdentityMenu.
         cx.on_action(|_: &OpenIdentityMenu, cx: &mut App| {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
-            if let Err(err) = crate::window::identity_window::open_identity_window(cx) {
-                tracing::error!(error = %err, "OpenIdentityMenu: open_identity_window failed");
+            if let Err(err) = crate::window::dock::open_dock_window(cx) {
+                tracing::error!(error = %err, "OpenIdentityMenu: open_dock_window failed");
             }
         });
 
