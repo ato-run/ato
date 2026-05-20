@@ -1152,15 +1152,16 @@ pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
         Ok(entries) => {
             let mut per_key_count: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
-            let mut grant_entries: Vec<Value> = Vec::new();
+            let mut handle_to_keys: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
             for e in &entries {
                 if let Some(ref allow) = e.allow {
                     per_key_count.insert(e.key.clone(), allow.len());
-                    if !allow.is_empty() {
-                        grant_entries.push(json!({
-                            "handle": allow.join(","),
-                            "keys": [&e.key],
-                        }));
+                    for handle in allow {
+                        handle_to_keys
+                            .entry(handle.clone())
+                            .or_default()
+                            .push(e.key.clone());
                     }
                 }
             }
@@ -1175,6 +1176,11 @@ pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
                     })
                 })
                 .collect::<Vec<_>>();
+            let grant_entries: Vec<Value> = handle_to_keys
+                .into_iter()
+                .filter(|(_, keys)| !keys.is_empty())
+                .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
+                .collect();
             (key_counts, grant_entries)
         }
         Err(_) => {
