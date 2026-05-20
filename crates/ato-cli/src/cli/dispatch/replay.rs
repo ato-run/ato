@@ -112,6 +112,7 @@ pub(super) fn execute_replay_command(
         cwd: plan.cwd,
         cache_strategy: CacheStrategyArg::Auto,
         deprecation_warning: None,
+        plan_only: false,
         reporter: Arc::new(reporters::CliReporter::new_run(json)),
     })
 }

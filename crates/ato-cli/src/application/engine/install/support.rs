@@ -7,11 +7,11 @@ use anyhow::{Context, Result};
 use rand::Rng;
 
 use capsule_core::execution_plan::error::AtoExecutionError;
-use capsule_core::AtoError;
 use capsule_core::input_resolver::{
     resolve_authoritative_input, ResolveInputOptions, ResolvedInput, ATO_LOCK_FILE_NAME,
 };
 use capsule_core::smoke::SmokeFailureClass;
+use capsule_core::AtoError;
 use capsule_core::CapsuleReporter;
 use tracing::debug;
 
@@ -2304,6 +2304,7 @@ pub(crate) fn execute_run_command(
     inject: Vec<String>,
     build_policy: crate::application::build_materialization::BuildPolicy,
     cache_strategy_arg: crate::cli::shared::CacheStrategyArg,
+    plan_only: bool,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2353,6 +2354,7 @@ pub(crate) fn execute_run_command(
         cache_strategy: cache_strategy_arg.resolve(),
         reporter,
         preview_mode: false,
+        plan_only,
     }))
 }
 

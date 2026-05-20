@@ -510,6 +510,7 @@ fn healthcheck_ok(url: &str) -> bool {
 /// freshly-written record win — this is enrichment, not overwrite.
 pub(crate) fn persist_after_spawn(
     pid: u32,
+    launch_key: &str,
     launch_digest: &str,
     process_start_time_unix_ms: Option<u64>,
     prelaunch_receipt: Option<&crate::app_control::session::ExecutionReceiptSessionMetadata>,
@@ -522,6 +523,7 @@ pub(crate) fn persist_after_spawn(
         .with_context(|| format!("failed to parse fresh session record {}", path.display()))?;
 
     record.schema_version = Some(SESSION_RECORD_SCHEMA_VERSION);
+    record.launch_key = Some(launch_key.to_string());
     record.launch_digest = Some(launch_digest.to_string());
     record.process_start_time_unix_ms = process_start_time_unix_ms;
 

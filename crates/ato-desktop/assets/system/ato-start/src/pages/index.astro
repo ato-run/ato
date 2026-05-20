@@ -51,6 +51,8 @@ import FeaturedApps from "../components/FeaturedApps.astro";
 
       const snap = window.__ATO_START_SNAPSHOT__ || {};
       const searchInput = document.getElementById('searchInput');
+      const recentCapsulesContent = document.getElementById('recentCapsulesContent');
+      const localAppsContent = document.getElementById('localAppsContent');
 
       function submitSearch() {
         const value = searchInput.value.trim();
@@ -62,6 +64,78 @@ import FeaturedApps from "../components/FeaturedApps.astro";
         searchInput.value = value;
         searchInput.focus();
         searchInput.setSelectionRange(value.length, value.length);
+      }
+
+      function buildEntryButton(iconSvg, title, subtitle, onClick) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'w-full flex items-center gap-3 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors text-left';
+        button.addEventListener('click', onClick);
+
+        var iconWrap = document.createElement('div');
+        iconWrap.className = 'w-10 h-10 rounded-xl border border-slate-200 bg-slate-50 text-slate-400 shrink-0 flex items-center justify-center';
+        iconWrap.innerHTML = iconSvg;
+
+        var textWrap = document.createElement('div');
+        textWrap.className = 'min-w-0 flex-1';
+
+        var titleEl = document.createElement('div');
+        titleEl.className = 'text-[12px] font-bold text-slate-700 truncate';
+        titleEl.textContent = title;
+
+        var subtitleEl = document.createElement('div');
+        subtitleEl.className = 'text-[11px] text-slate-400 truncate mt-0.5';
+        subtitleEl.textContent = subtitle;
+
+        textWrap.appendChild(titleEl);
+        textWrap.appendChild(subtitleEl);
+        button.appendChild(iconWrap);
+        button.appendChild(textWrap);
+        return button;
+      }
+
+      function renderRecentCapsules() {
+        if (!recentCapsulesContent) return;
+        var entries = Array.isArray(snap.recent_capsules) ? snap.recent_capsules : [];
+        if (!entries.length) return;
+
+        recentCapsulesContent.innerHTML = '';
+        recentCapsulesContent.className = 'min-h-28 border border-slate-200 bg-white rounded-2xl p-3 flex flex-col gap-2';
+
+        entries.slice(0, 4).forEach(function (entry) {
+          recentCapsulesContent.appendChild(
+            buildEntryButton(
+              '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg>',
+              entry.label || entry.handle || 'Capsule',
+              entry.handle || '',
+              function () {
+                if (entry.handle) ipc({ kind: 'open_capsule', handle: entry.handle });
+              }
+            )
+          );
+        });
+      }
+
+      function renderLocalApps() {
+        if (!localAppsContent) return;
+        var entries = Array.isArray(snap.local_apps) ? snap.local_apps : [];
+        if (!entries.length) return;
+
+        localAppsContent.innerHTML = '';
+        localAppsContent.className = 'min-h-28 border border-slate-200 bg-white rounded-2xl p-3 flex flex-col gap-2';
+
+        entries.slice(0, 4).forEach(function (entry) {
+          localAppsContent.appendChild(
+            buildEntryButton(
+              '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 002-2V8a2 2 0 00-2-2h-7.93a2 2 0 01-1.66-.9l-.82-1.2A2 2 0 007.93 3H4a2 2 0 00-2 2v13c0 1.1.9 2 2 2z"/></svg>',
+              entry.name || 'Local app',
+              entry.path || '',
+              function () {
+                if (entry.path) ipc({ kind: 'open_local_path', path: entry.path });
+              }
+            )
+          );
+        });
       }
 
       if (searchInput) {
@@ -80,7 +154,7 @@ import FeaturedApps from "../components/FeaturedApps.astro";
       document.querySelectorAll('.action-card[data-action]').forEach(function (card) {
         card.addEventListener('click', function () {
           var action = this.dataset.action;
-          if (action === 'github') fillSearch('https://github.com/');
+          if (action === 'github') ipc({ kind: 'open_github_run' });
           else if (action === 'local') fillSearch('~/');
           else if (action === 'store') ipc({ kind: 'open_store' });
         });
@@ -90,7 +164,7 @@ import FeaturedApps from "../components/FeaturedApps.astro";
         tab.addEventListener('click', function () {
           var t = this.dataset.tab;
           if (t === 'store') ipc({ kind: 'open_store' });
-          else if (t === 'github') fillSearch('https://github.com/');
+          else if (t === 'github') ipc({ kind: 'open_github_run' });
           else if (t === 'local') fillSearch('~/');
           else if (t === 'recent') ipc({ kind: 'show_all_recent' });
         });
@@ -130,6 +204,9 @@ import FeaturedApps from "../components/FeaturedApps.astro";
           if (searchInput) { searchInput.focus(); searchInput.select(); }
         }
       });
+
+      renderRecentCapsules();
+      renderLocalApps();
 
       if (searchInput) searchInput.focus();
     })();
