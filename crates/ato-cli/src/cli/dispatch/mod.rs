@@ -104,7 +104,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             write,
             read_write,
             cwd,
-            plan_only,
             args,
         } => run::execute_run_like_command(run::RunLikeCommandArgs {
             path,
