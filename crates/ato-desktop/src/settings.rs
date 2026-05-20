@@ -1148,44 +1148,61 @@ fn parse_control_bar_mode(v: &str) -> Option<ControlBarMode> {
 /// **No secret values are ever included.** Only key names, masked indicators,
 /// grant counts, and storage metadata are returned.
 pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
-    let keys: Vec<Value> = store
-        .secrets
-        .iter()
-        .map(|s| {
-            let grant_count = store
-                .grants
-                .values()
-                .filter(|gkeys| gkeys.contains(&s.key))
-                .count();
-            json!({
-                "key": s.key,
-                "hasValue": !s.value.is_empty(),
-                "grantCount": grant_count,
-            })
-        })
-        .collect();
-
-    let grants: Vec<Value> = {
-        let mut g: Vec<_> = store
-            .grants
-            .iter()
-            .filter(|(_, keys)| !keys.is_empty())
-            .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
-            .collect();
-        g.sort_by(|a, b| a["handle"].as_str().cmp(&b["handle"].as_str()));
-        g
+    let (grant_counts, grants) = match crate::secret_bridge::CliSecretBridge::list() {
+        Ok(entries) => {
+            let mut per_key_count: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut handle_to_keys: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for e in &entries {
+                if let Some(ref allow) = e.allow {
+                    per_key_count.insert(e.key.clone(), allow.len());
+                    for handle in allow {
+                        handle_to_keys
+                            .entry(handle.clone())
+                            .or_default()
+                            .push(e.key.clone());
+                    }
+                }
+            }
+            let key_counts = entries
+                .iter()
+                .map(|e| {
+                    let count = per_key_count.get(&e.key).copied().unwrap_or(0);
+                    json!({
+                        "key": e.key,
+                        "hasValue": true,
+                        "grantCount": count,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let grant_entries: Vec<Value> = handle_to_keys
+                .into_iter()
+                .filter(|(_, keys)| !keys.is_empty())
+                .map(|(handle, keys)| json!({ "handle": handle, "keys": keys }))
+                .collect();
+            (key_counts, grant_entries)
+        }
+        Err(_) => {
+            let fallback_keys: Vec<Value> = store
+                .secrets
+                .iter()
+                .map(|s| json!({ "key": s.key, "hasValue": false, "grantCount": 0 }))
+                .collect();
+            (fallback_keys, Vec::new())
+        }
     };
 
     let path_str = crate::config::secrets_path_display();
     let mode = if cfg!(unix) { "0600" } else { "platform-acl" };
 
     json!({
-        "keys": keys,
+        "keys": grant_counts,
         "grants": grants,
         "storage": {
             "path": path_str,
             "mode": mode,
-            "backend": "json-file",
+            "backend": "age-file",
         },
     })
 }

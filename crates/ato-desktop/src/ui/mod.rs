@@ -3495,9 +3495,8 @@ fn render_capsule_permissions_page(
     network_logs: &[&crate::state::NetworkLogEntry],
     theme: &Theme,
 ) -> Div {
-    let granted_envs = state
-        .secret_store
-        .grants
+    let granted_envs: Vec<String> = state
+        .secret_grant_keys_by_handle
         .get(canonical_handle)
         .cloned()
         .unwrap_or_default();
@@ -3837,9 +3836,8 @@ fn render_capsule_api_page(
     network_logs: &[&crate::state::NetworkLogEntry],
     theme: &Theme,
 ) -> Div {
-    let granted_envs = state
-        .secret_store
-        .grants
+    let granted_envs: Vec<String> = state
+        .secret_grant_keys_by_handle
         .get(canonical_handle)
         .cloned()
         .unwrap_or_default();
