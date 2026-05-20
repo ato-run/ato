@@ -10,6 +10,7 @@ mod localization;
 mod logging;
 mod orchestrator;
 mod retention;
+mod secret_bridge;
 mod settings;
 mod source_import_api;
 mod source_import_runner;

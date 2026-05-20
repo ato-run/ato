@@ -228,9 +228,8 @@ pub fn dispatch(
                 return Ok(());
             }
             let mut store = load_secrets();
-            store.add_secret(trimmed_key, trimmed_value);
-            if let Err(e) = save_secrets(&store) {
-                tracing::error!(error = %e, "ato_settings: PutSecret save failed");
+            if let Err(e) = store.add_secret(trimmed_key, trimmed_value) {
+                tracing::error!(error = %e, "ato_settings: PutSecret failed");
                 push_secrets_error(cx, request_id.as_deref(), &format!("save failed: {e}"));
                 return Ok(());
             }
@@ -247,9 +246,8 @@ pub fn dispatch(
                 push_secrets_error(cx, request_id.as_deref(), "key not found");
                 return Ok(());
             }
-            store.remove_secret(&trimmed_key);
-            if let Err(e) = save_secrets(&store) {
-                tracing::error!(error = %e, "ato_settings: DeleteSecret save failed");
+            if let Err(e) = store.remove_secret(&trimmed_key) {
+                tracing::error!(error = %e, "ato_settings: DeleteSecret failed");
                 push_secrets_error(cx, request_id.as_deref(), &format!("save failed: {e}"));
                 return Ok(());
             }
@@ -275,9 +273,8 @@ pub fn dispatch(
                 push_secrets_error(cx, request_id.as_deref(), "key not found");
                 return Ok(());
             }
-            store.grant_secret(&trimmed_handle, &trimmed_key);
-            if let Err(e) = save_secrets(&store) {
-                tracing::error!(error = %e, "ato_settings: GrantSecret save failed");
+            if let Err(e) = store.grant_secret(&trimmed_handle, &trimmed_key) {
+                tracing::error!(error = %e, "ato_settings: GrantSecret failed");
                 push_secrets_error(cx, request_id.as_deref(), &format!("save failed: {e}"));
                 return Ok(());
             }
@@ -299,9 +296,8 @@ pub fn dispatch(
                 return Ok(());
             }
             let mut store = load_secrets();
-            store.revoke_secret(&trimmed_handle, &trimmed_key);
-            if let Err(e) = save_secrets(&store) {
-                tracing::error!(error = %e, "ato_settings: RevokeSecret save failed");
+            if let Err(e) = store.revoke_secret(&trimmed_handle, &trimmed_key) {
+                tracing::error!(error = %e, "ato_settings: RevokeSecret failed");
                 push_secrets_error(cx, request_id.as_deref(), &format!("save failed: {e}"));
                 return Ok(());
             }
