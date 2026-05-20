@@ -84,6 +84,7 @@ pub(super) struct SessionStartPhaseRunner {
     target_label: Option<String>,
     json: bool,
     start_source: SessionStartSource,
+    expected_run_config_hash: Option<String>,
 
     // Set by Install phase
     resolution: Option<HandleResolution>,
@@ -150,12 +151,18 @@ pub(super) struct SessionStartPhaseRunner {
 }
 
 impl SessionStartPhaseRunner {
-    pub(super) fn new(handle: &str, target_label: Option<&str>, json: bool) -> Self {
+    pub(super) fn new(
+        handle: &str,
+        target_label: Option<&str>,
+        expected_run_config_hash: Option<String>,
+        json: bool,
+    ) -> Self {
         Self {
             handle: handle.to_string(),
             target_label: target_label.map(str::to_string),
             json,
             start_source: SessionStartSource::Handle,
+            expected_run_config_hash,
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -176,12 +183,17 @@ impl SessionStartPhaseRunner {
         }
     }
 
-    pub(super) fn from_materialized_record(record: MaterializedLaunchRecord, json: bool) -> Self {
+    pub(super) fn from_materialized_record(
+        record: MaterializedLaunchRecord,
+        expected_run_config_hash: Option<String>,
+        json: bool,
+    ) -> Self {
         Self {
             handle: record.handle.clone(),
             target_label: Some(record.target_label.clone()),
             json,
             start_source: SessionStartSource::MaterializedRecord(record),
+            expected_run_config_hash,
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -227,13 +239,45 @@ impl SessionStartPhaseRunner {
             MaterializedLaunchValidationOutcome::Stale { reason } => {
                 anyhow::bail!(
                     "materialized launch record {} is stale: {}",
-                    record.session_id,
+                    record
+                        .last_session_id
+                        .as_deref()
+                        .unwrap_or(&record.launch_key),
                     reason.as_str()
                 );
             }
         }
 
         let manifest_path = PathBuf::from(&record.manifest_path);
+        if record.handle != self.handle {
+            anyhow::bail!(
+                "materialized launch record belongs to '{}' not '{}'",
+                record.handle,
+                self.handle
+            );
+        }
+        let expected_target = self.target_label.as_deref().unwrap_or(&record.target_label);
+        if record.target_label != expected_target {
+            anyhow::bail!(
+                "materialized launch record target '{}' does not match '{}'",
+                record.target_label,
+                expected_target
+            );
+        }
+        let expected_run_config_hash = self
+            .expected_run_config_hash
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("materialized relaunch requires --run-config-hash"))?;
+        if record.run_config_hash != expected_run_config_hash {
+            anyhow::bail!("materialized launch record is stale: run config changed");
+        }
+        if record.platform != ato_session_core::current_platform_tag() {
+            anyhow::bail!(
+                "materialized launch record is stale: platform changed from {} to {}",
+                record.platform,
+                ato_session_core::current_platform_tag()
+            );
+        }
         let manifest_path_str = manifest_path.to_string_lossy().to_string();
         let mut resolution =
             build_resolution(&manifest_path_str, Some(record.target_label.as_str()), None)?;
@@ -259,7 +303,10 @@ impl SessionStartPhaseRunner {
         if actual_app_root != expected_app_root {
             anyhow::bail!(
                 "materialized launch record {} is stale: workspace root changed from {} to {}",
-                record.session_id,
+                record
+                    .last_session_id
+                    .as_deref()
+                    .unwrap_or(&record.launch_key),
                 expected_app_root.display(),
                 actual_app_root.display()
             );
@@ -287,16 +334,25 @@ impl SessionStartPhaseRunner {
         if launch_digest != record.launch_digest {
             anyhow::bail!(
                 "materialized launch record {} is stale: launch digest changed",
-                record.session_id
+                record
+                    .last_session_id
+                    .as_deref()
+                    .unwrap_or(&record.launch_key)
             );
         }
 
         let launch_key = lm::compute_launch_key(&launch_spec);
+        if record.launch_key != launch_key {
+            anyhow::bail!("materialized launch record is stale: launch key changed");
+        }
         self._launch_lock = lm::acquire_launch_lock(&launch_key).ok();
         self.pre_projection_spec = Some(launch_spec);
         notes.push(format!(
             "Relaunched from materialized launch record {}; skipped resolve/install.",
-            record.session_id
+            record
+                .last_session_id
+                .as_deref()
+                .unwrap_or(&record.launch_key)
         ));
         self.resolution = Some(resolution);
         self.manifest_path = Some(manifest_path);
@@ -531,6 +587,14 @@ impl SessionStartPhaseRunner {
         if self.install_reused {
             return Ok(());
         }
+        if matches!(
+            &self.start_source,
+            SessionStartSource::MaterializedRecord(_)
+        ) {
+            self.build_observation = None;
+            self.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+            return Ok(());
+        }
 
         // PR-C: orchestration mode no longer skips Build. The in-process
         // orchestration path runs in this process, so the wrapper owns the
@@ -546,15 +610,12 @@ impl SessionStartPhaseRunner {
             .expect("install phase must populate plan before build");
         let workspace_root = plan.workspace_root.clone();
 
-        let build_policy = if matches!(
-            &self.start_source,
-            SessionStartSource::MaterializedRecord(_)
-        ) {
-            bm::BuildPolicy::NoBuild
-        } else {
-            bm::BuildPolicy::IfStale
-        };
-        let prepared = bm::prepare_decision(plan, &self.launch_ctx, build_policy, &workspace_root);
+        let prepared = bm::prepare_decision(
+            plan,
+            &self.launch_ctx,
+            bm::BuildPolicy::IfStale,
+            &workspace_root,
+        );
         self.build_observation = prepared.observation.clone();
         self.build_decision_kind = Some(prepared.decision.result_kind);
 
@@ -656,6 +717,7 @@ impl SessionStartPhaseRunner {
             let lock = lm::acquire_launch_lock(&launch_key).ok();
             (spec, lock)
         };
+        let launch_key = lm::compute_launch_key(&launch_spec);
         let launch_digest = lm::compute_launch_digest(&launch_spec);
 
         // 1. Lookup + validate.
@@ -785,6 +847,7 @@ impl SessionStartPhaseRunner {
             let process_start_time = lm::process_start_time_unix_ms(pid);
             if let Err(err) = lm::persist_after_spawn(
                 pid,
+                &launch_key,
                 &launch_digest,
                 process_start_time,
                 prelaunch_receipt.as_ref(),
@@ -813,21 +876,27 @@ impl SessionStartPhaseRunner {
         }
 
         if fresh_spawn {
-            let materialized_record = info.to_materialized_launch_record(
-                resolution,
-                &plan.workspace_root,
-                &launch_digest,
-            );
-            if let Err(err) = crate::app_control::session::launch_cache_root().and_then(|root| {
-                crate::app_control::session::write_materialized_launch_record_atomic(
-                    &root,
-                    &materialized_record,
-                )
-            }) {
-                eprintln!(
-                    "ATO-WARN failed to persist materialized launch record for {}: {}",
-                    materialized_record.session_id, err
+            if let Some(run_config_hash) = self.expected_run_config_hash.as_deref() {
+                let materialized_record = info.to_materialized_launch_record(
+                    resolution,
+                    &plan.workspace_root,
+                    &launch_key,
+                    &launch_digest,
+                    run_config_hash,
                 );
+                if let Err(err) =
+                    crate::app_control::session::launch_cache_root().and_then(|root| {
+                        crate::app_control::session::write_materialized_launch_record_atomic(
+                            &root,
+                            &materialized_record,
+                        )
+                    })
+                {
+                    eprintln!(
+                        "ATO-WARN failed to persist materialized launch record for {}: {}",
+                        materialized_record.launch_key, err
+                    );
+                }
             }
         }
 

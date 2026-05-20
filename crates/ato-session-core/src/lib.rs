@@ -24,7 +24,8 @@ pub mod sweep;
 pub mod validate;
 
 pub use materialized::{
-    launch_cache_root, materialized_launch_record_path, read_materialized_launch_record,
+    compute_run_config_hash, current_platform_tag, launch_cache_root,
+    materialized_launch_record_path, read_materialized_launch_record,
     read_materialized_launch_records, validate_materialized_launch_record,
     write_materialized_launch_record_atomic, MaterializedLaunchRecord,
     MaterializedLaunchStaleReason, MaterializedLaunchValidationOutcome,
