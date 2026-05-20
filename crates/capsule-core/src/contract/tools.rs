@@ -320,53 +320,7 @@ pub async fn ensure_runtime_tool(
         .notify(format!("⬇️  Downloading {} {}", spec.name, version))
         .await?;
     let archive_bytes = download_bytes(&url).await?;
-    let archive_sha256 = hex::encode(Sha256::digest(&archive_bytes));
-
-    let archive_path = tools_root.join(archive_filename(&spec.fetch, &version)?);
-    fs::write(&archive_path, &archive_bytes).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to write archive {}: {}",
-            archive_path.display(),
-            e
-        ))
-    })?;
-    extract_archive(&archive_path, &extracted_dir)?;
-
-    let target_rel = match &spec.layout {
-        ToolLayout::NativeBinary { rel_path } | ToolLayout::NodeScript { rel_path } => rel_path,
-    };
-    // For GithubRelease specs the rel_path may also contain `{triple}`.
-    let target_rel_resolved = match &spec.fetch {
-        FetchKind::GithubRelease { triple_style, .. } => {
-            let triple = host_triple(*triple_style)?;
-            target_rel.replace("{triple}", &triple)
-        }
-        _ => target_rel.to_string(),
-    };
-    let target_path = extracted_dir.join(&target_rel_resolved);
-    if !target_path.exists() {
-        return Err(CapsuleError::Pack(format!(
-            "{} archive missing expected entry {}",
-            spec.name,
-            target_path.display()
-        )));
-    }
-
-    write_shim(spec, deps, &target_path, &shim_path)?;
-
-    fs::write(&sha_path, &archive_sha256).map_err(|e| {
-        CapsuleError::Pack(format!(
-            "Failed to write archive hash {}: {}",
-            sha_path.display(),
-            e
-        ))
-    })?;
-
-    Ok(ToolHandle {
-        bin_dir: shim_dir,
-        version,
-        binary_sha256: archive_sha256,
-    })
+    install_runtime_tool_archive(spec, &version, deps, &archive_bytes)
 }
 
 fn build_fetch_url(fetch: &FetchKind, version: &str) -> Result<String> {
@@ -460,10 +414,20 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
                 ))
             })?;
             for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).map_err(|e| {
-                    CapsuleError::Pack(format!("zip entry error: {}", e))
+                let mut entry = archive
+                    .by_index(i)
+                    .map_err(|e| CapsuleError::Pack(format!("zip entry error: {}", e)))?;
+                let relative = entry.enclosed_name().ok_or_else(|| {
+                    CapsuleError::Pack(format!("zip entry escapes destination: {}", entry.name()))
                 })?;
-                let out_path = dest.join(entry.name());
+                ensure_safe_relative(&relative)?;
+                if entry.is_symlink() {
+                    return Err(CapsuleError::Pack(format!(
+                        "zip entry is an unsupported symlink: {}",
+                        entry.name()
+                    )));
+                }
+                let out_path = dest.join(relative);
                 if entry.is_dir() {
                     fs::create_dir_all(&out_path).map_err(|e| {
                         CapsuleError::Pack(format!(
@@ -490,18 +454,13 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
                         ))
                     })?;
                     io::copy(&mut entry, &mut out_file).map_err(|e| {
-                        CapsuleError::Pack(format!(
-                            "Failed to write {}: {}",
-                            out_path.display(),
-                            e
-                        ))
+                        CapsuleError::Pack(format!("Failed to write {}: {}", out_path.display(), e))
                     })?;
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
                         if let Some(mode) = entry.unix_mode() {
-                            fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))
-                                .ok();
+                            fs::set_permissions(&out_path, fs::Permissions::from_mode(mode)).ok();
                         }
                     }
                 }
@@ -514,35 +473,173 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+fn install_runtime_tool_archive(
+    spec: &RuntimeToolSpec,
+    version: &str,
+    deps: &ToolDeps,
+    archive_bytes: &[u8],
+) -> Result<ToolHandle> {
+    let tools_root = toolchain_cache_dir()?
+        .join("tools")
+        .join(spec.name)
+        .join(version);
+    let extracted_dir = tools_root.join("extracted");
+    let shim_dir = tools_root.join("shim");
+    let sha_path = tools_root.join("binary.sha256");
+    let archive_sha256 = hex::encode(Sha256::digest(archive_bytes));
+
+    let shim_filename = if cfg!(windows) {
+        format!("{}.cmd", spec.name)
+    } else {
+        spec.name.to_string()
+    };
+    let shim_path = shim_dir.join(&shim_filename);
+
+    fs::create_dir_all(&tools_root).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to create tool dir {}: {}",
+            tools_root.display(),
+            e
+        ))
+    })?;
+    fs::create_dir_all(&extracted_dir).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to create tool extract dir {}: {}",
+            extracted_dir.display(),
+            e
+        ))
+    })?;
+    fs::create_dir_all(&shim_dir).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to create tool shim dir {}: {}",
+            shim_dir.display(),
+            e
+        ))
+    })?;
+
+    let archive_path = tools_root.join(archive_filename(&spec.fetch, version)?);
+    fs::write(&archive_path, archive_bytes).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to write archive {}: {}",
+            archive_path.display(),
+            e
+        ))
+    })?;
+    extract_archive(&archive_path, &extracted_dir)?;
+
+    let target_path = extracted_dir.join(resolved_layout_path(spec)?);
+    if !target_path.exists() {
+        return Err(CapsuleError::Pack(format!(
+            "{} archive missing expected entry {}",
+            spec.name,
+            target_path.display()
+        )));
+    }
+
+    write_shim(spec, deps, &target_path, &shim_path)?;
+
+    fs::write(&sha_path, &archive_sha256).map_err(|e| {
+        CapsuleError::Pack(format!(
+            "Failed to write archive hash {}: {}",
+            sha_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(ToolHandle {
+        bin_dir: shim_dir,
+        version: version.to_string(),
+        binary_sha256: archive_sha256,
+    })
+}
+
+fn resolved_layout_path(spec: &RuntimeToolSpec) -> Result<String> {
+    let target_rel = match &spec.layout {
+        ToolLayout::NativeBinary { rel_path } | ToolLayout::NodeScript { rel_path } => rel_path,
+    };
+    match &spec.fetch {
+        FetchKind::GithubRelease { triple_style, .. } => {
+            let triple = host_triple(*triple_style)?;
+            Ok(target_rel.replace("{triple}", &triple))
+        }
+        _ => Ok(target_rel.to_string()),
+    }
+}
+
 /// Maps the current host platform to a tool-specific triple string.
 /// Used to resolve `{triple}` placeholders in `GithubRelease` asset templates.
 fn host_triple(style: TripleStyle) -> Result<String> {
     match style {
         TripleStyle::Rust => {
-            let triple = match (cfg!(target_os = "macos"), cfg!(target_os = "linux"), cfg!(target_os = "windows"),
-                                cfg!(target_arch = "aarch64"), cfg!(target_arch = "x86_64")) {
-                (true, _, _, true, _)  => "aarch64-apple-darwin",
-                (true, _, _, _, true)  => "x86_64-apple-darwin",
-                (_, true, _, true, _)  => "aarch64-unknown-linux-gnu",
-                (_, true, _, _, true)  => "x86_64-unknown-linux-gnu",
-                (_, _, true, _, true)  => "x86_64-pc-windows-msvc",
-                _ => return Err(CapsuleError::Pack("Unsupported platform for Rust triple".to_string())),
+            let triple = match (
+                cfg!(target_os = "macos"),
+                cfg!(target_os = "linux"),
+                cfg!(target_os = "windows"),
+                cfg!(target_arch = "aarch64"),
+                cfg!(target_arch = "x86_64"),
+            ) {
+                (true, _, _, true, _) => "aarch64-apple-darwin",
+                (true, _, _, _, true) => "x86_64-apple-darwin",
+                (_, true, _, true, _) => "aarch64-unknown-linux-gnu",
+                (_, true, _, _, true) => "x86_64-unknown-linux-gnu",
+                (_, _, true, _, true) => "x86_64-pc-windows-msvc",
+                _ => {
+                    return Err(CapsuleError::Pack(
+                        "Unsupported platform for Rust triple".to_string(),
+                    ))
+                }
             };
             Ok(triple.to_string())
         }
         TripleStyle::Bun => {
-            let triple = match (cfg!(target_os = "macos"), cfg!(target_os = "linux"), cfg!(target_os = "windows"),
-                                cfg!(target_arch = "aarch64"), cfg!(target_arch = "x86_64")) {
-                (true, _, _, true, _)  => "darwin-aarch64",
-                (true, _, _, _, true)  => "darwin-x64",
-                (_, true, _, true, _)  => "linux-aarch64",
-                (_, true, _, _, true)  => "linux-x64",
-                (_, _, true, _, true)  => "windows-x64",
-                _ => return Err(CapsuleError::Pack("Unsupported platform for Bun triple".to_string())),
+            let triple = match (
+                cfg!(target_os = "macos"),
+                cfg!(target_os = "linux"),
+                cfg!(target_os = "windows"),
+                cfg!(target_arch = "aarch64"),
+                cfg!(target_arch = "x86_64"),
+            ) {
+                (true, _, _, true, _) => "darwin-aarch64",
+                (true, _, _, _, true) => "darwin-x64",
+                (_, true, _, true, _) => "linux-aarch64",
+                (_, true, _, _, true) => "linux-x64",
+                (_, _, true, _, true) => "windows-x64",
+                _ => {
+                    return Err(CapsuleError::Pack(
+                        "Unsupported platform for Bun triple".to_string(),
+                    ))
+                }
             };
             Ok(triple.to_string())
         }
     }
+}
+
+fn ensure_safe_relative(path: &Path) -> Result<()> {
+    if path.is_absolute() {
+        return Err(CapsuleError::Pack(format!(
+            "archive entry has absolute path: {}",
+            path.display()
+        )));
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(CapsuleError::Pack(format!(
+                    "archive entry escapes destination via '..': {}",
+                    path.display()
+                )));
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(CapsuleError::Pack(format!(
+                    "archive entry has root component: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_shim(
@@ -620,9 +717,110 @@ fn write_executable(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::foundation::reporter::NoOpReporter;
+    use std::ffi::OsString;
+    use std::fs::File;
+    use std::io::{Cursor, Write};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use zip::write::SimpleFileOptions;
 
     fn parse(toml_str: &str) -> toml::Value {
         toml_str.parse().expect("parse toml")
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    fn scoped_env(key: &'static str, value: Option<&str>) -> EnvGuard {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        EnvGuard { key, previous }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn unique_version(tag: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        format!("0.0.0-test-{tag}-{nanos}")
+    }
+
+    fn build_npm_tgz(rel_path: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = b"#!/usr/bin/env node\nconsole.log('ok');\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, rel_path, Cursor::new(payload))
+            .expect("append npm entry");
+        let tar = builder.into_inner().expect("finish tar");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&tar).expect("write tgz");
+        gz.finish().expect("finish tgz")
+    }
+
+    fn build_bun_zip() -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(0o755);
+        let path = format!("{}/bun", resolved_layout_path(&BUN).expect("bun layout"));
+        zip.start_file(path, options).expect("start bun file");
+        zip.write_all(b"bun binary").expect("write bun");
+        zip.finish().expect("finish bun zip");
+        cursor.into_inner()
+    }
+
+    fn build_uv_tgz() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = b"#!/bin/sh\necho uv\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                resolved_layout_path(&UV).expect("uv layout"),
+                Cursor::new(payload),
+            )
+            .expect("append uv");
+        let tar = builder.into_inner().expect("finish uv tar");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(&tar).expect("write uv tgz");
+        gz.finish().expect("finish uv tgz")
+    }
+
+    fn write_zip_archive(path: &Path, entries: &[(&str, &[u8], Option<u32>)]) {
+        let file = File::create(path).expect("create zip");
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, contents, mode) in entries {
+            let mut options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            if let Some(mode) = mode {
+                options = options.unix_permissions(*mode);
+            }
+            zip.start_file(*name, options).expect("start zip file");
+            zip.write_all(contents).expect("write zip contents");
+        }
+        zip.finish().expect("finish zip");
     }
 
     #[test]
@@ -703,5 +901,187 @@ mod tests {
         assert!(lookup("yarn").is_some());
         assert!(lookup("bun").is_some());
         assert!(lookup("uv").is_some());
+    }
+
+    #[test]
+    fn tool_registry_builds_expected_urls_and_archive_names() {
+        let cases = [
+            (
+                &PNPM,
+                "9.12.0",
+                "https://registry.npmjs.org/pnpm/-/pnpm-9.12.0.tgz",
+                "pnpm-9.12.0.tgz",
+            ),
+            (
+                &YARN,
+                "1.22.22",
+                "https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz",
+                "yarn-1.22.22.tgz",
+            ),
+        ];
+        for (spec, version, expected_url, expected_archive) in cases {
+            assert_eq!(build_fetch_url(&spec.fetch, version).unwrap(), expected_url);
+            assert_eq!(
+                archive_filename(&spec.fetch, version).unwrap(),
+                expected_archive
+            );
+        }
+
+        let bun_triple = host_triple(TripleStyle::Bun).unwrap();
+        let uv_triple = host_triple(TripleStyle::Rust).unwrap();
+        assert_eq!(
+            build_fetch_url(&BUN.fetch, "1.1.38").unwrap(),
+            format!("https://github.com/oven-sh/bun/releases/download/1.1.38/bun-{bun_triple}.zip")
+        );
+        assert_eq!(
+            archive_filename(&BUN.fetch, "1.1.38").unwrap(),
+            format!("bun-{bun_triple}.zip")
+        );
+        assert_eq!(
+            build_fetch_url(&UV.fetch, "0.5.21").unwrap(),
+            format!(
+                "https://github.com/astral-sh/uv/releases/download/0.5.21/uv-{uv_triple}.tar.gz"
+            )
+        );
+        assert_eq!(
+            archive_filename(&UV.fetch, "0.5.21").unwrap(),
+            format!("uv-{uv_triple}.tar.gz")
+        );
+    }
+
+    #[test]
+    fn tool_registry_resolves_expected_binary_paths() {
+        assert_eq!(resolved_layout_path(&PNPM).unwrap(), "package/bin/pnpm.cjs");
+        assert_eq!(resolved_layout_path(&YARN).unwrap(), "package/bin/yarn.js");
+        assert_eq!(
+            resolved_layout_path(&BUN).unwrap(),
+            format!("bun-{}/bun", host_triple(TripleStyle::Bun).unwrap())
+        );
+        assert_eq!(resolved_layout_path(&UV).unwrap(), "uv");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_runtime_tool_archive_smoke_covers_all_slice_b_tools() {
+        let ato_home = tempfile::tempdir().expect("ato_home");
+        let _home = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(NoOpReporter);
+        let _ = reporter;
+
+        let pnpm_version = unique_version("pnpm");
+        let pnpm_handle = install_runtime_tool_archive(
+            &PNPM,
+            &pnpm_version,
+            &ToolDeps {
+                node_bin: Some(PathBuf::from("/usr/bin/node")),
+            },
+            &build_npm_tgz("package/bin/pnpm.cjs"),
+        )
+        .expect("install pnpm");
+        assert!(pnpm_handle
+            .bin_dir
+            .join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" })
+            .exists());
+        assert!(ato_home
+            .path()
+            .join("toolchains/tools/pnpm")
+            .join(&pnpm_version)
+            .join("extracted")
+            .join("package/bin/pnpm.cjs")
+            .exists());
+
+        let yarn_version = unique_version("yarn");
+        let yarn_handle = install_runtime_tool_archive(
+            &YARN,
+            &yarn_version,
+            &ToolDeps {
+                node_bin: Some(PathBuf::from("/usr/bin/node")),
+            },
+            &build_npm_tgz("package/bin/yarn.js"),
+        )
+        .expect("install yarn");
+        assert!(yarn_handle
+            .bin_dir
+            .join(if cfg!(windows) { "yarn.cmd" } else { "yarn" })
+            .exists());
+        assert!(ato_home
+            .path()
+            .join("toolchains/tools/yarn")
+            .join(&yarn_version)
+            .join("extracted")
+            .join("package/bin/yarn.js")
+            .exists());
+
+        let bun_version = unique_version("bun");
+        let bun_handle = install_runtime_tool_archive(
+            &BUN,
+            &bun_version,
+            &ToolDeps::default(),
+            &build_bun_zip(),
+        )
+        .expect("install bun");
+        assert!(bun_handle
+            .bin_dir
+            .join(if cfg!(windows) { "bun.cmd" } else { "bun" })
+            .exists());
+        assert!(ato_home
+            .path()
+            .join("toolchains/tools/bun")
+            .join(&bun_version)
+            .join("extracted")
+            .join(resolved_layout_path(&BUN).unwrap())
+            .exists());
+
+        let uv_version = unique_version("uv");
+        let uv_handle =
+            install_runtime_tool_archive(&UV, &uv_version, &ToolDeps::default(), &build_uv_tgz())
+                .expect("install uv");
+        assert!(uv_handle
+            .bin_dir
+            .join(if cfg!(windows) { "uv.cmd" } else { "uv" })
+            .exists());
+        assert!(ato_home
+            .path()
+            .join("toolchains/tools/uv")
+            .join(&uv_version)
+            .join("extracted")
+            .join("uv")
+            .exists());
+    }
+
+    #[test]
+    fn extract_archive_rejects_zip_path_traversal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let archive = temp.path().join("bad.zip");
+        write_zip_archive(&archive, &[("../escape", b"bad", None)]);
+
+        let err = extract_archive(&archive, temp.path()).expect_err("zip traversal must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("escapes destination"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn extract_archive_rejects_zip_symlinks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let archive = temp.path().join("bad-link.zip");
+        let file = File::create(&archive).expect("create zip");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.add_symlink(
+            "bun-link",
+            "/tmp/elsewhere",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .expect("add symlink");
+        zip.finish().expect("finish zip");
+
+        let err = extract_archive(&archive, temp.path()).expect_err("zip symlink must fail");
+        let message = err.to_string();
+        assert!(
+            message.contains("unsupported symlink"),
+            "unexpected error: {message}"
+        );
     }
 }
