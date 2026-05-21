@@ -45,18 +45,12 @@ use wry::{Rect, WebView, WebViewBuilder};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::state::GuestRoute;
 use crate::system_capsule::ipc as system_ipc;
+use crate::system_capsule::static_resolver::resolve_system_capsule_protocol_response;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
-/// Single-file React SPA that covers all launch wizard screens
-/// (consent, boot, github_run, candidates, candidate_detail,
-///  no_candidates, create_toml). Built from `assets/system/ato-launch/`
-/// with `vite-plugin-singlefile`; all JS/CSS is inlined.
-const LAUNCH_APP_HTML: &str = include_str!("../../assets/system/ato-launch/dist/index.html");
-
-// Legacy plain-HTML builds kept for reference; no longer loaded into WebViews.
-const _CONSENT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/consent.html");
-const _BOOT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/boot.html");
+const LAUNCH_SCHEME: &str = "capsule-launch";
+const LAUNCH_SLUG: &str = "ato-launch";
 
 /// Pending capsule-launch target — set when `open_consent_window_for_route`
 /// opens the consent wizard, consumed by `ato_launch::dispatch` on
@@ -322,11 +316,19 @@ impl LaunchWindowShell {
         );
         let _ = self._webview.evaluate_script(&script);
     }
+
+    pub fn inject_cli_inference_result(&self, result: &serde_json::Value) {
+        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "typeof window.__ato_cli_inference_result==='function'&&window.__ato_cli_inference_result({})",
+            json
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
 }
 
 fn open_wizard(
     cx: &mut App,
-    html: &'static str,
     w: f32,
     h: f32,
     init_script: Option<String>,
@@ -354,9 +356,15 @@ fn open_wizard(
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let queue_for_ipc = queue.clone();
         let webview = WebViewBuilder::new()
-            .with_html(html)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
             .with_bounds(webview_rect)
@@ -811,8 +819,14 @@ fn open_consent_wizard_inner(
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let webview = WebViewBuilder::new()
-            .with_html(LAUNCH_APP_HTML)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
             .with_bounds(webview_rect)
@@ -935,8 +949,14 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let webview = WebViewBuilder::new()
-            .with_html(LAUNCH_APP_HTML)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
             .with_bounds(webview_rect)
@@ -1310,8 +1330,14 @@ fn open_boot_wizard_inner(
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let webview = WebViewBuilder::new()
-            .with_html(LAUNCH_APP_HTML)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
             .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
             .with_bounds(webview_rect)
@@ -1400,15 +1426,25 @@ mod tests {
 
     #[test]
     fn consent_config_inputs_allow_selection() {
-        assert!(_CONSENT_HTML_LEGACY.contains("-webkit-user-select: text;"));
-        assert!(_CONSENT_HTML_LEGACY.contains("user-select: text;"));
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/system/ato-launch/consent.html"
+        ))
+        .expect("legacy consent html should be readable");
+        assert!(html.contains("-webkit-user-select: text;"));
+        assert!(html.contains("user-select: text;"));
     }
 
     #[test]
     fn consent_preview_supports_network_identity_allowlists() {
-        assert!(_CONSENT_HTML_LEGACY.contains("networkIds"));
-        assert!(_CONSENT_HTML_LEGACY.contains("case 'network_ids':"));
-        assert!(_CONSENT_HTML_LEGACY.contains("Network IDs"));
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/system/ato-launch/consent.html"
+        ))
+        .expect("legacy consent html should be readable");
+        assert!(html.contains("networkIds"));
+        assert!(html.contains("case 'network_ids':"));
+        assert!(html.contains("Network IDs"));
     }
 
     #[test]

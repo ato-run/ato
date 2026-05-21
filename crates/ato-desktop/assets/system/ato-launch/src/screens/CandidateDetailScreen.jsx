@@ -47,15 +47,20 @@ function TomlViewer({ content }) {
 
 export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
   const [tab, setTab] = useState("structured");
+  const [proceedError, setProceedError] = useState(null);
   if (!candidate) return null;
 
   function handleProceed() {
+    if (!candidate.repo) {
+      setProceedError("リポジトリ情報が不足しています。候補選択からやり直してください。");
+      return;
+    }
+    setProceedError(null);
     bridge({
       kind: "github_proceed_to_consent",
-      repo: candidate.repo || "",
-      title: candidate.title || candidate.repo || "",
+      repo: candidate.repo,
+      title: candidate.title || candidate.repo,
     });
-    // onProceed is kept as a fallback for non-IPC environments (e.g. tests).
     if (typeof onProceed === "function") onProceed();
   }
 
@@ -149,6 +154,9 @@ export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
           style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
         >起動レビューへ進む</button>
       </div>
+      {proceedError && (
+        <div style={{ padding: "0 20px 12px", fontSize: 11.5, color: "var(--danger)" }}>{proceedError}</div>
+      )}
     </div>
   );
 }

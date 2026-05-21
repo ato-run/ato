@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
 use gpui::{AnyWindowHandle, App};
@@ -65,6 +66,10 @@ pub enum LaunchCommand {
     /// User pressed "Find candidates" in the GitHub Run wizard.
     /// `repo` is `owner/repo` (already normalized by the React layer).
     GithubFindCandidates { repo: String },
+    /// User pressed "CLI 推論を実行" in the CreateTomlScreen.
+    /// Reads lightweight metadata from the GitHub repo to infer a
+    /// draft `capsule.toml`.
+    GithubCliInference { repo: String },
     /// User clicked "起動レビューへ進む" (Proceed to review) in the
     /// candidate detail screen. Normalizes `repo` into a launchable
     /// `github.com/{owner}/{repo}` handle and opens the consent wizard.
@@ -77,6 +82,7 @@ impl LaunchCommand {
             LaunchCommand::Approve { .. } => Capability::WebviewCreate,
             LaunchCommand::Cancel | LaunchCommand::AbortBoot => Capability::WindowsClose,
             LaunchCommand::GithubFindCandidates { .. } => Capability::WebviewCreate,
+            LaunchCommand::GithubCliInference { .. } => Capability::WebviewCreate,
             LaunchCommand::GithubProceedToConsent { .. } => Capability::WebviewCreate,
         }
     }
@@ -136,10 +142,14 @@ pub fn dispatch(
                     for (key, value) in &secrets {
                         if !value.is_empty() {
                             if let Err(e) = store.add_secret(key.clone(), value.clone()) {
-                                return Err(BrokerError::Internal(format!("Failed to save secret {key}: {e}")));
+                                return Err(BrokerError::Internal(format!(
+                                    "Failed to save secret {key}: {e}"
+                                )));
                             }
                             if let Err(e) = store.grant_secret(handle, key) {
-                                return Err(BrokerError::Internal(format!("Failed to grant secret {key} to {handle}: {e}")));
+                                return Err(BrokerError::Internal(format!(
+                                    "Failed to grant secret {key} to {handle}: {e}"
+                                )));
                             }
                         }
                     }
@@ -261,16 +271,47 @@ pub fn dispatch(
 
             fe.spawn(async move {
                 let repo_clone = Arc::clone(&repo_owned);
-                let result: serde_json::Value = be.spawn(async move {
-                    fetch_github_candidates(&repo_clone)
-                }).await;
+                let result: serde_json::Value = be
+                    .spawn(async move { fetch_github_candidates(&repo_clone) })
+                    .await;
 
                 let _ = async_app.update(|cx| {
                     if let Some(shell) = shell_weak.upgrade() {
                         shell.read(cx).inject_github_candidates(&result);
                     }
                 });
-            }).detach();
+            })
+            .detach();
+        }
+        LaunchCommand::GithubCliInference { repo } => {
+            tracing::info!(repo = %repo, "ato_launch: github_cli_inference requested");
+
+            let shell_weak = cx
+                .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                .and_then(|s| s.0.clone());
+            let Some(shell_weak) = shell_weak else {
+                tracing::warn!("ato_launch: github_cli_inference — no ActiveGithubRunShell");
+                return Ok(());
+            };
+
+            let async_app = cx.to_async();
+            let fe = cx.foreground_executor().clone();
+            let be = cx.background_executor().clone();
+            let repo_owned = Arc::new(repo);
+
+            fe.spawn(async move {
+                let repo_clone = Arc::clone(&repo_owned);
+                let result: serde_json::Value = be
+                    .spawn(async move { infer_capsule_toml(&repo_clone) })
+                    .await;
+
+                let _ = async_app.update(|cx| {
+                    if let Some(shell) = shell_weak.upgrade() {
+                        shell.read(cx).inject_cli_inference_result(&result);
+                    }
+                });
+            })
+            .detach();
         }
         LaunchCommand::GithubProceedToConsent { repo, title } => {
             tracing::info!(repo = %repo, title = %title, "ato_launch: github_proceed_to_consent");
@@ -285,8 +326,7 @@ pub fn dispatch(
             let _ = host.update(cx, |_, window, _| window.remove_window());
             cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
 
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(
                     error = %err,
@@ -317,7 +357,8 @@ fn fetch_github_candidates(repo: &str) -> serde_json::Value {
             match resp.into_json::<serde_json::Value>() {
                 Ok(body) => {
                     // GitHub API returns `{content: "<base64>", ...}` for file contents.
-                    let content_b64 = body.get("content")
+                    let content_b64 = body
+                        .get("content")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .replace('\n', "");
@@ -335,9 +376,12 @@ fn fetch_github_candidates(repo: &str) -> serde_json::Value {
                     };
 
                     // Extract basic metadata from TOML for the candidate row.
-                    let name = extract_toml_str(&toml_text, "name").unwrap_or_else(|| repo.to_string());
-                    let version = extract_toml_str(&toml_text, "version").unwrap_or_else(|| "0.0.0".to_string());
-                    let description = extract_toml_str(&toml_text, "description").unwrap_or_default();
+                    let name =
+                        extract_toml_str(&toml_text, "name").unwrap_or_else(|| repo.to_string());
+                    let version = extract_toml_str(&toml_text, "version")
+                        .unwrap_or_else(|| "0.0.0".to_string());
+                    let description =
+                        extract_toml_str(&toml_text, "description").unwrap_or_default();
                     let author = extract_toml_str(&toml_text, "author").unwrap_or_default();
 
                     serde_json::json!({
@@ -361,8 +405,9 @@ fn fetch_github_candidates(repo: &str) -> serde_json::Value {
             }
         }
         Err(ureq::Error::Status(404, _)) => serde_json::json!({
-            "ok": false,
-            "error": "capsule.toml が見つかりませんでした。このリポジトリには capsule.toml がありません。"
+            "ok": true,
+            "candidates": [],
+            "repo": repo,
         }),
         Err(ureq::Error::Status(code, _)) => serde_json::json!({
             "ok": false,
@@ -384,7 +429,11 @@ fn extract_toml_str(text: &str, key: &str) -> Option<String> {
             if let Some(rest) = line.strip_prefix(key) {
                 let rest = rest.trim();
                 if rest.starts_with('=') {
-                    let value = rest[1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    let value = rest[1..]
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
                     if !value.is_empty() {
                         return Some(value);
                     }
@@ -393,4 +442,203 @@ fn extract_toml_str(text: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn github_api_get(url: &str) -> Result<serde_json::Value, String> {
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let delay = Duration::from_millis(1000 * (1u64 << (attempt - 1)));
+            std::thread::sleep(delay);
+        }
+
+        let resp = ureq::get(url)
+            .set("User-Agent", "ato-desktop")
+            .set("Accept", "application/vnd.github+json")
+            .call()
+            .map_err(|e| match e {
+                ureq::Error::Status(404, _) => "NOT_FOUND".to_string(),
+                ureq::Error::Status(403, resp) => {
+                    let body = resp.into_string().unwrap_or_default();
+                    if body.contains("rate limit") || body.contains("secondary rate limit") {
+                        "RATE_LIMITED".to_string()
+                    } else {
+                        format!("GITHUB_UNAUTHORIZED: {body}")
+                    }
+                }
+                ureq::Error::Status(code, resp) => {
+                    let body = resp.into_string().unwrap_or_default();
+                    format!("HTTP_{code}: {body}")
+                }
+                _ => format!("NETWORK_ERROR: {e}"),
+            });
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) if e == "NOT_FOUND" => return Err(e),
+            Err(e) if e.starts_with("RATE_LIMITED") => {
+                last_err = e;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let body: serde_json::Value = match resp.into_json() {
+            Ok(v) => v,
+            Err(_) => {
+                last_err = "PARSE_ERROR".to_string();
+                continue;
+            }
+        };
+
+        if body.get("content").is_some() || body.is_array() {
+            return Ok(body);
+        }
+        if let Some(msg) = body.get("message").and_then(|v| v.as_str()) {
+            if msg.contains("rate limit") || msg.contains("secondary rate limit") {
+                last_err = "RATE_LIMITED".to_string();
+                continue;
+            }
+            return Err(format!("GITHUB_API_ERROR: {msg}"));
+        }
+        return Ok(body);
+    }
+    Err(last_err)
+}
+
+fn github_fetch_file(repo: &str, path: &str) -> Result<Option<String>, String> {
+    let url = format!("https://api.github.com/repos/{}/contents/{path}", repo);
+    let body = match github_api_get(&url) {
+        Ok(v) => v,
+        Err(e) if e == "NOT_FOUND" => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let content_b64 = match body.get("content").and_then(|v| v.as_str()) {
+        Some(s) => s.replace('\n', ""),
+        None => return Ok(None),
+    };
+    Ok(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content_b64)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+}
+
+fn infer_capsule_toml(repo: &str) -> serde_json::Value {
+    let mut runtime = String::new();
+    let mut entry = String::new();
+    let mut name = repo.split('/').last().unwrap_or("my-capsule").to_string();
+    let mut port: Option<u16> = None;
+    let mut warnings: Vec<String> = Vec::new();
+    let mut api_errors: Vec<String> = Vec::new();
+
+    let mut try_fetch = |path: &str| -> Option<String> {
+        match github_fetch_file(repo, path) {
+            Ok(v) => v,
+            Err(e) => {
+                api_errors.push(format!("{path}: {e}"));
+                None
+            }
+        }
+    };
+
+    let mut package_json = None;
+    let mut cargo_toml = false;
+    let mut pyproject_toml = false;
+    let mut requirements_txt = false;
+
+    if let Some(pkg) = try_fetch("package.json") {
+        package_json = Some(pkg);
+    }
+    if package_json.is_none() {
+        cargo_toml = try_fetch("Cargo.toml").is_some();
+    }
+    if package_json.is_none() && !cargo_toml {
+        pyproject_toml = try_fetch("pyproject.toml").is_some();
+        requirements_txt = try_fetch("requirements.txt").is_some();
+    }
+
+    if let Some(pkg) = package_json {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&pkg) {
+            runtime = "node".to_string();
+            if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+                name = n.to_string();
+            }
+            let start_script = val
+                .get("scripts")
+                .and_then(|s| s.get("start"))
+                .and_then(|v| v.as_str());
+            let dev_script = val
+                .get("scripts")
+                .and_then(|s| s.get("dev"))
+                .and_then(|v| v.as_str());
+            if let Some(s) = start_script {
+                entry = s.to_string();
+            } else if let Some(d) = dev_script {
+                entry = d.to_string();
+                port = Some(3000);
+            }
+            if entry.is_empty() {
+                entry = "index.js".to_string();
+            }
+        }
+    } else if cargo_toml {
+        runtime = "rust".to_string();
+        entry = "cargo run".to_string();
+        warnings.push(
+            "Rust projects require local clone to build. The inferred entry may need adjustment."
+                .to_string(),
+        );
+    } else if pyproject_toml || requirements_txt {
+        runtime = "python".to_string();
+        entry = "main.py".to_string();
+    }
+
+    if runtime.is_empty() {
+        let error_code = if api_errors.iter().any(|e| e.contains("RATE_LIMITED")) {
+            "rate_limited"
+        } else if !api_errors.is_empty() {
+            "github_api_error"
+        } else {
+            "unsupported_project"
+        };
+        let message = match error_code {
+            "rate_limited" => "GitHub API のレート制限に達しました。少し時間をおいて再試行してください。".to_string(),
+            "github_api_error" => format!(
+                "GitHub API エラーが発生しました: {}",
+                api_errors.join("; ")
+            ),
+            _ => "このリポジトリのプロジェクト種別を判定できませんでした。手動で capsule.toml を作成してください。".to_string(),
+        };
+        return serde_json::json!({
+            "ok": false,
+            "error_code": error_code,
+            "message": message,
+        });
+    }
+
+    let mut toml = format!(
+        r#"[capsule]
+name = "{name}"
+version = "0.1.0"
+description = "Auto-inferred capsule.toml for {repo}"
+
+[execution]
+runtime = "{runtime}"
+entry = "{entry}"
+"#
+    );
+    if let Some(p) = port {
+        toml.push_str(&format!("port = {p}\n"));
+    }
+    if !warnings.is_empty() {
+        toml.push_str("\n# Warnings:\n");
+        for w in &warnings {
+            toml.push_str(&format!("# {w}\n"));
+        }
+    }
+
+    serde_json::json!({
+        "ok": true,
+        "toml": toml,
+        "repo": repo,
+    })
 }

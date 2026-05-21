@@ -102,14 +102,16 @@ export default function App() {
       return (
         <CreateTomlScreen
           initialContent={githubState.customToml}
+          repo={githubState.repo}
           onSave={(content) => {
             const syntheticCandidate = {
               title: "カスタム capsule.toml",
               author: "（自分で作成）",
               status: "unverified",
-              source: "local",
+              source: "local_draft",
               description: "このセッションで作成した capsule.toml",
               toml: content,
+              repo: githubState.repo,
             };
             navigate("candidate_detail", {
               candidates: [syntheticCandidate],
