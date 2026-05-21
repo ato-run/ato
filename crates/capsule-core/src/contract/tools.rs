@@ -247,19 +247,25 @@ pub fn read_tool_version(
 /// Provisions a runtime tool and returns a directory containing a shim that
 /// resolves the tool name on PATH. If the tool is already on the host PATH the
 /// containing directory is returned unchanged (no download).
+fn should_probe_host_runtime_tool(version_override: Option<&str>) -> bool {
+    version_override.is_none()
+}
+
 pub async fn ensure_runtime_tool(
     spec: &RuntimeToolSpec,
     version_override: Option<&str>,
     deps: &ToolDeps,
     reporter: Arc<dyn CapsuleReporter + 'static>,
 ) -> Result<ToolHandle> {
-    if let Ok(found) = which::which(spec.name) {
-        if let Some(dir) = found.parent() {
-            return Ok(ToolHandle {
-                bin_dir: dir.to_path_buf(),
-                version: String::new(),
-                binary_sha256: String::new(),
-            });
+    if should_probe_host_runtime_tool(version_override) {
+        if let Ok(found) = which::which(spec.name) {
+            if let Some(dir) = found.parent() {
+                return Ok(ToolHandle {
+                    bin_dir: dir.to_path_buf(),
+                    version: String::new(),
+                    binary_sha256: String::new(),
+                });
+            }
         }
     }
 
@@ -893,6 +899,12 @@ mod tests {
             None,
             "legacy runtime_tools must be ignored once [[tools]] is present"
         );
+    }
+
+    #[test]
+    fn pinned_tool_version_disables_host_shortcut() {
+        assert!(should_probe_host_runtime_tool(None));
+        assert!(!should_probe_host_runtime_tool(Some("1.2.8")));
     }
 
     #[test]
