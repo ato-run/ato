@@ -301,6 +301,69 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
 
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
 
+    // Dispatch asynchronous WKWebView snapshot requests for each card.
+    // Results are progressively pushed into the WebView as they arrive.
+    // Uses the foreground executor with non-blocking polling (background
+    // timer + try_recv) so the main thread is never stalled.
+    let window_id_to_handle: Vec<(u64, AnyWindowHandle)> = entries
+        .iter()
+        .map(|e| (e.handle.window_id().as_u64(), e.handle))
+        .collect();
+    let async_app = cx.to_async();
+    let switcher_handle = *handle;
+    async_app
+        .foreground_executor()
+        .spawn({
+            let be = async_app.background_executor().clone();
+            let aa = async_app.clone();
+            async move {
+                use std::time::{Duration, Instant};
+                // Brief delay to let the ato-windows page finish loading before
+                // we push screenshots via evaluate_script.
+                be.timer(Duration::from_millis(300)).await;
+                for (window_id, window_handle) in window_id_to_handle {
+                    let (tx, rx) = mpsc::channel();
+                    aa.update(|cx| request_snapshot(cx, window_handle, tx));
+                    let deadline = Instant::now() + Duration::from_millis(1500);
+                    loop {
+                        be.timer(Duration::from_millis(50)).await;
+                        match rx.try_recv() {
+                            Ok(Some(data_url)) => {
+                                aa.update(|cx| {
+                                    // Guard against a close-reopen race: only push
+                                    // into the switcher instance we were spawned for.
+                                    let still_open = cx
+                                        .global::<CardSwitcherWindowSlot>()
+                                        .0
+                                        .map(|h| h == switcher_handle)
+                                        .unwrap_or(false);
+                                    if still_open {
+                                        if let Some(entity) = cx
+                                            .try_global::<CardSwitcherEntitySlot>()
+                                            .and_then(|slot| slot.0.clone())
+                                        {
+                                            let _ = entity.update(cx, |shell, _cx| {
+                                                shell.push_screenshot(window_id, &data_url);
+                                            });
+                                        }
+                                    }
+                                });
+                                break;
+                            }
+                            Ok(None) => break,
+                            Err(mpsc::TryRecvError::Empty) => {
+                                if Instant::now() >= deadline {
+                                    break;
+                                }
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => break,
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+
     tracing::info!("switcher: open complete");
     Ok(())
 }
