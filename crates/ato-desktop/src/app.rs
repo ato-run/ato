@@ -347,6 +347,26 @@ impl AssetSource for LocalAssetSource {
 
 pub fn run(skip_onboarding: bool) {
     let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
+    match crate::system_capsule::materializer::bootstrap_from_assets(&assets_dir) {
+        Ok(report) => {
+            tracing::info!(
+                materialized = report.materialized.len(),
+                reused = report.reused.len(),
+                degraded = report.degraded.len(),
+                "system capsule seeds bootstrapped"
+            );
+            for degraded in &report.degraded {
+                tracing::warn!(
+                    capsule = degraded.capsule,
+                    error = degraded.error,
+                    "system capsule entered degraded state during bootstrap"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(?error, "system capsule bootstrap failed before startup");
+        }
+    }
     let open_url_bridge = Arc::new(OpenUrlBridge::default());
     let application = gpui_platform::application().with_assets(LocalAssetSource(assets_dir));
     application.on_open_urls({
@@ -381,6 +401,7 @@ pub fn run(skip_onboarding: bool) {
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
+        cx.set_global(crate::window::dock::DockIdentityCache::default());
         cx.set_global(crate::window::capsule_panel::CapsulePanelWindowSlot::default());
         cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot::default());
         // Slot tracking the control bar info popup.
@@ -489,6 +510,7 @@ pub fn run(skip_onboarding: bool) {
             cx.quit();
         });
         cx.on_action(|_: &ConfirmQuitWithCleanup, cx| {
+            crate::window::dock::cleanup_dock_window(cx);
             let report = crate::orchestrator::cleanup_host_resources();
             tracing::info!(?report, "Host resource cleanup completed on quit");
             cx.quit();
@@ -1005,6 +1027,23 @@ pub fn run(skip_onboarding: bool) {
             crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::store::open_store_window(cx) {
                 tracing::error!(error = %err, "failed to open store window");
+            }
+        });
+
+        // Toggle Dock visibility. If the dock window exists, close it.
+        // If not, open it. The identity cache makes re-opening fast.
+        cx.on_action(|_: &ToggleDock, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "ToggleDock dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            let slot = cx.global::<crate::window::dock::DockWindowSlot>();
+            if let Some(handle) = slot.0 {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            } else {
+                let _ = crate::window::dock::open_dock_window(cx);
             }
         });
 

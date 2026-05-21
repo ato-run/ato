@@ -202,6 +202,52 @@ pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
     }
 }
 
+/// Hide the NSWindow backing `window` without destroying it.
+/// Call this inside `window.on_window_should_close(...)` to implement
+/// hide-instead-of-close — the GPUI window stays alive, so the next
+/// dock / settings / switcher button click only needs to order the
+/// window back on-screen without recreating the WebView or re-running
+/// heavy initialisation.
+pub fn hide_window_in_handler(window: &mut Window) {
+    let rwh = match window.window_handle() {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(error = %e, "hide_window_in_handler: window_handle failed");
+            return;
+        }
+    };
+    match rwh.as_raw() {
+        RawWindowHandle::AppKit(h) => {
+            let view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
+            if let Some(nswindow) = view.window() {
+                unsafe { nswindow.orderOut(None) };
+            }
+        }
+        other => {
+            warn!(handle = ?other, "hide_window_in_handler: not AppKit");
+        }
+    }
+}
+
+/// Hide an NSWindow identified by `handle` via `orderOut:`.
+/// Call from outside any `handle.update()` (e.g. action handler)
+/// to avoid GPUI reentrancy.
+#[cfg(target_os = "macos")]
+pub fn hide_ns_window(cx: &mut App, handle: AnyWindowHandle) {
+    if let Some(nswindow) = ns_window_for(cx, handle) {
+        unsafe { nswindow.orderOut(None) };
+    }
+}
+
+/// Show (unhide) an NSWindow identified by `handle` via
+/// `makeKeyAndOrderFront:`. Call from outside any `handle.update()`.
+#[cfg(target_os = "macos")]
+pub fn show_ns_window(cx: &mut App, handle: AnyWindowHandle) {
+    if let Some(nswindow) = ns_window_for(cx, handle) {
+        unsafe { nswindow.makeKeyAndOrderFront(None) };
+    }
+}
+
 /// Make `child` a real AppKit child of `parent` via
 /// `[parent addChildWindow:child ordered:NSWindowAbove]`. Also bumps
 /// the child window's level to `NSFloatingWindowLevel` so it paints

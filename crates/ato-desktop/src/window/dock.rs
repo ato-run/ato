@@ -26,7 +26,6 @@ use gpui::{
     Window, WindowBounds, WindowDecorations, WindowOptions,
 };
 use gpui_component::TitleBar;
-use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
@@ -41,51 +40,40 @@ use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
 use crate::system_capsule::ipc as system_ipc;
 use crate::system_capsule::manifest::system_capsule_url;
+use crate::system_capsule::static_resolver::resolve_system_capsule_asset;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
 const DOCK_SCHEME: &str = "capsule-dock";
-const DOCK_CAPSULE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/system/ato-dock");
-const DOCK_CAPSULE_TOML: &str = include_str!("../../assets/system/ato-dock/capsule.toml");
+const DOCK_SLUG: &str = "ato-dock";
 
-#[derive(Deserialize)]
-struct DockCapsuleManifest {
-    run: Option<String>,
-}
-
-fn dock_run_dir_from_manifest() -> String {
-    let run = toml::from_str::<DockCapsuleManifest>(DOCK_CAPSULE_TOML)
-        .ok()
-        .and_then(|manifest| manifest.run)
-        .unwrap_or_else(|| "dist".to_string());
-
-    let trimmed = run.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        return "dist".to_string();
-    }
-    if trimmed
-        .split('/')
-        .any(|segment| segment == ".." || segment.is_empty())
+fn dock_protocol_response(
+    request_path: &str,
+    identity: &Value,
+    runtime_snapshot: &Value,
+) -> Response<Cow<'static, [u8]>> {
+    let asset = resolve_system_capsule_asset(DOCK_SLUG, request_path);
+    let body = if asset.status_code == 200
+        && asset.content_type.starts_with("text/html")
+        && matches!(request_path, "" | "/" | "/index.html")
     {
-        return "dist".to_string();
-    }
-    trimmed.to_string()
-}
+        let inject = format!(
+            "<head><script>window.__ATO_IDENTITY={};window.__ATO_DOCK_BOOTSTRAP={};</script>",
+            serde_json::to_string(identity).unwrap_or_else(|_| "null".to_string()),
+            serde_json::to_string(runtime_snapshot).unwrap_or_else(|_| "null".to_string()),
+        );
+        let html = String::from_utf8_lossy(&asset.body).replacen("<head>", &inject, 1);
+        Cow::Owned(html.into_bytes())
+    } else {
+        Cow::Owned(asset.body)
+    };
 
-fn dock_mime_type(file_path: &str) -> &'static str {
-    match file_path.rsplit('.').next().unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "png" => "image/png",
-        "svg" => "image/svg+xml",
-        "ico" => "image/x-icon",
-        "json" => "application/json",
-        "map" => "application/json",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        _ => "application/octet-stream",
-    }
+    Response::builder()
+        .status(asset.status_code)
+        .header("Content-Type", asset.content_type)
+        .header("Cache-Control", "no-store, no-cache")
+        .body(body)
+        .expect("dock asset response must build")
 }
 
 /// Slot tracking the single open Dock window.
@@ -98,6 +86,13 @@ impl gpui::Global for DockWindowSlot {}
 #[derive(Default)]
 pub struct DockEntitySlot(pub Option<gpui::Entity<DockWebView>>);
 impl gpui::Global for DockEntitySlot {}
+
+/// Cached result of `fetch_identity()` to avoid the blocking
+/// `ato whoami` subprocess on every dock reopen. Cleared on
+/// login / logout so the next open fetches fresh state.
+#[derive(Default)]
+pub struct DockIdentityCache(pub Option<Value>);
+impl gpui::Global for DockIdentityCache {}
 
 type DockEventQueue = Arc<Mutex<Vec<Value>>>;
 
@@ -533,6 +528,7 @@ pub fn cleanup_dock_window(cx: &mut App) {
     }
     cx.set_global(DockWindowSlot(None));
     cx.set_global(DockEntitySlot(None));
+    cx.set_global(DockIdentityCache(None));
 }
 
 /// Shell out to `ato whoami` to fetch authentication state.
@@ -598,6 +594,10 @@ fn fetch_identity() -> Value {
 pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     let existing = cx.global::<DockWindowSlot>().0;
     if let Some(handle) = existing {
+        #[cfg(target_os = "macos")]
+        if let Some(nswindow) = crate::window::macos::ns_window_for(cx, handle) {
+            unsafe { nswindow.makeKeyAndOrderFront(None) };
+        }
         let result = handle.update(cx, |_, window, _| window.activate_window());
         match result {
             Ok(()) => return Ok(handle),
@@ -610,7 +610,17 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
 
     let config = crate::config::load_config();
     let locale = resolve_locale(config.general.language);
-    let identity = fetch_identity();
+    let identity = match cx.global::<DockIdentityCache>().0.as_ref() {
+        Some(cached) => {
+            tracing::debug!("dock: reusing cached identity");
+            cached.clone()
+        }
+        None => {
+            let fresh = fetch_identity();
+            cx.set_global(DockIdentityCache(Some(fresh.clone())));
+            fresh
+        }
+    };
     let identity_state: Arc<Mutex<Value>> = Arc::new(Mutex::new(identity.clone()));
     let identity_state_for_protocol = identity_state.clone();
     let runtime_state = Arc::new(Mutex::new(DockRuntimeState::new()));
@@ -619,7 +629,6 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
         .lock()
         .map(|state| state.event_queue.clone())
         .map_err(|_| anyhow::anyhow!("Dock runtime lock poisoned"))?;
-    let dock_run_dir = dock_run_dir_from_manifest();
 
     // Compose the init script: i18n strings first, then the automation
     // agent so `window.__atoAgent` is available for MCP automation.
@@ -667,7 +676,6 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .into(),
         };
         let url = format!("{DOCK_SCHEME}://localhost/");
-        let dock_run_dir_for_protocol = dock_run_dir.clone();
 
         // Clone the automation host so the page-load closure can call
         // mark_page_loaded without capturing a non-Send type.
@@ -678,7 +686,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 DOCK_SCHEME.to_string(),
-                move |_id, _req, responder| {
+                move |_id, req, responder| {
                     let current_identity = identity_state_for_protocol
                         .lock()
                         .map(|guard| guard.clone())
@@ -699,46 +707,11 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                             })
                         })
                         .unwrap_or_else(|_| json!({}));
-
-                    let raw_path = _req.uri().path();
-                    let file_path = if raw_path == "/" || raw_path.is_empty() {
-                        "index.html"
-                    } else {
-                        raw_path.strip_prefix('/').unwrap_or(raw_path)
-                    };
-                    let content_path = format!("{}/{}", dock_run_dir_for_protocol, file_path);
-                    let file = match DOCK_CAPSULE_DIR.get_file(&content_path) {
-                        Some(file) => file,
-                        None => {
-                            let response = Response::builder()
-                                .status(404)
-                                .header("Content-Type", "text/plain; charset=utf-8")
-                                .body(Cow::Borrowed(b"not found" as &[u8]))
-                                .expect("dock not-found response must build");
-                            responder.respond(response);
-                            return;
-                        }
-                    };
-
-                    let body: Cow<'static, [u8]> = if file_path == "index.html" {
-                        let inject = format!(
-                            "<head><script>window.__ATO_IDENTITY={};window.__ATO_DOCK_BOOTSTRAP={};</script>",
-                            serde_json::to_string(&current_identity)
-                                .unwrap_or_else(|_| "null".to_string()),
-                            serde_json::to_string(&runtime_snapshot)
-                                .unwrap_or_else(|_| "null".to_string()),
-                        );
-                        let html = String::from_utf8_lossy(file.contents())
-                            .replacen("<head>", &inject, 1);
-                        Cow::Owned(html.into_bytes())
-                    } else {
-                        Cow::Borrowed(file.contents())
-                    };
-                    let response = Response::builder()
-                        .header("Content-Type", dock_mime_type(file_path))
-                        .header("Cache-Control", "no-store, no-cache")
-                        .body(body)
-                        .expect("dock asset response must build");
+                    let response = dock_protocol_response(
+                        req.uri().path(),
+                        &current_identity,
+                        &runtime_snapshot,
+                    );
                     responder.respond(response);
                 },
             )
@@ -748,15 +721,11 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                 use wry::PageLoadEvent;
                 if matches!(event, PageLoadEvent::Finished) {
                     if let Some(automation) = &automation_for_load {
-                        automation.mark_page_loaded(
-                            crate::webview::DOCK_AUTOMATION_PANE_ID,
-                        );
+                        automation.mark_page_loaded(crate::webview::DOCK_AUTOMATION_PANE_ID);
                     }
                 } else if matches!(event, PageLoadEvent::Started) {
                     if let Some(automation) = &automation_for_load {
-                        automation.mark_page_unloaded(
-                            crate::webview::DOCK_AUTOMATION_PANE_ID,
-                        );
+                        automation.mark_page_unloaded(crate::webview::DOCK_AUTOMATION_PANE_ID);
                     }
                 }
             })
@@ -780,6 +749,20 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     cx.set_global(DockWindowSlot(Some(*handle)));
     cx.set_global(DockEntitySlot(entity_capture.borrow_mut().take()));
 
+    // Intercept the OS close button (red traffic light) to hide the
+    // dock instead of destroying it. The GPUI window + Wry WebView
+    // stay alive, so the next dock click only needs to call
+    // makeKeyAndOrderFront + activate_window without running
+    // `fetch_identity`, creating a new WebView, or loading the page.
+    let close_handle = *handle;
+    handle.update(cx, |_, window, app_cx| {
+        window.on_window_should_close(app_cx, move |window, _app| {
+            tracing::info!("dock: close intercepted, hiding instead of destroying");
+            crate::window::macos::hide_window_in_handler(window);
+            false
+        });
+    });
+
     use crate::window::content_windows::{
         ContentWindowEntry, ContentWindowKind, OpenContentWindows,
     };
@@ -802,11 +785,14 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
 
 /// Update the existing Dock WebView's identity after a successful login and reload the page.
 pub fn notify_login_success(cx: &mut App) {
+    cx.set_global(DockIdentityCache(None));
+    let identity = fetch_identity();
+    cx.set_global(DockIdentityCache(Some(identity.clone())));
+
     let entity = cx
         .try_global::<DockEntitySlot>()
         .and_then(|slot| slot.0.clone());
     if let Some(entity) = entity {
-        let identity = fetch_identity();
         entity.update(cx, |view, _cx| {
             if let Ok(mut guard) = view.identity_state.lock() {
                 *guard = identity;
