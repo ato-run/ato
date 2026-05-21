@@ -29,15 +29,15 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    FocusNextAppWindow, FocusPrevAppWindow, NavigateToUrl, OpenCardSwitcher,
-    OpenContentWindowLogs, OpenContentWindowSettings, OpenDockWindow, OpenStoreWindow, ShowSettings,
+    FocusNextAppWindow, FocusPrevAppWindow, NavigateToUrl, OpenCardSwitcher, OpenContentWindowLogs,
+    OpenContentWindowSettings, OpenDockWindow, OpenStoreWindow, ShowSettings,
     ToggleControlBarInfoPopup, ToggleStarCapsule,
 };
-use crate::window::gestures::{GestureAction, GestureState};
 use crate::config::{load_config, save_config, ControlBarMode};
 use crate::localization::{resolve_locale, tr, LocaleCode};
 use crate::state::GuestRoute;
 use crate::window::content_windows::OpenContentWindows;
+use crate::window::gestures::{GestureAction, GestureState};
 
 const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
@@ -415,6 +415,7 @@ fn display_url_from_route(route: &GuestRoute) -> String {
     match route {
         GuestRoute::ExternalUrl(url) => url.as_str().to_string(),
         GuestRoute::CapsuleHandle { handle, .. } => format!("capsule://{handle}"),
+        GuestRoute::LocalManifest(local) => format!("capsule://{}", local.source_handle),
         GuestRoute::CapsuleUrl { handle, url, .. } => {
             format!("capsule://{handle} → {url}")
         }
@@ -486,10 +487,8 @@ impl Render for ControlBarShellPlaceholder {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, _cx| {
-                    this.gesture_state.on_mouse_down(
-                        f32::from(event.position.x),
-                        f32::from(event.position.y),
-                    );
+                    this.gesture_state
+                        .on_mouse_down(f32::from(event.position.x), f32::from(event.position.y));
                 }),
             )
             .on_mouse_up(
@@ -513,16 +512,18 @@ impl Render for ControlBarShellPlaceholder {
                     shell.update(cx, |_shell, cx| cx.notify());
                 }
             })
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                if let Some(action) = this.gesture_state.on_mouse_move(
-                    f32::from(event.position.x),
-                    f32::from(event.position.y),
-                ) {
-                    if matches!(action, GestureAction::OpenCardSwitcher) {
-                        window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some(action) = this
+                        .gesture_state
+                        .on_mouse_move(f32::from(event.position.x), f32::from(event.position.y))
+                    {
+                        if matches!(action, GestureAction::OpenCardSwitcher) {
+                            window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+                        }
                     }
-                }
-            }))
+                }),
+            )
             .on_hover(move |hovered, window, cx| {
                 if *hovered {
                     let was_expanded = cx.global::<ControlBarController>().expanded;
@@ -674,6 +675,7 @@ fn my_dock_button() -> impl IntoElement {
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0xf4f4f5)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            cx.stop_propagation();
             window.dispatch_action(Box::new(OpenDockWindow), cx);
         })
         .child(
@@ -717,15 +719,23 @@ fn pill_button(
         .font_weight(FontWeight(500.0))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0xf4f4f5)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| match target {
-            ActionTarget::Settings => {
-                window.dispatch_action(Box::new(ShowSettings), cx);
-            }
-            ActionTarget::Store => {
-                window.dispatch_action(Box::new(OpenStoreWindow), cx);
-            }
-            ActionTarget::CardSwitcher => {
-                window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            // Stop propagation so the outer gesture zone does not record
+            // this mouse-down. Without this, a hold >= 400 ms on the pill
+            // button would cause the gesture's on_mouse_up handler to fire
+            // a second OpenCardSwitcher dispatch, toggling the window
+            // closed immediately after it opened.
+            cx.stop_propagation();
+            match target {
+                ActionTarget::Settings => {
+                    window.dispatch_action(Box::new(ShowSettings), cx);
+                }
+                ActionTarget::Store => {
+                    window.dispatch_action(Box::new(OpenStoreWindow), cx);
+                }
+                ActionTarget::CardSwitcher => {
+                    window.dispatch_action(Box::new(OpenCardSwitcher), cx);
+                }
             }
         });
     match icon {
@@ -776,6 +786,7 @@ fn url_pill(omnibar: Entity<InputState>, is_capsule: bool, is_starred: bool) -> 
             .cursor_pointer()
             .hover(|s| s.opacity(0.7))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
                 let target_id = cx
                     .global::<OpenContentWindows>()
                     .frontmost()
@@ -848,6 +859,7 @@ fn info_icon_button() -> impl IntoElement {
         .cursor_pointer()
         .hover(|s| s.bg(hsla(0.0, 0.0, 0.0, 0.05)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            cx.stop_propagation();
             window.dispatch_action(Box::new(ToggleControlBarInfoPopup), cx);
         })
         .child(
@@ -870,6 +882,7 @@ fn star_icon_button(icon: IconName) -> impl IntoElement {
         .cursor_pointer()
         .hover(|s| s.bg(hsla(0.0, 0.0, 0.0, 0.05)))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
             window.dispatch_action(Box::new(ToggleStarCapsule), cx);
         })
         .child(Icon::new(icon).size(px(13.0)).text_color(rgb(0x9ca3af)))
@@ -1133,11 +1146,11 @@ fn info_popup_item_enabled(
                 })
         })
         .when_some(icon, |this, icon_name| {
-            this.child(
-                Icon::new(icon_name)
-                    .size(px(13.0))
-                    .text_color(if enabled { rgb(0x6b7280) } else { rgb(0xd1d5db) }),
-            )
+            this.child(Icon::new(icon_name).size(px(13.0)).text_color(if enabled {
+                rgb(0x6b7280)
+            } else {
+                rgb(0xd1d5db)
+            }))
         })
         .child(label.to_string())
 }
