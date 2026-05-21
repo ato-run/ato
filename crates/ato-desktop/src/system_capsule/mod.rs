@@ -43,5 +43,6 @@ pub mod manifest;
 pub mod materializer;
 pub mod registry;
 pub mod static_resolver;
+pub mod window_registry;
 
 pub use broker::{BrokerError, Capability, CapabilityBroker, SystemCapsuleId, SystemCommand};

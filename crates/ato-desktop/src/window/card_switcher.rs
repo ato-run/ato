@@ -304,6 +304,8 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
     cx.set_global(CardSwitcherEntitySlot(entity_capture.borrow_mut().take()));
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoWindows, *handle);
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
 
     // Dispatch asynchronous WKWebView snapshot requests for each card.
