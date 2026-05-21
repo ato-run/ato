@@ -54,7 +54,9 @@ mod watch;
 use background::*;
 #[cfg(test)]
 use preflight::*;
-pub(crate) use preflight::{preflight_native_sandbox, run_v03_lifecycle_steps};
+pub(crate) use preflight::{
+    explicit_install_command_string, preflight_native_sandbox, run_v03_lifecycle_steps,
+};
 
 const BACKGROUND_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEOUT_SECS";
