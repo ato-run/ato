@@ -22,3 +22,4 @@ pub mod principal;
 pub mod policy;
 pub mod registry;
 pub mod broker;
+pub mod commands;
