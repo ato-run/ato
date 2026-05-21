@@ -385,6 +385,7 @@ pub fn run(skip_onboarding: bool) {
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
         cx.set_global(crate::state::session::SessionRegistry::default());
         cx.set_global(crate::window::launch_window::PendingLaunches::default());
+        cx.set_global(crate::state::capsule_state::CapsuleStateStore::default());
         crate::window::install_control_bar_controller(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
@@ -635,25 +636,31 @@ pub fn run(skip_onboarding: bool) {
             // whether to also stop the process here.
             let close_behavior =
                 crate::config::load_config().desktop.window_close_behavior;
-            let mut registry =
-                cx.global_mut::<crate::state::session::SessionRegistry>();
-            let affected_session_ids =
-                registry.detach_clients_by_window_id(closed_id);
-            match close_behavior {
-                crate::config::WindowCloseBehavior::StopSession => {
-                    for sid in &affected_session_ids {
+            let affected_session_ids = {
+                let mut registry =
+                    cx.global_mut::<crate::state::session::SessionRegistry>();
+                let ids = registry.detach_clients_by_window_id(closed_id);
+                if close_behavior == crate::config::WindowCloseBehavior::StopSession {
+                    for sid in &ids {
                         registry.stop_session_once(sid);
                     }
                     tracing::info!(
-                        ?affected_session_ids,
+                        ?ids,
                         "windowCloseBehavior=stop-session: stopping sessions"
                     );
-                }
-                crate::config::WindowCloseBehavior::KeepSessionRunning => {
+                } else {
                     tracing::info!(
-                        ?affected_session_ids,
+                        ?ids,
                         "windowCloseBehavior=keep-session-running: sessions detached"
                     );
+                }
+                ids
+            };
+            if close_behavior == crate::config::WindowCloseBehavior::StopSession {
+                // Clear ephemeral capsule state for stopped sessions.
+                for sid in &affected_session_ids {
+                    cx.global_mut::<crate::state::capsule_state::CapsuleStateStore>()
+                        .clear_session(sid);
                 }
             }
 
