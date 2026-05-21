@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
@@ -73,7 +72,14 @@ pub enum LaunchCommand {
     /// User clicked "起動レビューへ進む" (Proceed to review) in the
     /// candidate detail screen. Normalizes `repo` into a launchable
     /// `github.com/{owner}/{repo}` handle and opens the consent wizard.
-    GithubProceedToConsent { repo: String, title: String },
+    GithubProceedToConsent {
+        repo: String,
+        title: String,
+        manifest_toml: String,
+        manifest_source: crate::state::ManifestSource,
+        #[serde(default = "default_requested_ref")]
+        requested_ref: String,
+    },
 }
 
 impl LaunchCommand {
@@ -132,6 +138,7 @@ pub fn dispatch(
             let route_handle: Option<String> = match &pending_route {
                 Some(GuestRoute::CapsuleHandle { handle, .. }) => Some(handle.clone()),
                 Some(GuestRoute::CapsuleUrl { handle, .. }) => Some(handle.clone()),
+                Some(GuestRoute::LocalManifest(local)) => Some(local.source_handle.clone()),
                 _ => None,
             };
 
@@ -204,9 +211,17 @@ pub fn dispatch(
                         // Record launch in the start-page history so the
                         // next time the start page opens, this capsule
                         // appears in the "recent capsules" row.
-                        if let GuestRoute::CapsuleHandle { handle, label }
-                        | GuestRoute::CapsuleUrl { handle, label, .. } = &route
-                        {
+                        let history_item = match &route {
+                            GuestRoute::CapsuleHandle { handle, label }
+                            | GuestRoute::CapsuleUrl { handle, label, .. } => {
+                                Some((handle.as_str(), label.as_str()))
+                            }
+                            GuestRoute::LocalManifest(local) => {
+                                Some((local.source_handle.as_str(), local.label.as_str()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((handle, label)) = history_item {
                             let mut store =
                                 crate::system_capsule::ato_start::StartPageHistoryStore::load();
                             store.record_open(handle, label);
@@ -313,30 +328,74 @@ pub fn dispatch(
             })
             .detach();
         }
-        LaunchCommand::GithubProceedToConsent { repo, title } => {
-            tracing::info!(repo = %repo, title = %title, "ato_launch: github_proceed_to_consent");
+        LaunchCommand::GithubProceedToConsent {
+            repo,
+            title,
+            manifest_toml,
+            manifest_source,
+            requested_ref,
+        } => {
+            tracing::info!(
+                repo = %repo,
+                title = %title,
+                manifest_source = manifest_source.as_str(),
+                requested_ref = %requested_ref,
+                "ato_launch: github_proceed_to_consent"
+            );
 
-            let handle = crate::window::launch_window::normalize_github_handle(&repo);
-            let route = GuestRoute::CapsuleHandle {
-                handle: handle.clone(),
-                label: title.clone(),
+            let shell_weak = cx
+                .try_global::<crate::window::launch_window::ActiveGithubRunShell>()
+                .and_then(|s| s.0.clone());
+            let async_app = cx.to_async();
+            let fe = cx.foreground_executor().clone();
+            let be = cx.background_executor().clone();
+            let request = crate::github_manifest_draft::GithubDraftRequest {
+                repo,
+                title,
+                manifest_toml,
+                manifest_source,
+                requested_ref,
             };
 
-            // Close the GitHub Run wizard; the consent wizard takes focus.
-            let _ = host.update(cx, |_, window, _| window.remove_window());
-            cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
-
-            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
-            {
-                tracing::error!(
-                    error = %err,
-                    handle = %handle,
-                    "ato_launch: open_consent_window_for_route failed"
-                );
-            }
+            fe.spawn(async move {
+                let result = be
+                    .spawn(async move {
+                        crate::github_manifest_draft::prepare_github_manifest_draft(request)
+                    })
+                    .await;
+                let _ = async_app.update(|cx| match result {
+                    Ok(route) => {
+                        let _ = host.update(cx, |_, window, _| window.remove_window());
+                        cx.set_global(crate::window::launch_window::ActiveGithubRunShell(None));
+                        if let Err(err) =
+                            crate::window::launch_window::open_consent_window_for_route(cx, route)
+                        {
+                            tracing::error!(
+                                error = %err,
+                                "ato_launch: open_consent_window_for_route failed"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "ato_launch: github draft validation failed");
+                        if let Some(shell) = shell_weak.and_then(|weak| weak.upgrade()) {
+                            let payload = serde_json::json!({
+                                "ok": false,
+                                "error": format!("{err:#}"),
+                            });
+                            shell.read(cx).inject_github_proceed_result(&payload);
+                        }
+                    }
+                });
+            })
+            .detach();
         }
     }
     Ok(())
+}
+
+fn default_requested_ref() -> String {
+    "HEAD".to_string()
 }
 
 /// Fetch `capsule.toml` candidates for `owner/repo` from the GitHub
@@ -393,6 +452,7 @@ fn fetch_github_candidates(repo: &str) -> serde_json::Value {
                             "author": author,
                             "status": "community",
                             "source": "github",
+                            "manifest_source": "repo",
                             "toml": toml_text,
                             "repo": repo,
                         }]
@@ -517,9 +577,11 @@ fn github_fetch_file(repo: &str, path: &str) -> Result<Option<String>, String> {
         Some(s) => s.replace('\n', ""),
         None => return Ok(None),
     };
-    Ok(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content_b64)
-        .ok()
-        .map(|bytes| String::from_utf8_lossy(&bytes).to_string()))
+    Ok(
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &content_b64)
+            .ok()
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string()),
+    )
 }
 
 fn infer_capsule_toml(repo: &str) -> serde_json::Value {
