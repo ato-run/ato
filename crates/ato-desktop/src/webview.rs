@@ -679,10 +679,7 @@ impl WebViewManager {
                             self.views.insert(active.pane_id, webview);
                         }
                         Err(error) => {
-                            state.sync_web_session_state(
-                                active.pane_id,
-                                WebSessionState::Closed,
-                            );
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
                             state.push_activity(
                                 ActivityTone::Error,
                                 format!("Failed to build child webview: {error}"),
@@ -1076,10 +1073,7 @@ impl WebViewManager {
                 AuthStatus => {
                     let status = match crate::orchestrator::resolve_ato_binary() {
                         Ok(ato_bin) => {
-                            match Command::new(&ato_bin)
-                                .arg("desktop-auth-handoff")
-                                .output()
-                            {
+                            match Command::new(&ato_bin).arg("desktop-auth-handoff").output() {
                                 Ok(output) if output.status.success() => {
                                     auth_status_from_handoff_stdout(&output.stdout)
                                 }
@@ -1090,8 +1084,9 @@ impl WebViewManager {
                     };
                     match serde_json::to_value(status) {
                         Ok(json) => req.send(Ok(json)),
-                        Err(_) => req.send(Ok(serde_json::to_value(signed_out_auth_status())
-                            .unwrap_or_default())),
+                        Err(_) => req.send(Ok(
+                            serde_json::to_value(signed_out_auth_status()).unwrap_or_default()
+                        )),
                     };
                     continue;
                 }
@@ -1927,9 +1922,7 @@ impl WebViewManager {
         let window_handle = self.window_handle;
 
         // Collect secrets granted for this capsule handle before moving into the async block.
-        let secrets: Vec<SecretEntry> = state
-            .secret_store
-            .secrets_for_capsule(&handle);
+        let secrets: Vec<SecretEntry> = state.secret_store.secrets_for_capsule(&handle);
         // Same idea for plaintext config — capture a snapshot now so
         // the background thread doesn't reach back into AppState.
         let plain_configs: Vec<(String, String)> =
@@ -2066,7 +2059,7 @@ impl WebViewManager {
                 RouteContent::External,
                 None,
             ),
-            GuestRoute::CapsuleHandle { .. } => {
+            GuestRoute::CapsuleHandle { .. } | GuestRoute::LocalManifest(_) => {
                 let session = local_session.ok_or_else(|| {
                     anyhow::anyhow!("capsule webview build requires resolved guest session")
                 })?;
@@ -2885,7 +2878,6 @@ impl WebViewManager {
         stopped
     }
 
-
     /// Drain every retained session and graceful-stop each in a
     /// background thread. Active panes (`self.views`) are
     /// **untouched** — the user has to close those panes first
@@ -3492,7 +3484,9 @@ fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
             page_load_behavior: PageLoadBehavior::UpdateExternalUrl,
             observe_title_changes: true,
         },
-        GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. } => BuildFlags {
+        GuestRoute::Capsule { .. }
+        | GuestRoute::CapsuleHandle { .. }
+        | GuestRoute::LocalManifest(_) => BuildFlags {
             inject_bridge: true,
             enable_ipc: true,
             enable_custom_protocol: true,
@@ -4322,6 +4316,7 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
         GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
+        GuestRoute::LocalManifest(local) => Some(local.source_handle.clone()),
         GuestRoute::Capsule { .. } | GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
             None
         }
@@ -4332,6 +4327,7 @@ fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(format!("handle:{handle}")),
         GuestRoute::CapsuleUrl { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::LocalManifest(local) => Some(format!("handle:{}", local.source_handle)),
         GuestRoute::Capsule { session, .. } => Some(format!("session:{session}")),
         GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => None,
     }
@@ -4342,6 +4338,7 @@ fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
         route,
         GuestRoute::Capsule { .. }
             | GuestRoute::CapsuleHandle { .. }
+            | GuestRoute::LocalManifest(_)
             | GuestRoute::CapsuleUrl { .. }
     )
 }

@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
+use crate::state::{LocalManifestRoute, ManifestSource};
 use crate::surface_timing::{ClickOrigin, SurfaceStageTimer};
 use crate::terminal::{TerminalCore, TryRecvOutput};
 
@@ -107,6 +108,76 @@ pub fn take_pending_cli_command(session_id: &str) -> Option<CliLaunchSpec> {
         .lock()
         .ok()
         .and_then(|mut map| map.remove(session_id))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DesktopLaunchInput {
+    Handle(String),
+    LocalManifestPath(LocalManifestLaunchInput),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalManifestLaunchInput {
+    pub manifest_path: PathBuf,
+    pub source_handle: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub manifest_source: ManifestSource,
+    pub manifest_hash: String,
+    pub draft_id: String,
+}
+
+impl DesktopLaunchInput {
+    pub fn from_handle(handle: impl Into<String>) -> Self {
+        Self::Handle(handle.into())
+    }
+
+    pub fn from_local_manifest(route: &LocalManifestRoute) -> Self {
+        Self::LocalManifestPath(LocalManifestLaunchInput {
+            manifest_path: route.manifest_path.clone(),
+            source_handle: route.source_handle.clone(),
+            requested_ref: route.requested_ref.clone(),
+            resolved_commit: route.resolved_commit.clone(),
+            manifest_source: route.manifest_source.clone(),
+            manifest_hash: route.manifest_hash.clone(),
+            draft_id: route.draft_id.clone(),
+        })
+    }
+
+    pub fn launch_input_kind(&self) -> &'static str {
+        match self {
+            Self::Handle(_) => "handle",
+            Self::LocalManifestPath(_) => "local_manifest_path",
+        }
+    }
+
+    pub fn boundary_arg(&self) -> String {
+        match self {
+            Self::Handle(handle) => handle.clone(),
+            Self::LocalManifestPath(local) => local.manifest_path.display().to_string(),
+        }
+    }
+
+    pub fn source_handle(&self) -> &str {
+        match self {
+            Self::Handle(handle) => handle,
+            Self::LocalManifestPath(local) => &local.source_handle,
+        }
+    }
+
+    pub fn manifest_path_for_log(&self) -> Option<&Path> {
+        match self {
+            Self::Handle(_) => None,
+            Self::LocalManifestPath(local) => Some(local.manifest_path.as_path()),
+        }
+    }
+
+    pub fn manifest_source_for_log(&self) -> Option<&'static str> {
+        match self {
+            Self::Handle(_) => None,
+            Self::LocalManifestPath(local) => Some(local.manifest_source.as_str()),
+        }
+    }
 }
 
 const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
@@ -314,6 +385,20 @@ pub fn resolve_and_start_guest(
     plain_configs: &[(String, String)],
     on_step: Option<Box<dyn Fn(u8) + Send>>,
 ) -> Result<GuestLaunchSession, LaunchError> {
+    resolve_and_start_guest_with_input(
+        &DesktopLaunchInput::from_handle(handle.to_string()),
+        secrets,
+        plain_configs,
+        on_step,
+    )
+}
+
+pub fn resolve_and_start_guest_with_input(
+    input: &DesktopLaunchInput,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
+) -> Result<GuestLaunchSession, LaunchError> {
     // Step 0: validating (emitted before preflight so the boot wizard shows
     // "検証中" immediately, even if the page fires the callback before the
     // WebView has fully loaded — the JS buffers it via DOMContentLoaded).
@@ -330,7 +415,20 @@ pub fn resolve_and_start_guest(
     // already satisfied) or returns a "ref not supported" error
     // (e.g. uncached remote ref), fall through to the legacy launch
     // loop which still drains lazily via `merge_*_into_resolution`.
-    match collect_preflight_requirements(handle) {
+    let boundary_arg = input.boundary_arg();
+    let source_handle = input.source_handle().to_string();
+    tracing::info!(
+        launch_input.kind = input.launch_input_kind(),
+        source_handle = %source_handle,
+        manifest_source = input.manifest_source_for_log().unwrap_or("handle"),
+        manifest_path = input
+            .manifest_path_for_log()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        "desktop launch input selected"
+    );
+
+    match collect_preflight_requirements_with_input(input) {
         Ok(envelopes) => {
             // Preflight emits "what the manifest requires" — it has no
             // visibility into the desktop's per-handle SecretStore.
@@ -350,7 +448,7 @@ pub fn resolve_and_start_guest(
             let filtered = filter_already_provided_secrets(envelopes, secrets, plain_configs);
             if !filtered.is_empty() {
                 return Err(LaunchError::PreflightAggregate {
-                    handle: handle.to_string(),
+                    handle: source_handle,
                     requirements: filtered,
                     original_secrets: secrets.to_vec(),
                 });
@@ -366,14 +464,21 @@ pub fn resolve_and_start_guest(
             // requirements lazily. Logged at warn so we can spot
             // patterns without spamming under expected conditions.
             warn!(
-                handle = %handle,
+                handle = %boundary_arg,
                 error = %error,
                 "preflight collection skipped; falling back to lazy aggregation"
             );
         }
     }
 
-    resolve_and_start_capsule(handle, secrets, plain_configs, on_step)
+    let mut session = resolve_and_start_capsule(&boundary_arg, secrets, plain_configs, on_step)?;
+    if let DesktopLaunchInput::LocalManifestPath(local) = input {
+        session.handle = local.source_handle.clone();
+        session.normalized_handle = local.source_handle.clone();
+        session.source = Some(local.source_handle.clone());
+        session.manifest_path = local.manifest_path.clone();
+    }
+    Ok(session)
 }
 
 pub fn resolve_and_start_guest_from_materialized_record(
@@ -467,7 +572,13 @@ fn filter_already_provided_secrets(
 fn collect_preflight_requirements(
     handle: &str,
 ) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
-    Ok(collect_preflight_envelope(handle)?.requirements)
+    collect_preflight_requirements_with_input(&DesktopLaunchInput::from_handle(handle.to_string()))
+}
+
+fn collect_preflight_requirements_with_input(
+    input: &DesktopLaunchInput,
+) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+    Ok(collect_preflight_envelope_for_input(input)?.requirements)
 }
 
 /// Full capsule identity + requirements returned by `ato internal preflight --json`.
@@ -482,8 +593,13 @@ pub(crate) struct ConsentPreflightData {
 /// Collect full preflight data for the consent wizard UI.
 /// Normalizes the handle (adds `capsule://` prefix for bare `github.com/` handles).
 pub(crate) fn collect_preflight_for_consent(handle: &str) -> Result<ConsentPreflightData> {
-    let normalized = normalize_preflight_handle(handle);
-    let envelope = collect_preflight_envelope(&normalized)?;
+    collect_preflight_for_consent_with_input(&DesktopLaunchInput::from_handle(handle.to_string()))
+}
+
+pub(crate) fn collect_preflight_for_consent_with_input(
+    input: &DesktopLaunchInput,
+) -> Result<ConsentPreflightData> {
+    let envelope = collect_preflight_envelope_for_input(input)?;
     Ok(ConsentPreflightData {
         capsule_id: envelope.capsule_id,
         capsule_version: envelope.capsule_version,
@@ -500,6 +616,20 @@ fn normalize_preflight_handle(handle: &str) -> String {
         format!("capsule://{handle}")
     } else {
         handle.to_string()
+    }
+}
+
+fn collect_preflight_envelope_for_input(
+    input: &DesktopLaunchInput,
+) -> Result<PreflightAggregateEnvelope> {
+    match input {
+        DesktopLaunchInput::Handle(handle) => {
+            let normalized = normalize_preflight_handle(handle);
+            collect_preflight_envelope(&normalized)
+        }
+        DesktopLaunchInput::LocalManifestPath(local) => {
+            collect_preflight_envelope(&local.manifest_path.display().to_string())
+        }
     }
 }
 
@@ -2721,8 +2851,8 @@ mod tests {
     use super::{
         allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
         detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
-        pop_last_codepoint_width, url_port, which_in_path_entries, ResolvePayload,
-        SessionStartInfo,
+        pop_last_codepoint_width, url_port, which_in_path_entries, DesktopLaunchInput,
+        ResolvePayload, SessionStartInfo,
     };
 
     fn resolved_payload(
@@ -5111,5 +5241,34 @@ mod fast_path_tests {
         let err = resolve_ato_binary().unwrap_err();
         assert!(format!("{err:#}").contains("missing ato helper"));
         std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+    }
+
+    #[test]
+    fn local_manifest_launch_input_uses_path_as_boundary_not_handle() {
+        let route = crate::state::LocalManifestRoute {
+            manifest_path: PathBuf::from("/ato/desktop/github-drafts/o/r/sha/draft/capsule.toml"),
+            source_handle: "github.com/owner/repo".to_string(),
+            label: "repo".to_string(),
+            requested_ref: "main".to_string(),
+            resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            manifest_source: crate::state::ManifestSource::UserEdited,
+            manifest_hash: "hash".to_string(),
+            draft_id: "draft".to_string(),
+        };
+        let input = DesktopLaunchInput::from_local_manifest(&route);
+
+        assert_eq!(input.launch_input_kind(), "local_manifest_path");
+        assert_eq!(input.source_handle(), "github.com/owner/repo");
+        assert!(input.boundary_arg().ends_with("/capsule.toml"));
+        assert_ne!(input.boundary_arg(), input.source_handle());
+    }
+
+    #[test]
+    fn handle_launch_input_keeps_handle_as_boundary() {
+        let input = DesktopLaunchInput::from_handle("github.com/owner/repo");
+        assert_eq!(input.launch_input_kind(), "handle");
+        assert_eq!(input.source_handle(), "github.com/owner/repo");
+        assert_eq!(input.boundary_arg(), "github.com/owner/repo");
+        assert!(input.manifest_path_for_log().is_none());
     }
 }
