@@ -31,7 +31,7 @@ use gpui::{
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
-use crate::orchestrator::{GuestLaunchSession, LaunchError};
+use crate::orchestrator::{DesktopLaunchInput, GuestLaunchSession, LaunchError};
 use crate::state::session::{
     CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession, SessionClient, SessionClientId,
     SessionClientKind, SessionClientState, SessionRegistry,
@@ -49,6 +49,10 @@ use crate::{impl_focusable_via_paste, paste_render_wrap};
 pub enum CapsuleBootInput {
     Start {
         handle: String,
+        configs: Vec<(String, String)>,
+    },
+    Launch {
+        input: DesktopLaunchInput,
         configs: Vec<(String, String)>,
     },
     MaterializedRestart {
@@ -103,6 +107,9 @@ impl AppCapsuleShell {
     ) -> Self {
         match input {
             CapsuleBootInput::Start { handle, configs } => Self::new(handle, configs, window, cx),
+            CapsuleBootInput::Launch { input, configs } => {
+                Self::new_with_launch_input(input, configs, window, cx)
+            }
             CapsuleBootInput::MaterializedRestart {
                 handle,
                 record_path,
@@ -267,6 +274,119 @@ impl AppCapsuleShell {
                                     aa.update(|cx: &mut App| {
                                         close_boot_window(cx);
                                     });
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+
+        Self {
+            handle,
+            launch_configs,
+            boot_state: CapsuleBootState::Booting,
+            webview: None,
+            content_window_id: None,
+            pending_result: None,
+            window_size: win_size,
+            abort_flag,
+            paste: WebViewPasteSupport::new(cx),
+        }
+    }
+
+    pub fn new_with_launch_input(
+        input: DesktopLaunchInput,
+        configs: Vec<(String, String)>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let handle = input.source_handle().to_string();
+        let win_size = window.bounds().size;
+        let abort_flag = Arc::new(AtomicBool::new(false));
+
+        let secret_store = crate::config::load_secrets();
+        let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
+
+        let boot_shell_weak: Option<WeakEntity<LaunchWindowShell>> = cx
+            .try_global::<PendingBootShell>()
+            .and_then(|g| g.0.clone());
+        cx.set_global(PendingBootShell(None));
+
+        let launch_configs = configs.clone();
+        let configs_for_thread = configs.clone();
+        let abort_clone = Arc::clone(&abort_flag);
+        std::thread::spawn(move || {
+            let prog = progress_tx;
+            let result = crate::orchestrator::resolve_and_start_guest_with_input(
+                &input,
+                &secrets,
+                &configs_for_thread,
+                Some(Box::new(move |step| {
+                    let _ = prog.send(step);
+                })),
+            );
+            if abort_clone.load(Ordering::Acquire) {
+                if let Ok(ref session) = result {
+                    let sid = session.session_id.clone();
+                    let _ = crate::orchestrator::stop_guest_session(&sid);
+                }
+                return;
+            }
+            let _ = tx.send(result);
+        });
+
+        let entity = cx.entity().downgrade();
+        let abort_poll = Arc::clone(&abort_flag);
+        let async_app = cx.to_async();
+        async_app
+            .foreground_executor()
+            .spawn({
+                let be = async_app.background_executor().clone();
+                let aa = async_app.clone();
+                async move {
+                    loop {
+                        be.timer(Duration::from_millis(100)).await;
+
+                        let steps: Vec<u8> = {
+                            let mut v = Vec::new();
+                            while let Ok(s) = progress_rx.try_recv() {
+                                v.push(s);
+                            }
+                            v
+                        };
+                        if !steps.is_empty() {
+                            let boot = boot_shell_weak.clone();
+                            aa.update(move |cx| {
+                                if let Some(shell) = boot.and_then(|w| w.upgrade()) {
+                                    let _ = shell.update(cx, |shell, _| {
+                                        for s in &steps {
+                                            shell.push_step(*s);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+
+                        match rx.try_recv() {
+                            Ok(res) => {
+                                if let Some(ent) = entity.upgrade() {
+                                    aa.update(move |cx| {
+                                        let _ = ent.update(cx, |shell, cx| {
+                                            shell.pending_result = Some(res);
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                                break;
+                            }
+                            Err(TryRecvError::Disconnected) => break,
+                            Err(TryRecvError::Empty) => {
+                                if abort_poll.load(Ordering::Acquire) {
                                     break;
                                 }
                             }

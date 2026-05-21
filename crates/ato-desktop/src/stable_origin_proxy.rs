@@ -106,6 +106,7 @@ impl StableOriginRouteTable {
 pub(crate) fn logical_capsule_key_for_stable_origin(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::LocalManifest(local) => Some(format!("handle:{}", local.source_handle)),
         GuestRoute::Capsule { session, .. } => Some(format!("session:{session}")),
         GuestRoute::CapsuleUrl { .. }
         | GuestRoute::ExternalUrl(_)
