@@ -84,7 +84,7 @@ export default function App() {
         <CandidateDetailScreen
           candidate={githubState.candidates[githubState.selectedIndex]}
           onBack={() => navigate("candidates")}
-          onProceed={() => navigate("consent")}
+          onProceed={() => {}}
         />
       );
 
@@ -103,12 +103,13 @@ export default function App() {
         <CreateTomlScreen
           initialContent={githubState.customToml}
           repo={githubState.repo}
-          onSave={(content) => {
+          onSave={(content, meta = {}) => {
             const syntheticCandidate = {
               title: "カスタム capsule.toml",
               author: "（自分で作成）",
               status: "unverified",
               source: "local_draft",
+              manifest_source: meta.manifest_source || "user_edited",
               description: "このセッションで作成した capsule.toml",
               toml: content,
               repo: githubState.repo,
