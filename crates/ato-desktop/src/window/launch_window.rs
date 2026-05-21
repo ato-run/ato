@@ -43,6 +43,7 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
+use crate::orchestrator::DesktopLaunchInput;
 use crate::state::GuestRoute;
 use crate::system_capsule::ipc as system_ipc;
 use crate::system_capsule::static_resolver::resolve_system_capsule_protocol_response;
@@ -325,6 +326,15 @@ impl LaunchWindowShell {
         );
         let _ = self._webview.evaluate_script(&script);
     }
+
+    pub fn inject_github_proceed_result(&self, result: &serde_json::Value) {
+        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "typeof window.__ato_github_proceed_result==='function'&&window.__ato_github_proceed_result({})",
+            json
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
 }
 
 fn open_wizard(
@@ -500,6 +510,7 @@ pub fn open_consent_window_for_route_with_client(
                 .to_string();
             (pretty_name, handle.clone())
         }
+        GuestRoute::LocalManifest(local) => (local.label.clone(), local.source_handle.clone()),
         GuestRoute::ExternalUrl(url) => (
             url.host_str().unwrap_or("external").to_string(),
             url.as_str().to_string(),
@@ -518,7 +529,7 @@ pub fn open_consent_window_for_route_with_client(
     };
 
     let stashed = StashedLaunch {
-        route,
+        route: route.clone(),
         requested_client,
     };
     let mut launches = cx.global_mut::<PendingLaunches>();
@@ -559,6 +570,7 @@ pub fn open_consent_window_for_route_with_client(
     })));
 
     // Spawn background preflight; hydrate on completion.
+    let launch_input = launch_input_for_route(&route);
     let handle_clone = display_handle.clone();
     let name_clone = display_name.clone();
     let id_clone = preview_id.clone();
@@ -568,9 +580,13 @@ pub fn open_consent_window_for_route_with_client(
     let aa = async_app.clone();
     fe.spawn(async move {
         let preflight_handle = handle_clone.clone();
+        let preflight_input = launch_input.clone();
         let (preflight_result, secrets_store) = be
             .spawn(async move {
-                let data = crate::orchestrator::collect_preflight_for_consent(&preflight_handle);
+                let data = match preflight_input.as_ref() {
+                    Some(input) => crate::orchestrator::collect_preflight_for_consent_with_input(input),
+                    None => crate::orchestrator::collect_preflight_for_consent(&preflight_handle),
+                };
                 let store = crate::config::load_secrets();
                 (data, store)
             })
@@ -1007,7 +1023,7 @@ pub fn start_boot_launch(
         });
     }
 
-    let Some(handle) = launch_handle_for_route(&route) else {
+    let Some(launch_input) = launch_input_for_route(&route) else {
         show_boot_failure(
             cx,
             &boot_shell_weak,
@@ -1015,17 +1031,18 @@ pub fn start_boot_launch(
         );
         return;
     };
+    let handle = launch_input.source_handle().to_string();
 
     let secret_store = crate::config::load_secrets();
     let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
     let launch_configs_for_result = configs.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
-    let handle_for_thread = handle.clone();
+    let launch_input_for_thread = launch_input.clone();
     let abort_for_thread = Arc::clone(&abort_flag);
     std::thread::spawn(move || {
-        let result = crate::orchestrator::resolve_and_start_guest(
-            &handle_for_thread,
+        let result = crate::orchestrator::resolve_and_start_guest_with_input(
+            &launch_input_for_thread,
             &secrets,
             &configs,
             Some(Box::new(move |step| {
@@ -1241,12 +1258,15 @@ pub fn start_boot_launch(
         .detach();
 }
 
-fn launch_handle_for_route(route: &GuestRoute) -> Option<String> {
+fn launch_input_for_route(route: &GuestRoute) -> Option<DesktopLaunchInput> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
-            Some(handle.clone())
+            Some(DesktopLaunchInput::from_handle(handle.clone()))
         }
-        GuestRoute::Capsule { session, .. } => Some(session.clone()),
+        GuestRoute::LocalManifest(local) => Some(DesktopLaunchInput::from_local_manifest(local)),
+        GuestRoute::Capsule { session, .. } => {
+            Some(DesktopLaunchInput::from_handle(session.clone()))
+        }
         _ => None,
     }
 }
@@ -1281,9 +1301,15 @@ fn stop_session_async(session_id: String) {
 }
 
 fn record_start_history(route: &GuestRoute) {
-    if let GuestRoute::CapsuleHandle { handle, label }
-    | GuestRoute::CapsuleUrl { handle, label, .. } = route
-    {
+    let item = match route {
+        GuestRoute::CapsuleHandle { handle, label }
+        | GuestRoute::CapsuleUrl { handle, label, .. } => Some((handle.as_str(), label.as_str())),
+        GuestRoute::LocalManifest(local) => {
+            Some((local.source_handle.as_str(), local.label.as_str()))
+        }
+        _ => None,
+    };
+    if let Some((handle, label)) = item {
         let mut store = crate::system_capsule::ato_start::StartPageHistoryStore::load();
         store.record_open(handle, label);
         if let Err(err) = store.save() {
