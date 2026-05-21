@@ -75,10 +75,9 @@ mod tests {
     use super::*;
 
     fn make_window_id(n: u64) -> WindowId {
-        // SAFETY: WindowId is a repr(transparent) newtype around u64 in GPUI.
-        // We use transmute here only in tests to construct deterministic IDs
-        // without a running runtime.
-        unsafe { std::mem::transmute::<u64, WindowId>(n) }
+        // WindowId implements From<u64> in GPUI (via slotmap::KeyData::from_ffi),
+        // which is the public-API way to construct a WindowId without a running runtime.
+        WindowId::from(n)
     }
 
     #[test]
