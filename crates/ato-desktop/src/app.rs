@@ -584,12 +584,6 @@ pub fn run(skip_onboarding: bool) {
                 .unwrap_or(false)
             {
                 cx.set_global(crate::window::control_bar::InfoPopupWindowSlot(None));
-                if let Some(shell) = cx.global::<crate::window::ControlBarController>().shell.clone()
-                {
-                    shell.update(cx, |shell, _| {
-                        shell.info_popup_open = false;
-                    });
-                }
                 tracing::info!("Info popup window closed; slot cleared");
             }
             let store_slot = cx
@@ -727,6 +721,7 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) =
                 crate::window::capsule_panel::open_capsule_settings_window(cx, action.window_id)
             {
@@ -795,6 +790,7 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
                 tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
             }
@@ -983,6 +979,7 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::open_card_switcher_window(cx) {
                 tracing::error!(error = %err, "failed to open card switcher window");
             }
@@ -1005,6 +1002,7 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::store::open_store_window(cx) {
                 tracing::error!(error = %err, "failed to open store window");
             }
@@ -1018,6 +1016,7 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::dock::open_dock_window(cx) {
                 tracing::error!(error = %err, "failed to open dock window");
             }
@@ -1043,6 +1042,7 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
                 tracing::error!(error = %err, "failed to open capsule panel window");
             }
