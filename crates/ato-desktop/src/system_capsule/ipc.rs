@@ -126,7 +126,32 @@ pub type IpcResponseCallback = Box<dyn Fn(&mut App, u64, String) + 'static>;
 /// Runs on whatever thread Wry chooses; only touches the queue.
 /// Errors are logged at WARN and dropped so a malformed message
 /// never propagates beyond the bridge boundary.
+///
+/// **Security note**: this variant accepts any capsule slug in the envelope.
+/// Prefer [`make_ipc_handler_for_capsule`] which rejects envelopes whose
+/// capsule slug does not match the expected capsule for this WebView.
 pub fn make_ipc_handler(queue: SystemBridgeQueue) -> impl Fn(wry::http::Request<String>) + 'static {
+    make_ipc_handler_inner(None, queue)
+}
+
+/// Capsule-bound IPC handler — the preferred variant for all system-capsule
+/// WebViews.
+///
+/// Only accepts envelopes where `manifest::lookup_by_slug(envelope.capsule)`
+/// resolves to `expected_capsule`.  Any envelope claiming a different capsule
+/// identity is rejected with a WARN log.  This prevents a compromised system
+/// capsule page from spoofing another capsule's commands.
+pub fn make_ipc_handler_for_capsule(
+    expected_capsule: SystemCapsuleId,
+    queue: SystemBridgeQueue,
+) -> impl Fn(wry::http::Request<String>) + 'static {
+    make_ipc_handler_inner(Some(expected_capsule), queue)
+}
+
+fn make_ipc_handler_inner(
+    expected_capsule: Option<SystemCapsuleId>,
+    queue: SystemBridgeQueue,
+) -> impl Fn(wry::http::Request<String>) + 'static {
     move |request: wry::http::Request<String>| {
         let body = request.body();
         let envelope: Envelope = match serde_json::from_str(body) {
@@ -143,6 +168,16 @@ pub fn make_ipc_handler(queue: SystemBridgeQueue) -> impl Fn(wry::http::Request<
                 return;
             }
         };
+        if let Some(expected) = expected_capsule {
+            if capsule != expected {
+                tracing::warn!(
+                    received = %envelope.capsule,
+                    expected = ?expected,
+                    "system_capsule::ipc: cross-capsule spoof rejected"
+                );
+                return;
+            }
+        }
         let command_result = parse_system_command(capsule, envelope.command);
         match command_result {
             Ok(cmd) => {
@@ -296,5 +331,34 @@ mod tests {
     #[test]
     fn unknown_slug_returns_none() {
         assert!(manifest::lookup_by_slug("not-a-real-capsule").is_none());
+    }
+
+    #[test]
+    fn cross_capsule_spoof_is_rejected_by_bound_handler() {
+        // A bound dock handler must reject envelopes claiming to be ato-settings.
+        let queue = new_queue();
+        let handler = make_ipc_handler_for_capsule(SystemCapsuleId::AtoDock, queue.clone());
+        // Synthesise a fake Wry request body claiming to be ato-settings.
+        let body = r#"{"capsule":"ato-settings","command":{"kind":"close"},"requestId":1}"#;
+        let fake_req = wry::http::Request::builder()
+            .body(body.to_string())
+            .unwrap();
+        handler(fake_req);
+        // The spoof must have been silently rejected — queue stays empty.
+        assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bound_handler_accepts_own_capsule() {
+        let queue = new_queue();
+        let handler = make_ipc_handler_for_capsule(SystemCapsuleId::AtoOnboarding, queue.clone());
+        // A valid onboarding command from the onboarding capsule.
+        let body = r#"{"capsule":"ato-onboarding","command":{"kind":"complete","version":1},"requestId":2}"#;
+        let fake_req = wry::http::Request::builder()
+            .body(body.to_string())
+            .unwrap();
+        handler(fake_req);
+        // The valid command must have been enqueued.
+        assert_eq!(queue.lock().unwrap().len(), 1);
     }
 }
