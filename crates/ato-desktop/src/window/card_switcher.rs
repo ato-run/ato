@@ -161,16 +161,30 @@ fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
 #[cfg(target_os = "macos")]
 fn snapshot_window(cx: &mut App, handle: AnyWindowHandle) -> Option<String> {
     use base64::Engine;
-    let nswindow = crate::window::macos::ns_window_for(cx, handle)?;
+    let nswindow = match crate::window::macos::ns_window_for(cx, handle) {
+        Some(nsw) => nsw,
+        None => {
+            tracing::debug!("snapshot: ns_window_for returned None");
+            return None;
+        }
+    };
     let win_num = nswindow.windowNumber();
     if win_num <= 0 {
+        tracing::debug!(win_num, "snapshot: windowNumber <= 0");
         return None;
     }
     let tmp = std::env::temp_dir().join(format!("ato-snap-{}-{}.png", win_num, std::process::id()));
-    let out = std::process::Command::new("screencapture")
-        .args(["-l", &win_num.to_string(), "-t", "png", "-x", tmp.to_str()?])
+    let tmp_str = tmp.to_str()?;
+    let out = match std::process::Command::new("screencapture")
+        .args(["-l", &win_num.to_string(), "-t", "png", "-x", tmp_str])
         .output()
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!(win_num, ?e, "snapshot: screencapture spawn failed");
+            return None;
+        }
+    };
     if !out.status.success() {
         tracing::debug!(
             window_number = win_num,
@@ -179,10 +193,18 @@ fn snapshot_window(cx: &mut App, handle: AnyWindowHandle) -> Option<String> {
         );
         return None;
     }
-    let bytes = std::fs::read(&tmp).ok()?;
+    let bytes = match std::fs::read(&tmp) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::debug!(win_num, ?e, "snapshot: failed to read PNG");
+            return None;
+        }
+    };
     let _ = std::fs::remove_file(&tmp);
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(format!("data:image/png;base64,{}", encoded))
+    let data_url = format!("data:image/png;base64,{}", encoded);
+    tracing::debug!(win_num, preview_len = data_url.len(), "snapshot: captured");
+    Some(data_url)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -247,9 +269,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     let windows_script = format!("window.__ATO_WINDOWS = {};", cards_json);
     let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
         .unwrap_or_else(|_| "[]".to_string());
-    let combined_script = format!(
-        "{windows_script}\nwindow.__ATO_SESSIONS = {sessions_json};"
-    );
+    let combined_script = format!("{windows_script}\nwindow.__ATO_SESSIONS = {sessions_json};");
     let locale = resolve_locale(crate::config::load_config().general.language);
     let init_script = compose_init_script(locale, Some(&combined_script));
 
