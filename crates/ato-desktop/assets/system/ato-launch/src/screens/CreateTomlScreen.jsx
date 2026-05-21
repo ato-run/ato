@@ -52,7 +52,7 @@ entry = ""
 `,
 };
 
-export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
+export function CreateTomlScreen({ initialContent, repo, onSave, onCancel }) {
   const isCliInference = initialContent === "__cli_inference__";
 
   const [tab, setTab] = useState(isCliInference ? "inference" : initialContent !== null && initialContent !== "" ? "editor" : "template");
@@ -62,6 +62,7 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
   const [selectedTemplate, setSelectedTemplate] = useState("web");
   const [inferring, setInferring] = useState(false);
   const [inferred, setInferred] = useState(false);
+  const [inferenceError, setInferenceError] = useState(null);
 
   // When tab switches to template, sync content
   useEffect(() => {
@@ -75,23 +76,28 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
 
   const runCliInference = () => {
     setInferring(true);
-    bridge({ kind: "github_cli_inference" });
-    // Rust calls window.__ato_cli_inference_result(toml_string)
-    window.__ato_cli_inference_result = (toml) => {
-      setContent(toml || TEMPLATES.blank);
-      setInferring(false);
-      setInferred(true);
-      setTab("editor");
+    setInferenceError(null);
+    bridge({ kind: "github_cli_inference", repo: repo || "" });
+    window.__ato_cli_inference_result = (result) => {
+      if (result && result.ok && result.toml) {
+        setContent(result.toml);
+        setInferring(false);
+        setInferred(true);
+        setInferenceError(null);
+        setTab("editor");
+      } else {
+        const msg = (result && result.message) || "推論に失敗しました。もう一度お試しいただくか、手動で作成してください。";
+        setInferenceError(msg);
+        setInferring(false);
+        setInferred(false);
+      }
       delete window.__ato_cli_inference_result;
     };
-    // Fallback timeout
     setTimeout(() => {
       if (window.__ato_cli_inference_result) {
         delete window.__ato_cli_inference_result;
-        setContent(TEMPLATES.blank);
+        setInferenceError("推論がタイムアウトしました。ネットワーク接続を確認してください。");
         setInferring(false);
-        setInferred(false);
-        setTab("editor");
       }
     }, 30000);
   };
@@ -169,6 +175,7 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
                 Ato CLI がリポジトリのソースを解析して<br />capsule.toml の下書きを自動生成します。<br />生成後にエディタで編集できます。
               </div>
               {inferred && <div style={{ fontSize: 12, color: "var(--ok)", marginTop: 8, fontWeight: 600 }}>✓ 推論完了 — エディタで確認してください</div>}
+              {inferenceError && <div style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 8, lineHeight: 1.6, maxWidth: 280 }}>{inferenceError}</div>}
             </div>
             <button
               onClick={inferring ? undefined : runCliInference}
