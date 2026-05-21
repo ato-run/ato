@@ -66,9 +66,7 @@ enum BridgeRequest {
         namespace: Option<String>,
     },
     #[serde(rename = "resolve_for_capsule")]
-    ResolveForCapsule {
-        capsule_handle: String,
-    },
+    ResolveForCapsule { capsule_handle: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,16 +86,14 @@ type BridgeResult<T> = std::result::Result<T, BridgeError>;
 
 impl CliSecretBridge {
     fn call(request: &BridgeRequest) -> BridgeResult<BridgeResponse> {
-        let ato = crate::orchestrator::resolve_ato_binary()
-            .map_err(|e| BridgeError {
-                code: "binary_not_found".into(),
-                message: format!("failed to resolve ato binary: {e}"),
-            })?;
-        let request_json = serde_json::to_string(request)
-            .map_err(|e| BridgeError {
-                code: "serialization_failed".into(),
-                message: format!("{e}"),
-            })?;
+        let ato = crate::orchestrator::resolve_ato_binary().map_err(|e| BridgeError {
+            code: "binary_not_found".into(),
+            message: format!("failed to resolve ato binary: {e}"),
+        })?;
+        let request_json = serde_json::to_string(request).map_err(|e| BridgeError {
+            code: "serialization_failed".into(),
+            message: format!("{e}"),
+        })?;
 
         let mut child = Command::new(&ato)
             .args(["secrets", "bridge", "--json"])
@@ -115,10 +111,12 @@ impl CliSecretBridge {
                 code: "spawn_failed".into(),
                 message: "failed to open bridge stdin".into(),
             })?;
-            stdin.write_all(request_json.as_bytes()).map_err(|e| BridgeError {
-                code: "spawn_failed".into(),
-                message: format!("failed to write bridge request: {e}"),
-            })?;
+            stdin
+                .write_all(request_json.as_bytes())
+                .map_err(|e| BridgeError {
+                    code: "spawn_failed".into(),
+                    message: format!("failed to write bridge request: {e}"),
+                })?;
             stdin.write_all(b"\n").map_err(|e| BridgeError {
                 code: "spawn_failed".into(),
                 message: format!("failed to write newline: {e}"),
@@ -144,10 +142,12 @@ impl CliSecretBridge {
 
         let mut stdout_reader = BufReader::new(&output.stdout[..]);
         let mut line = String::new();
-        stdout_reader.read_line(&mut line).map_err(|e| BridgeError {
-            code: "spawn_failed".into(),
-            message: format!("failed to read bridge response: {e}"),
-        })?;
+        stdout_reader
+            .read_line(&mut line)
+            .map_err(|e| BridgeError {
+                code: "spawn_failed".into(),
+                message: format!("failed to read bridge response: {e}"),
+            })?;
 
         serde_json::from_str(line.trim()).map_err(|e| BridgeError {
             code: "malformed_response".into(),

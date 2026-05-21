@@ -806,11 +806,7 @@ impl SecretStore {
         }
     }
 
-    pub fn grant_secret(
-        &mut self,
-        capsule_handle: &str,
-        key: &str,
-    ) -> Result<(), BridgeError> {
+    pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
         let mut allow = self.current_allow_list(key)?;
         if !allow.contains(&canonical) {
@@ -819,11 +815,7 @@ impl SecretStore {
         crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
     }
 
-    pub fn revoke_secret(
-        &mut self,
-        capsule_handle: &str,
-        key: &str,
-    ) -> Result<(), BridgeError> {
+    pub fn revoke_secret(&mut self, capsule_handle: &str, key: &str) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
         let mut allow = self.current_allow_list(key)?;
         allow.retain(|h| h != &canonical);
@@ -849,10 +841,7 @@ impl SecretStore {
         for e in &entries {
             if let Some(ref allow) = e.allow {
                 for handle in allow {
-                    cache
-                        .entry(handle.clone())
-                        .or_default()
-                        .push(e.key.clone());
+                    cache.entry(handle.clone()).or_default().push(e.key.clone());
                 }
             }
         }
@@ -942,9 +931,9 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
 
     // Step 1: migrate secrets (key → value entries).
     for entry in &legacy.secrets {
-        if let Err(e) = crate::secret_bridge::CliSecretBridge::set(
-            &entry.key, &entry.value, None, None, None,
-        ) {
+        if let Err(e) =
+            crate::secret_bridge::CliSecretBridge::set(&entry.key, &entry.value, None, None, None)
+        {
             tracing::warn!(key = %entry.key, error = %e, "Migration: failed to set secret, aborting");
             return None;
         }
@@ -967,9 +956,7 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
     }
     for (key, allow_set) in per_key_allows {
         let allow: Vec<String> = allow_set.into_iter().collect();
-        if let Err(e) =
-            crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
-        {
+        if let Err(e) = crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None) {
             tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, aborting");
             return None;
         }
@@ -990,7 +977,6 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
 
     Some(migrated)
 }
-
 
 // ── Capsule Config Store (non-secret) ─────────────────────────────────────────
 
@@ -1535,21 +1521,33 @@ mod tests {
     fn migration_grants_inversion_output_canonical_keys() {
         let legacy_grants: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::from([
-                ("capsule://org/app@1.2.3".into(), vec!["API_KEY".into(), "OTHER_KEY".into()]),
+                (
+                    "capsule://org/app@1.2.3".into(),
+                    vec!["API_KEY".into(), "OTHER_KEY".into()],
+                ),
                 ("capsule://org/app".into(), vec!["API_KEY".into()]),
             ]);
         let canonical = SecretStore::canonicalize_handle;
-        let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
+        let mut per_key_allows: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
         for (raw_handle, allowed_keys) in &legacy_grants {
             let ch = canonical(raw_handle).to_string();
             for key in allowed_keys {
-                per_key_allows.entry(key.clone()).or_default().insert(ch.clone());
+                per_key_allows
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(ch.clone());
             }
         }
         let api_key_allows = per_key_allows.get("API_KEY").unwrap();
         assert!(api_key_allows.contains("capsule://org/app"));
-        assert_eq!(api_key_allows.len(), 1, "versioned grant must merge to canonical");
+        assert_eq!(
+            api_key_allows.len(),
+            1,
+            "versioned grant must merge to canonical"
+        );
         let other_allows = per_key_allows.get("OTHER_KEY").unwrap();
         assert!(other_allows.contains("capsule://org/app"));
     }

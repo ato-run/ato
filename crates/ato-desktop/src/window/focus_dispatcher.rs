@@ -21,9 +21,9 @@ use crate::app::{
 };
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
+use crate::state::session::SessionRegistry;
 use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
 use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
-use crate::state::session::SessionRegistry;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::dock::DockEntitySlot;
 
