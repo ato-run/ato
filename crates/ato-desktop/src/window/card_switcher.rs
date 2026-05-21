@@ -209,6 +209,7 @@ fn kind_tag(kind: &ContentWindowKind) -> &'static str {
 pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     let existing = cx.global::<CardSwitcherWindowSlot>().0;
     if let Some(handle) = existing {
+        tracing::info!(window_id = %handle.window_id(), "switcher: closing existing window (toggle)");
         let close_result = handle.update(cx, |_, window, _| window.remove_window());
         cx.set_global(CardSwitcherWindowSlot(None));
         cx.set_global(CardSwitcherEntitySlot(None));
@@ -216,6 +217,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             return Ok(());
         }
     }
+    tracing::info!("switcher: opening new window");
 
     let entries: Vec<_> = cx
         .global::<OpenContentWindows>()
@@ -293,56 +295,13 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
+    tracing::info!(window_id = %handle.window_id(), "switcher: window created, setting slots");
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
     cx.set_global(CardSwitcherEntitySlot(entity_capture.borrow_mut().take()));
 
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
 
-    // Dispatch WKWebView snapshot requests for each card. The results
-    // arrive asynchronously and are pushed into the WebView as they
-    // are resolved (progressive rendering of real screenshots).
-    let window_id_to_handle: Vec<(u64, AnyWindowHandle)> = entries
-        .iter()
-        .map(|e| (e.handle.window_id().as_u64(), e.handle))
-        .collect();
-    let async_app = cx.to_async();
-    let foreground = async_app.foreground_executor().clone();
-    foreground
-        .spawn(async move {
-            use std::time::Duration;
-            let mut channels: Vec<(u64, mpsc::Receiver<Option<String>>)> = Vec::new();
-            for (window_id, window_handle) in &window_id_to_handle {
-                let (tx, rx) = mpsc::channel();
-                let _ = async_app.update(|cx| {
-                    request_snapshot(cx, *window_handle, tx);
-                });
-                channels.push((*window_id, rx));
-            }
-
-            for (window_id, rx) in channels {
-                match rx.recv_timeout(Duration::from_millis(500)) {
-                    Ok(Some(data_url)) => {
-                        async_app
-                            .update(|cx| {
-                                if let Some(entity) = cx
-                                    .try_global::<CardSwitcherEntitySlot>()
-                                    .and_then(|slot| slot.0.clone())
-                                {
-                                    let _ = entity.update(cx, |shell, _cx| {
-                                        shell.push_screenshot(window_id, &data_url);
-                                    });
-                                }
-                            });
-                    }
-                    Ok(None) | Err(_) => {
-                        // Screenshot failed or timed out — card already
-                        // shows the CSS mock preview from initial load.
-                    }
-                }
-            }
-        })
-        .detach();
-
+    tracing::info!("switcher: open complete");
     Ok(())
 }
 
