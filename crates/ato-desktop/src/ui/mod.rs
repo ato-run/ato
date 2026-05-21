@@ -33,14 +33,14 @@ use crate::app::{
     BrowserForward, BrowserReload, CancelAuthHandoff, CancelConfigForm, CancelConsentForm,
     CancelQuit, CancelResolutionForm, CheckForUpdates, CloseTask, ConfirmQuitClear,
     ConfirmQuitKeep, ConfirmQuitWithCleanup, CycleHandle, DenyPermissionPrompt, DismissTransient,
-    ExpandSplit,
-    FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut, NativePaste,
-    NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask, NextWorkspace,
-    OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage, OpenLocalRegistry,
-    OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResolutionFormBack, ResolutionFormNext,
-    ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab, SelectSettingsTab, SelectTask,
-    ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm,
-    ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
+    ExpandSplit, FocusCommandBar, InstallCapsuleUpdate, MoveTask, NativeCopy, NativeCut,
+    NativePaste, NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask,
+    NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage,
+    OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResolutionFormBack,
+    ResolutionFormNext, ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab, SelectSettingsTab,
+    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
+    SubmitResolutionForm, ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover,
+    ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -2182,9 +2182,7 @@ fn render_quit_dialog(
     let text_secondary = theme.text_secondary;
     let warn_color = theme.traffic_amber;
 
-    let show_cleanup = cleanup_preview
-        .map(|p| p.needs_cleanup)
-        .unwrap_or(false);
+    let show_cleanup = cleanup_preview.map(|p| p.needs_cleanup).unwrap_or(false);
 
     div()
         .id("quit-confirm-overlay")
@@ -2242,7 +2240,12 @@ fn render_quit_dialog(
                                     .child("Stale resources found:"),
                             )
                             .child({
-                                let mut lines = div().flex().flex_col().gap(px(2.0)).text_size(px(12.0)).text_color(text_secondary);
+                                let mut lines = div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .text_size(px(12.0))
+                                    .text_color(text_secondary);
                                 if let Some(p) = cleanup_preview {
                                     if !p.postgres_pids.is_empty() {
                                         lines = lines.child(format!(
@@ -2255,7 +2258,11 @@ fn render_quit_dialog(
                                         lines = lines.child(format!(
                                             "  • {} bun server process{}",
                                             p.bun_server_pids.len(),
-                                            if p.bun_server_pids.len() > 1 { "es" } else { "" },
+                                            if p.bun_server_pids.len() > 1 {
+                                                "es"
+                                            } else {
+                                                ""
+                                            },
                                         ));
                                     }
                                     if !p.port_1111_pids.is_empty() {
@@ -2311,10 +2318,7 @@ fn render_quit_dialog(
                                 theme,
                                 QuitDialogButtonKind::Danger,
                                 |window, cx| {
-                                    window.dispatch_action(
-                                        Box::new(ConfirmQuitWithCleanup),
-                                        cx,
-                                    );
+                                    window.dispatch_action(Box::new(ConfirmQuitWithCleanup), cx);
                                 },
                             ))
                         }),

@@ -21,7 +21,10 @@ fn main() {
 }
 
 fn check_onboarding_dist(manifest_dir: &PathBuf) {
-    let capsule_dir = manifest_dir.join("assets").join("system").join("ato-onboarding");
+    let capsule_dir = manifest_dir
+        .join("assets")
+        .join("system")
+        .join("ato-onboarding");
     let dist_dir = capsule_dir.join("dist");
     let entrypoint = dist_dir.join("index.html");
 
@@ -46,9 +49,19 @@ fn check_onboarding_dist(manifest_dir: &PathBuf) {
     }
 
     if !capsule_dir.join("node_modules").exists() {
-        run_command("npm", &["install"], &capsule_dir, "ato-onboarding npm install");
+        run_command(
+            "npm",
+            &["install"],
+            &capsule_dir,
+            "ato-onboarding npm install",
+        );
     }
-    run_command("npm", &["run", "build"], &capsule_dir, "ato-onboarding vite build");
+    run_command(
+        "npm",
+        &["run", "build"],
+        &capsule_dir,
+        "ato-onboarding vite build",
+    );
     if entrypoint.exists() {
         return;
     }
@@ -114,9 +127,7 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
     }
 
     if env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD") {
-        println!(
-            "cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; dock dist check skipped"
-        );
+        println!("cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; dock dist check skipped");
         return;
     }
 
@@ -184,16 +195,19 @@ fn check_start_dist(manifest_dir: &PathBuf) {
     }
 
     if env_truthy("ATO_DESKTOP_SKIP_START_BUILD") {
-        println!(
-            "cargo:warning=ATO_DESKTOP_SKIP_START_BUILD=1 set; start dist check skipped"
-        );
+        println!("cargo:warning=ATO_DESKTOP_SKIP_START_BUILD=1 set; start dist check skipped");
         return;
     }
 
     if !capsule_dir.join("node_modules").exists() {
         run_command("npm", &["install"], &capsule_dir, "ato-start npm install");
     }
-    run_command("npm", &["run", "build"], &capsule_dir, "ato-start astro build");
+    run_command(
+        "npm",
+        &["run", "build"],
+        &capsule_dir,
+        "ato-start astro build",
+    );
     if entrypoint.exists() {
         return;
     }
@@ -226,9 +240,7 @@ fn check_store_dist(manifest_dir: &PathBuf) {
     }
 
     if env_truthy("ATO_DESKTOP_SKIP_STORE_BUILD") {
-        println!(
-            "cargo:warning=ATO_DESKTOP_SKIP_STORE_BUILD=1 set; store dist check skipped"
-        );
+        println!("cargo:warning=ATO_DESKTOP_SKIP_STORE_BUILD=1 set; store dist check skipped");
         return;
     }
 
