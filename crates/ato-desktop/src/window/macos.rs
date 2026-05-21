@@ -12,10 +12,18 @@
 
 #![cfg(target_os = "macos")]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
-use objc2_app_kit::{NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2::runtime::AnyClass;
+use objc2_app_kit::{
+    NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSFloatingWindowLevel, NSImage, NSView,
+    NSWindow, NSWindowOrderingMode,
+};
+use objc2_foundation::{NSData, NSDictionary, NSRunLoop, NSDate, NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
 
@@ -276,4 +284,97 @@ pub fn attach_as_child(
     }
     tracing::info!("addChildWindow attached Control Bar to AppWindow");
     Ok(())
+}
+
+// ── WKWebView screenshot helpers ──────────────────────────────────
+//
+// `screencapture -l <windowID>` cannot capture Metal-backed windows
+// (GPUI renders via Metal). For these windows we fall through to
+// WKWebView's own snapshot API, which captures the WebView content
+// directly without needing CGWindowListCreateImage.
+
+/// Find a WKWebView in the NSView hierarchy rooted at `content`.
+/// Wry mounts the WKWebView as a child of the GPUI content view, so
+/// we walk `contentView.subviews()` recursively looking for any view
+/// whose class is `WKWebView` (or subclass).
+fn find_wkwebview_in_content(content: &NSView) -> Option<Retained<NSView>> {
+    use objc2::msg_send;
+
+    static WK_CLASS: std::sync::OnceLock<Option<&'static AnyClass>> =
+        std::sync::OnceLock::new();
+    let wk_class = *WK_CLASS.get_or_init(|| {
+        let name = std::ffi::CStr::from_bytes_with_nul(b"WKWebView\0").unwrap();
+        AnyClass::get(name)
+    });
+    let wk_class = wk_class?;
+
+    for sv in content.subviews().iter() {
+        let is_wk: bool = unsafe { msg_send![&sv, isKindOfClass: wk_class] };
+        if is_wk {
+            return Some(sv);
+        }
+        if let Some(found) = find_wkwebview_in_content(&sv) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Take a WKWebView screenshot and return it as a `data:image/png;base64,...`
+/// data URL suitable for embedding in an `<img>` tag.
+///
+/// `takeSnapshotWithConfiguration:completionHandler:` is asynchronous;
+/// we pump the main run loop with a short timeout to synchronise the
+/// result. Timeout is hit when `snapshot_timeout` elapses without a
+/// valid image — the function returns `None` in that case.
+pub fn capture_wkwebview_snapshot(
+    nswindow: &NSWindow,
+    snapshot_timeout: Duration,
+) -> Option<String> {
+    let content = nswindow.contentView()?;
+    let wk_view = find_wkwebview_in_content(&content)?;
+
+    use base64::Engine;
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    let result: Rc<RefCell<Option<Retained<NSImage>>>> = Rc::new(RefCell::new(None));
+    let cell = result.clone();
+
+    let handler = RcBlock::new(
+        move |image: *mut NSImage, _error: *mut AnyObject| {
+            if !image.is_null() {
+                *cell.borrow_mut() = Some(unsafe { Retained::retain(image) }.unwrap());
+            }
+        },
+    );
+
+    unsafe {
+        let _: () = msg_send![
+            &*wk_view,
+            takeSnapshotWithConfiguration: std::ptr::null_mut::<AnyObject>(),
+            completionHandler: &*handler
+        ];
+    }
+
+    let deadline = Instant::now() + snapshot_timeout;
+    let run_loop = NSRunLoop::mainRunLoop();
+    while result.borrow().is_none() && Instant::now() < deadline {
+        let next = NSDate::dateWithTimeIntervalSinceNow(0.01);
+        run_loop.runUntilDate(&next);
+    }
+
+    let image = result.borrow_mut().take()?;
+
+    let tiff = unsafe { image.TIFFRepresentation() }?;
+    let rep = unsafe { NSBitmapImageRep::imageRepWithData(&tiff) }?;
+    let empty = NSDictionary::<NSString, AnyObject>::new();
+    let png = unsafe {
+        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
+    }?;
+    let bytes = png.to_vec();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:image/png;base64,{}", b64))
 }

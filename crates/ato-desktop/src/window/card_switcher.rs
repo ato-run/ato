@@ -151,60 +151,24 @@ fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
     }
 }
 
-/// Capture a PNG screenshot of the OS window that backs `handle` and
-/// return a data URL ready to embed in an `<img>`. macOS-only — uses
-/// the OS-provided `screencapture -l <windowID>` tool which goes via
-/// `CGWindowListCreateImage` and works on any window by ID without
-/// raising it to the foreground (important: the switcher overlay
-/// would obscure them otherwise). Requires the user to have granted
-/// Screen Recording permission to the terminal running ato-desktop.
+/// Capture a WKWebView screenshot from the NSWindow that backs
+/// `handle` and return a `data:image/png;base64,...` URL.
+///
+/// Uses WKWebView's own `takeSnapshotWithConfiguration:completionHandler:`
+/// API so we don't depend on `CGWindowListCreateImage` which cannot
+/// read Metal-backed GPU windows (GPUI renders via Metal).
 #[cfg(target_os = "macos")]
 fn snapshot_window(cx: &mut App, handle: AnyWindowHandle) -> Option<String> {
-    use base64::Engine;
-    let nswindow = match crate::window::macos::ns_window_for(cx, handle) {
-        Some(nsw) => nsw,
-        None => {
-            tracing::debug!("snapshot: ns_window_for returned None");
-            return None;
-        }
-    };
-    let win_num = nswindow.windowNumber();
-    if win_num <= 0 {
-        tracing::debug!(win_num, "snapshot: windowNumber <= 0");
-        return None;
-    }
-    let tmp = std::env::temp_dir().join(format!("ato-snap-{}-{}.png", win_num, std::process::id()));
-    let tmp_str = tmp.to_str()?;
-    let out = match std::process::Command::new("screencapture")
-        .args(["-l", &win_num.to_string(), "-t", "png", "-x", tmp_str])
-        .output()
-    {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::debug!(win_num, ?e, "snapshot: screencapture spawn failed");
-            return None;
-        }
-    };
-    if !out.status.success() {
-        tracing::debug!(
-            window_number = win_num,
-            stderr = ?String::from_utf8_lossy(&out.stderr),
-            "screencapture failed; falling back to CSS preview"
-        );
-        return None;
-    }
-    let bytes = match std::fs::read(&tmp) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::debug!(win_num, ?e, "snapshot: failed to read PNG");
-            return None;
-        }
-    };
-    let _ = std::fs::remove_file(&tmp);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let data_url = format!("data:image/png;base64,{}", encoded);
-    tracing::debug!(win_num, preview_len = data_url.len(), "snapshot: captured");
-    Some(data_url)
+    use std::time::Duration;
+    let nswindow = crate::window::macos::ns_window_for(cx, handle)?;
+    crate::window::macos::capture_wkwebview_snapshot(
+        &nswindow,
+        Duration::from_millis(300),
+    )
+    .or_else(|| {
+        tracing::debug!("snapshot: WKWebView snapshot returned None — falling back to CSS preview");
+        None
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
