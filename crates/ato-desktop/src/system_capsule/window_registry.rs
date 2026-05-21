@@ -1,64 +1,72 @@
-//! Runtime window handle registry for active system capsule WebViews.
+//! Runtime window binding registry for active system capsule WebViews.
 //!
-//! `SystemCapsuleWindowRegistry` maps each `SystemCapsuleId` to the GPUI
-//! window that currently hosts it.  It is a `'static` GPUI global.
+//! `SystemCapsuleWindowRegistry` maps each `SystemCapsuleId` to the set of
+//! GPUI `WindowId`s that currently host it.  A capsule may have **more than
+//! one** active window (e.g. `AtoLaunch` opens separate consent / boot /
+//! github-run windows), so the registry uses a `HashSet<WindowId>` per capsule
+//! rather than a single slot.
 //!
 //! # Usage
 //!
-//! - **At window creation**: call `register(id, handle)` after opening the GPUI
-//!   window.
-//! - **At window close** (or when the slot becomes `None`): call
-//!   `unregister(id)`.
-//! - **In the drain loop** (`spawn_drain_loop_inner`): call `has_binding(id)` to
-//!   confirm a live window exists before dispatching IPC commands.  Without a
-//!   registered window handle the IPC is denied so that commands cannot be
-//!   dispatched to a capsule that never opened a window.
+//! - **At window creation**: call `register(id, handle)` to add the window to
+//!   the capsule's binding set.
+//! - **At window close**: call `unregister_window(window_id)` to remove the
+//!   window from *all* capsule sets (no need to know the capsule id in
+//!   advance).
+//! - **In the drain loop** (`spawn_drain_loop_inner`): call
+//!   `has_binding_for_window(id, window_id)` to confirm that *this specific*
+//!   host window is still registered before dispatching an IPC command.  This
+//!   prevents stale drain loops from processing IPC after their window has
+//!   closed, without affecting sibling windows of the same capsule.
 //!
 //! The `gpui::Global` impl lives in `window/mod.rs` (see the comment there).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use gpui::AnyWindowHandle;
+use gpui::{AnyWindowHandle, WindowId};
 
 use super::broker::SystemCapsuleId;
 
-/// Registry mapping active system capsule IDs to their host window handles.
+/// Registry mapping active system capsule IDs to their host window IDs.
+///
+/// Multiple windows per capsule are supported (see [`register`]).
 #[derive(Debug, Default)]
 pub struct SystemCapsuleWindowRegistry {
-    windows: HashMap<SystemCapsuleId, AnyWindowHandle>,
+    windows: HashMap<SystemCapsuleId, HashSet<WindowId>>,
 }
 
 impl SystemCapsuleWindowRegistry {
-    /// Register a live host window for a system capsule.
+    /// Add `handle` to the binding set for `id`.
     ///
-    /// If the capsule was already registered (e.g. the window was re-opened),
-    /// the old handle is silently replaced.
+    /// Idempotent: calling `register` twice with the same window is a no-op.
     pub fn register(&mut self, id: SystemCapsuleId, handle: AnyWindowHandle) {
-        self.windows.insert(id, handle);
+        self.windows.entry(id).or_default().insert(handle.window_id());
     }
 
-    /// Remove the binding for a system capsule (called on window close).
-    pub fn unregister(&mut self, id: SystemCapsuleId) {
-        self.windows.remove(&id);
+    /// Remove `window_id` from every capsule's binding set.
+    ///
+    /// Called from `on_window_closed` where the capsule id is not known in
+    /// advance.  Empty sets are pruned so that `has_binding` stays accurate.
+    pub fn unregister_window(&mut self, window_id: WindowId) {
+        self.windows.retain(|_, ids| {
+            ids.remove(&window_id);
+            !ids.is_empty()
+        });
     }
 
-    /// Returns `true` if there is a registered host window for `id`.
+    /// Returns `true` if there is **at least one** registered window for `id`.
     pub fn has_binding(&self, id: SystemCapsuleId) -> bool {
-        self.windows.contains_key(&id)
+        self.windows.get(&id).is_some_and(|s| !s.is_empty())
     }
 
-    /// Returns the registered handle, if any.
-    pub fn get(&self, id: SystemCapsuleId) -> Option<AnyWindowHandle> {
-        self.windows.get(&id).copied()
-    }
-    /// Returns the `SystemCapsuleId` registered under the given GPUI window
-    /// handle, if any. Used by `on_window_closed` to unregister the binding
-    /// by window id without knowing the capsule id in advance.
-    pub fn find_by_window_id(&self, window_id: gpui::WindowId) -> Option<SystemCapsuleId> {
+    /// Returns `true` if `window_id` is in the binding set for `id`.
+    ///
+    /// Used by each drain loop to confirm that *its own* host window is still
+    /// active — without affecting other windows of the same capsule.
+    pub fn has_binding_for_window(&self, id: SystemCapsuleId, window_id: WindowId) -> bool {
         self.windows
-            .iter()
-            .find(|(_, h)| h.window_id() == window_id)
-            .map(|(id, _)| *id)
+            .get(&id)
+            .is_some_and(|s| s.contains(&window_id))
     }
 }
 
@@ -66,23 +74,80 @@ impl SystemCapsuleWindowRegistry {
 mod tests {
     use super::*;
 
-    fn dummy_id() -> SystemCapsuleId {
-        SystemCapsuleId::AtoStore
+    fn make_window_id(n: u64) -> WindowId {
+        // SAFETY: WindowId is a repr(transparent) newtype around u64 in GPUI.
+        // We use transmute here only in tests to construct deterministic IDs
+        // without a running runtime.
+        unsafe { std::mem::transmute::<u64, WindowId>(n) }
     }
-
-    // Note: AnyWindowHandle cannot be cheaply constructed in unit tests (it
-    // requires a running GPUI runtime), so we only test the registry logic.
 
     #[test]
     fn has_binding_false_when_empty() {
         let reg = SystemCapsuleWindowRegistry::default();
-        assert!(!reg.has_binding(dummy_id()));
+        assert!(!reg.has_binding(SystemCapsuleId::AtoStore));
     }
 
     #[test]
-    fn unregister_of_unknown_id_is_noop() {
+    fn register_then_has_binding() {
+        let wid = make_window_id(1);
         let mut reg = SystemCapsuleWindowRegistry::default();
-        reg.unregister(dummy_id()); // must not panic
-        assert!(!reg.has_binding(dummy_id()));
+        // Simulate registration via raw window_id.
+        reg.windows
+            .entry(SystemCapsuleId::AtoStore)
+            .or_default()
+            .insert(wid);
+        assert!(reg.has_binding(SystemCapsuleId::AtoStore));
+        assert!(reg.has_binding_for_window(SystemCapsuleId::AtoStore, wid));
+    }
+
+    #[test]
+    fn unregister_window_noop_on_unknown() {
+        let mut reg = SystemCapsuleWindowRegistry::default();
+        reg.unregister_window(make_window_id(99)); // must not panic
+        assert!(!reg.has_binding(SystemCapsuleId::AtoLaunch));
+    }
+
+    #[test]
+    fn multiwindow_launch_survives_partial_close() {
+        // AtoLaunch can have multiple concurrent windows (consent, boot, …).
+        // Closing one must NOT remove the binding for the remaining windows.
+        let w1 = make_window_id(1);
+        let w2 = make_window_id(2);
+        let mut reg = SystemCapsuleWindowRegistry::default();
+        reg.windows
+            .entry(SystemCapsuleId::AtoLaunch)
+            .or_default()
+            .insert(w1);
+        reg.windows
+            .entry(SystemCapsuleId::AtoLaunch)
+            .or_default()
+            .insert(w2);
+
+        // Close w2 — w1 must still have binding.
+        reg.unregister_window(w2);
+        assert!(reg.has_binding(SystemCapsuleId::AtoLaunch));
+        assert!(reg.has_binding_for_window(SystemCapsuleId::AtoLaunch, w1));
+        assert!(!reg.has_binding_for_window(SystemCapsuleId::AtoLaunch, w2));
+
+        // Close w1 — now no binding.
+        reg.unregister_window(w1);
+        assert!(!reg.has_binding(SystemCapsuleId::AtoLaunch));
+    }
+
+    #[test]
+    fn register_is_idempotent() {
+        let wid = make_window_id(5);
+        let mut reg = SystemCapsuleWindowRegistry::default();
+        for _ in 0..3 {
+            reg.windows
+                .entry(SystemCapsuleId::AtoStore)
+                .or_default()
+                .insert(wid);
+        }
+        assert_eq!(
+            reg.windows[&SystemCapsuleId::AtoStore].len(),
+            1,
+            "duplicate inserts must be deduplicated"
+        );
     }
 }
