@@ -10,7 +10,23 @@ related:
 
 # ADR-008: Desktop Host Bridge IPC 境界設計
 
-## Context
+## Implementation Status (feat/ipc-boundary-redesign)
+
+各フェーズの **実装状態** を明示する。ADR の設計原則はすべて確定しているが、
+一部は **scaffold / 今後の PR で本配線** が必要な状態である。
+
+| 項目 | 状態 |
+|------|------|
+| SystemCapsuleDescriptor / Binding split | ✅ 実装済み |
+| make_ipc_handler_for_capsule (spoof 拒否) | ✅ 実装済み |
+| slug 閉集合 + legacy alias 正規化 | ✅ 実装済み |
+| SystemCapsuleWindowRegistry (multi-window) | ✅ 実装済み |
+| drain loop: has_binding_for_window チェック | ✅ 実装済み |
+| IpcPrincipal / IpcPolicy / IpcCommandRegistry | ✅ scaffold — 型定義・registry 定義のみ。drain loop はまだ CapabilityBroker を使用 |
+| IpcBroker::dispatch 本配線 | 🔲 scaffold — 実装あり、drain loop への接続は follow-up |
+| typed response / SYSTEM_IPC_INIT_SCRIPT | 🔲 scaffold — JS API 定義あり、system window への注入・spawn_drain_loop_with_response 使用は follow-up |
+| capsule.state.get / set / delete / list_keys | 🔲 scaffold — CapsuleStateStore と registry spec 定義のみ。IPC handler は not_implemented stub |
+
 
 `ato-desktop` の WebView ↔ ホスト間 IPC (`system_capsule/ipc.rs`) は長い間 fire-and-forget 設計で、以下の問題を抱えていた。
 
@@ -19,9 +35,8 @@ related:
 3. **System capsule と guest capsule の IPC surface が混在** — system-only コマンドが任意の WebView から呼べる状態だった。
 4. **IPC コードが `system_capsule/` 配下のみに置かれていた** — 再利用・テストが困難だった。
 
-これらの問題は security boundary の曖昧さであり、ato-desktop の信頼性・監査可能性に影響する。
+## Context
 
-## Decision
 
 以下の設計原則を採用し、`feat/ipc-boundary-redesign` ブランチ（9フェーズ）で実装した。
 
@@ -55,9 +70,10 @@ pub enum IpcVisibility {
 
 ### 3. Host window binding を前提とする
 
-- 各 system capsule ウィンドウは開かれた瞬間に `SystemCapsuleWindowRegistry` に自身の `AnyWindowHandle` を登録する。
-- ウィンドウが閉じられると `on_window_closed` で unregister される。
-- IPC ドレインループは `has_binding()` を確認し、バインディングが存在しない capsule へのディスパッチを `no_binding` エラーで拒否する。
+- 各 system capsule ウィンドウは開かれた瞬間に `SystemCapsuleWindowRegistry` に自身の `WindowId` を登録する。
+- ウィンドウが閉じられると `on_window_closed` で `unregister_window(window_id)` が呼ばれ、全 capsule のセットから削除される。
+- IPC ドレインループは `has_binding_for_window(capsule, host_window_id)` を確認し、**そのドレインループを起動した特定ウィンドウ**が登録されていない場合のみ `no_binding` エラーで拒否する。
+- `AtoLaunch` のように同一 capsule id で複数ウィンドウが同時に存在するケースでも、片方が閉じてもう片方の IPC は継続して処理される。
 
 ### 4. Slug 閉集合と legacy エイリアス
 
@@ -65,7 +81,7 @@ canonical slug セット: `store`, `web-viewer`, `settings`, `windows`, `launch`
 
 旧 `ato-*` 形式は `manifest.rs` の `legacy_aliases` にのみ残し、`lookup_by_slug()` が正規化する。JS アセット（24ファイル）はすべて canonical slug へ更新済み。
 
-### 5. Typed response / request_id
+### 5. Typed response / request_id  *(scaffold — 本配線は follow-up)*
 
 ```rust
 pub struct IpcRequest { pub id: Option<u64>, pub command: String, pub params: Value }
@@ -75,17 +91,21 @@ pub enum IpcResponse {
 }
 ```
 
-JS プリロードスクリプト (`SYSTEM_IPC_INIT_SCRIPT`) が `window.__atoPendingIpc: Map<u64, resolver>` を管理し、Rust 側から `window.__atoIpcResolve(id, json)` を呼び出して Promise を解決する。
+JS プリロードスクリプト (`SYSTEM_IPC_INIT_SCRIPT`) が `window.__atoPendingIpc: Map<u64, resolver>` を管理し、Rust 側から `window.__atoIpcResolve(id, json)` を呼び出して Promise を解決する設計。
 
-### 6. Session-scoped capsule state store
+> **現状**: `SYSTEM_IPC_INIT_SCRIPT` は `system_capsule/ipc.rs` に定義済みだが、各 system window の `with_initialization_script` にはまだ合成されていない。`spawn_drain_loop_with_response` も定義済みだが使用している window はない。本配線は follow-up PR で行う。
+
+### 6. Session-scoped capsule state store  *(CapsuleStateStore 実装済み、IPC handler は scaffold)*
 
 ```rust
 pub struct CapsuleStateStore { /* session_id → capsule_instance_key → state_key → Value */ }
 ```
 
-- `capsule.state.get` / `capsule.state.set` コマンドで操作。
+- `capsule.state.get` / `capsule.state.set` / `capsule.state.delete` / `capsule.state.list_keys` コマンドで操作する設計。
 - session 終了時に `clear_session()` で自動破棄（O(1)）。
 - 長期 persistence はスコープ外。
+
+> **現状**: `CapsuleStateStore` GPUI global は実装済み。`IpcCommandRegistry` に command spec も登録済み。しかし `ipc/commands/mod.rs` の handler 実装は `not_implemented` stub。実コマンド処理は follow-up PR で行う。
 
 ## Alternatives Considered
 
@@ -118,14 +138,16 @@ pub struct CapsuleStateStore { /* session_id → capsule_instance_key → state_
 
 ### Bad
 
-- `IpcBroker::dispatch` と `CapabilityBroker::dispatch` の二系統が並存している（Phase 8 時点）。`IpcBroker` はまだ stub handlers のみで本番コマンドを処理していない。実際のコマンド処理は引き続き `CapabilityBroker` が担う。
+- `IpcBroker::dispatch` と `CapabilityBroker::dispatch` の二系統が並存している。`IpcBroker` の型定義・registry は実装済みだが、drain loop は依然 `CapabilityBroker` を呼んでいる。実際のコマンド処理は引き続き `CapabilityBroker` が担う（follow-up で切り替え）。
 - `SystemCapsuleBinding` の `materialized_root` / `serving_root` / `version_hash` フィールドは、バンドルされた system capsule（`include_dir!` 埋め込み）には意味がない。フィールドは将来の on-disk capsule 用として定義のみ。
-- 複数の launch ウィンドウが同時に存在する場合、`SystemCapsuleWindowRegistry` には最後に開かれたもののみが登録される（AtoLaunch は重複開き可能）。
+- typed response / `SYSTEM_IPC_INIT_SCRIPT` は scaffold 定義のみ。system window へのスクリプト注入と `spawn_drain_loop_with_response` の採用は follow-up。
+- `capsule.state.*` の IPC handler は `not_implemented` stub のみ（`CapsuleStateStore` 自体は実装済み）。
 
 ## Follow-up
 
 - [ ] `IpcBroker::dispatch` を本番ドレインループに接続し、`CapabilityBroker` を段階的に廃止する
 - [ ] `IpcHandler` トレイトに `&mut App` アクセスパターンを追加する（現状 stateless）
+- [ ] system window に `SYSTEM_IPC_INIT_SCRIPT` を合成し、`spawn_drain_loop_with_response` に切り替える
+- [ ] `capsule.state.get / set / delete / list_keys` handler を実装する（`CapsuleStateStore` は利用可能）
 - [ ] Guest capsule IPC (`bridge.rs`) を同じ principal / visibility モデルに統合する
 - [ ] `accepted/CAPSULE_IPC_SPEC.md` を新 IPC 設計に合わせて更新する（実装検証後に別 PR）
-- [ ] `AtoLaunch` の複数ウィンドウに対応した binding registry（`Vec<AnyWindowHandle>` or 上書き許容）を決定する
