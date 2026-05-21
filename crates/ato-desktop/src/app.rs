@@ -635,14 +635,9 @@ pub fn run(skip_onboarding: bool) {
             }
 
             // Unregister system capsule window binding on close.
-            if let Some(capsule_id) = cx
-                .global::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
-                .find_by_window_id(window_id)
-            {
-                cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
-                    .unregister(capsule_id);
-                tracing::debug!(?capsule_id, "SystemCapsuleWindowRegistry: binding removed on window close");
-            }
+            cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+                .unregister_window(window_id);
+            tracing::debug!(?window_id, "SystemCapsuleWindowRegistry: binding removed on window close");
 
             // Session lifecycle handling based on windowCloseBehavior.
             // The AppCapsuleShell Drop will detach the client; we decide
