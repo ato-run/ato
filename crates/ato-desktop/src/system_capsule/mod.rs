@@ -39,5 +39,8 @@ pub mod ato_windows;
 pub mod broker;
 pub mod ipc;
 pub mod manifest;
+pub mod materializer;
+pub mod registry;
+pub mod static_resolver;
 
 pub use broker::{BrokerError, Capability, CapabilityBroker, SystemCapsuleId, SystemCommand};
