@@ -253,8 +253,6 @@ pub struct ControlBarShellPlaceholder {
     omnibar: Entity<InputState>,
     locale: LocaleCode,
     omnibar_focused: bool,
-    /// Track whether the info popup is currently open.
-    pub(crate) info_popup_open: bool,
     /// Track which capsule handles are starred (pinned).
     starred_handles: HashSet<String>,
     /// Trackpad / mouse gesture recognizer (#174).
@@ -310,7 +308,6 @@ impl ControlBarShellPlaceholder {
             omnibar,
             locale,
             omnibar_focused: false,
-            info_popup_open: false,
             starred_handles: load_config()
                 .desktop
                 .pinned_capsules
@@ -355,11 +352,11 @@ impl ControlBarShellPlaceholder {
     /// Toggle the info popup open/closed. Called from the action handler
     /// in app.rs so it runs outside the render cycle.
     pub(crate) fn toggle_info_popup(&mut self, cx: &mut Context<Self>) {
-        if self.info_popup_open {
-            close_info_popup(cx);
-            self.info_popup_open = false;
+        if close_info_popup_if_live(cx) {
+            cx.notify();
             return;
         }
+
         let frontmost = cx.global::<OpenContentWindows>().frontmost();
         let model = frontmost
             .as_ref()
@@ -384,11 +381,10 @@ impl ControlBarShellPlaceholder {
                         .unwrap_or_else(|| String::new()),
                 }
             });
-        self.info_popup_open = true;
         if let Err(err) = open_info_popup(cx, model, self.locale) {
             tracing::error!(error = %err, "Failed to open info popup");
-            self.info_popup_open = false;
         }
+        cx.notify();
     }
 
     /// Toggle star/pin state for the current omnibar URL.
@@ -1133,12 +1129,7 @@ fn info_popup_item_enabled(
                 .hover(|s| s.bg(rgb(0xf4f4f5)))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     on_click(window, cx);
-                    close_info_popup(cx);
-                    if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
-                        shell.update(cx, |shell, _| {
-                            shell.info_popup_open = false;
-                        });
-                    }
+                    dismiss_info_popup(cx);
                 })
         })
         .when_some(icon, |this, icon_name| {
@@ -1156,7 +1147,7 @@ fn open_info_popup(
     model: InfoPopupModel,
     locale: LocaleCode,
 ) -> Result<AnyWindowHandle> {
-    close_info_popup(cx);
+    dismiss_info_popup(cx);
 
     let popup_size = size(px(300.0), px(440.0));
 
@@ -1202,10 +1193,22 @@ fn open_info_popup(
     Ok(*handle)
 }
 
-fn close_info_popup(cx: &mut App) {
-    if let Some(handle) = cx.global::<InfoPopupWindowSlot>().0 {
-        cx.set_global(InfoPopupWindowSlot(None));
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+pub(crate) fn dismiss_info_popup(cx: &mut App) {
+    let _ = close_info_popup_if_live(cx);
+}
+
+fn close_info_popup_if_live(cx: &mut App) -> bool {
+    let Some(handle) = cx.global::<InfoPopupWindowSlot>().0 else {
+        return false;
+    };
+
+    cx.set_global(InfoPopupWindowSlot(None));
+    match handle.update(cx, |_, window, _| window.remove_window()) {
+        Ok(_) => true,
+        Err(err) => {
+            tracing::debug!(error = %err, "Info popup handle was stale while dismissing");
+            false
+        }
     }
 }
 
