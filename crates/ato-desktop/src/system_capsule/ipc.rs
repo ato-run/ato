@@ -265,6 +265,9 @@ fn spawn_drain_loop_inner(
     let fe = async_app.foreground_executor().clone();
     let be = async_app.background_executor().clone();
     let aa = async_app.clone();
+    // Capture the window id at spawn time so the check below never touches
+    // the (potentially closed) AnyWindowHandle after loop termination.
+    let host_window_id = host.window_id();
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
@@ -281,10 +284,15 @@ fn spawn_drain_loop_inner(
             }
             for (capsule, command, request_id) in drained {
                 aa.update(|cx| {
-                    // Deny dispatch if no live window binding is registered
-                    // for this capsule. This prevents IPC from being processed
-                    // for a capsule whose window has closed or was never opened.
-                    if !cx.global::<SystemCapsuleWindowRegistry>().has_binding(capsule) {
+                    // Deny dispatch if *this specific host window* is no longer
+                    // registered for the capsule.  Checking by window_id (rather
+                    // than capsule id alone) ensures that closing one of several
+                    // concurrent AtoLaunch windows does not silently deny IPC for
+                    // the remaining open windows of the same capsule.
+                    if !cx
+                        .global::<SystemCapsuleWindowRegistry>()
+                        .has_binding_for_window(capsule, host_window_id)
+                    {
                         tracing::warn!(
                             ?capsule,
                             "system_capsule::ipc: denied — no window binding registered"
