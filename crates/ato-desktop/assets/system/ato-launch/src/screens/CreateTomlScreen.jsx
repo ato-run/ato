@@ -62,16 +62,21 @@ export function CreateTomlScreen({ initialContent, repo, onSave, onCancel }) {
   const [selectedTemplate, setSelectedTemplate] = useState("web");
   const [inferring, setInferring] = useState(false);
   const [inferred, setInferred] = useState(false);
+  const [manifestSource, setManifestSource] = useState(isCliInference ? "inferred_fallback" : "user_edited");
   const [inferenceError, setInferenceError] = useState(null);
 
   // When tab switches to template, sync content
   useEffect(() => {
-    if (tab === "template") setContent(TEMPLATES[selectedTemplate]);
+    if (tab === "template") {
+      setContent(TEMPLATES[selectedTemplate]);
+      setManifestSource("user_edited");
+    }
   }, [tab, selectedTemplate]);
 
   const handleTemplateSelect = (key) => {
     setSelectedTemplate(key);
     setContent(TEMPLATES[key]);
+    setManifestSource("user_edited");
   };
 
   const runCliInference = () => {
@@ -83,6 +88,7 @@ export function CreateTomlScreen({ initialContent, repo, onSave, onCancel }) {
         setContent(result.toml);
         setInferring(false);
         setInferred(true);
+        setManifestSource("inferred_fallback");
         setInferenceError(null);
         setTab("editor");
       } else {
@@ -199,7 +205,10 @@ export function CreateTomlScreen({ initialContent, repo, onSave, onCancel }) {
             </div>
             <textarea
               value={content}
-              onChange={e => setContent(e.target.value)}
+              onChange={e => {
+                setContent(e.target.value);
+                setManifestSource("user_edited");
+              }}
               spellCheck={false}
               style={{
                 flex: 1, minHeight: 260, padding: "12px 14px", borderRadius: 9, resize: "none",
@@ -218,7 +227,7 @@ export function CreateTomlScreen({ initialContent, repo, onSave, onCancel }) {
           キャンセル
         </button>
         <button
-          onClick={() => onSave(content)}
+          onClick={() => onSave(content, { manifest_source: manifestSource })}
           disabled={!content.trim()}
           style={{
             flex: 1, padding: "9px 0", borderRadius: 8, border: "none",
