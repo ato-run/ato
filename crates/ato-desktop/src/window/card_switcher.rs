@@ -209,7 +209,7 @@ fn kind_tag(kind: &ContentWindowKind) -> &'static str {
 pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     let existing = cx.global::<CardSwitcherWindowSlot>().0;
     if let Some(handle) = existing {
-        tracing::info!(window_id = %handle.window_id(), "switcher: closing existing window (toggle)");
+        tracing::info!(window_id = handle.window_id().as_u64(), "switcher: closing existing window (toggle)");
         let close_result = handle.update(cx, |_, window, _| window.remove_window());
         cx.set_global(CardSwitcherWindowSlot(None));
         cx.set_global(CardSwitcherEntitySlot(None));
@@ -295,7 +295,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
-    tracing::info!(window_id = %handle.window_id(), "switcher: window created, setting slots");
+    tracing::info!(window_id = handle.window_id().as_u64(), "switcher: window created, setting slots");
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
     cx.set_global(CardSwitcherEntitySlot(entity_capture.borrow_mut().take()));
 
