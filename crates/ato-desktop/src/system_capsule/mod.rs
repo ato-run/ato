@@ -37,6 +37,7 @@ pub mod ato_store;
 pub mod ato_web_viewer;
 pub mod ato_windows;
 pub mod broker;
+pub mod binding;
 pub mod ipc;
 pub mod manifest;
 pub mod materializer;
