@@ -533,6 +533,17 @@
     return `<div class="pv-real"><img src="${dataUrl}" alt=""></div>`;
   }
 
+  // Called by the host (ato-desktop) when an asynchronous WKWebView
+  // screenshot is ready. Replaces the CSS mock preview in the card
+  // identified by `windowId` with the real `<img>` data URL.
+  window.__ATO_SWITCHER_SCREENSHOT__ = function(windowId, dataUrl) {
+    var card = document.querySelector('.card[data-window-id="' + windowId + '"]');
+    if (!card) return;
+    var preview = card.querySelector('.card-preview');
+    if (!preview) return;
+    preview.innerHTML = '<div class="pv-real"><img src="' + dataUrl + '" alt=""></div>';
+  };
+
   function makeCard(entry, isActive, idx) {
     const accent = accentFor(entry.title);
     // Prefer the real screenshot when the host was able to capture
