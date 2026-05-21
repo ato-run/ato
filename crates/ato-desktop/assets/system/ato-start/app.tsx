@@ -25,7 +25,7 @@ function submitQuery(value: string) {
   // Route through ato-start's OpenQuery dispatch, which already
   // classifies the input and forwards GitHub repo inputs to the
   // GitHub Import review surface.
-  postIpc({ capsule: 'ato-start', command: { kind: 'open_query', value: trimmed } });
+  postIpc({ capsule: 'start', command: { kind: 'open_query', value: trimmed } });
 }
 
 export default function App() {
@@ -97,7 +97,7 @@ export default function App() {
                 <div className="w-6 h-6 bg-blue-50 rounded-md flex items-center justify-center"><Store size={14} strokeWidth={2.5}/></div>
                 Store
               </div>
-              <div className="flex items-center gap-1.5 text-[13px] font-bold text-slate-700 cursor-pointer hover:text-slate-900 transition-colors" onClick={() => postIpc({ capsule: 'ato-start', command: { kind: 'open_github_run' } })}>
+              <div className="flex items-center gap-1.5 text-[13px] font-bold text-slate-700 cursor-pointer hover:text-slate-900 transition-colors" onClick={() => postIpc({ capsule: 'start', command: { kind: 'open_github_run' } })}>
                 <Github size={16}/> GitHub
               </div>
               <div className="flex items-center gap-1.5 text-[13px] font-bold text-amber-500 cursor-pointer hover:text-amber-600 transition-colors">
@@ -112,7 +112,7 @@ export default function App() {
           {/* Action Cards Grid */}
           <div className="grid grid-cols-4 gap-4 mb-8">
             {/* Run any repo */}
-            <div className="flex flex-col p-4 rounded-2xl border border-rose-100 bg-rose-50/30 shadow-sm cursor-pointer hover:shadow-md transition-all hover:-translate-y-0.5 group" onClick={() => postIpc({ capsule: 'ato-start', command: { kind: 'open_github_run' } })}>
+            <div className="flex flex-col p-4 rounded-2xl border border-rose-100 bg-rose-50/30 shadow-sm cursor-pointer hover:shadow-md transition-all hover:-translate-y-0.5 group" onClick={() => postIpc({ capsule: 'start', command: { kind: 'open_github_run' } })}>
               <div className="flex items-start gap-3 mb-4">
                 <div className="w-12 h-12 rounded-[14px] bg-gradient-to-br from-rose-400 to-rose-500 text-white flex items-center justify-center shadow-inner shrink-0 group-hover:scale-105 transition-transform">
                   <Rocket size={20}/>

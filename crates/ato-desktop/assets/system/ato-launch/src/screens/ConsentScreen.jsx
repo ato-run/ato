@@ -49,7 +49,7 @@ function parseSummary(raw) {
 
 // ── IPC bridge ──────────────────────────────────────────────────────────────
 function bridge(cmd) {
-  const msg = JSON.stringify({ capsule: "ato-launch", command: cmd });
+  const msg = JSON.stringify({ capsule: "launch", command: cmd });
   if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(msg);
   else console.log("[no bridge]", cmd);
 }

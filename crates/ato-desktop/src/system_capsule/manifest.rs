@@ -16,6 +16,15 @@
 //! IPC layer and the `capsule://desktop.ato.run/<slug>` URL scheme.
 //! Legacy `ato-*` aliases are accepted at the IPC boundary and
 //! immediately normalised; the canonical form is always used downstream.
+//!
+//! # Stable-origin audit (Phase 7)
+//!
+//! `stable_origin_proxy.rs` derives stable-origin host labels from
+//! `GuestRoute::Capsule { session }` or `GuestRoute::CapsuleHandle { handle }`,
+//! **never** from the capsule slug.  Slug-to-`SystemCapsuleId` unification
+//! therefore cannot affect origin isolation: each capsule instance keeps
+//! its own `capsule_instance_key` (handle or session id) regardless of
+//! which slug form was used to address it.
 
 use super::broker::{Capability, SystemCapsuleId};
 
