@@ -145,12 +145,8 @@ impl Default for CapsuleDetailTab {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum HostPanelRoute {
     Launcher,
-    Settings {
-        section: Option<SettingsTab>,
-    },
-    CapsuleDetail {
-        pane_id: PaneId,
-    },
+    Settings { section: Option<SettingsTab> },
+    CapsuleDetail { pane_id: PaneId },
 }
 
 impl HostPanelRoute {
@@ -226,6 +222,38 @@ impl CapabilityGrant {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestSource {
+    Embedded,
+    Repo,
+    UserEdited,
+    InferredFallback,
+}
+
+impl ManifestSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Repo => "repo",
+            Self::UserEdited => "user_edited",
+            Self::InferredFallback => "inferred_fallback",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalManifestRoute {
+    pub manifest_path: PathBuf,
+    pub source_handle: String,
+    pub label: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub manifest_source: ManifestSource,
+    pub manifest_hash: String,
+    pub draft_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GuestRoute {
     Capsule {
@@ -242,6 +270,7 @@ pub enum GuestRoute {
         label: String,
         url: Url,
     },
+    LocalManifest(LocalManifestRoute),
     /// Interactive PTY terminal session served via terminal:// custom protocol
     Terminal {
         session_id: String,
@@ -255,6 +284,7 @@ impl GuestRoute {
             Self::ExternalUrl(url) => url.as_str().to_string(),
             Self::CapsuleHandle { label, .. } => label.clone(),
             Self::CapsuleUrl { label, .. } => label.clone(),
+            Self::LocalManifest(local) => local.label.clone(),
             Self::Terminal { session_id } => format!("terminal://{session_id}/"),
         }
     }
@@ -1600,7 +1630,9 @@ impl AppState {
     fn rebuild_grant_cache(&mut self) {
         match crate::config::SecretStore::build_grant_keys_cache() {
             Ok(cache) => self.secret_grant_keys_by_handle = cache,
-            Err(e) => tracing::warn!(error = %e, "Failed to rebuild grant key cache, keeping stale"),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to rebuild grant key cache, keeping stale")
+            }
         }
     }
 
@@ -2713,6 +2745,10 @@ impl AppState {
                 let handle = handle.clone();
                 self.navigate_to_url(&handle);
             }
+            GuestRoute::LocalManifest(local) => {
+                let handle = local.source_handle.clone();
+                self.navigate_to_url(&handle);
+            }
             GuestRoute::CapsuleUrl { label, .. } => {
                 let label = label.clone();
                 self.navigate_to_url(&label);
@@ -2956,6 +2992,9 @@ impl AppState {
                             Some(route_source_label(handle))
                         }
                         GuestRoute::CapsuleUrl { handle, .. } => Some(route_source_label(handle)),
+                        GuestRoute::LocalManifest(local) => {
+                            Some(route_source_label(&local.source_handle))
+                        }
                         GuestRoute::Capsule { .. } => Some("embedded".to_string()),
                         GuestRoute::ExternalUrl(_) => Some("web".to_string()),
                         GuestRoute::Terminal { .. } => Some("terminal".to_string()),
@@ -4196,6 +4235,7 @@ fn sidebar_icon_for_task(
                 .unwrap_or_else(|| SidebarTaskIconSpec::Monogram(short_label(&task.title))),
             GuestRoute::Capsule { .. }
             | GuestRoute::CapsuleHandle { .. }
+            | GuestRoute::LocalManifest(_)
             | GuestRoute::CapsuleUrl { .. } => web
                 .local_url
                 .as_deref()
@@ -4735,12 +4775,7 @@ mod tests {
             .active_capsule_detail_host_panel_route()
             .expect("capsule detail route");
 
-        assert_eq!(
-            route,
-            HostPanelRoute::CapsuleDetail {
-                pane_id: 2,
-            }
-        );
+        assert_eq!(route, HostPanelRoute::CapsuleDetail { pane_id: 2 });
     }
 
     #[test]
@@ -4766,9 +4801,7 @@ mod tests {
         assert_eq!(task.title, "Capsule detail · pane 2");
         assert!(task.panes.iter().any(|pane| matches!(
             pane.surface,
-            PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
-                pane_id: 2,
-            })
+            PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail { pane_id: 2 })
         )));
     }
 
@@ -4790,9 +4823,7 @@ mod tests {
         assert_eq!(task.title, "Capsule detail · pane 2");
         assert!(task.panes.iter().any(|pane| matches!(
             pane.surface,
-            PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail {
-                pane_id: 2,
-            })
+            PaneSurface::HostPanel(HostPanelRoute::CapsuleDetail { pane_id: 2 })
         )));
     }
 
