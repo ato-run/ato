@@ -218,6 +218,8 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoIdentity, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     Ok(())
 }

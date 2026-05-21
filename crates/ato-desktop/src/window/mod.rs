@@ -47,6 +47,7 @@ impl gpui::Global for crate::state::AppWindowRegistry {}
 impl gpui::Global for content_windows::OpenContentWindows {}
 impl gpui::Global for crate::state::session::SessionRegistry {}
 impl gpui::Global for crate::state::capsule_state::CapsuleStateStore {}
+impl gpui::Global for crate::system_capsule::window_registry::SystemCapsuleWindowRegistry {}
 
 pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{

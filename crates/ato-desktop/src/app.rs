@@ -386,6 +386,9 @@ pub fn run(skip_onboarding: bool) {
         cx.set_global(crate::state::session::SessionRegistry::default());
         cx.set_global(crate::window::launch_window::PendingLaunches::default());
         cx.set_global(crate::state::capsule_state::CapsuleStateStore::default());
+        cx.set_global(
+            crate::system_capsule::window_registry::SystemCapsuleWindowRegistry::default(),
+        );
         crate::window::install_control_bar_controller(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
@@ -629,6 +632,16 @@ pub fn run(skip_onboarding: bool) {
             {
                 crate::window::dock::cleanup_dock_window(cx);
                 tracing::info!("Dock window closed; slot cleared");
+            }
+
+            // Unregister system capsule window binding on close.
+            if let Some(capsule_id) = cx
+                .global::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+                .find_by_window_id(window_id)
+            {
+                cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+                    .unregister(capsule_id);
+                tracing::debug!(?capsule_id, "SystemCapsuleWindowRegistry: binding removed on window close");
             }
 
             // Session lifecycle handling based on windowCloseBehavior.

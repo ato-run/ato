@@ -217,6 +217,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         },
     );
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoStart, *handle);
     system_ipc::spawn_drain_loop(cx, queue_for_drain, *handle);
 
     Ok(())
