@@ -91,6 +91,12 @@ impl RegistryBuilder {
         self
     }
 
+    /// Register multiple command specs produced by a namespace `specs()` function.
+    pub fn register_many(mut self, specs: Vec<IpcCommandSpec>) -> Self {
+        self.commands.extend(specs);
+        self
+    }
+
     pub fn build(self) -> IpcCommandRegistry {
         let commands = self
             .commands
