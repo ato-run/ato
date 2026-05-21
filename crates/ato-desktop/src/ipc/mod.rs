@@ -18,3 +18,7 @@
 //! Phases 2–9 will progressively fill in the stubs below.
 
 pub mod protocol;
+pub mod principal;
+pub mod policy;
+pub mod registry;
+pub mod broker;
