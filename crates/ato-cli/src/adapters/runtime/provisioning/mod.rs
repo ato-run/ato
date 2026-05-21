@@ -1,4 +1,5 @@
 mod dependency_root;
+pub(crate) mod lifecycle_path;
 mod diagnose;
 mod shadow;
 mod types;
