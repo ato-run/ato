@@ -557,8 +557,7 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
             }
         }
         Ok(None) => {
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
             }
@@ -569,8 +568,7 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
                 handle,
                 "ato_start: session fast-path failed; falling back to consent"
             );
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
             }

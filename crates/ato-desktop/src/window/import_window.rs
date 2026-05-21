@@ -163,7 +163,9 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
         if let Some(handle) = slot.window {
             // Try to bring the existing window forward. If activation
             // fails (handle is stale), fall through and reopen.
-            let activate_ok = handle.update(cx, |_, window, _| window.activate_window()).is_ok();
+            let activate_ok = handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok();
             if activate_ok {
                 return Ok(handle);
             }
