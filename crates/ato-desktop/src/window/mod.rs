@@ -46,6 +46,7 @@ pub mod web_link_view;
 impl gpui::Global for crate::state::AppWindowRegistry {}
 impl gpui::Global for content_windows::OpenContentWindows {}
 impl gpui::Global for crate::state::session::SessionRegistry {}
+impl gpui::Global for crate::state::capsule_state::CapsuleStateStore {}
 
 pub use card_switcher::open_card_switcher_window;
 pub use control_bar::{
