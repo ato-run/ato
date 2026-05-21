@@ -15,7 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::{AnyWindowHandle, App};
 use serde::Deserialize;
 
-use crate::source_import_api::{discover as discover_api_creds, ApiClient, ApiCreds, AttemptStatus};
+use crate::source_import_api::{
+    discover as discover_api_creds, ApiClient, ApiCreds, AttemptStatus,
+};
 use crate::source_import_runner::{infer as runner_infer, run_with_recipe as runner_run};
 use crate::source_import_session::{GitHubImportSessionState, ImportOutput};
 use crate::system_capsule::broker::{BrokerError, Capability};
@@ -138,9 +140,7 @@ pub fn begin_open(cx: &mut App, url: String) {
             (Ok(output), Some(creds)) => {
                 let creds = creds.clone();
                 let source = output.source.clone();
-                Some(be.spawn(async move {
-                    ApiClient::new(creds).create_source_import(&source)
-                }))
+                Some(be.spawn(async move { ApiClient::new(creds).create_source_import(&source) }))
             }
             _ => None,
         };
@@ -162,7 +162,10 @@ pub fn begin_open(cx: &mut App, url: String) {
                             match result {
                                 Ok(id) => session.set_source_import_id(id),
                                 Err(error) => {
-                                    tracing::warn!(?error, "ato-import: create_source_import failed");
+                                    tracing::warn!(
+                                        ?error,
+                                        "ato-import: create_source_import failed"
+                                    );
                                 }
                             }
                         }
@@ -240,9 +243,8 @@ fn handle_retry_inference(cx: &mut App) {
     let aa = async_app.clone();
     let session_for_bg = session_arc.clone();
     fe.spawn(async move {
-        let outcome: Result<ImportOutput, anyhow::Error> = be
-            .spawn(async move { runner_infer(&repo_url) })
-            .await;
+        let outcome: Result<ImportOutput, anyhow::Error> =
+            be.spawn(async move { runner_infer(&repo_url) }).await;
         let _ = aa.update(move |cx| {
             match outcome {
                 Ok(output) => {
@@ -285,7 +287,10 @@ pub(crate) fn handle_run(cx: &mut App) {
                 return;
             }
         };
-        let toml = session.editable_recipe_toml().unwrap_or_default().to_string();
+        let toml = session
+            .editable_recipe_toml()
+            .unwrap_or_default()
+            .to_string();
         let allow_unsafe = session.unsafe_execution_confirmed();
         (repo, toml, allow_unsafe)
     };
@@ -311,7 +316,11 @@ pub(crate) fn handle_run(cx: &mut App) {
         // foreground executor. The session may have advanced since
         // we started; we only post when it lands cleanly in
         // Verified / FailedAwaitingRecipeEdit.
-        let attempt_input: Option<(String, AttemptStatus, crate::source_import_session::ImportRun)> = {
+        let attempt_input: Option<(
+            String,
+            AttemptStatus,
+            crate::source_import_session::ImportRun,
+        )> = {
             let session_id = session_for_bg
                 .lock()
                 .ok()
@@ -328,15 +337,16 @@ pub(crate) fn handle_run(cx: &mut App) {
                 _ => None,
             }
         };
-        let attempt_task = match (attempt_input, creds.as_ref()) {
-            (Some((id, status, run)), Some(creds)) => {
-                let creds = creds.clone();
-                Some(be.spawn(async move {
-                    ApiClient::new(creds).record_attempt(&id, status, &run)
-                }))
-            }
-            _ => None,
-        };
+        let attempt_task =
+            match (attempt_input, creds.as_ref()) {
+                (Some((id, status, run)), Some(creds)) => {
+                    let creds = creds.clone();
+                    Some(be.spawn(async move {
+                        ApiClient::new(creds).record_attempt(&id, status, &run)
+                    }))
+                }
+                _ => None,
+            };
         if let Some(task) = attempt_task {
             if let Err(error) = task.await {
                 tracing::warn!(?error, "ato-import: record_attempt failed");

@@ -510,7 +510,10 @@ mod tests {
             .expect("auth_status registered");
         let schema = entry.get("inputSchema").expect("inputSchema");
         let props = schema.get("properties").expect("properties");
-        assert!(props.get("token").is_none(), "auth_status must not expose token field");
+        assert!(
+            props.get("token").is_none(),
+            "auth_status must not expose token field"
+        );
     }
 
     #[test]
@@ -535,7 +538,10 @@ mod tests {
         let (method, params) =
             super::map_tool_to_command("auth_status", &serde_json::json!({})).expect("map");
         assert_eq!(method, "auth_status");
-        assert!(params.as_object().is_some(), "params must be object (pane_id injected)");
+        assert!(
+            params.as_object().is_some(),
+            "params must be object (pane_id injected)"
+        );
     }
 }
 
@@ -1193,7 +1199,10 @@ fn map_tool_to_command(
                 return Err("NavigateToUrl requires a `url` parameter".into());
             }
             if action == "GithubRunFindCandidates" && url.is_none() {
-                return Err("GithubRunFindCandidates requires a `url` parameter (owner/repo or GitHub URL)".into());
+                return Err(
+                    "GithubRunFindCandidates requires a `url` parameter (owner/repo or GitHub URL)"
+                        .into(),
+                );
             }
             if action == "GithubRunProceedToConsent" && url.is_none() {
                 return Err("GithubRunProceedToConsent requires a `url` parameter (owner/repo or GitHub URL)".into());

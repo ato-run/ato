@@ -416,7 +416,11 @@ impl GitHubImportSession {
 
     /// Record that inference (CLI `ato import --emit-json`) failed.
     /// Transitions from `InferringRecipe` → `InferenceFailed`.
-    pub(crate) fn record_inference_failure(&mut self, error_class: String, error_excerpt: String) -> Result<()> {
+    pub(crate) fn record_inference_failure(
+        &mut self,
+        error_class: String,
+        error_excerpt: String,
+    ) -> Result<()> {
         if self.state != GitHubImportSessionState::InferringRecipe {
             bail!(
                 "record_inference_failure expects InferringRecipe, got {:?}",
@@ -671,9 +675,7 @@ mod tests {
                 status: "failed".to_string(),
                 phase: Some("install".to_string()),
                 error_class: Some(error_class.to_string()),
-                error_excerpt: Some(
-                    "ModuleNotFoundError: No module named 'distutils'".to_string(),
-                ),
+                error_excerpt: Some("ModuleNotFoundError: No module named 'distutils'".to_string()),
                 command_mode: None,
                 requires_host_shell: None,
                 shell_kind: None,
@@ -764,7 +766,11 @@ mod tests {
             GitHubImportSessionState::FailedAwaitingRecipeEdit
         );
         assert_eq!(
-            session.snapshot().last_run.as_ref().and_then(|r| r.error_class.clone()),
+            session
+                .snapshot()
+                .last_run
+                .as_ref()
+                .and_then(|r| r.error_class.clone()),
             Some("missing_required_env".to_string())
         );
         session.start_run().expect("retry starts");
@@ -973,7 +979,10 @@ mod tests {
             GitHubImportSessionState::FailedAwaitingRecipeEdit
         );
         let snap = session.snapshot();
-        assert_eq!(snap.last_run.as_ref().unwrap().phase.as_deref(), Some("install"));
+        assert_eq!(
+            snap.last_run.as_ref().unwrap().phase.as_deref(),
+            Some("install")
+        );
         assert_eq!(
             snap.last_run.as_ref().unwrap().error_class.as_deref(),
             Some("node_gyp_missing_distutils")
@@ -1069,18 +1078,12 @@ mod tests {
         session.begin_resolve("owner/repo").expect("source");
         session.begin_inference();
         session
-            .record_inference_failure(
-                "parse_error".to_string(),
-                "invalid JSON".to_string(),
-            )
+            .record_inference_failure("parse_error".to_string(), "invalid JSON".to_string())
             .expect("record");
 
         let snap = session.snapshot();
         assert_eq!(snap.state, GitHubImportSessionState::InferenceFailed);
-        assert_eq!(
-            snap.inference_error_class.as_deref(),
-            Some("parse_error")
-        );
+        assert_eq!(snap.inference_error_class.as_deref(), Some("parse_error"));
         assert_eq!(
             snap.inference_error_excerpt.as_deref(),
             Some("invalid JSON")
@@ -1094,10 +1097,7 @@ mod tests {
         session.begin_resolve("blinkospace/blinko").expect("source");
         session.begin_inference();
         session
-            .record_inference_failure(
-                "cli_nonzero_exit".to_string(),
-                "failed".to_string(),
-            )
+            .record_inference_failure("cli_nonzero_exit".to_string(), "failed".to_string())
             .expect("record failure");
 
         session.begin_resolve("other/repo").expect("new resolve");
@@ -1109,17 +1109,13 @@ mod tests {
     #[test]
     fn record_inference_failure_rejected_outside_inferring_state() {
         let mut session = GitHubImportSession::default();
-        assert!(
-            session
-                .record_inference_failure("x".to_string(), "y".to_string())
-                .is_err()
-        );
+        assert!(session
+            .record_inference_failure("x".to_string(), "y".to_string())
+            .is_err());
         session.begin_resolve("owner/repo").expect("resolve");
-        assert!(
-            session
-                .record_inference_failure("x".to_string(), "y".to_string())
-                .is_err()
-        );
+        assert!(session
+            .record_inference_failure("x".to_string(), "y".to_string())
+            .is_err());
     }
 
     #[test]
@@ -1173,10 +1169,7 @@ mod tests {
 
         session.set_submit_error("timeout".to_string());
         let snap = session.snapshot();
-        assert_eq!(
-            snap.submit_error_excerpt.as_deref(),
-            Some("timeout")
-        );
+        assert_eq!(snap.submit_error_excerpt.as_deref(), Some("timeout"));
 
         session.clear_submit_error();
         assert!(session.submit_error_excerpt().is_none());
@@ -1223,7 +1216,10 @@ mod tests {
         session.set_submit_error("sub_error".to_string());
         let snap = session.snapshot();
         assert_eq!(snap.inference_error_class.as_deref(), Some("inf_error"));
-        assert_eq!(snap.inference_error_excerpt.as_deref(), Some("inference failed"));
+        assert_eq!(
+            snap.inference_error_excerpt.as_deref(),
+            Some("inference failed")
+        );
         assert_eq!(snap.submit_error_excerpt.as_deref(), Some("sub_error"));
     }
 
@@ -1288,7 +1284,10 @@ mod tests {
         );
 
         let snap = session.snapshot();
-        assert_eq!(snap.state, GitHubImportSessionState::AwaitingTomlConfirmation);
+        assert_eq!(
+            snap.state,
+            GitHubImportSessionState::AwaitingTomlConfirmation
+        );
         assert!(snap.editable_recipe_toml.is_some());
         assert!(!snap.submit_enabled);
         assert!(!snap.unsafe_execution_confirmed);
@@ -1430,12 +1429,13 @@ mod tests {
         let mut failed = failed_output("provider_failed");
         failed.recipe.origin = "manual".to_string();
         failed.recipe_resolution = None;
-        session
-            .apply_run_result(failed)
-            .expect("apply failed");
+        session.apply_run_result(failed).expect("apply failed");
 
         let snap = session.snapshot();
-        assert_eq!(snap.state, GitHubImportSessionState::FailedAwaitingRecipeEdit);
+        assert_eq!(
+            snap.state,
+            GitHubImportSessionState::FailedAwaitingRecipeEdit
+        );
         assert_eq!(snap.recipe.as_ref().unwrap().origin, "registry");
         assert_eq!(
             snap.recipe_resolution.as_ref().unwrap().source,
@@ -1512,16 +1512,16 @@ mod tests {
 
         let mut session = GitHubImportSession::default();
         session.begin_resolve("blinkospace/blinko").expect("source");
-        session.apply_inferred_output(inferred).expect("apply inferred");
+        session
+            .apply_inferred_output(inferred)
+            .expect("apply inferred");
         assert_eq!(session.base_recipe_hash(), Some(base_hash.as_str()));
         assert!(!session.edited_locally());
 
         // "Edit" to the exact same bytes — this happens when the UI fires
         // an edit on blur even though the user did not change anything.
         // The base hash must match and the dirty flag must stay false.
-        session
-            .edit_recipe(base_toml.clone())
-            .expect("edit");
+        session.edit_recipe(base_toml.clone()).expect("edit");
         assert!(!session.edited_locally());
 
         // Now actually edit.
@@ -1555,7 +1555,10 @@ mod tests {
             "verified base hash must be in payload so API can reuse the binding"
         );
         assert_eq!(
-            payload.base_recipe_resolution.as_ref().map(|r| r.source.as_str()),
+            payload
+                .base_recipe_resolution
+                .as_ref()
+                .map(|r| r.source.as_str()),
             Some("remote_binding"),
         );
         assert!(
@@ -1594,7 +1597,10 @@ mod tests {
             "user-edited recipe must be marked so API records it as a new manual row",
         );
         assert_eq!(
-            payload.base_recipe_resolution.as_ref().map(|r| r.source.as_str()),
+            payload
+                .base_recipe_resolution
+                .as_ref()
+                .map(|r| r.source.as_str()),
             Some("remote_binding"),
             "API still gets the original provenance for the audit trail",
         );
@@ -1623,10 +1629,7 @@ mod tests {
             json["recipe_resolution"]["source"].as_str(),
             Some("remote_binding"),
         );
-        assert_eq!(
-            json["base_recipe_hash"].as_str(),
-            Some("blake3:recipehash"),
-        );
+        assert_eq!(json["base_recipe_hash"].as_str(), Some("blake3:recipehash"),);
         assert_eq!(json["base_recipe_origin"].as_str(), Some("registry"));
         assert_eq!(
             json["base_recipe_resolution"]["source"].as_str(),
@@ -1652,7 +1655,10 @@ mod tests {
 
         let payload = session.submit_payload().expect("payload available");
         assert_eq!(payload.recipe.origin, "inference");
-        assert_eq!(payload.base_recipe_hash.as_deref(), Some("blake3:recipehash"));
+        assert_eq!(
+            payload.base_recipe_hash.as_deref(),
+            Some("blake3:recipehash")
+        );
         assert!(
             payload.base_recipe_resolution.is_none(),
             "no resolution emitted by CLI → no base resolution in payload",

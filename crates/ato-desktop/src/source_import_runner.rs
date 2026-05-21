@@ -42,7 +42,11 @@ pub(crate) fn infer(repo: &str) -> Result<ImportOutput> {
 ///
 /// When `allow_unsafe` is true, the child process inherits
 /// `CAPSULE_ALLOW_UNSAFE=1` so source/native execution is permitted.
-pub(crate) fn run_with_recipe(repo: &str, recipe_path: &Path, allow_unsafe: bool) -> Result<ImportOutput> {
+pub(crate) fn run_with_recipe(
+    repo: &str,
+    recipe_path: &Path,
+    allow_unsafe: bool,
+) -> Result<ImportOutput> {
     let ato = resolve_ato_binary()?;
     let mut cmd = Command::new(&ato);
     cmd.arg("import")
@@ -76,12 +80,8 @@ pub(crate) fn run_with_recipe(repo: &str, recipe_path: &Path, allow_unsafe: bool
 fn parse_import_output(stdout: &[u8]) -> Result<ImportOutput> {
     let stdout = std::str::from_utf8(stdout).context("ato import emitted non-utf8 stdout")?;
     let trimmed = stdout.trim();
-    serde_json::from_str::<ImportOutput>(trimmed).with_context(|| {
-        format!(
-            "ato import emitted invalid JSON ({} bytes)",
-            trimmed.len()
-        )
-    })
+    serde_json::from_str::<ImportOutput>(trimmed)
+        .with_context(|| format!("ato import emitted invalid JSON ({} bytes)", trimmed.len()))
 }
 
 fn head_lines(text: &str, n: usize) -> String {
