@@ -48,6 +48,7 @@ function TomlViewer({ content }) {
 export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
   const [tab, setTab] = useState("structured");
   const [proceedError, setProceedError] = useState(null);
+  const [proceeding, setProceeding] = useState(false);
   if (!candidate) return null;
 
   function handleProceed() {
@@ -56,10 +57,21 @@ export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
       return;
     }
     setProceedError(null);
+    setProceeding(true);
+    window.__ato_github_proceed_result = (result) => {
+      if (result && result.ok === false) {
+        setProceedError(result.error || "capsule.toml の検証に失敗しました。");
+        setProceeding(false);
+      }
+      delete window.__ato_github_proceed_result;
+    };
     bridge({
       kind: "github_proceed_to_consent",
       repo: candidate.repo,
       title: candidate.title || candidate.repo,
+      manifest_toml: candidate.toml || "",
+      manifest_source: candidate.manifest_source || (candidate.source === "github" ? "repo" : "user_edited"),
+      requested_ref: candidate.requested_ref || "HEAD",
     });
     if (typeof onProceed === "function") onProceed();
   }
@@ -151,8 +163,14 @@ export function CandidateDetailScreen({ candidate, onBack, onProceed }) {
         >戻る</button>
         <button
           onClick={handleProceed}
-          style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "var(--accent)", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-        >起動レビューへ進む</button>
+          disabled={proceeding}
+          style={{
+            flex: 1, padding: "9px 0", borderRadius: 8, border: "none",
+            background: proceeding ? "var(--surface-2)" : "var(--accent)",
+            color: proceeding ? "var(--soft)" : "#fff",
+            fontSize: 13, fontWeight: 600, cursor: proceeding ? "not-allowed" : "pointer",
+          }}
+        >{proceeding ? "検証中..." : "起動レビューへ進む"}</button>
       </div>
       {proceedError && (
         <div style={{ padding: "0 20px 12px", fontSize: 11.5, color: "var(--danger)" }}>{proceedError}</div>
