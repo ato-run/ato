@@ -12,18 +12,13 @@
 
 #![cfg(target_os = "macos")]
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::time::{Duration, Instant};
-
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
 use objc2_app_kit::{
-    NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSFloatingWindowLevel, NSImage, NSView,
-    NSWindow, NSWindowOrderingMode,
+    NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode,
 };
-use objc2_foundation::{NSData, NSDictionary, NSRunLoop, NSDate, NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
 
@@ -320,34 +315,63 @@ fn find_wkwebview_in_content(content: &NSView) -> Option<Retained<NSView>> {
     None
 }
 
-/// Take a WKWebView screenshot and return it as a `data:image/png;base64,...`
-/// data URL suitable for embedding in an `<img>` tag.
+/// Dispatch a WKWebView screenshot request for the NSWindow that
+/// backs `handle`. The result (a `data:image/png;base64,...` URL or
+/// `None` on failure) is sent to `tx` when WKWebView's async snapshot
+/// API completes.
 ///
-/// `takeSnapshotWithConfiguration:completionHandler:` is asynchronous;
-/// we pump the main run loop with a short timeout to synchronise the
-/// result. Timeout is hit when `snapshot_timeout` elapses without a
-/// valid image — the function returns `None` in that case.
-pub fn capture_wkwebview_snapshot(
-    nswindow: &NSWindow,
-    snapshot_timeout: Duration,
-) -> Option<String> {
-    let content = nswindow.contentView()?;
-    let wk_view = find_wkwebview_in_content(&content)?;
+/// On the main thread this calls `takeSnapshotWithConfiguration:` and
+/// returns immediately — the completion handler runs asynchronously on
+/// the main queue. No run-loop pumping is performed, so this is safe
+/// to call from within GPUI event handlers.
+pub fn request_wkwebview_snapshot(
+    cx: &mut App,
+    handle: AnyWindowHandle,
+    tx: std::sync::mpsc::Sender<Option<String>>,
+) {
+    let Some(nswindow) = ns_window_for(cx, handle) else {
+        let _ = tx.send(None);
+        return;
+    };
+    let Some(content) = nswindow.contentView() else {
+        let _ = tx.send(None);
+        return;
+    };
+    let Some(wk_view) = find_wkwebview_in_content(&content) else {
+        let _ = tx.send(None);
+        return;
+    };
 
     use base64::Engine;
     use block2::RcBlock;
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
-    use objc2_foundation::NSString;
-
-    let result: Rc<RefCell<Option<Retained<NSImage>>>> = Rc::new(RefCell::new(None));
-    let cell = result.clone();
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+    use objc2_foundation::{NSDictionary, NSString};
 
     let handler = RcBlock::new(
         move |image: *mut NSImage, _error: *mut AnyObject| {
-            if !image.is_null() {
-                *cell.borrow_mut() = Some(unsafe { Retained::retain(image) }.unwrap());
-            }
+            let data_url = if !image.is_null() {
+                let img = unsafe { &*image };
+                let tiff = unsafe { img.TIFFRepresentation() };
+                let rep = tiff
+                    .as_ref()
+                    .and_then(|t| unsafe { NSBitmapImageRep::imageRepWithData(t) });
+                let empty = NSDictionary::<NSString, AnyObject>::new();
+                let png = rep
+                    .as_ref()
+                    .and_then(|r| unsafe {
+                        r.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
+                    });
+                png.map(|data| {
+                    let b64 =
+                        base64::engine::general_purpose::STANDARD.encode(&data.to_vec());
+                    format!("data:image/png;base64,{}", b64)
+                })
+            } else {
+                None
+            };
+            let _ = tx.send(data_url);
         },
     );
 
@@ -358,23 +382,4 @@ pub fn capture_wkwebview_snapshot(
             completionHandler: &*handler
         ];
     }
-
-    let deadline = Instant::now() + snapshot_timeout;
-    let run_loop = NSRunLoop::mainRunLoop();
-    while result.borrow().is_none() && Instant::now() < deadline {
-        let next = NSDate::dateWithTimeIntervalSinceNow(0.01);
-        run_loop.runUntilDate(&next);
-    }
-
-    let image = result.borrow_mut().take()?;
-
-    let tiff = unsafe { image.TIFFRepresentation() }?;
-    let rep = unsafe { NSBitmapImageRep::imageRepWithData(&tiff) }?;
-    let empty = NSDictionary::<NSString, AnyObject>::new();
-    let png = unsafe {
-        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
-    }?;
-    let bytes = png.to_vec();
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(format!("data:image/png;base64,{}", b64))
 }

@@ -12,6 +12,8 @@
 //! mock previews, gradients, shadows) than GPUI's element library
 //! can express ergonomically.
 
+use std::sync::mpsc;
+
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
@@ -36,6 +38,12 @@ use crate::{impl_focusable_via_paste, paste_render_wrap};
 #[derive(Default)]
 pub struct CardSwitcherWindowSlot(pub Option<AnyWindowHandle>);
 impl gpui::Global for CardSwitcherWindowSlot {}
+
+/// Slot tracking the live `CardSwitcherShell` entity so background
+/// screenshot tasks can push results into the WebView asynchronously.
+#[derive(Default)]
+pub struct CardSwitcherEntitySlot(pub Option<gpui::Entity<CardSwitcherShell>>);
+impl gpui::Global for CardSwitcherEntitySlot {}
 
 /// Lightweight GPUI entity whose only job is to keep the Wry WebView
 /// alive for the lifetime of the switcher window. Wry mounts the
@@ -69,6 +77,21 @@ impl Render for CardSwitcherShell {
 }
 
 impl CardSwitcherShell {
+    /// Inject a screenshot data URL into the switcher page for the
+    /// card identified by `window_id`. Called from the background
+    /// screenshot dispatch loop when WKWebView snapshots arrive.
+    fn push_screenshot(&self, window_id: u64, data_url: &str) {
+        let escaped = data_url
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        let script = format!(
+            "window.__ATO_SWITCHER_SCREENSHOT__ && window.__ATO_SWITCHER_SCREENSHOT__({window_id}, '{escaped}');"
+        );
+        if let Err(e) = self._webview.evaluate_script(&script) {
+            tracing::debug!(window_id, ?e, "switcher: screenshot push failed");
+        }
+    }
+
     fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
         let current = window.bounds().size;
         if current == self.window_size {
@@ -151,29 +174,17 @@ fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
     }
 }
 
-/// Capture a WKWebView screenshot from the NSWindow that backs
-/// `handle` and return a `data:image/png;base64,...` URL.
-///
-/// Uses WKWebView's own `takeSnapshotWithConfiguration:completionHandler:`
-/// API so we don't depend on `CGWindowListCreateImage` which cannot
-/// read Metal-backed GPU windows (GPUI renders via Metal).
+/// Dispatch an asynchronous WKWebView screenshot request. The result
+/// (a `data:image/png;base64,...` URL or `None`) is sent through `tx`
+/// when the platform's snapshot API completes.
 #[cfg(target_os = "macos")]
-fn snapshot_window(cx: &mut App, handle: AnyWindowHandle) -> Option<String> {
-    use std::time::Duration;
-    let nswindow = crate::window::macos::ns_window_for(cx, handle)?;
-    crate::window::macos::capture_wkwebview_snapshot(
-        &nswindow,
-        Duration::from_millis(300),
-    )
-    .or_else(|| {
-        tracing::debug!("snapshot: WKWebView snapshot returned None — falling back to CSS preview");
-        None
-    })
+fn request_snapshot(cx: &mut App, handle: AnyWindowHandle, tx: mpsc::Sender<Option<String>>) {
+    crate::window::macos::request_wkwebview_snapshot(cx, handle, tx);
 }
 
 #[cfg(not(target_os = "macos"))]
-fn snapshot_window(_cx: &mut App, _handle: AnyWindowHandle) -> Option<String> {
-    None
+fn request_snapshot(_cx: &mut App, _handle: AnyWindowHandle, tx: mpsc::Sender<Option<String>>) {
+    let _ = tx.send(None);
 }
 
 fn kind_tag(kind: &ContentWindowKind) -> &'static str {
@@ -189,42 +200,43 @@ fn kind_tag(kind: &ContentWindowKind) -> &'static str {
 
 /// Toggle the Card Switcher overlay. If one is already open
 /// (tracked via the `CardSwitcherWindowSlot` global), this closes
-/// it. Otherwise it snapshots `OpenContentWindows::mru_order()` into
-/// a card payload, opens a fresh Wry-backed overlay, and starts the
-/// IPC drain loop. The Control Bar's switcher button dispatches
-/// through here so a second click dismisses the overlay instead of
-/// stacking another on top.
+/// it. Otherwise it builds card payloads from
+/// `OpenContentWindows::mru_order()`, opens a fresh Wry-backed overlay
+/// with CSS-only mock previews, then dispatches asynchronous WKWebView
+/// snapshots that push real screenshots into the page as they arrive.
+/// The Control Bar's switcher button dispatches through here so a
+/// second click dismisses the overlay instead of stacking another.
 pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     let existing = cx.global::<CardSwitcherWindowSlot>().0;
     if let Some(handle) = existing {
         let close_result = handle.update(cx, |_, window, _| window.remove_window());
         cx.set_global(CardSwitcherWindowSlot(None));
+        cx.set_global(CardSwitcherEntitySlot(None));
         if close_result.is_ok() {
             return Ok(());
         }
     }
 
-    // Snapshot each window BEFORE opening the switcher overlay so the
-    // overlay does not obscure them. screencapture -l works on any
-    // window by ID regardless of stacking, but doing it before keeps
-    // the visual lineage obvious in the log.
     let entries: Vec<_> = cx
         .global::<OpenContentWindows>()
         .mru_order()
         .into_iter()
         .collect();
+
+    // Open the card switcher immediately with CSS mock previews.
+    // Real screenshots are captured asynchronously and pushed into
+    // the WebView via `evaluate_script` as they arrive.
     let cards: Vec<CardDto> = entries
-        .into_iter()
+        .iter()
         .map(|e| {
             let window_id = e.handle.window_id().as_u64();
-            let preview_data_url = snapshot_window(cx, e.handle);
             let glyph = glyph_for(e.title.as_ref(), &e.kind);
             CardDto {
                 window_id,
                 title: e.title.to_string(),
                 subtitle: e.subtitle.to_string(),
                 kind: kind_tag(&e.kind),
-                preview_data_url,
+                preview_data_url: None,
                 glyph,
             }
         })
@@ -248,14 +260,13 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         ..Default::default()
     };
 
-    // Stage B: route through the system-capsule IPC pipeline. The
-    // WebView posts `{capsule, command}` envelopes; the handler
-    // parses them into typed (SystemCapsuleId, SystemCommand) pairs
-    // and the drain loop hands each to `CapabilityBroker::dispatch`.
-    // No per-window dispatcher closure — the broker is the only path.
     let queue = system_ipc::new_queue();
+    let drain_queue = queue.clone();
+    let entity_capture: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<CardSwitcherShell>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let entity_capture2 = entity_capture.clone();
 
-    let handle = cx.open_window(options, |window, cx| {
+    let handle = cx.open_window(options, move |window, cx| {
         let win_size = window.bounds().size;
         let webview_rect = Rect {
             position: LogicalPosition::new(0i32, 0i32).into(),
@@ -278,12 +289,59 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             window_size: win_size,
             paste: WebViewPasteSupport::new(cx),
         });
+        *entity_capture2.borrow_mut() = Some(shell.clone());
         window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
+    cx.set_global(CardSwitcherEntitySlot(entity_capture.borrow_mut().take()));
 
-    system_ipc::spawn_drain_loop(cx, queue, *handle);
+    system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
+
+    // Dispatch WKWebView snapshot requests for each card. The results
+    // arrive asynchronously and are pushed into the WebView as they
+    // are resolved (progressive rendering of real screenshots).
+    let window_id_to_handle: Vec<(u64, AnyWindowHandle)> = entries
+        .iter()
+        .map(|e| (e.handle.window_id().as_u64(), e.handle))
+        .collect();
+    let async_app = cx.to_async();
+    let foreground = async_app.foreground_executor().clone();
+    foreground
+        .spawn(async move {
+            use std::time::Duration;
+            let mut channels: Vec<(u64, mpsc::Receiver<Option<String>>)> = Vec::new();
+            for (window_id, window_handle) in &window_id_to_handle {
+                let (tx, rx) = mpsc::channel();
+                let _ = async_app.update(|cx| {
+                    request_snapshot(cx, *window_handle, tx);
+                });
+                channels.push((*window_id, rx));
+            }
+
+            for (window_id, rx) in channels {
+                match rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(Some(data_url)) => {
+                        async_app
+                            .update(|cx| {
+                                if let Some(entity) = cx
+                                    .try_global::<CardSwitcherEntitySlot>()
+                                    .and_then(|slot| slot.0.clone())
+                                {
+                                    let _ = entity.update(cx, |shell, _cx| {
+                                        shell.push_screenshot(window_id, &data_url);
+                                    });
+                                }
+                            });
+                    }
+                    Ok(None) | Err(_) => {
+                        // Screenshot failed or timed out — card already
+                        // shows the CSS mock preview from initial load.
+                    }
+                }
+            }
+        })
+        .detach();
 
     Ok(())
 }

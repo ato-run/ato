@@ -390,6 +390,7 @@ pub fn run(skip_onboarding: bool) {
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
         cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
+        cx.set_global(crate::window::card_switcher::CardSwitcherEntitySlot::default());
         // Slot tracking the currently-open Launcher window so the
         // Stage D retired the Launcher window — the focused
         // settings cog now opens an `ato-settings` system capsule
@@ -565,6 +566,9 @@ pub fn run(skip_onboarding: bool) {
             if switcher_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
                 cx.set_global(
                     crate::window::card_switcher::CardSwitcherWindowSlot(None),
+                );
+                cx.set_global(
+                    crate::window::card_switcher::CardSwitcherEntitySlot(None),
                 );
                 tracing::info!("Card Switcher window closed; slot cleared");
             }
