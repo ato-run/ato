@@ -45,6 +45,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::orchestrator::DesktopLaunchInput;
 use crate::state::GuestRoute;
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::system_capsule::static_resolver::resolve_system_capsule_protocol_response;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -376,7 +377,7 @@ fn open_wizard(
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_ipc))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Launch wizard WebView");
@@ -391,6 +392,8 @@ fn open_wizard(
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     Ok(*handle)
 }
@@ -844,7 +847,7 @@ fn open_consent_wizard_inner(
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_closure))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the consent WebView");
@@ -860,6 +863,8 @@ fn open_consent_wizard_inner(
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()
@@ -974,7 +979,7 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_closure))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the github_run WebView");
@@ -990,6 +995,8 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()
@@ -1365,7 +1372,7 @@ fn open_boot_wizard_inner(
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_closure))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the boot WebView");
@@ -1381,6 +1388,8 @@ fn open_boot_wizard_inner(
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()

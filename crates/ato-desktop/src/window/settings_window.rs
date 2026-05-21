@@ -201,6 +201,8 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
         },
     );
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoSettings, *handle);
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
 
     Ok(())

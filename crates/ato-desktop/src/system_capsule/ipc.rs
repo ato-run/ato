@@ -44,6 +44,7 @@ use super::ato_web_viewer::WebViewerCommand;
 use super::ato_windows::WindowsCommand;
 use super::broker::{CapabilityBroker, SystemCapsuleId, SystemCommand};
 use super::manifest;
+use super::window_registry::SystemCapsuleWindowRegistry;
 use crate::ipc::protocol::IpcResponse;
 
 /// JS preload injected into every system-capsule WebView via
@@ -280,6 +281,26 @@ fn spawn_drain_loop_inner(
             }
             for (capsule, command, request_id) in drained {
                 aa.update(|cx| {
+                    // Deny dispatch if no live window binding is registered
+                    // for this capsule. This prevents IPC from being processed
+                    // for a capsule whose window has closed or was never opened.
+                    if !cx.global::<SystemCapsuleWindowRegistry>().has_binding(capsule) {
+                        tracing::warn!(
+                            ?capsule,
+                            "system_capsule::ipc: denied — no window binding registered"
+                        );
+                        if let (Some(rid), Some(cb)) = (request_id, response_cb.as_ref()) {
+                            let response = IpcResponse::error(
+                                Some(rid),
+                                "no_binding",
+                                "no active window registered for this capsule".to_string(),
+                            );
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                cb(cx, rid, json);
+                            }
+                        }
+                        return;
+                    }
                     let result = CapabilityBroker::dispatch(cx, host, capsule, command);
                     if let (Some(rid), Some(cb)) = (request_id, response_cb.as_ref()) {
                         let response = match result {
