@@ -238,6 +238,48 @@ fn remote_export_then_remote_lookup_satisfies_no_build() -> Result<()> {
 #[test]
 #[serial]
 #[cfg(unix)]
+fn worker_sim_produces_remote_layer_consumed_by_lookup() -> Result<()> {
+    let root = test_root()?;
+    let _cleanup = Cleanup(root.clone());
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    let worker_workspace = root.join("worker");
+    let remote = root.join("remote-mirror");
+    fs::create_dir_all(&home)?;
+    copy_fixture(&workspace)?;
+
+    ato_cli::artifact_build_worker_sim::run_fixture_file_backed_artifact_build_worker(
+        &fixture_dir(),
+        &worker_workspace,
+        &remote,
+    )?;
+
+    let output = run_ato_with_remote(
+        &workspace,
+        &home,
+        Some(&remote),
+        &[
+            "run",
+            ".",
+            "--yes",
+            "--no-build",
+            "--dangerously-skip-permissions",
+        ],
+    )?;
+    assert_success("worker remote no-build run", &output);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("build-output-layer-ok"),
+        "worker remote stdout:\n{}\nworker remote stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(workspace.join("dist/run.sh").exists());
+    Ok(())
+}
+
+#[test]
+#[serial]
+#[cfg(unix)]
 fn remote_export_imports_to_local_cas() -> Result<()> {
     let root = test_root()?;
     let _cleanup = Cleanup(root.clone());
@@ -675,11 +717,14 @@ fn inject_symlink_into_remote_payload_and_rehash(remote_layer_root: &Path) -> Re
 }
 
 fn copy_fixture(workspace: &Path) -> Result<()> {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    crate_copy_dir(&fixture_dir(), workspace)
+}
+
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("vite-build-output-layer");
-    crate_copy_dir(&fixture, workspace)
+        .join("vite-build-output-layer")
 }
 
 fn crate_copy_dir(source: &Path, target: &Path) -> Result<()> {
