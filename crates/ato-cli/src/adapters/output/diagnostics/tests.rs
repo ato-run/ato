@@ -447,11 +447,7 @@ fn maps_unsafe_gate_missing_env_to_e301_not_e999() {
         Some("Set CAPSULE_ALLOW_UNSAFE=1 only if you intentionally want to bypass Ato permission and sandbox checks."),
     ));
     let diagnostic = from_anyhow(&err, CommandContext::Run);
-    assert_eq!(
-        diagnostic.code,
-        CliDiagnosticCode::E301,
-        "must be E301, not E999"
-    );
+    assert_eq!(diagnostic.code, CliDiagnosticCode::E301, "must be E301, not E999");
     assert_eq!(diagnostic.phase, "execution");
     assert!(
         diagnostic.message.contains("CAPSULE_ALLOW_UNSAFE=1"),

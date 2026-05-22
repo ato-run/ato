@@ -623,12 +623,7 @@ fn is_python_server_tool(command: &str) -> bool {
 /// should inject `--port <N>` into even when the run command does not contain `$PORT`.
 fn is_python_module_server_invocation(args: &[String]) -> bool {
     const PYTHON_SERVER_MODULES: &[&str] = &[
-        "uvicorn",
-        "gunicorn",
-        "flask",
-        "streamlit",
-        "hypercorn",
-        "daphne",
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
     ];
     let mut iter = args.iter();
     while let Some(token) = iter.next() {
@@ -646,8 +641,7 @@ fn is_python_module_server_invocation(args: &[String]) -> bool {
 /// Returns `true` when `args` already contains an explicit `--port` flag,
 /// meaning the user or a previous injection already set the port.
 fn has_explicit_port_flag(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--port" || a.starts_with("--port="))
+    args.iter().any(|a| a == "--port" || a.starts_with("--port="))
 }
 
 /// Returns `true` when `command == "-m"` and the first arg is a known Python
@@ -658,12 +652,7 @@ fn is_module_command_server_invocation(command: &str, args: &[String]) -> bool {
         return false;
     }
     const PYTHON_SERVER_MODULES: &[&str] = &[
-        "uvicorn",
-        "gunicorn",
-        "flask",
-        "streamlit",
-        "hypercorn",
-        "daphne",
+        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
     ];
     args.first()
         .map(|m| PYTHON_SERVER_MODULES.contains(&m.to_ascii_lowercase().as_str()))
@@ -1677,7 +1666,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         // Create run.sh so the path-exists branch fires deterministically,
         // avoiding dependence on provider-workspace classification of sibling tests.
-        fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho ok\n").expect("write run.sh");
+        fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho ok\n")
+            .expect("write run.sh");
         let plan = plan_from_manifest(
             &dir,
             r#"
@@ -2417,12 +2407,7 @@ mod tests {
     fn module_command_server_invocation_detects_minus_m_uvicorn() {
         // derive_launch_spec for `python -m uvicorn app:main` produces
         // command="-m", args=["uvicorn", "app:main", ...].
-        let args: Vec<String> = vec![
-            "uvicorn".into(),
-            "app.main:app".into(),
-            "--host".into(),
-            "127.0.0.1".into(),
-        ];
+        let args: Vec<String> = vec!["uvicorn".into(), "app.main:app".into(), "--host".into(), "127.0.0.1".into()];
         assert!(is_module_command_server_invocation("-m", &args));
         assert!(!is_module_command_server_invocation("python", &args));
     }
