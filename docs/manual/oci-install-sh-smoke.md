@@ -58,22 +58,23 @@ ato run /tmp/blinko-test --oci-install-sh
 Expected diagnostics:
 
 ```
-[oci-install-sh] Selected script: /tmp/blinko-test/install.sh
-[oci-install-sh] Extracted docker networks: blinko-network (source metadata only)
-[oci-install-sh] Extracted services: blinko-postgres, blinko-website
-[oci-install-sh] Warning: --restart always ignored (Ato session owns lifecycle)
-[oci-install-sh] Warning: unsafe default detected for POSTGRES_PASSWORD → generated secret
-[oci-install-sh] Warning: unsafe default detected for NEXTAUTH_SECRET → generated secret
-[oci-install-sh] Warning: DATABASE_URL rewritten to use alias 'blinko-postgres'
-[oci] Resolving images (no lock found, running fresh resolution)...
-[oci] postgres:14  → sha256:<digest> (linux/arm64, podman-rootless-v1)
-[oci] blinkospace/blinko:latest → sha256:<digest> (linux/arm64, podman-rootless-v1)
-[oci] Lock written: ato.oci.lock.json
-[oci] Pulling postgres:14 ...
-[oci] Pulling blinkospace/blinko:latest ...
-[oci] Starting service: blinko-postgres ...
-[oci] Starting service: blinko-website ...
-[oci] blinko-website: http://localhost:<host-port>
+📋 Install script: /tmp/blinko-test/install.sh
+🔑 Source hash: sha256:<64-char-blake3-hash>
+🔗 Extracted networks: blinko-network
+🔧 Services: blinko-postgres, blinko-website
+   blinko-postgres → image: postgres:14
+   blinko-website → image: blinkospace/blinko:latest
+⚠️  install.sh: --restart always ignored (Ato session owns lifecycle for blinko-postgres)
+⚠️  install.sh: --restart always ignored (Ato session owns lifecycle for blinko-website)
+⚠️  install.sh: unsafe default for POSTGRES_PASSWORD → generated secret requirement
+⚠️  install.sh: unsafe default for NEXTAUTH_SECRET → generated secret requirement
+⚠️  install.sh: DATABASE_URL rewritten to use service alias for blinko-postgres
+🔍 [blinko-postgres] Resolving image digest: postgres:14
+✅ [blinko-postgres] Resolved: sha256:<digest-prefix>
+🔍 [blinko-website] Resolving image digest: blinkospace/blinko:latest
+✅ [blinko-website] Resolved: sha256:<digest-prefix>
+🔒 Lock written: ato.oci.lock.json
+🌐 OCI service 'blinko-website' available at http://127.0.0.1:<host-port>/
 ```
 
 A file `ato.oci.lock.json` is created in the current directory:
@@ -114,14 +115,21 @@ ato run /tmp/blinko-test --oci-install-sh
 Expected diagnostics:
 
 ```
-[oci-install-sh] Selected script: /tmp/blinko-test/install.sh
-[oci-install-sh] Extracted services: blinko-postgres, blinko-website
-[oci] Checking lock... source hash matches, all entries fresh
-[oci] blinko-postgres: reusing sha256:<digest>
-[oci] blinko-website: reusing sha256:<digest>
-[oci] Lock unchanged (no rewrite needed)
-[oci] Pulling postgres@sha256:<digest> ...
-...
+📋 Install script: /tmp/blinko-test/install.sh
+🔑 Source hash: sha256:<same-hash-as-first-run>
+🔗 Extracted networks: blinko-network
+🔧 Services: blinko-postgres, blinko-website
+   blinko-postgres → image: postgres:14
+   blinko-website → image: blinkospace/blinko:latest
+⚠️  install.sh: --restart always ignored (Ato session owns lifecycle for blinko-postgres)
+⚠️  install.sh: --restart always ignored (Ato session owns lifecycle for blinko-website)
+⚠️  install.sh: unsafe default for POSTGRES_PASSWORD → generated secret requirement
+⚠️  install.sh: unsafe default for NEXTAUTH_SECRET → generated secret requirement
+⚠️  install.sh: DATABASE_URL rewritten to use service alias for blinko-postgres
+♻️  [blinko-postgres] Reusing lock: postgres:14 → sha256:<digest-prefix>
+♻️  [blinko-website] Reusing lock: blinkospace/blinko:latest → sha256:<digest-prefix>
+🔒 Lock written: ato.oci.lock.json
+🌐 OCI service 'blinko-website' available at http://127.0.0.1:<host-port>/
 ```
 
 The second run uses the pinned digest from `ato.oci.lock.json`.  Execution

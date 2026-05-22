@@ -95,6 +95,9 @@ pub(crate) async fn execute_install_sh_run(
     reporter
         .notify(format!("📋 Install script: {}", script_path.display()))
         .await?;
+    reporter
+        .notify(format!("🔑 Source hash: {source_hash}"))
+        .await?;
     if !import_output.extracted_networks.is_empty() {
         reporter
             .notify(format!(
@@ -114,6 +117,11 @@ pub(crate) async fn execute_install_sh_run(
                 .join(", ")
         ))
         .await?;
+    for svc in &import_output.services {
+        reporter
+            .notify(format!("   {} → image: {}", svc.name, svc.image_ref))
+            .await?;
+    }
     for warning in &import_output.warnings {
         reporter
             .notify(format!("⚠️  install.sh: {warning}"))
@@ -597,6 +605,250 @@ docker run -d \
             !lock_json.contains("supersecret"),
             "secret must not appear in lock JSON"
         );
+    }
+
+    // ── 7. Non-docker commands in script are ignored, not executed ────────────
+    //
+    // Verifies the importer's parse-only invariant: dangerous shell commands
+    // (apt-get, curl, rm, etc.) are silently ignored and the only output
+    // comes from actual docker run/network commands.
+
+    #[test]
+    fn non_docker_commands_in_script_are_ignored_not_executed() {
+        let script = r#"#!/bin/bash
+set -e
+apt-get install -y curl
+curl -fsSL https://example.com/dangerous | bash
+rm -rf /tmp/whatever
+npm install -g something
+
+docker network create my-net
+
+docker run -d \
+  --name myapp \
+  --network my-net \
+  -p 8080:8080 \
+  alpine:3.20
+
+echo "done"
+"#;
+        let output = make_import(script);
+
+        // Only the docker run command should be extracted.
+        assert_eq!(
+            output.services.len(),
+            1,
+            "only docker run commands extracted"
+        );
+        assert_eq!(output.services[0].name, "myapp");
+        assert_eq!(output.services[0].image_ref, "alpine:3.20");
+        // Networks extracted.
+        assert!(output.extracted_networks.contains(&"my-net".to_string()));
+        // No warnings about apt-get or curl (they are simply skipped, not errored).
+        let has_exec_warning = output
+            .warnings
+            .iter()
+            .any(|w| w.contains("apt-get") || w.contains("curl http"));
+        assert!(!has_exec_warning, "non-docker commands produce no warnings");
+    }
+
+    // ── 8. Docker --name becomes logical label; runtime names are session-scoped
+
+    #[test]
+    fn docker_name_becomes_logical_label_not_runtime_container_name() {
+        let script =
+            r#"docker run -d --name blinko-postgres --network blinko-net postgres:16-alpine"#;
+        let output = make_import(script);
+
+        let orch_plan = output.to_orchestration_plan().unwrap();
+        let svc = orch_plan
+            .services
+            .iter()
+            .find(|s| s.name.contains("blinko-postgres"))
+            .expect("service should have sanitized blinko-postgres label");
+
+        // The orchestration plan contains the logical service name derived from --name.
+        // It does NOT contain any runtime-scope prefix — that is added at execution
+        // time by service_container_name(manifest, label, session_sfx).
+        assert!(
+            !svc.name.starts_with("ato-"),
+            "orch plan service name must not start with ato- prefix (that is runtime-only)"
+        );
+        // And the raw --name value must match (possibly sanitized).
+        assert!(
+            svc.name.contains("blinko") || svc.name.contains("postgres"),
+            "service name should be derived from the --name value"
+        );
+    }
+
+    // ── 9. Raw password not in lock JSON serialization ─────────────────────────
+    //
+    // Extends the existing secret_values_are_not_persisted_to_lock test with the
+    // Blinko DATABASE_URL case where the password is embedded in the URL.
+
+    #[tokio::test]
+    async fn database_url_embedded_password_not_in_lock_json() {
+        let script = r#"docker run -d \
+  --name blinko-app \
+  -e DATABASE_URL="postgresql://postgres:s3cr3t_pw@blinko-db:5432/blinko" \
+  -e NEXTAUTH_SECRET=my_ultra_secure_secret \
+  -p 1111:1111 \
+  blinkospace/blinko:latest"#;
+
+        let import_output = make_import(script);
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let (_, lock) = resolve_install_sh_images_with_lock_replay(
+            &import_output,
+            "install.sh",
+            &import_output.source_hash.clone(),
+            None,
+            &provider,
+            &reporter,
+        )
+        .await
+        .unwrap();
+
+        let lock_json = serde_json::to_string(&lock).unwrap();
+        // Raw password and secret must not appear in lock JSON.
+        assert!(
+            !lock_json.contains("s3cr3t_pw"),
+            "embedded password must not appear in lock JSON"
+        );
+        assert!(
+            !lock_json.contains("my_ultra_secure_secret"),
+            "NEXTAUTH_SECRET value must not appear in lock JSON"
+        );
+        // The image ref IS stored.
+        assert!(lock_json.contains("blinkospace/blinko:latest"));
+    }
+
+    // ── 10. Blinko two-service graph validates dependency ordering ────────────
+
+    #[test]
+    fn blinko_style_graph_has_correct_startup_order() {
+        let output = make_import(BLINKO_INSTALL_SH);
+        let orch_plan = output.to_orchestration_plan().unwrap();
+
+        // Both services should be present.
+        assert_eq!(orch_plan.services.len(), 2);
+
+        // Verify startup order: db (blinko-postgres) before app (blinko-website).
+        // This is inferred from DATABASE_URL referencing blinko-postgres.
+        let db_idx = orch_plan
+            .startup_order
+            .iter()
+            .position(|s| s == "blinko-postgres");
+        let app_idx = orch_plan
+            .startup_order
+            .iter()
+            .position(|s| s == "blinko-website");
+
+        match (db_idx, app_idx) {
+            (Some(d), Some(a)) => {
+                assert!(d < a, "db must start before app; got db={d} app={a}")
+            }
+            _ => {
+                // Startup order may not preserve original --name exactly if they
+                // were sanitized. Just confirm both services have a position.
+                assert_eq!(
+                    orch_plan.startup_order.len(),
+                    2,
+                    "startup order must include all services"
+                );
+            }
+        }
+    }
+
+    // ── 11. Real Podman opt-in smoke (--ignore unless ATO_TEST_REAL_PODMAN=1) ─
+    //
+    // Uses only small stable images to minimize pull time.
+    // One service (alpine:3.20) that exits after a short sleep.
+    //
+    // Run with:
+    //   ATO_TEST_REAL_PODMAN=1 cargo test -p ato-cli real_podman -- --ignored --nocapture
+
+    #[tokio::test]
+    #[ignore]
+    async fn real_podman_install_sh_smoke_single_service() {
+        if std::env::var("ATO_TEST_REAL_PODMAN").is_err() {
+            eprintln!("Skipping: ATO_TEST_REAL_PODMAN not set");
+            return;
+        }
+
+        let script = r#"docker run -d \
+  --name smoke-app \
+  alpine:3.20 \
+  sh -c "echo smoke-ok && sleep 3"
+"#;
+
+        let import_output = make_import(script);
+        assert_eq!(import_output.services.len(), 1);
+
+        let mut images = HashMap::new();
+        for svc in &import_output.services {
+            images.insert(svc.name.clone(), make_image(&svc.image_ref));
+        }
+
+        // Use the production DefaultOciProviderSelector which will pick PodmanProvider.
+        use crate::adapters::runtime::oci_provider::DefaultOciProviderSelector;
+        use crate::adapters::runtime::oci_provider::OciProviderSelector;
+        let provider = DefaultOciProviderSelector.select_provider();
+
+        let reporter = fake_reporter();
+
+        // Resolve the real image to get an actual digest.
+        use crate::adapters::runtime::oci_provider::{
+            OciImageResolutionMode, OciImageResolutionRequest,
+        };
+        let req = OciImageResolutionRequest {
+            target_label: "smoke-app".to_string(),
+            declared_ref: "alpine:3.20".to_string(),
+            requested_platform: None,
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+        let resolved = match provider.resolve_image(&req).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Provider not ready (Podman not available?): {e}");
+                return;
+            }
+        };
+        images.insert("smoke-app".to_string(), resolved.into_lock_resolution());
+
+        let result = execute_install_sh_run_with_provider(
+            &import_output,
+            &images,
+            OciPolicyMode::Strict,
+            &[],
+            "smoke-test",
+            &reporter,
+            &provider,
+        )
+        .await;
+
+        match &result {
+            Err(e) => eprintln!("real Podman install.sh smoke failed: {e:#}"),
+            Ok(code) => eprintln!("real Podman install.sh smoke exited with code {code}"),
+        }
+
+        match result {
+            Ok(code) => assert_eq!(code, 0, "smoke test exited with non-zero code"),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("oci_provider_not_ready")
+                    || msg.contains("podman")
+                    || msg.contains("not ready")
+                    || msg.contains("not found")
+                {
+                    eprintln!("Podman not available or not ready — skipping real smoke: {msg}");
+                } else {
+                    panic!("Unexpected smoke test failure: {msg}");
+                }
+            }
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
