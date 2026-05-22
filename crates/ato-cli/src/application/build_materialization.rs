@@ -193,6 +193,16 @@ fn derive_toolchain_fingerprint(
         .execution_driver()
         .unwrap_or_else(|| "unknown".to_string());
     let target = plan.selected_target_label();
+    build_observation_toolchain_fingerprint(&runtime, &driver, target)
+}
+
+/// Compose the phase build observation toolchain identity from an already
+/// resolved runtime boundary.
+pub(crate) fn build_observation_toolchain_fingerprint(
+    runtime: &str,
+    driver: &str,
+    target: &str,
+) -> String {
     let os_arch = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     format!(
         "runtime:{}|driver:{}|target:{}|os:{}|schema:{}",

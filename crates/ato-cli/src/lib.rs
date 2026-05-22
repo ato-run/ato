@@ -50,6 +50,14 @@ pub mod phase_materializer_remote {
     pub use crate::application::phase_materializer_remote::export_recorded_build_output_layer_to_remote_mirror;
 }
 
+#[doc(hidden)]
+pub mod artifact_build_worker_sim {
+    // Integration-test-only bridge for the file-backed local worker harness.
+    // Keep the actual producer request/response boundary crate-local until a
+    // non-test producer surface owns the public API.
+    pub use crate::application::artifact_build_worker_sim::run_fixture_file_backed_artifact_build_worker;
+}
+
 pub mod dependency_materializer {
     pub use crate::application::dependency_materializer::{
         AttestationRef, AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
