@@ -54,7 +54,7 @@ impl ArtifactBuildCommandRunner {
         command_identity: &str,
         source_root: &Path,
         worker_workspace: &Path,
-        allowed_env_keys: &[String],
+        _allowed_env_keys: &[String],
     ) -> Result<()> {
         let child_home = worker_workspace.join("home");
         let child_tmp = worker_workspace.join("tmp");
@@ -72,11 +72,9 @@ impl ArtifactBuildCommandRunner {
             .env("HOME", &child_home)
             .env("TMPDIR", &child_tmp);
         set_minimal_path(&mut command);
-        for key in allowed_env_keys {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
+        // allowed_env_keys are contract metadata only in the local simulation.
+        // Future worker infra must supply explicit sanitized env values; we
+        // must never read host std::env by key name here.
 
         let output = command.output().with_context(|| {
             format!("failed to run artifact build command '{command_identity}'")
@@ -581,6 +579,48 @@ mod tests {
                 provenance_created_by: "artifact-build-worker-sim-test".to_string(),
             },
         )
+    }
+
+    #[test]
+    #[serial]
+    fn worker_sim_does_not_inherit_host_secret_env() {
+        let secret_key = "ATO_TEST_SECRET_SHOULD_NOT_LEAK";
+        let secret_value = "secret-value-must-not-appear-in-build";
+
+        // Set secret in host process env.
+        std::env::set_var(secret_key, secret_value);
+
+        let temp = TempDir::new().expect("temp");
+        let source_root = temp.path().join("src");
+        let worker_workspace = temp.path().join("worker");
+        fs::create_dir_all(&source_root).expect("src dir");
+
+        // Command writes the env var (or "not-set") to a file outside source_root.
+        let out_file = temp.path().join("env-check.txt");
+        let command = format!(
+            "printf '%s' \"${{{}:-not-set}}\" > '{}'",
+            secret_key,
+            out_file.display()
+        );
+
+        // allowed_env_keys lists the key — proving contract metadata alone does
+        // not cause the host value to be forwarded to the child process.
+        ArtifactBuildCommandRunner::LocalShell
+            .run_build(
+                &command,
+                &source_root,
+                &worker_workspace,
+                &[secret_key.to_string()],
+            )
+            .expect("run_build succeeded");
+
+        let captured = fs::read_to_string(&out_file).expect("env-check.txt written by command");
+        assert!(
+            !captured.contains(secret_value),
+            "host secret leaked into worker build process: {captured}"
+        );
+
+        std::env::remove_var(secret_key);
     }
 
     fn fixture_request() -> ArtifactBuildProducerRequest {
