@@ -100,6 +100,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             rebuild,
             no_build,
             plan_only,
+            oci_compose,
             read,
             write,
             read_write,
@@ -146,6 +147,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             cache_strategy: cache,
             deprecation_warning: None,
             plan_only,
+            oci_compose,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 

@@ -57,6 +57,9 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) cache_strategy: CacheStrategyArg,
     pub(crate) deprecation_warning: Option<&'static str>,
     pub(crate) plan_only: bool,
+    /// When true, detect a compose file, import it, and run through PodmanProvider.
+    /// This is an experimental explicit flag — it does not affect normal `ato run` behavior.
+    pub(crate) oci_compose: bool,
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
 
@@ -87,6 +90,26 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
 
     if let Some(warning) = args.deprecation_warning {
         eprintln!("{warning}");
+    }
+
+    // --oci-compose: import docker-compose.yml and run via PodmanProvider.
+    // This early-return path bypasses the normal capsule resolution pipeline.
+    if args.oci_compose {
+        let project_dir = args.path.clone();
+        let reporter = args.reporter.clone();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt
+            .block_on(
+                crate::adapters::runtime::executors::oci_compose_runner::execute_compose_run(
+                    &project_dir,
+                    reporter,
+                    capsule_core::execution_plan::model::OciPolicyMode::Strict,
+                    &[],
+                ),
+            )
+            .map(|_| ());
     }
 
     let sandbox_requested =
@@ -578,6 +601,7 @@ mod tests {
             cache_strategy: crate::cli::shared::CacheStrategyArg::Auto,
             deprecation_warning: None,
             plan_only: false,
+            oci_compose: false,
             reporter,
         })
         .expect("canonical handle should normalize");
