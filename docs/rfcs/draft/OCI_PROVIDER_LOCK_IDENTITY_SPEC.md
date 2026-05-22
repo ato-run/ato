@@ -379,6 +379,7 @@ PR 7: single-target Podman execution
 PR 8: multi-service Blinko
 PR 9: Docker Compose subset importer (pure)
 PR 10: CLI wiring — --oci-compose flag, image resolution, lock/plan/run
+PR 10.5: hardening — failure-path tests, diagnostics, opt-in real Podman smoke
 PR 11: install.sh / docker-run intent extractor (future)
 ```
 
@@ -805,3 +806,91 @@ Future: `ato run github.com/org/repo --oci-compose` (after repo materialization 
 
 `install.sh` and `docker run` intent extractor are deferred to PR 11.
 Compose CLI wiring is stable before adding an additional import surface.
+
+---
+
+## §12 PR 10.5 — Compose CLI Hardening: Failure-Path Tests, Diagnostics, Opt-in Real Podman Smoke
+
+### 12.1 Goal
+
+Harden the `--oci-compose` path added in PR 10:
+- Typed failure-path coverage for all resolution/pull/policy error classes.
+- Improved diagnostics: compose file path, service list, and per-service resolved digest are
+  printed to the reporter before execution.
+- An opt-in `#[ignore]` real Podman smoke test.
+- A manual smoke verification doc at `docs/manual/oci-compose-podman-smoke.md`.
+
+### 12.2 Diagnostics improvements
+
+`execute_compose_run` now emits (via `reporter.notify`) before execution:
+
+```
+📋 Compose file: <path>
+🔧 Services: <comma-separated service names>
+✅ [<service>] Resolved: sha256:... (first 19 chars)
+⚠️  compose: <warning>   (for each importer warning)
+```
+
+**Must NOT appear in diagnostics:**
+- Secret values
+- Raw `DATABASE_URL` if it contains a password
+- Global `container_name` as a runtime name
+
+### 12.3 FakeOciProvider extensions
+
+Two new constructors added to `FakeOciProvider` for error injection:
+
+| Constructor | Behavior |
+|-------------|----------|
+| `FakeOciProvider::with_resolve_error(err)` | `resolve_image()` returns the given error |
+| `FakeOciProvider::with_pull_failure(err)` | `pull_image()` returns the given error |
+
+### 12.4 Failure-path tests (6 new tests, total 17)
+
+| Test | Coverage |
+|------|----------|
+| `image_resolve_unsupported_returns_resolution_required_error` | `Unsupported` variant → `oci_image_resolution_required` error |
+| `image_resolve_generic_failure_is_propagated` | `Operation` variant → error propagates with context |
+| `pull_failure_in_compose_graph_is_typed` | `pull_image` failure → typed error from executor |
+| `strict_egress_gap_blocks_compose_execution` | `Strict` + non-empty `egress_allow` → `oci_execution_gate_failed` |
+| `loose_policy_gap_allows_compose_execution` | `Loose` + `egress_allow` → execution succeeds |
+| `real_podman_compose_smoke_minimal_two_service` | `#[ignore]` real Podman opt-in smoke |
+
+### 12.5 Real Podman opt-in smoke test
+
+The test `real_podman_compose_smoke_minimal_two_service` is marked `#[ignore]`
+and guarded by `ATO_TEST_REAL_PODMAN=1`:
+
+```sh
+ATO_TEST_REAL_PODMAN=1 cargo test -p ato-cli real_podman -- --ignored --nocapture
+```
+
+- Uses `alpine:3.19` for both services to minimize pull time.
+- `app` depends_on `db` and exits after `sleep 3`.
+- `db` is a background sleeper (`sleep 30`).
+- Accepts graceful skip if Podman is not available or not ready.
+
+### 12.6 Lock persistence status
+
+Image digest resolution in `resolve_images_for_compose` is **in-memory only**.
+No lock file write path exists yet for Compose-imported services. This is
+documented as diagnostic-only until a future PR adds lock persistence for
+the Compose import path.
+
+Execution is still gated on digest presence (the `images` map must be populated
+before `execute_service_graph_with_provider` is called).
+
+### 12.7 Known pre-existing blocker (unchanged)
+
+`cargo test --workspace` triggers an interactive consent prompt. Always run
+per-crate filters:
+
+```sh
+cargo test -p ato-cli oci_compose --lib
+cargo test -p capsule-core compose_import --lib
+```
+
+### 12.8 Next: PR 11 (deferred)
+
+`install.sh` and `docker run` intent extractor remain deferred to PR 11.
+The Compose CLI wiring is stable before adding an additional import surface.

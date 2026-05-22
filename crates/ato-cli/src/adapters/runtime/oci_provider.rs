@@ -1348,6 +1348,8 @@ where
 #[derive(Clone)]
 pub(crate) struct FakeOciProvider {
     pub probe_result: Result<OciProviderProbe, OciProviderError>,
+    /// When `Some`, every `resolve_image` call returns this error instead of the fake digest.
+    pub resolve_error: Option<OciProviderError>,
     pub pull_result: Result<(), OciProviderError>,
     pub create_container_result: Result<String, OciProviderError>,
     pub start_result: Result<(), OciProviderError>,
@@ -1371,6 +1373,7 @@ impl FakeOciProvider {
     pub(crate) fn ready() -> Self {
         Self {
             probe_result: Ok(fake_oci_probe_ready()),
+            resolve_error: None,
             pull_result: Ok(()),
             create_container_result: Ok("fake-container-id".to_string()),
             start_result: Ok(()),
@@ -1422,6 +1425,20 @@ impl FakeOciProvider {
         });
         f
     }
+
+    /// Simulate an image resolution failure for all resolve_image calls.
+    pub(crate) fn with_resolve_error(error: OciProviderError) -> Self {
+        let mut f = Self::ready();
+        f.resolve_error = Some(error);
+        f
+    }
+
+    /// Simulate a pull failure for all pull_image calls.
+    pub(crate) fn with_pull_failure(error: OciProviderError) -> Self {
+        let mut f = Self::ready();
+        f.pull_result = Err(error);
+        f
+    }
 }
 
 pub(crate) fn fake_oci_semantics() -> OciProviderSemantics {
@@ -1468,6 +1485,9 @@ impl OciProvider for FakeOciProvider {
             .lock()
             .unwrap()
             .push(format!("resolve:{}", request.declared_ref));
+        if let Some(ref err) = self.resolve_error {
+            return Err(err.clone());
+        }
         Ok(OciResolvedImage {
             declared_ref: request.declared_ref.clone(),
             resolved_digest: format!("sha256:{}", "b".repeat(64)),
