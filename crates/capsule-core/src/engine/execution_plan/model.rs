@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::foundation::types::oci::OciImageResolution;
+
 pub const EXECUTION_PLAN_SCHEMA_VERSION: &str = "1";
 pub const MOUNT_SET_ALGO_ID: &str = "lockfile_mountset_v1";
 pub const MOUNT_SET_ALGO_VERSION: u32 = 1;
@@ -45,6 +47,8 @@ pub enum ExecutionDriver {
     Python,
     Wasmtime,
     Native,
+    /// OCI container image driver (podman, docker-compatible).
+    Oci,
 }
 
 impl ExecutionDriver {
@@ -56,6 +60,7 @@ impl ExecutionDriver {
             Self::Python => "python",
             Self::Wasmtime => "wasmtime",
             Self::Native => "native",
+            Self::Oci => "oci",
         }
     }
 
@@ -67,6 +72,7 @@ impl ExecutionDriver {
             "python" | "python3" => Some(Self::Python),
             "wasmtime" => Some(Self::Wasmtime),
             "native" => Some(Self::Native),
+            // "oci" is selected automatically by runtime=oci; not a manifest driver keyword.
             _ => None,
         }
     }
@@ -76,6 +82,8 @@ impl ExecutionDriver {
 pub enum ExecutionTier {
     Tier1,
     Tier2,
+    /// Tier3: containerized OCI execution (container image + provider materialization).
+    Tier3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +95,9 @@ pub struct ExecutionPlan {
     pub runtime: Runtime,
     pub consent: Consent,
     pub reproducibility: Reproducibility,
+    /// OCI policy envelope — present only when target runtime is OCI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oci: Option<OciPolicyEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +223,40 @@ impl ConsentKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reproducibility {
     pub platform: Platform,
+}
+
+/// Policy enforcement mode for OCI targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OciPolicyMode {
+    /// Provider must enforce all requested policies; fail if any cannot be enforced.
+    Strict,
+    /// Record policy gaps as warnings; require explicit consent.
+    Loose,
+    /// Best-effort enforcement only; record gaps in receipt.
+    Off,
+}
+
+/// OCI-specific policy envelope attached to `ExecutionPlan` for OCI runtime targets.
+///
+/// Records the plan-time-known OCI policy facts used for consent hashing and
+/// provider readiness checks.  Live runtime state (container id, host port,
+/// volume id) is never stored here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OciPolicyEnvelope {
+    /// Declared image reference from the manifest (may be a mutable tag).
+    pub declared_image_ref: String,
+    /// Resolved image information from the lock, if available at plan-compile time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_image: Option<OciImageResolution>,
+    /// Port published to localhost as declared in the manifest target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_exposure: Option<u16>,
+    /// Network egress allowlist from the manifest `[network]` section.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_allow: Vec<String>,
+    /// Policy enforcement mode.
+    pub policy_mode: OciPolicyMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
