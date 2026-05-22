@@ -279,10 +279,11 @@ pub fn prepare_target_execution(
             RuntimeGuardMode::Preview,
             has_authoritative_lock,
         )?;
-        let sandbox_gate_pending = preview_guard.requires_sandbox_opt_in && !options.sandbox_mode;
-        let consent_gate_pending = !(options.assume_yes
-            && is_transient_provider_workspace(&runtime_decision.plan))
-            && !crate::consent_store::has_consent(&execution_plan)?;
+        let sandbox_gate_pending =
+            preview_guard.requires_sandbox_opt_in && !options.sandbox_mode;
+        let consent_gate_pending =
+            !(options.assume_yes && is_transient_provider_workspace(&runtime_decision.plan))
+                && !crate::consent_store::has_consent(&execution_plan)?;
 
         if sandbox_gate_pending && consent_gate_pending {
             return Err(AtoExecutionError::from_ato_error(
