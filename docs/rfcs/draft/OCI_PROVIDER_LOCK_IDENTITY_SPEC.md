@@ -1307,3 +1307,153 @@ Postgres port remains internal.
 - Multiple compose files or mixed compose + install.sh in one project is not
   tested.
 - PR 12 target: `docker run` single-command import from README-style snippets.
+
+---
+
+## §15 PR 11.5 — Blinko Smoke, Invariant Hardening, and Merge Readiness
+
+### 15.1 Invariants strengthened
+
+PR 11.5 adds and explicitly documents the following invariants:
+
+1. **Script is never executed** — `DockerRunScriptImporter` operates purely on
+   the script text as a string. No shell subprocess is created. Non-docker
+   commands (`apt-get`, `curl`, `rm`, etc.) are silently skipped.
+
+2. **`--name` is logical label, not runtime name** — The `--name` value from a
+   `docker run` command is used to derive the logical service label inside
+   `OrchestrationPlan`. The actual runtime container name is `ato-<project>-<label>-<session_sfx>`,
+   computed at execution time by `service_container_name()` in `oci_multi_service.rs`.
+   The two are never the same in production.
+
+3. **Raw secret values never reach the lock or diagnostics** — All env keys
+   classified as secret-like (contains PASSWORD, PASSWD, SECRET, TOKEN, KEY,
+   CREDENTIAL) have their values replaced with a redacted placeholder before
+   any log/diagnostic output is produced. The `OciComposeLock` model does not
+   have any field for env values; secrets therefore cannot appear in
+   `ato.oci.lock.json` by design.
+
+4. **DATABASE_URL embedded passwords are redacted** — When a `DATABASE_URL`
+   embeds a password that is also flagged as a secret-like env, the password
+   portion is replaced with a `{generated:<KEY>}` placeholder and a warning
+   is emitted. The redacted URL (with service alias substituted) may appear in
+   diagnostics; the raw password does not.
+
+5. **Session-scoped runtime names** — Verified by the existing
+   `service_container_name_is_session_scoped` test in `oci_multi_service.rs`
+   and the new `docker_name_becomes_logical_label_not_runtime_container_name`
+   test in `install_sh_runner.rs`.
+
+### 15.2 Lock file naming and future migration
+
+#### Current status
+
+The OCI import lock is stored in `ato.oci.lock.json` as an **experimental
+sidecar lock file**, separate from the primary `ato.lock.json` manifest lock.
+
+Rationale for separation:
+- The OCI lock schema is still evolving (PR 10.6–11.5).
+- It conflates `import` metadata (compose / install.sh source hash) with
+  `image` resolution data in one JSON object. The primary lock uses a
+  different data model.
+- Keeping them separate avoids breaking existing `ato.lock.json` parsers
+  while the OCI model stabilises.
+
+#### Fields stored in `ato.oci.lock.json` (current)
+
+```json
+{
+  "version": 1,
+  "import": {
+    "kind": "compose" | "docker-run-script",
+    "source_path": "docker-compose.yml" | "install.sh",
+    "source_hash": "sha256:..."
+  },
+  "images": {
+    "<service-label>": {
+      "declared_ref": "<image:tag>",
+      "resolved_digest": "sha256:...",
+      "platform": "linux/arm64",
+      "provider_semantics": "podman-rootless-v1"
+    }
+  }
+}
+```
+
+Fields intentionally absent: container id, network id, volume id, allocated
+host port, secret values, Podman machine id.
+
+#### Future migration plan (not PR 11.5 scope)
+
+When the OCI model is promoted from experimental to stable:
+
+1. The `images` section will move into `ato.lock.json` under an `oci_images` key.
+2. The `import` section will move to `ato.lock.json` under `oci_import`.
+3. `ato.oci.lock.json` will be deprecated and eventually removed.
+4. Migration rule: `ato.oci.lock.json` is an implementation detail, not a
+   stable public contract. Consumers should not parse it directly.
+
+**PR 11 reuse note**: install.sh and compose importers share the same
+`OciComposeLock` Rust type. The `import.kind` field (`compose` vs
+`docker-run-script`) distinguishes them. No separate lock format was created
+for the install.sh importer.
+
+### 15.3 Policy and mount safety table
+
+The following table documents how each Docker-run flag is handled across the
+three OCI import paths (explicit capsule, `--oci-compose`, `--oci-install-sh`):
+
+| Flag / feature | Compose | install.sh | Explicit capsule | Notes |
+|---|---|---|---|---|
+| Absolute bind mount (`-v /host:/ctr`) | Rejected | Rejected | Rejected | Security hard-reject |
+| Relative bind mount (`-v ./data:/ctr`) | Rejected or project-scoped | Rejected or project-scoped | Rejected | Warning emitted if project-scoped |
+| Named volume (`-v pg_data:/data`) | Allowed → state binding | Allowed → state binding | Allowed via `[state]` | Persisted as Ato state binding |
+| `--privileged` | Rejected | Rejected | Rejected | Hard reject; typed error |
+| `--network host` | Rejected | Rejected | Rejected | Hard reject; typed error |
+| `--restart <policy>` | Ignored with warning | Ignored with warning | N/A | Ato session owns lifecycle |
+| `--cap-add / --cap-drop` | Rejected | Rejected | Rejected | Not in current scope |
+| `--device` | Rejected | Rejected | Rejected | Not in current scope |
+| `--userns / --pid host` | Rejected | Rejected | Rejected | Not in current scope |
+| Strict + unsupported egress | Blocked | Blocked | Blocked | Via `OciPolicyMode::Strict` |
+| Loose / Off policy | Allowed with diagnostic | Allowed with diagnostic | Allowed with diagnostic | For opt-in experiments |
+
+### 15.4 Diagnostics emitted by `--oci-install-sh`
+
+After PR 11.5, the `--oci-install-sh` path prints:
+
+```
+📋 Install script: /path/to/install.sh
+🔑 Source hash: sha256:...
+🔗 Extracted networks: blinko-network        ← if any
+🔧 Services: blinko-postgres, blinko-website
+   blinko-postgres → image: postgres:14
+   blinko-website  → image: blinkospace/blinko:latest
+⚠️  install.sh: ...                           ← any warnings (redacted secrets, --restart, etc.)
+ℹ️  install.sh (unsupported, skipped): ...    ← unsupported features
+♻️  [blinko-postgres] Reusing lock: postgres:14 → sha256:abc123...  ← lock replay
+✅ [blinko-website] Resolved: sha256:def456...                       ← fresh resolve
+🔒 Lock written: ato.oci.lock.json
+🌐 OCI service 'blinko-website' available at http://127.0.0.1:<port>/
+```
+
+Never printed:
+- Raw `POSTGRES_PASSWORD` value
+- Raw `NEXTAUTH_SECRET` value
+- Raw `DATABASE_URL` with embedded password
+- Generated secret values
+- Podman machine id or internal container id
+
+### 15.5 Tests added (PR 11.5)
+
+**`ato-cli` (new tests in `install_sh_runner.rs`):**
+
+- `non_docker_commands_in_script_are_ignored_not_executed`
+- `docker_name_becomes_logical_label_not_runtime_container_name`
+- `database_url_embedded_password_not_in_lock_json`
+- `blinko_style_graph_has_correct_startup_order`
+- `real_podman_install_sh_smoke_single_service` (opt-in `#[ignore]`)
+
+**Fixture files added:**
+
+- `crates/ato-cli/tests/fixtures/install_sh/blinko_style.sh`
+- `crates/ato-cli/tests/fixtures/install_sh/lightweight_two_service.sh`
