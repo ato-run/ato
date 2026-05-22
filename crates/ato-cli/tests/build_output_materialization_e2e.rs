@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use capsule_core::blob::{hash_tree, BlobManifest};
 use capsule_core::common::store::BlobAddress;
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -400,6 +401,55 @@ fn remote_lookup_is_disabled_by_default() -> Result<()> {
     Ok(())
 }
 
+/// A symlink injected into a remote CAS payload must be rejected at projection
+/// time, even if the hash verifies correctly. Under `--no-build` this must be
+/// a hard failure rather than a silent fall-through.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn remote_payload_symlink_is_rejected_at_projection() -> Result<()> {
+    let root = test_root()?;
+    let _cleanup = Cleanup(root.clone());
+    let home_a = root.join("home-a");
+    let workspace_a = root.join("workspace-a");
+    let home_b = root.join("home-b");
+    let workspace_b = root.join("workspace-b");
+    let remote = root.join("remote-mirror");
+    fs::create_dir_all(&home_a)?;
+    fs::create_dir_all(&home_b)?;
+    copy_fixture(&workspace_a)?;
+    copy_fixture(&workspace_b)?;
+
+    // Build once so we have a real CAS blob to export.
+    let first = run_ato(
+        &workspace_a,
+        &home_a,
+        &["run", ".", "--yes", "--dangerously-skip-permissions"],
+    )?;
+    assert_success("cold run", &first);
+
+    // Export the genuine blob to a remote mirror, then tamper with it.
+    let remote_layer = export_output_layer_to_remote(&workspace_a, &home_a, &remote)?;
+    inject_symlink_into_remote_payload_and_rehash(&remote_layer)?;
+
+    // workspace_b has a fresh home (no local CAS hit) so the remote is the
+    // only possible materialization source. Under --no-build the remote lookup
+    // must succeed (hash matches) but projection must refuse the symlink.
+    let output = run_ato_with_remote(
+        &workspace_b,
+        &home_b,
+        Some(&remote),
+        &["run", ".", "--yes", "--no-build", "--dangerously-skip-permissions"],
+    )?;
+    assert_failure("no-build with symlink in remote payload", &output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("symlink"),
+        "expected symlink rejection in stderr, got:\n{stderr}"
+    );
+    Ok(())
+}
+
 fn run_ato(workspace: &Path, home: &Path, args: &[&str]) -> Result<std::process::Output> {
     run_ato_with_remote(workspace, home, None, args)
 }
@@ -556,6 +606,32 @@ fn corrupt_manifest(home: &Path, blob_hash: &str) -> Result<()> {
         "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
     );
     fs::write(&path, serde_json::to_vec_pretty(&value)?).context("write corrupt manifest")?;
+    Ok(())
+}
+
+fn inject_symlink_into_remote_payload_and_rehash(remote_layer_root: &Path) -> Result<()> {
+    let payload = remote_layer_root.join("blob/payload");
+    // Place a dangling absolute symlink inside dist/ — the declared output dir.
+    std::os::unix::fs::symlink("/etc/passwd", payload.join("dist/injected-link"))
+        .context("inject symlink into remote payload")?;
+
+    // Recompute the tree hash with the symlink present.
+    let tree = hash_tree(&payload).context("rehash payload after symlink injection")?;
+    let manifest = BlobManifest::from_tree_hash(&tree, "test-symlink-injection", "2026-01-01T00:00:00Z");
+    manifest
+        .write_to(&remote_layer_root.join("blob/manifest.json"))
+        .context("write updated manifest.json")?;
+
+    // Update layer.json to reference the new hash so verification doesn't
+    // fail at the manifest-check stage before projection is attempted.
+    let layer_path = remote_layer_root.join("layer.json");
+    let mut layer: Value =
+        serde_json::from_slice(&fs::read(&layer_path).context("read layer.json")?)
+            .context("parse layer.json")?;
+    layer["blob_hash"] = Value::String(tree.blob_hash.clone());
+    let mut bytes = serde_json::to_vec_pretty(&layer).context("serialize updated layer.json")?;
+    bytes.push(b'\n');
+    fs::write(&layer_path, bytes).context("write updated layer.json")?;
     Ok(())
 }
 
