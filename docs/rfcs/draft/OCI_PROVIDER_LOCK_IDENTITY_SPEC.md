@@ -216,6 +216,78 @@ Providers must not claim enforcement they cannot provide. For example, if a
 Podman v1 provider cannot enforce a domain egress allowlist, the receipt records
 that gap and strict mode fails before launch.
 
+### 3.8 Image resolution lifecycle
+
+Image resolution converts a declared image ref (which may include a mutable tag)
+into a content-addressed, platform-specific identity. It is a distinct step from
+image pull and must complete before execution identity is computed.
+
+**Lifecycle:**
+
+```text
+1. Manifest inspect    podman manifest inspect <declared_ref>
+2. Platform selection  pick child entry matching requested_platform
+3. Digest extraction   record child manifest digest (platform-specific, not index digest)
+4. Lock write          write declared_ref + resolved_digest + platform to resolution.oci_images
+5. Execution identity  lock digest + provider semantics label included in OCI envelope
+```
+
+**Required vs BestEffort:**
+
+| Mode | Unresolved image | Malformed ref | Unsupported platform |
+|------|-----------------|---------------|---------------------|
+| `Required` | Typed `ImageResolveFailed` error — operation fails | Typed `ImageRefMalformed` error | Typed `ImagePlatformUnsupported` error |
+| `BestEffort` | Diagnostic result without failing parent operation | Same, reported in failures collection | Same |
+
+**Mutable tags:**
+
+A mutable tag (e.g. `latest`, `main`, a semver without an explicit digest) may
+be accepted only after being resolved to a digest in the lock. If a mutable-tag
+image cannot be resolved — for example because the provider is offline — the
+operation fails in `Required` mode. In `BestEffort` mode the unresolved ref is
+recorded in the failure collection; it must not be written to the lock.
+
+A digest ref (e.g. `ghcr.io/acme/app@sha256:...`) round-trips without forced
+mutation and suppresses the mutable-tag warning.
+
+**Multi-platform manifests:**
+
+If the manifest is a multi-platform index and no `requested_platform` is given,
+resolution fails if more than one candidate entry is present. Auto-picking an
+arbitrary platform is forbidden because the choice must be deterministic and
+auditable.
+
+If the manifest is a single-arch image (no `manifests` array in inspect output)
+and the ref already carries an embedded digest, the ref is usable provided a
+`requested_platform` is explicitly supplied. Without an explicit platform there
+is no reliable way to record the platform; resolution fails.
+
+**What resolution does not do:**
+
+Image resolution explicitly does not:
+- pull the image layers to the local store
+- create containers
+- start services
+- allocate host ports or volumes
+
+Pull and materialization are deferred to a later slice (PR 7 in the rollout
+above) after the provider boundary and lock update contract are solid.
+
+**Why resolved digest is necessary but not sufficient:**
+
+A resolved image digest pins the exact image content. It is a required input to
+execution identity. However, the digest alone does not capture:
+
+- selected platform (arm64 and amd64 variants of the same image have the same
+  index digest but different child digests)
+- environment variable closure and secret ref shape
+- state binding and mount shape
+- network policy and port exposure intent
+- provider semantics
+
+Execution identity therefore includes the full OCI launch envelope, of which the
+resolved digest is one field.
+
 ## 4. Interfaces
 
 The first code surface is:

@@ -667,6 +667,44 @@ mod tests {
     }
 
     #[test]
+    fn lock_update_records_declared_ref_digest_and_platform() {
+        let mut lock = sample_lock();
+        // Simulate writing a resolved image (as produced by OciResolvedImage::into_lock_resolution)
+        // into the lock's oci_images map.  The key must match the workload's target label ("web")
+        // which is already present in the sample_lock workloads.
+        lock.resolution.entries.insert(
+            "oci_images".to_string(),
+            json!({
+                "web": {
+                    "declared_ref": "postgres:14",
+                    "resolved_digest":
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "platform": {
+                        "os": "linux",
+                        "architecture": "amd64"
+                    }
+                    // importer_input_hash absent (None → omitted in into_lock_resolution)
+                }
+            }),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        let image = model.selected.oci_image.expect("oci_image must be present");
+
+        assert_eq!(image.declared_ref, "postgres:14");
+        assert_eq!(
+            image.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(image.platform.os, "linux");
+        assert_eq!(image.platform.architecture, "amd64");
+        assert!(
+            image.importer_input_hash.is_none(),
+            "importer_input_hash must be absent when not provided by OciResolvedImage::into_lock_resolution"
+        );
+    }
+
+    #[test]
     fn python_targets_derive_uv_selector_env_from_runtime_version() {
         let mut lock = sample_lock();
         lock.contract.entries.insert(
