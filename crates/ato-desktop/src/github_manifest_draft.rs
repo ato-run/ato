@@ -248,13 +248,27 @@ fn draft_root(owner: &str, repo: &str, resolved_commit: &str, draft_id: &str) ->
 }
 
 fn new_draft_id(manifest_hash: &str) -> String {
-    let hash_prefix = manifest_hash.chars().take(12).collect::<String>();
+    let hash_prefix =
+        sanitize_draft_path_segment(&manifest_hash.chars().take(12).collect::<String>());
     format!(
         "{}-{}-{}",
         current_unix_millis(),
         std::process::id(),
         hash_prefix
     )
+}
+
+fn sanitize_draft_path_segment(segment: &str) -> String {
+    segment
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn current_unix_millis() -> u128 {
@@ -358,4 +372,17 @@ fn validate_entrypoint(working_dir: PathBuf, entrypoint: Option<String>) -> Resu
 
 fn is_full_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draft_id_sanitizes_manifest_hash_prefix_for_path_segments() {
+        let draft_id = new_draft_id("blake3:aa8f929fc71dfa9c");
+
+        assert!(draft_id.ends_with("blake3-aa8f9"));
+        assert!(!draft_id.contains(':'));
+    }
 }
