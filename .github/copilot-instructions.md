@@ -250,6 +250,13 @@ If the answer to all three is "no", don't add it.
 
 ---
 
+## Collaboration Workflow
+
+- For non-trivial changes (roughly 3+ files touched, architectural decisions, or unclear edge cases), proactively use the Rubber Duck agent to critique the plan **before** implementation.
+- Treat Rubber Duck feedback as independent review input: verify key findings, adopt fixes that prevent real bugs, and avoid unnecessary complexity.
+
+---
+
 ## Forbidden Patterns
 
 | Pattern | Reason | Alternative |
@@ -301,4 +308,4 @@ Serena MCP が利用可能な場合、コード操作には Serena のシンボ�
 - Commit in small, coherent chunks during implementation so progress is saved incrementally.
 - Do not hardcode a commit author identity. Use the currently authenticated `gh` user for GitHub operations, and use the current repository/global `git config user.name` and `git config user.email` for local commits. Do not add any `Co-Authored-By` lines.
 - Message format: `<scope>(<app>): <what changed>` — e.g., `fix(ato-desktop): guard evaluate_script after PageLoadEvent::Finished`
-
+- When merging pull requests, **do not use squash merge**. Preserve commits and merge as-is.
