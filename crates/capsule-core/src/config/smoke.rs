@@ -728,6 +728,16 @@ fn prepare_smoke_working_directory(
     // Skip git-hooks managers (husky, lefthook, etc.): the smoke workspace has no .git dir.
     command.env("HUSKY", "0");
     command.env("LEFTHOOK", "0");
+    // Pin Python for node-gyp native builds. Python 3.12+ dropped distutils, which node-gyp
+    // requires. Use python3.11 unless the service explicitly provides its own PYTHON override.
+    // Both knobs are set: npm_config_python is checked by node-gyp/npm first; PYTHON is the
+    // fallback used by older tooling and scripts.
+    if !service.env.contains_key("PYTHON") {
+        command.env("PYTHON", "python3.11");
+    }
+    if !service.env.contains_key("npm_config_python") {
+        command.env("npm_config_python", "python3.11");
+    }
     // Use the bundled pnpm content-addressable store (fetched during build) so the
     // smoke install resolves from cache rather than downloading from the network.
     if program == "pnpm" {
@@ -1201,7 +1211,7 @@ startup_timeout_ms = 0
         fs::write(
             &pnpm_path,
             format!(
-                "#!/bin/sh\n{{\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'TMPDIR=%s\\n' \"$TMPDIR\"\nprintf 'npm_config_cache=%s\\n' \"$npm_config_cache\"\nprintf 'pnpm_config_store_dir=%s\\n' \"$pnpm_config_store_dir\"\nprintf 'SECRET_HOST_TOKEN=%s\\n' \"$SECRET_HOST_TOKEN\"\n}} > '{}'\nmkdir -p node_modules\nexit 0\n",
+                "#!/bin/sh\n{{\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'TMPDIR=%s\\n' \"$TMPDIR\"\nprintf 'npm_config_cache=%s\\n' \"$npm_config_cache\"\nprintf 'pnpm_config_store_dir=%s\\n' \"$pnpm_config_store_dir\"\nprintf 'PYTHON=%s\\n' \"$PYTHON\"\nprintf 'npm_config_python=%s\\n' \"$npm_config_python\"\nprintf 'SECRET_HOST_TOKEN=%s\\n' \"$SECRET_HOST_TOKEN\"\n}} > '{}'\nmkdir -p node_modules\nexit 0\n",
                 env_capture_path.display()
             ),
         )
@@ -1270,6 +1280,8 @@ startup_timeout_ms = 0
         assert!(captured.contains(&format!("TMPDIR={isolated_tmp}")));
         assert!(captured.contains(&format!("npm_config_cache={isolated_npm_cache}")));
         assert!(captured.contains(&format!("pnpm_config_store_dir={isolated_pnpm_store}")));
+        assert!(captured.contains("PYTHON=python3.11"));
+        assert!(captured.contains("npm_config_python=python3.11"));
         assert!(captured.contains("SECRET_HOST_TOKEN="));
         assert!(!captured.contains("do-not-leak"));
 
