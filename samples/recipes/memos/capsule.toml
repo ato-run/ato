@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "memos"
+version = "0.24.0"
+type = "app"
+description = "Lightweight, self-hosted memo hub — fast note capture with Markdown"
+homepage = "https://github.com/usememos/memos"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "neosmemo/memos:stable"
+port = 5230
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "notes, attachments, database"
+attach = "explicit"
+schema_id = "sha256:1ddf601be2a78994d7d6496bdbb5820b7ece8eac025832ea6daa33d16adef206"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "5230" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/opt/memos"
