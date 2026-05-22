@@ -45,10 +45,38 @@ impl OciProviderProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OciImageResolveRequest {
+pub(crate) struct OciImageResolutionRequest {
+    pub target_label: String,
     pub declared_ref: String,
-    pub platform: Option<OciPlatform>,
+    pub requested_platform: Option<OciPlatform>,
+    pub resolution_mode: OciImageResolutionMode,
     pub importer_input_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciImageResolutionMode {
+    Required,
+    BestEffort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciResolvedImage {
+    pub declared_ref: String,
+    pub resolved_digest: String,
+    pub platform: OciPlatform,
+    pub media_type: Option<String>,
+    pub provider_semantics: OciProviderSemantics,
+}
+
+impl OciResolvedImage {
+    pub(crate) fn into_lock_resolution(self) -> OciImageResolution {
+        OciImageResolution {
+            declared_ref: self.declared_ref,
+            resolved_digest: self.resolved_digest,
+            platform: self.platform,
+            importer_input_hash: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +149,27 @@ pub(crate) enum OciProviderError {
     },
     #[error("OCI provider does not support operation '{0}'")]
     Unsupported(&'static str),
+
+    #[error("OCI image reference '{declared_ref}' is malformed: {reason}")]
+    ImageRefMalformed {
+        declared_ref: String,
+        reason: String,
+    },
+
+    #[error("OCI image '{declared_ref}' resolve failed: {reason}")]
+    ImageResolveFailed {
+        declared_ref: String,
+        reason: String,
+    },
+
+    #[error("OCI image '{declared_ref}' does not support platform '{platform}'")]
+    ImagePlatformUnsupported {
+        declared_ref: String,
+        platform: String,
+    },
+
+    #[error("OCI registry authentication required for '{declared_ref}'")]
+    RegistryAuthRequired { declared_ref: String },
 }
 
 impl OciProviderError {
@@ -133,6 +182,10 @@ impl OciProviderError {
             Self::CapabilityUnsupported { .. } => "oci_provider_capability_unsupported",
             Self::CommandFailed { .. } | Self::Operation { .. } => "oci_provider_command_failed",
             Self::Unsupported(_) => "oci_provider_unsupported_operation",
+            Self::ImageRefMalformed { .. } => "oci_image_ref_malformed",
+            Self::ImageResolveFailed { .. } => "oci_image_resolve_failed",
+            Self::ImagePlatformUnsupported { .. } => "oci_image_platform_unsupported",
+            Self::RegistryAuthRequired { .. } => "oci_registry_auth_required",
         }
     }
 
@@ -152,8 +205,8 @@ pub(crate) trait OciProvider: Send + Sync {
 
     async fn resolve_image(
         &self,
-        _request: &OciImageResolveRequest,
-    ) -> Result<OciImageResolution, OciProviderError> {
+        _request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
         Err(OciProviderError::Unsupported("resolve_image"))
     }
 
@@ -390,6 +443,112 @@ where
         }
     }
 
+    async fn resolve_image(
+        &self,
+        request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
+        let declared_ref = &request.declared_ref;
+
+        // Validate basic format.
+        if declared_ref.trim().is_empty()
+            || declared_ref
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return Err(OciProviderError::ImageRefMalformed {
+                declared_ref: declared_ref.clone(),
+                reason: "image reference must be non-empty and must not contain whitespace"
+                    .to_string(),
+            });
+        }
+
+        // Extract digest if already embedded in the ref (e.g. "image@sha256:...").
+        let ref_digest = extract_digest_from_ref(declared_ref);
+        if let Some(ref digest) = ref_digest {
+            if let Err(reason) = validate_oci_digest_format(digest) {
+                return Err(OciProviderError::ImageRefMalformed {
+                    declared_ref: declared_ref.clone(),
+                    reason,
+                });
+            }
+        }
+
+        // Always call `podman manifest inspect` to get manifest information.
+        // This is required for platform discovery in all cases.
+        let output = run_provider_command(
+            &self.runner,
+            "podman",
+            &["manifest", "inspect", declared_ref],
+        )?;
+
+        if !output.success() {
+            let combined = format!("{} {}", output.stdout, output.stderr);
+            if is_registry_auth_error(&combined) {
+                return Err(OciProviderError::RegistryAuthRequired {
+                    declared_ref: declared_ref.clone(),
+                });
+            }
+            let reason = if output.stderr.trim().is_empty() {
+                output.stdout.trim().to_string()
+            } else {
+                output.stderr.trim().to_string()
+            };
+            return Err(OciProviderError::ImageResolveFailed {
+                declared_ref: declared_ref.clone(),
+                reason,
+            });
+        }
+
+        let parsed = parse_manifest_inspect(&output.stdout).map_err(|reason| {
+            OciProviderError::ImageResolveFailed {
+                declared_ref: declared_ref.clone(),
+                reason: format!("could not parse manifest inspect output: {reason}"),
+            }
+        })?;
+
+        if parsed.is_list {
+            // Manifest list: select the platform entry and use its child digest.
+            let entry = select_platform_entry(
+                &parsed.entries,
+                request.requested_platform.as_ref(),
+                declared_ref,
+            )?;
+            Ok(OciResolvedImage {
+                declared_ref: declared_ref.clone(),
+                resolved_digest: entry.digest.clone(),
+                platform: entry.platform.clone(),
+                media_type: entry.media_type.clone(),
+                provider_semantics: self.semantics.clone(),
+            })
+        } else {
+            // Single-arch manifest: only usable when we already have the digest from the ref.
+            if let Some(digest) = ref_digest {
+                let platform = request.requested_platform.clone().ok_or_else(|| {
+                    OciProviderError::ImagePlatformUnsupported {
+                        declared_ref: declared_ref.clone(),
+                        platform: "single-platform manifest: specify requested_platform to resolve"
+                            .to_string(),
+                    }
+                })?;
+                Ok(OciResolvedImage {
+                    declared_ref: declared_ref.clone(),
+                    resolved_digest: digest,
+                    platform,
+                    media_type: parsed.media_type,
+                    provider_semantics: self.semantics.clone(),
+                })
+            } else {
+                // Mutable tag + single-arch: cannot get digest without pulling.
+                Err(OciProviderError::ImageResolveFailed {
+                    declared_ref: declared_ref.clone(),
+                    reason: "single-platform manifest requires image pull for digest resolution; \
+                        use a digest reference or ensure the image has a manifest list"
+                        .to_string(),
+                })
+            }
+        }
+    }
+
     async fn pull_image(&self, _image: &OciImageResolution) -> Result<(), OciProviderError> {
         Err(OciProviderError::Unsupported("pull_image"))
     }
@@ -553,6 +712,169 @@ fn machine_running(value: &serde_json::Value) -> bool {
         .or_else(|| value.get("running"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
+}
+
+// ── Manifest inspect helpers ─────────────────────────────────────────────────
+
+struct ManifestEntry {
+    digest: String,
+    platform: OciPlatform,
+    media_type: Option<String>,
+}
+
+struct ManifestInspectParsed {
+    is_list: bool,
+    entries: Vec<ManifestEntry>,
+    media_type: Option<String>,
+}
+
+/// Parse `podman manifest inspect` JSON output.
+///
+/// Returns a manifest list (with per-platform entries) when the JSON contains
+/// a `"manifests"` array.  Returns a single-arch sentinel when it does not.
+fn parse_manifest_inspect(json: &str) -> Result<ManifestInspectParsed, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json.trim()).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let media_type = value
+        .get("mediaType")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    if let Some(manifests_arr) = value.get("manifests").and_then(|v| v.as_array()) {
+        let mut entries = Vec::with_capacity(manifests_arr.len());
+        for (i, m) in manifests_arr.iter().enumerate() {
+            let digest = m
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("manifests[{i}] missing 'digest'"))?
+                .to_string();
+            let platform_json = m
+                .get("platform")
+                .ok_or_else(|| format!("manifests[{i}] missing 'platform'"))?;
+            let os = platform_json
+                .get("os")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("manifests[{i}].platform missing 'os'"))?
+                .to_string();
+            let architecture = platform_json
+                .get("architecture")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("manifests[{i}].platform missing 'architecture'"))?
+                .to_string();
+            let variant = platform_json
+                .get("variant")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let entry_media_type = m
+                .get("mediaType")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            entries.push(ManifestEntry {
+                digest,
+                platform: OciPlatform {
+                    os,
+                    architecture,
+                    variant,
+                },
+                media_type: entry_media_type,
+            });
+        }
+        Ok(ManifestInspectParsed {
+            is_list: true,
+            entries,
+            media_type,
+        })
+    } else {
+        Ok(ManifestInspectParsed {
+            is_list: false,
+            entries: Vec::new(),
+            media_type,
+        })
+    }
+}
+
+/// Select the manifest entry that best matches `requested`.
+///
+/// - If `requested` is `Some`: find an exact `os/architecture[/variant]` match or fail.
+/// - If `requested` is `None` and there is exactly one entry: return it.
+/// - If `requested` is `None` and there are multiple entries: fail with an ambiguity error.
+fn select_platform_entry<'a>(
+    entries: &'a [ManifestEntry],
+    requested: Option<&OciPlatform>,
+    declared_ref: &str,
+) -> Result<&'a ManifestEntry, OciProviderError> {
+    if let Some(requested) = requested {
+        entries
+            .iter()
+            .find(|e| {
+                e.platform.os == requested.os
+                    && e.platform.architecture == requested.architecture
+                    && (requested.variant.is_none() || e.platform.variant == requested.variant)
+            })
+            .ok_or_else(|| {
+                let requested_platform = format!(
+                    "{}/{}{}",
+                    requested.os,
+                    requested.architecture,
+                    requested
+                        .variant
+                        .as_deref()
+                        .map(|v| format!("/{v}"))
+                        .unwrap_or_default()
+                );
+                OciProviderError::ImagePlatformUnsupported {
+                    declared_ref: declared_ref.to_string(),
+                    platform: requested_platform,
+                }
+            })
+    } else if entries.len() == 1 {
+        Ok(&entries[0])
+    } else {
+        let platforms: Vec<_> = entries
+            .iter()
+            .map(|e| format!("{}/{}", e.platform.os, e.platform.architecture))
+            .collect();
+        Err(OciProviderError::ImagePlatformUnsupported {
+            declared_ref: declared_ref.to_string(),
+            platform: format!(
+                "ambiguous: {} platform(s) available ({}); specify requested_platform",
+                entries.len(),
+                platforms.join(", ")
+            ),
+        })
+    }
+}
+
+/// Extract the `sha256:...` digest embedded in `image@sha256:...` style refs.
+fn extract_digest_from_ref(declared_ref: &str) -> Option<String> {
+    declared_ref
+        .find("@sha256:")
+        .map(|pos| declared_ref[pos + 1..].to_string())
+}
+
+/// Require `sha256:` prefix followed by exactly 64 lowercase hex characters.
+fn validate_oci_digest_format(digest: &str) -> Result<(), String> {
+    let hex = digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("digest must start with 'sha256:', got '{digest}'"))?;
+    if hex.len() != 64 {
+        return Err(format!(
+            "sha256 digest must be 64 hex characters, got {}",
+            hex.len()
+        ));
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("sha256 digest must contain only hexadecimal characters".to_string());
+    }
+    Ok(())
+}
+
+fn is_registry_auth_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("unauthorized")
+        || lower.contains("authentication required")
+        || lower.contains("auth required")
 }
 
 pub(crate) struct DockerCompatibleOciProvider<C> {
@@ -1099,5 +1421,242 @@ mod tests {
                 "start:ato-test".to_string(),
             ]
         );
+    }
+
+    // ── Image resolution tests ────────────────────────────────────────────────
+
+    fn multi_arch_manifest_json() -> &'static str {
+        r#"{
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+          "manifests": [
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "platform": { "os": "linux", "architecture": "amd64" }
+            },
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "platform": { "os": "linux", "architecture": "arm64", "variant": "v8" }
+            }
+          ]
+        }"#
+    }
+
+    fn single_arch_manifest_json() -> &'static str {
+        r#"{
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+          "config": { "mediaType": "application/vnd.docker.container.image.v1+json" }
+        }"#
+    }
+
+    fn fake_semantics() -> OciProviderSemantics {
+        OciProviderSemantics {
+            kind: OciProviderKind::Podman,
+            mode: OciProviderMode::Rootless,
+            substrate: OciProviderSubstrate::NativeLinux,
+            policy_profile: "oci-podman-v1".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolves_tag_to_digest_and_platform_with_fake_provider() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "postgres:14"],
+                output(0, multi_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: "postgres:14".to_string(),
+            requested_platform: Some(OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let resolved = provider.resolve_image(&request).await.expect("resolve");
+        assert_eq!(
+            resolved.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(resolved.platform.os, "linux");
+        assert_eq!(resolved.platform.architecture, "amd64");
+        assert_eq!(resolved.declared_ref, "postgres:14");
+    }
+
+    #[tokio::test]
+    async fn digest_ref_with_platform_resolves_single_arch_manifest() {
+        let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let declared_ref = format!("postgres@{digest}");
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", &declared_ref],
+                output(0, single_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: declared_ref.clone(),
+            requested_platform: Some(OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let resolved = provider.resolve_image(&request).await.expect("resolve");
+        assert_eq!(resolved.resolved_digest, digest);
+        assert_eq!(resolved.platform.architecture, "amd64");
+    }
+
+    #[tokio::test]
+    async fn mutable_tag_single_arch_manifest_fails_with_typed_error() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "myimage:latest"],
+                output(0, single_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "app".to_string(),
+            declared_ref: "myimage:latest".to_string(),
+            requested_platform: Some(OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("should fail for mutable tag on single-arch manifest");
+        assert_eq!(err.code(), "oci_image_resolve_failed");
+        assert!(
+            err.to_string().contains("requires image pull"),
+            "error should explain pull is needed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_image_ref_returns_typed_error() {
+        let provider =
+            PodmanProvider::with_runner(FakeRunner::default(), PodmanProbePlatform::Linux);
+
+        let request = OciImageResolutionRequest {
+            target_label: "app".to_string(),
+            declared_ref: "has space".to_string(),
+            requested_platform: None,
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("malformed ref must fail");
+        assert_eq!(err.code(), "oci_image_ref_malformed");
+    }
+
+    #[tokio::test]
+    async fn unsupported_platform_returns_typed_error_when_ambiguous() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "postgres:14"],
+                output(0, multi_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: "postgres:14".to_string(),
+            requested_platform: None, // no platform → ambiguous
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("ambiguous platform must fail");
+        assert_eq!(err.code(), "oci_image_platform_unsupported");
+        assert!(
+            err.to_string().contains("ambiguous"),
+            "error should mention ambiguity: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_platform_returns_typed_error_when_not_found() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "postgres:14"],
+                output(0, multi_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: "postgres:14".to_string(),
+            requested_platform: Some(OciPlatform {
+                os: "windows".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("unsupported platform must fail");
+        assert_eq!(err.code(), "oci_image_platform_unsupported");
+    }
+
+    #[test]
+    fn resolved_image_converts_to_lock_resolution() {
+        let resolved = OciResolvedImage {
+            declared_ref: "postgres:14".to_string(),
+            resolved_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            media_type: Some("application/vnd.docker.distribution.manifest.v2+json".to_string()),
+            provider_semantics: fake_semantics(),
+        };
+
+        let lock = resolved.into_lock_resolution();
+        assert_eq!(lock.declared_ref, "postgres:14");
+        assert_eq!(
+            lock.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(lock.platform.os, "linux");
+        assert_eq!(lock.platform.architecture, "amd64");
+        assert!(lock.importer_input_hash.is_none());
     }
 }
