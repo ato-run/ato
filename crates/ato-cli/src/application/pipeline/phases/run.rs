@@ -3001,6 +3001,33 @@ where
             anyhow::bail!("--background is not supported for orchestration mode");
         }
 
+        // OCI service graph: route to the official Podman-backed multi-service executor.
+        // This must be checked before the legacy Bollard orchestrator to avoid routing
+        // OCI services through the Docker-compatible path.
+        if decision.plan.all_services_are_oci() {
+            let exit = crate::executors::oci_multi_service::execute_multi_service(
+                &decision.plan,
+                request.reporter.clone(),
+                &launch_ctx,
+            )
+            .await?;
+            if exit != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
+                }
+                maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
+                std::process::exit(exit);
+            }
+            progress.ok(
+                HourglassPhase::Execute,
+                "oci multi-service runtime completed",
+            );
+            return Ok(());
+        }
+
         let exit = crate::executors::orchestrator::execute(
             &decision.plan,
             &prepared,

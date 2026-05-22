@@ -468,3 +468,153 @@ invocation.
 Docker Compose subset importer and `install.sh` intent extractor are deferred
 to PR 9. The execution model (digest lock, provider gate, identity boundary,
 receipt) must be solid before adding importer-generated capsule manifests.
+
+---
+
+## 9. PR 8 — Multi-Service Podman OCI Execution
+
+### 9.1 Scope
+
+PR 8 supports an explicit OCI service graph declared through the existing
+`[services]` model. The motivating example is Blinko: an app container
+(`blinkospace/blinko:latest`) and a database container (`postgres:14`) where
+the app must reach the database by an internal alias before it starts.
+
+Out of scope for PR 8:
+- Docker Compose or `install.sh` importers (PR 9)
+- Privileged containers, host network, device mounts
+- Restart-always policy
+- Swarm/deploy semantics
+
+### 9.2 Service graph execution
+
+Services are started in topological order derived from `depends_on`.
+
+```
+1. Resolve all OCI images → require digest for every service (Required mode)
+2. Apply aggregate policy gate (Strict/Loose/Off)
+3. Create session-scoped Podman network
+4. For each service (in dependency order):
+   a. Pull resolved image
+   b. Create container with Ato-owned labels and network alias
+   c. Start container
+   d. Wait readiness (TCP or HTTP probe)
+5. Record session state and return receipt
+```
+
+Failure at any step triggers cleanup of all resources created so far.
+
+### 9.3 Podman network and naming
+
+One Podman network per Ato session, named `ato_<session_id_prefix>`.
+
+Container names are session-scoped: `ato_<session_prefix>_<service_label>`.
+
+Network aliases are the logical service labels (e.g., `db`, `app`). Internal
+traffic uses these aliases; the alias is never exposed externally.
+
+Required Ato-owned labels on all resources:
+
+```
+io.ato.managed = true
+io.ato.session_id = <id>
+io.ato.execution_id = <id>
+io.ato.provider = podman
+io.ato.target = <service_label>
+```
+
+### 9.4 State bindings → Podman bind mounts
+
+Existing `[state.*]` entries with `state_bindings` are mapped to bind mounts
+on the container at execution time.
+
+- `durability = "persistent"` → volume path is preserved across sessions; not
+  deleted on failure.
+- `durability = "ephemeral"` → temp directory path is deleted on session stop
+  or failure.
+
+Volume path is recorded in the session record keyed by the state name.
+
+Execution identity includes the state binding *shape* (state key, target path,
+durability), not the generated volume path or contents.
+
+### 9.5 Readiness probes
+
+Container exit-wait is NOT used as a readiness signal for long-running
+services. Two probe types are supported:
+
+| Probe type | Use case |
+|------------|----------|
+| TCP | database port liveness (`postgres:5432`) |
+| HTTP | app endpoint liveness (`blinko:1111/health`) |
+
+Probe parameters are resolved from the service `port` declaration and optional
+capsule manifest hints. If no explicit probe is configured, TCP probe on the
+declared port is attempted.
+
+If readiness times out, `OciProviderError::HealthcheckTimeout` is returned,
+logs for the failed service are collected, and all resources are cleaned up.
+
+### 9.6 Ports
+
+Only the user-facing service (the one with the declared manifest `port`) gets
+a host port. Database ports are internal only.
+
+| Field | Location |
+|-------|----------|
+| Container port (stable) | Execution identity |
+| Auto-allocated host port | Session record and receipt URL only |
+
+Host port must not appear in execution identity or receipt identity hash.
+
+### 9.7 Generated secret wiring
+
+For Blinko-style `app + postgres`, connection secrets (`POSTGRES_PASSWORD`,
+`NEXTAUTH_SECRET`, `DATABASE_URL`) are generated per-session.
+
+Rules:
+- Secret values never enter execution identity.
+- Secret values never enter receipt (only redacted key names and derivation
+  shape are recorded).
+- `ATO_SERVICE_<LABEL>_HOST` is the network alias (stable), not `127.0.0.1`.
+- `ATO_SERVICE_<LABEL>_PORT` is the container port, not the host port.
+- `DATABASE_URL` template shape is part of identity; the embedded password
+  value is not.
+
+### 9.8 Policy behavior at graph level
+
+Policy mode is aggregated across the service graph.
+
+| `policy_mode` | `egress_allow` | Outcome |
+|---------------|----------------|---------|
+| `Strict` | non-empty | Execution blocked |
+| `Strict` | empty | Gate passes |
+| `Loose` | non-empty | Diagnostic warning; execution proceeds |
+| `Loose` | empty | Gate passes |
+| `Off` | any | Always passes |
+
+`Strict` is the default for new manifests.
+
+### 9.9 Session and receipt
+
+Session records:
+- provider kind
+- network name / id
+- per-service: container id, container name, image digest, platform, readiness status
+- main service host port
+- volumes keyed by state name
+
+Receipt records:
+- declared image refs
+- resolved digests
+- provider semantics label
+- policy enforcement result
+- redacted env key names and derivation shape
+
+Receipt never contains: secret values, generated passwords, allocated host
+port in identity, Podman machine id in identity.
+
+### 9.10 Compose / install.sh importer
+
+Docker Compose subset importer and `install.sh` intent extractor remain
+deferred to PR 9.
