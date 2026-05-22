@@ -1339,8 +1339,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
     // `verify_lockfile_external_dependencies(manifest, lock)` stays
     // as a debug parity guard.
     {
-        let external_dependencies =
-            manifest_external_capsule_dependencies(&plan.manifest)?;
+        let external_dependencies = manifest_external_capsule_dependencies(&plan.manifest)?;
         let bundle = crate::application::graph_views::build_declared_only_bundle(
             &external_dependencies,
             Some(plan.manifest_path.display().to_string()),
@@ -1352,11 +1351,8 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             &compatibility_legacy_lock.lock,
         )?;
         debug_assert!(
-            verify_lockfile_external_dependencies(
-                &plan.manifest,
-                &compatibility_legacy_lock.lock,
-            )
-            .is_ok(),
+            verify_lockfile_external_dependencies(&plan.manifest, &compatibility_legacy_lock.lock,)
+                .is_ok(),
             "PR-4a parity: legacy verifier disagrees with bundle-derived verifier \
              at run.rs pre-spawn gate (compatibility branch)"
         );
@@ -2755,10 +2751,7 @@ fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspac
 /// Resolve `{{deps.<alias>.runtime_exports.<key>}}` templates using the
 /// dependency orchestrator's resolved exports. If the value is not a
 /// template, it is returned unchanged.
-fn resolve_dep_template_inner(
-    value: &str,
-    graph: &RunningGraph,
-) -> String {
+fn resolve_dep_template_inner(value: &str, graph: &RunningGraph) -> String {
     if !value.contains("deps.") || !value.contains("runtime_exports.") {
         return value.to_string();
     }
@@ -3116,26 +3109,21 @@ where
         let plan_granted = crate::consent_store::has_consent(&execution_plan)?;
         debug_assert!(
             {
-                let consent_deps =
-                    capsule_core::lockfile::manifest_external_capsule_dependencies(
-                        &decision.plan.manifest,
-                    )
-                    .ok();
+                let consent_deps = capsule_core::lockfile::manifest_external_capsule_dependencies(
+                    &decision.plan.manifest,
+                )
+                .ok();
                 let view_granted = consent_deps.map(|deps| {
-                    let consent_input =
-                        capsule_core::engine::execution_graph::GraphConsentInput {
-                            scoped_id: execution_plan.consent.key.scoped_id.clone(),
-                            version: execution_plan.consent.key.version.clone(),
-                            target_label: execution_plan.consent.key.target_label.clone(),
-                            policy_segment_hash: execution_plan
-                                .consent
-                                .policy_segment_hash
-                                .clone(),
-                            provisioning_policy_hash: execution_plan
-                                .consent
-                                .provisioning_policy_hash
-                                .clone(),
-                        };
+                    let consent_input = capsule_core::engine::execution_graph::GraphConsentInput {
+                        scoped_id: execution_plan.consent.key.scoped_id.clone(),
+                        version: execution_plan.consent.key.version.clone(),
+                        target_label: execution_plan.consent.key.target_label.clone(),
+                        policy_segment_hash: execution_plan.consent.policy_segment_hash.clone(),
+                        provisioning_policy_hash: execution_plan
+                            .consent
+                            .provisioning_policy_hash
+                            .clone(),
+                    };
                     let bundle =
                         crate::application::graph_views::build_declared_only_bundle_with_consent(
                             &deps,
@@ -3145,9 +3133,7 @@ where
                             consent_input,
                         );
                     let view =
-                        crate::application::graph_views::ExecutionConsentView::from_bundle(
-                            &bundle,
-                        );
+                        crate::application::graph_views::ExecutionConsentView::from_bundle(&bundle);
                     crate::consent_store::has_consent_view(&view).unwrap_or(plan_granted)
                 });
                 view_granted
@@ -3234,15 +3220,20 @@ where
         let target_env: Vec<(String, String)> = decision.plan.execution_env().into_iter().collect();
         // Resolve {{deps.X.runtime_exports.Y}} templates from the running dep graph.
         let resolved_env: Vec<(String, String)> = {
-            let graph = dep_contracts.as_ref().and_then(DependencyContractGuard::graph);
-            target_env.into_iter().map(|(key, value)| {
-                let resolved = if let Some(g) = graph {
-                    resolve_dep_template_inner(&value, g)
-                } else {
-                    value.to_string()
-                };
-                (key, resolved)
-            }).collect()
+            let graph = dep_contracts
+                .as_ref()
+                .and_then(DependencyContractGuard::graph);
+            target_env
+                .into_iter()
+                .map(|(key, value)| {
+                    let resolved = if let Some(g) = graph {
+                        resolve_dep_template_inner(&value, g)
+                    } else {
+                        value.to_string()
+                    };
+                    (key, resolved)
+                })
+                .collect()
         };
         tracing::info!(%command, cwd=%prestart_cwd.display(), env_count=%resolved_env.len(), has_graph=%dep_contracts.as_ref().and_then(DependencyContractGuard::graph).is_some(), "running prestart command");
         // Debug: log DATABASE_URL value
@@ -3257,9 +3248,7 @@ where
         for (key, value) in &resolved_env {
             cmd.env(key, value);
         }
-        let mut child = cmd
-            .spawn()
-            .context("failed to spawn prestart command")?;
+        let mut child = cmd.spawn().context("failed to spawn prestart command")?;
         let status = child.wait().context("prestart command wait failed")?;
         if !status.success() {
             anyhow::bail!(
@@ -4050,8 +4039,7 @@ mod tests {
         reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
         validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
         ExternalServiceContract, ExternalServiceHealthcheck, ExternalServiceHealthcheckKind,
-        ExternalServiceMode,
-        PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
+        ExternalServiceMode, PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4742,7 +4730,10 @@ node = "20"
             targets.contains_key("default"),
             "alias [targets.default] should have been inserted"
         );
-        let default_target = targets.get("default").and_then(toml::Value::as_table).unwrap();
+        let default_target = targets
+            .get("default")
+            .and_then(toml::Value::as_table)
+            .unwrap();
         assert_eq!(
             default_target.get("build").and_then(toml::Value::as_str),
             Some("npm install && npm run build")

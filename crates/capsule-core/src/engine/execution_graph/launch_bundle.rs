@@ -525,13 +525,13 @@ mod tests {
                 GraphDependencyInput {
                     provider: "provider://db".to_string(),
                     output: "output://db".to_string(),
-                ..Default::default()
-            },
+                    ..Default::default()
+                },
                 GraphDependencyInput {
                     provider: "provider://cache".to_string(),
                     output: "output://cache".to_string(),
-                ..Default::default()
-            },
+                    ..Default::default()
+                },
             ],
             declared_host: Some(GraphHostInput {
                 filesystem_source_root: Some("workspace:.".to_string()),
