@@ -614,6 +614,20 @@ fn parse_docker_run(
                 continue;
             }
 
+            // ── Shell variable in flag position (e.g., $volume_mount) ────────
+            // The Blinko install.sh pattern uses `$volume_mount \` as an
+            // optional `-v` flag that expands to empty string or a volume
+            // spec at runtime.  We cannot expand it statically; skip it and
+            // continue so the real image ref that follows is captured.
+            _ if tok.starts_with('$') && iter.peek().is_some() => {
+                warnings.push(format!(
+                    "line {line_num}: shell variable '{tok}' in flag position skipped \
+                     (dynamic expansion not supported; volume mounts using shell variables \
+                     must be declared as state bindings)"
+                ));
+                continue;
+            }
+
             // ── Image reference (first positional arg) ───────────────────────
             _ => {
                 image_ref = Some(tok.clone());
@@ -1084,6 +1098,56 @@ docker run -d \
             .expect("blinko-website service");
         assert!(!app_svc.ports.is_empty(), "app service should have port");
         assert_eq!(app_svc.ports[0].container_port, 1111);
+    }
+
+    // ── 2b. Real Blinko install.sh with $volume_mount shell variable ──────────
+
+    #[test]
+    fn shell_variable_in_flag_position_is_skipped_real_blinko_pattern() {
+        // The actual Blinko install.sh uses `$volume_mount \` as an optional
+        // -v flag that expands to either `-v /path:/app/.blinko` or empty
+        // string depending on interactive prompt.  The parser must skip it
+        // and find `blinkospace/blinko:latest` as the image ref.
+        let script = r#"#!/bin/bash
+docker network create blinko-network
+docker run -d \
+  --name blinko-postgres \
+  --network blinko-network \
+  -e POSTGRES_DB=postgres \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=mysecretpassword \
+  --restart always \
+  postgres:14
+docker run -d \
+  --name blinko-website \
+  --network blinko-network \
+  -p 1111:1111 \
+  -e NODE_ENV=production \
+  -e NEXTAUTH_SECRET=my_ultra_secure_nextauth_secret \
+  -e DATABASE_URL=postgresql://postgres:mysecretpassword@blinko-postgres:5432/postgres \
+  $volume_mount \
+  --restart always \
+  blinkospace/blinko:latest
+"#;
+        let out = import_docker_run_script(&make_input(script)).unwrap();
+        assert_eq!(out.services.len(), 2, "expected postgres + blinko-website");
+
+        let website = out
+            .services
+            .iter()
+            .find(|s| s.name.contains("website"))
+            .expect("blinko-website service");
+        assert_eq!(
+            website.image_ref, "blinkospace/blinko:latest",
+            "$volume_mount must not be treated as image ref"
+        );
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("$volume_mount") && w.contains("skipped")),
+            "expected warning about shell variable, got: {:?}",
+            out.warnings
+        );
     }
 
     // ── 3. docker network create is metadata only ─────────────────────────────
