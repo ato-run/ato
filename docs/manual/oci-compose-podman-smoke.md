@@ -149,15 +149,52 @@ podman volume prune -f  # only if pg_data should be removed
 
 | Test path | What it covers |
 |-----------|---------------|
-| Fake-provider unit tests (17 total) | Import, resolve, policy gate, pull failure, diagnostics |
+| Fake-provider unit tests (24 total) | Import, resolve, policy gate, pull failure, diagnostics, lock persistence replay |
 | `#[ignore]` opt-in real Podman test | Minimal two-service alpine smoke |
 | Manual Blinko smoke (this doc) | Full user-facing path with real images |
+
+---
+
+## Lock persistence behavior (PR 10.6)
+
+From PR 10.6 onward, `ato.oci.lock.json` is written to the project directory
+after image digest resolution.
+
+### First run (no lock)
+
+```
+📋 Compose file: /tmp/blinko-smoke/docker-compose.yml
+🔧 Services: postgres, blinko
+🔍 [postgres] Resolving image digest: postgres:16-alpine
+✅ [postgres] Resolved: sha256:abcdef12345...
+🔍 [blinko] Resolving image digest: blinkospace/blinko:latest
+✅ [blinko] Resolved: sha256:deadbeef678...
+🔒 Lock written: ato.oci.lock.json
+```
+
+`ato.oci.lock.json` is created in the project directory.
+
+### Second run (lock present and fresh)
+
+```
+📋 Compose file: /tmp/blinko-smoke/docker-compose.yml
+🔧 Services: postgres, blinko
+♻️  [postgres] Reusing lock: postgres:16-alpine → sha256:abcdef12345...
+♻️  [blinko] Reusing lock: blinkospace/blinko:latest → sha256:deadbeef678...
+🔒 Lock written: ato.oci.lock.json
+```
+
+No provider round-trip for either service. Execution identity is unchanged.
+
+### Compose file changed (lock drift)
+
+If the `docker-compose.yml` content changes (hash changes), all entries are
+re-resolved and the lock is updated with fresh digests.
 
 ---
 
 ## Deferred (future PRs)
 
 - `install.sh` / `docker run` intent extractor (PR 11)
-- Lock file persistence for resolved image digests (currently in-memory only)
 - Persistent volume GC policy
 - Readiness probe timeout tests against real containers
