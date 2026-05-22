@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::adapters::runtime::oci_session_store::{OciSessionStatus, OciSessionStore};
 use crate::binding;
 use crate::reporters::CliReporter;
 use crate::runtime::process::{format_duration, get_process_uptime, ProcessManager, ProcessStatus};
@@ -78,12 +79,46 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             })
             .collect();
 
-        let output = serde_json::to_string_pretty(&json_output)?;
+        // Append OCI sessions to JSON output.
+        let oci_sessions = OciSessionStore::new()
+            .ok()
+            .and_then(|s| s.list_sessions().ok())
+            .unwrap_or_default();
+        let oci_json: Vec<serde_json::Value> = oci_sessions
+            .iter()
+            .filter(|s| args.all || s.status == OciSessionStatus::Running)
+            .map(|s| {
+                serde_json::json!({
+                    "kind": "oci",
+                    "id": s.session_id,
+                    "import_kind": s.import_kind,
+                    "service_count": s.services.len(),
+                    "main_endpoint": s.main_endpoint,
+                    "network": s.network_name,
+                    "status": s.status.to_string(),
+                    "created_at": s.created_at,
+                })
+            })
+            .collect();
+        let mut combined = json_output;
+        combined.extend(oci_json);
+
+        let output = serde_json::to_string_pretty(&combined)?;
         futures::executor::block_on(reporter.notify(output))?;
     } else {
         futures::executor::block_on(reporter.notify("📋 Listing capsule sessions...".to_string()))?;
 
-        if processes.is_empty() {
+        // Load OCI sessions.
+        let oci_sessions = OciSessionStore::new()
+            .ok()
+            .and_then(|s| s.list_sessions().ok())
+            .unwrap_or_default();
+        let oci_visible: Vec<_> = oci_sessions
+            .iter()
+            .filter(|s| args.all || s.status == OciSessionStatus::Running)
+            .collect();
+
+        if processes.is_empty() && oci_visible.is_empty() {
             futures::executor::block_on(reporter.notify("No capsules found.".to_string()))?;
             return Ok(());
         }
@@ -137,10 +172,36 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             }
         }
 
+        // Show OCI sessions as a separate section.
+        for s in &oci_visible {
+            let status_icon = if s.status == OciSessionStatus::Running {
+                "🐳 running"
+            } else {
+                "⚪ stopped"
+            };
+            let endpoint = s.main_endpoint.as_deref().unwrap_or("-");
+            let id = if s.session_id.len() > 8 {
+                &s.session_id[..8]
+            } else {
+                &s.session_id
+            };
+            futures::executor::block_on(reporter.notify(format!(
+                "{:>8} {:>8} {:>12} {:>15} {:>34} {}",
+                "—",
+                id,
+                s.import_kind,
+                status_icon,
+                format!("oci/{}", s.import_kind),
+                endpoint
+            )))?;
+        }
+
         futures::executor::block_on(reporter.notify("-".repeat(100)))?;
-        futures::executor::block_on(
-            reporter.notify(format!("Total: {} capsule(s)", processes.len())),
-        )?;
+        futures::executor::block_on(reporter.notify(format!(
+            "Total: {} capsule(s) ({} OCI)",
+            processes.len() + oci_visible.len(),
+            oci_visible.len()
+        )))?;
     }
 
     Ok(())
