@@ -760,6 +760,126 @@ port = 3000
     }
 
     #[test]
+    fn test_v03_package_manager_script_generates_shell_service() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+schema_version = "0.3"
+name = "blinko"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "bun run start:server:production"
+"#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config = generate_config(&manifest_path, None, false).unwrap();
+        assert_eq!(config.services["main"].executable, "sh");
+        assert_eq!(
+            config.services["main"].args,
+            vec![
+                "-c".to_string(),
+                "bun run start:server:production".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_v03_package_manager_lifecycle_run_generates_shell_root_service() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let run_command =
+            "bun run prisma:migrate:deploy && bun run seed && bun run start:server:production";
+        let manifest = format!(
+            r#"
+schema_version = "0.3"
+name = "blinko"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+working_dir = "."
+run = "{run_command}"
+"#
+        );
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config = generate_config(&manifest_path, None, false).unwrap();
+        assert_eq!(config.services["main"].executable, "sh");
+        assert_eq!(
+            config.services["main"].args,
+            vec!["-c".to_string(), run_command.to_string()]
+        );
+        assert_eq!(config.services["main"].cwd.as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn test_v03_explicit_node_run_command_keeps_file_entrypoint() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+schema_version = "0.3"
+name = "node-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node server.js"
+"#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config = generate_config(&manifest_path, None, false).unwrap();
+        assert_eq!(config.services["main"].executable, "node");
+        assert_eq!(config.services["main"].args, vec!["server.js"]);
+    }
+
+    #[test]
+    fn test_v03_explicit_node_run_command_keeps_relative_file_entrypoint() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+schema_version = "0.3"
+name = "node-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "node ./dist/index.js"
+"#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config = generate_config(&manifest_path, None, false).unwrap();
+        assert_eq!(config.services["main"].executable, "node");
+        assert_eq!(config.services["main"].args, vec!["dist/index.js"]);
+    }
+
+    #[test]
+    fn test_v03_source_node_explicit_bun_run_command_keeps_bun_executable() {
+        let tmp = tempdir().unwrap();
+        let manifest_path = tmp.path().join("capsule.toml");
+
+        let manifest = r#"
+schema_version = "0.3"
+name = "bun-demo"
+version = "0.1.0"
+type = "app"
+runtime = "source/node"
+run = "bun src/index.ts"
+"#;
+
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let config = generate_config(&manifest_path, None, false).unwrap();
+        assert_eq!(config.services["main"].executable, "bun");
+        assert_eq!(config.services["main"].args, vec!["src/index.ts"]);
+    }
+
+    #[test]
     fn test_deno_app_config_generation() {
         let tmp = tempdir().unwrap();
         let manifest_path = tmp.path().join("capsule.toml");
