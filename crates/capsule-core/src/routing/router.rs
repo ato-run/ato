@@ -873,9 +873,7 @@ impl ExecutionDescriptor {
     /// Resolve a command value from a target-level field, handling both
     /// string and object (table) forms.
     fn resolve_target_field(&self, field: &str) -> Option<String> {
-        let target = self.manifest
-            .get("targets")?
-            .get(&self.selected_target)?;
+        let target = self.manifest.get("targets")?.get(&self.selected_target)?;
         let value = target.get(field)?;
         match value {
             toml::Value::String(s) => Some(s.clone()),

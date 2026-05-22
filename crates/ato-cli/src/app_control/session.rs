@@ -2985,7 +2985,10 @@ mod tests {
     }
 
     impl TestEnvGuard {
-        fn capture_and_set(ato_home_path: &std::path::Path, session_root: &std::path::Path) -> Self {
+        fn capture_and_set(
+            ato_home_path: &std::path::Path,
+            session_root: &std::path::Path,
+        ) -> Self {
             let guard = Self {
                 ato_home: std::env::var("ATO_HOME").ok(),
                 home: std::env::var("HOME").ok(),

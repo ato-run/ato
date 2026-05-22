@@ -543,7 +543,7 @@ mod tests {
             &plan,
             tmp.path(),
             "strict",
-            true,  // sandbox_mode = true
+            true, // sandbox_mode = true
             false,
             RuntimeGuardMode::Strict,
             false, // no authoritative lock
