@@ -33,6 +33,11 @@ const OCI_SESSIONS_DIR: &str = "oci-sessions";
 pub enum OciSessionStatus {
     Running,
     Stopped,
+    /// Stop was attempted but one or more containers/networks could not be
+    /// removed (e.g. Podman not reachable, permission error, partial cleanup).
+    /// The session record is kept so that a subsequent `ato stop --all` can
+    /// retry the cleanup.
+    StopFailed,
 }
 
 impl std::fmt::Display for OciSessionStatus {
@@ -40,6 +45,7 @@ impl std::fmt::Display for OciSessionStatus {
         match self {
             OciSessionStatus::Running => write!(f, "running"),
             OciSessionStatus::Stopped => write!(f, "stopped"),
+            OciSessionStatus::StopFailed => write!(f, "stop_failed"),
         }
     }
 }
@@ -165,13 +171,23 @@ impl OciSessionStore {
     }
 
     pub fn mark_stopped(&self, session_id: &str) -> Result<()> {
+        self.set_status(session_id, OciSessionStatus::Stopped)
+    }
+
+    /// Mark the session as `StopFailed`, keeping the record so that a
+    /// subsequent `ato stop --all` can retry the cleanup.
+    pub fn mark_stop_failed(&self, session_id: &str) -> Result<()> {
+        self.set_status(session_id, OciSessionStatus::StopFailed)
+    }
+
+    fn set_status(&self, session_id: &str, status: OciSessionStatus) -> Result<()> {
         let path = self.record_path(session_id);
         if !path.exists() {
             return Ok(());
         }
         let content = fs::read_to_string(&path)?;
         let mut record: OciSessionRecord = serde_json::from_str(&content)?;
-        record.status = OciSessionStatus::Stopped;
+        record.status = status;
         let updated = serde_json::to_string_pretty(&record)?;
         fs::write(&path, updated)?;
         Ok(())
@@ -273,6 +289,26 @@ pub struct StopResult {
     pub stopped_containers: Vec<String>,
     pub network_removed: bool,
     pub errors: Vec<String>,
+}
+
+impl StopResult {
+    pub fn is_fully_stopped(&self) -> bool {
+        self.errors.is_empty() && self.network_removed
+    }
+}
+
+/// Apply the result of [`stop_oci_session`] to the session store.
+///
+/// - **Full success** (`errors` empty AND `network_removed`): delete the record.
+/// - **Partial failure**: mark as `StopFailed` so that a subsequent
+///   `ato stop --all` can retry.  The record is preserved; real resources that
+///   may still be running can still be discovered and cleaned up.
+pub fn apply_stop_result(store: &OciSessionStore, session_id: &str, result: &StopResult) {
+    if result.is_fully_stopped() {
+        let _ = store.delete_session(session_id);
+    } else {
+        let _ = store.mark_stop_failed(session_id);
+    }
 }
 
 // ── ISO 8601 timestamp helper ─────────────────────────────────────────────────
@@ -602,6 +638,123 @@ mod tests {
             sessions.is_empty(),
             "fresh ATO_HOME should have no sessions, got: {:?}",
             sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>()
+        );
+    }
+
+    // ── apply_stop_result regression tests ───────────────────────────────────
+
+    /// When stop_oci_session returns container errors, the session record must
+    /// be kept as StopFailed so a later `ato stop --all` can retry.
+    #[test]
+    fn stop_all_oci_sessions_keeps_record_when_container_stop_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-fail-stop-1234");
+        store.write_session(&record).unwrap();
+
+        let failed_result = StopResult {
+            stopped_containers: vec![],
+            network_removed: false,
+            errors: vec!["stop ato-fail-stop-1234-app: permission denied".to_string()],
+        };
+        apply_stop_result(&store, "ato-fail-stop-1234", &failed_result);
+
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1, "record must be kept on stop failure");
+        assert_eq!(
+            sessions[0].status,
+            OciSessionStatus::StopFailed,
+            "status must be StopFailed, not deleted or Running"
+        );
+    }
+
+    /// When network removal fails (containers stopped but network rm errors),
+    /// the record must be kept as StopFailed.
+    #[test]
+    fn stop_all_oci_sessions_keeps_record_when_network_remove_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-fail-net-5678");
+        store.write_session(&record).unwrap();
+
+        let partial_result = StopResult {
+            stopped_containers: vec!["ato-fail-net-5678-app".to_string()],
+            network_removed: false, // network rm failed
+            errors: vec!["network rm ato-fail-net-5678: active endpoints".to_string()],
+        };
+        apply_stop_result(&store, "ato-fail-net-5678", &partial_result);
+
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "record must be kept when network rm fails"
+        );
+        assert_eq!(sessions[0].status, OciSessionStatus::StopFailed);
+    }
+
+    /// When stop succeeds fully (no errors, network removed), the record must
+    /// be deleted — not left as Running or StopFailed.
+    #[test]
+    fn stop_all_oci_sessions_deletes_record_only_on_full_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-ok-stop-abcd");
+        store.write_session(&record).unwrap();
+
+        let success_result = StopResult {
+            stopped_containers: vec![
+                "ato-ok-stop-abcd-db".to_string(),
+                "ato-ok-stop-abcd-app".to_string(),
+            ],
+            network_removed: true,
+            errors: vec![],
+        };
+        apply_stop_result(&store, "ato-ok-stop-abcd", &success_result);
+
+        let sessions = store.list_sessions().unwrap();
+        assert!(
+            sessions.is_empty(),
+            "record must be deleted on full success, but found: {:?}",
+            sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A StopFailed session can be retried: after a subsequent successful stop,
+    /// the record is deleted.
+    #[test]
+    fn stop_all_oci_sessions_can_retry_after_previous_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-retry-efgh");
+        store.write_session(&record).unwrap();
+
+        // First attempt: partial failure.
+        let fail_result = StopResult {
+            stopped_containers: vec![],
+            network_removed: false,
+            errors: vec!["stop ato-retry-efgh-app: podman not running".to_string()],
+        };
+        apply_stop_result(&store, "ato-retry-efgh", &fail_result);
+
+        // Record is kept as StopFailed.
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, OciSessionStatus::StopFailed);
+
+        // Second attempt: full success.
+        let retry_result = StopResult {
+            stopped_containers: vec!["ato-retry-efgh-app".to_string()],
+            network_removed: true,
+            errors: vec![],
+        };
+        apply_stop_result(&store, "ato-retry-efgh", &retry_result);
+
+        // Now the record must be deleted.
+        let sessions = store.list_sessions().unwrap();
+        assert!(
+            sessions.is_empty(),
+            "record must be deleted after successful retry"
         );
     }
 }

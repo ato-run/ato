@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::adapters::runtime::oci_session_store::{
-    stop_oci_session, OciSessionStatus, OciSessionStore,
+    apply_stop_result, stop_oci_session, OciSessionStatus, OciSessionStore,
 };
 use crate::reporters::CliReporter;
 use crate::runtime::process::ProcessManager;
@@ -29,7 +29,10 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .map(|sessions| {
                 sessions
                     .into_iter()
-                    .filter(|s| s.status == OciSessionStatus::Running)
+                    .filter(|s| {
+                        s.status == OciSessionStatus::Running
+                            || s.status == OciSessionStatus::StopFailed
+                    })
                     .count()
             })
             .unwrap_or(0);
@@ -157,12 +160,16 @@ fn stop_all_oci_sessions(args: &CloseArgs, reporter: &Arc<CliReporter>) -> Resul
         Err(_) => return Ok(()), // No OCI sessions directory yet
     };
     let sessions = store.list_sessions().unwrap_or_default();
-    let running: Vec<_> = sessions
+    // Retry both Running and StopFailed sessions so that a previous partial
+    // failure can be recovered on the next invocation.
+    let to_stop: Vec<_> = sessions
         .iter()
-        .filter(|s| s.status == OciSessionStatus::Running)
+        .filter(|s| {
+            s.status == OciSessionStatus::Running || s.status == OciSessionStatus::StopFailed
+        })
         .collect();
 
-    for session in running {
+    for session in to_stop {
         futures::executor::block_on(reporter.notify(format!(
             "🐳 Stopping OCI session {} ({}, {} service(s))...",
             session.session_id,
@@ -186,8 +193,9 @@ fn stop_all_oci_sessions(args: &CloseArgs, reporter: &Arc<CliReporter>) -> Resul
             )?;
         }
 
-        // Mark session as stopped (don't delete — user may want to inspect).
-        let _ = store.delete_session(&session.session_id);
+        // Delete on full success; keep the record (as StopFailed) on partial
+        // failure so a later `ato stop --all` can retry.
+        apply_stop_result(&store, &session.session_id, &result);
     }
 
     Ok(())
