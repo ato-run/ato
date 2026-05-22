@@ -20,6 +20,7 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::application::phase_materializer::BuildOutputLayerRecord;
 use crate::application::source_inventory::{
     collect_source_files, native_lockfiles, normalize_outputs,
 };
@@ -570,6 +571,8 @@ pub(crate) struct MaterializationRecord {
     pub(crate) env_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) env_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) output_layer: Option<BuildOutputLayerRecord>,
     pub(crate) created_at: String,
 }
 
@@ -702,6 +705,8 @@ pub(crate) enum DecisionAction {
     Skip,
     /// Run the build executor.
     Execute,
+    /// Restore the declared build outputs from the immutable local store.
+    Project(BuildOutputLayerRecord),
     /// `--no-build` policy refused materialization. Caller should fail with
     /// `ATO_ERR_MISSING_MATERIALIZATION`.
     Fail,
@@ -779,6 +784,12 @@ pub(crate) fn decide(
                         &observation.working_dir_relative,
                         &record.outputs,
                     ) {
+                        if let Some(layer) = record.output_layer.clone() {
+                            return BuildDecision {
+                                action: DecisionAction::Project(layer),
+                                result_kind: BuildResultKind::Materialized,
+                            };
+                        }
                         return BuildDecision {
                             action: if matches!(policy, BuildPolicy::NoBuild) {
                                 DecisionAction::Fail
@@ -851,6 +862,7 @@ pub(crate) fn record_for(
         toolchain_fingerprint: toolchain_fingerprint.to_string(),
         env_keys: Vec::new(),
         env_fingerprint: None,
+        output_layer: None,
         created_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -931,7 +943,16 @@ pub(crate) fn persist_after_execute(
         LoadOutcome::Loaded(f) => f,
         LoadOutcome::Missing | LoadOutcome::Invalid(_) => MaterializationFile::default(),
     };
-    upsert_record(&mut file, record_for(observation, &toolchain_fp));
+    let mut record = record_for(observation, &toolchain_fp);
+    match crate::application::phase_materializer::capture_build_outputs(workspace_root, observation)
+    {
+        Ok(layer) => record.output_layer = layer,
+        Err(err) => eprintln!(
+            "ATO-WARN failed to capture build output layer for local materialization: {}",
+            err
+        ),
+    }
+    upsert_record(&mut file, record);
 
     let heuristic_label = observation.source.heuristic_label();
     if heuristic_label.is_some() && !suppress_recommendation {

@@ -2415,6 +2415,18 @@ where
     );
     state.build_observation = prepared.observation.clone();
     state.build_decision_kind = Some(prepared.decision.result_kind);
+    let build_output_lock = if matches!(
+        &prepared.decision.action,
+        bm::DecisionAction::Project(_) | bm::DecisionAction::Execute
+    ) {
+        prepared
+            .observation
+            .as_ref()
+            .map(crate::application::phase_materializer::acquire_build_output_lock_for_observation)
+            .transpose()?
+    } else {
+        None
+    };
 
     match prepared.decision.action {
         bm::DecisionAction::Skip => {
@@ -2424,6 +2436,41 @@ where
                 "build materialization reused — executor skipped",
             );
             return Ok(state);
+        }
+        bm::DecisionAction::Project(layer) => {
+            let Some(observation) = prepared.observation.as_ref() else {
+                anyhow::bail!("build output projection requires a build observation");
+            };
+            match crate::application::phase_materializer::project_build_outputs(
+                &workspace_root,
+                observation,
+                &layer,
+            ) {
+                Ok(()) => {
+                    drop(build_output_lock);
+                    maybe_apply_dependency_materialization(request, &mut state).await?;
+                    progress.ok(
+                        HourglassPhase::Build,
+                        "build output layer projected — executor skipped",
+                    );
+                    return Ok(state);
+                }
+                Err(error)
+                    if matches!(
+                        request.build_policy,
+                        crate::application::build_materialization::BuildPolicy::NoBuild
+                    ) =>
+                {
+                    eprintln!("ATO-ERROR failed to project required build output layer: {error:#}");
+                    return Err(error.context("failed to project required build output layer"));
+                }
+                Err(error) => {
+                    eprintln!(
+                        "ATO-WARN failed to project build output layer; build will execute: {}",
+                        error
+                    );
+                }
+            }
         }
         bm::DecisionAction::Fail => {
             return Err(bm::no_build_error(&prepared.decision));
@@ -2475,6 +2522,7 @@ where
     }
 
     if let Some(observation) = state.build_observation.as_ref() {
+        drop(build_output_lock);
         bm::persist_after_execute(
             &state.decision.plan,
             &workspace_root,
