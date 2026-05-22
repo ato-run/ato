@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use capsule_core::blob::{hash_tree, BlobManifest};
 use capsule_core::common::store::BlobAddress;
-use serde_json::{json, Value};
+use serde_json::Value;
 use serial_test::serial;
 
 #[test]
@@ -191,7 +191,7 @@ fn no_build_hard_fails_when_build_output_manifest_mismatches() -> Result<()> {
 #[test]
 #[serial]
 #[cfg(unix)]
-fn remote_cas_hit_satisfies_no_build_on_clean_home_workspace() -> Result<()> {
+fn remote_export_then_remote_lookup_satisfies_no_build() -> Result<()> {
     let root = test_root()?;
     let _cleanup = Cleanup(root.clone());
     let home_a = root.join("home-a");
@@ -238,7 +238,7 @@ fn remote_cas_hit_satisfies_no_build_on_clean_home_workspace() -> Result<()> {
 #[test]
 #[serial]
 #[cfg(unix)]
-fn remote_cas_hit_imports_into_local_cas_for_later_no_build() -> Result<()> {
+fn remote_export_imports_to_local_cas() -> Result<()> {
     let root = test_root()?;
     let _cleanup = Cleanup(root.clone());
     let home_a = root.join("home-a");
@@ -293,6 +293,73 @@ fn remote_cas_hit_imports_into_local_cas_for_later_no_build() -> Result<()> {
         String::from_utf8_lossy(&local_run.stderr)
     );
     assert!(workspace_b.join("dist/run.sh").exists());
+    Ok(())
+}
+
+#[test]
+#[serial]
+#[cfg(unix)]
+fn export_refuses_invalid_existing_remote_dir() -> Result<()> {
+    let root = test_root()?;
+    let _cleanup = Cleanup(root.clone());
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    let remote = root.join("remote-mirror");
+    fs::create_dir_all(&home)?;
+    copy_fixture(&workspace)?;
+
+    let first = run_ato(
+        &workspace,
+        &home,
+        &["run", ".", "--yes", "--dangerously-skip-permissions"],
+    )?;
+    assert_success("cold source run", &first);
+
+    let final_dir = remote_layer_dir(&workspace, &remote)?;
+    fs::create_dir_all(&final_dir).context("create invalid remote export dir")?;
+    fs::write(
+        final_dir.join("layer.json"),
+        b"{\"schema_version\":\"corrupt\"}\n",
+    )
+    .context("write corrupt remote layer")?;
+
+    let error = export_output_layer_to_remote(&workspace, &home, &remote)
+        .expect_err("invalid existing remote export must not be overwritten");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("existing remote build output export"),
+        "error:\n{message}"
+    );
+    assert!(
+        fs::read_to_string(final_dir.join("layer.json"))?.contains("corrupt"),
+        "existing invalid layer.json must remain untouched"
+    );
+    Ok(())
+}
+
+#[test]
+#[serial]
+#[cfg(unix)]
+fn export_is_idempotent_for_valid_existing_remote_dir() -> Result<()> {
+    let root = test_root()?;
+    let _cleanup = Cleanup(root.clone());
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    let remote = root.join("remote-mirror");
+    fs::create_dir_all(&home)?;
+    copy_fixture(&workspace)?;
+
+    let first = run_ato(
+        &workspace,
+        &home,
+        &["run", ".", "--yes", "--dangerously-skip-permissions"],
+    )?;
+    assert_success("cold source run", &first);
+
+    let first_export = export_output_layer_to_remote(&workspace, &home, &remote)?;
+    let second_export = export_output_layer_to_remote(&workspace, &home, &remote)?;
+    assert_eq!(first_export, second_export);
+    assert!(second_export.join("blob/payload/dist/run.sh").exists());
     Ok(())
 }
 
@@ -439,7 +506,13 @@ fn remote_payload_symlink_is_rejected_at_projection() -> Result<()> {
         &workspace_b,
         &home_b,
         Some(&remote),
-        &["run", ".", "--yes", "--no-build", "--dangerously-skip-permissions"],
+        &[
+            "run",
+            ".",
+            "--yes",
+            "--no-build",
+            "--dangerously-skip-permissions",
+        ],
     )?;
     assert_failure("no-build with symlink in remote payload", &output);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -521,57 +594,22 @@ fn export_output_layer_to_remote(
     home: &Path,
     remote_root: &Path,
 ) -> Result<PathBuf> {
+    let _guard = HomeGuard::set(home);
+    ato_cli::phase_materializer_remote::export_recorded_build_output_layer_to_remote_mirror(
+        remote_root,
+        workspace,
+    )
+}
+
+fn remote_layer_dir(workspace: &Path, remote_root: &Path) -> Result<PathBuf> {
     let layer = output_layer_record(workspace)?;
     let materialization_key = layer
         .get("materialization_key")
         .and_then(Value::as_str)
         .context("output_layer.materialization_key missing")?;
-    let blob_hash = layer
-        .get("blob_hash")
-        .and_then(Value::as_str)
-        .context("output_layer.blob_hash missing")?;
-    let remote_layer_root = remote_root
+    Ok(remote_root
         .join("build-output")
-        .join(materialization_key.replace(':', "-"));
-    let remote_blob_root = remote_layer_root.join("blob");
-    fs::create_dir_all(&remote_blob_root)?;
-
-    let _guard = HomeGuard::set(home);
-    let address = BlobAddress::parse(blob_hash).context("parse blob hash")?;
-    fs::copy(
-        address.manifest_path(),
-        remote_blob_root.join("manifest.json"),
-    )
-    .context("copy blob manifest to remote mirror")?;
-    copy_dir_entries(&address.payload_dir(), &remote_blob_root.join("payload"))?;
-
-    let layer_json = json!({
-        "schema_version": "ato-remote-build-output-layer-v1",
-        "materialization_key": materialization_key,
-        "blob_hash": blob_hash,
-        "output_contract_digest": layer
-            .get("output_contract_digest")
-            .and_then(Value::as_str)
-            .context("output_layer.output_contract_digest missing")?,
-        "platform_profile": layer
-            .get("platform_profile")
-            .and_then(Value::as_str)
-            .context("output_layer.platform_profile missing")?,
-        "outputs": layer
-            .get("outputs")
-            .cloned()
-            .context("output_layer.outputs missing")?,
-        "provenance": {
-            "kind": "file-mirror",
-            "created_by": "test"
-        }
-    });
-    fs::write(
-        remote_layer_root.join("layer.json"),
-        serde_json::to_vec_pretty(&layer_json)?,
-    )
-    .context("write remote layer.json")?;
-    Ok(remote_layer_root)
+        .join(materialization_key.replace(':', "-")))
 }
 
 fn corrupt_remote_blob_manifest(remote_layer_root: &Path) -> Result<()> {
@@ -617,7 +655,8 @@ fn inject_symlink_into_remote_payload_and_rehash(remote_layer_root: &Path) -> Re
 
     // Recompute the tree hash with the symlink present.
     let tree = hash_tree(&payload).context("rehash payload after symlink injection")?;
-    let manifest = BlobManifest::from_tree_hash(&tree, "test-symlink-injection", "2026-01-01T00:00:00Z");
+    let manifest =
+        BlobManifest::from_tree_hash(&tree, "test-symlink-injection", "2026-01-01T00:00:00Z");
     manifest
         .write_to(&remote_layer_root.join("blob/manifest.json"))
         .context("write updated manifest.json")?;

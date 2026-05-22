@@ -42,6 +42,14 @@ pub mod cache_admin {
     };
 }
 
+#[doc(hidden)]
+pub mod phase_materializer_remote {
+    // Integration-test-only bridge. Do not treat this as the future public
+    // remote producer API; production producers should call the lower-level
+    // writer with an explicit observation/layer/provenance boundary.
+    pub use crate::application::phase_materializer_remote::export_recorded_build_output_layer_to_remote_mirror;
+}
+
 pub mod dependency_materializer {
     pub use crate::application::dependency_materializer::{
         AttestationRef, AttestationStrategy, CacheLookupResult, CacheStrategy, DepDerivationKeyV1,
