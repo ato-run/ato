@@ -2,6 +2,7 @@ pub mod deno;
 pub mod launch_context;
 pub mod node_compat;
 pub mod oci;
+pub mod oci_compose_runner;
 pub mod oci_multi_service;
 pub mod oci_single_target;
 pub mod open_web;
