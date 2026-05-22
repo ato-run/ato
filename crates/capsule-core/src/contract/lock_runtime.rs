@@ -44,6 +44,18 @@ fn oci_image_resolution_from_lock(
         })
 }
 
+/// Look up the resolved OCI image for a given target label from the lock file.
+///
+/// Returns `Ok(None)` when no `resolution.oci_images` section is present or the label is absent.
+/// This does **not** call `ensure_execution_ready`, so it works for pure-OCI service capsules
+/// that have no `contract.process` entry.
+pub fn resolve_oci_image_for_target(
+    lock: &AtoLock,
+    target_label: &str,
+) -> Result<Option<OciImageResolution>, AtoExecutionError> {
+    oci_image_resolution_from_lock(lock, target_label)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LockContractMetadata {
     pub name: Option<String>,

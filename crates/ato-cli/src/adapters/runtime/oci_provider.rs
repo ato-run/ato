@@ -1338,6 +1338,12 @@ where
 // ── FakeOciProvider ───────────────────────────────────────────────────────────
 // A fully-controllable in-process OCI provider for use in unit tests.
 // All lifecycle results are set up front; no real Podman is required.
+//
+// Call tracking:
+// - `call_log` records each method call as "<method>:<key_arg>" in order.
+// - `create_container_queue` and `start_result_queue` allow per-call result queues.
+//   When the queue is empty the flat result field is used as fallback.
+// - `create_container_requests` captures every OciContainerRequest for inspection.
 
 #[derive(Clone)]
 pub(crate) struct FakeOciProvider {
@@ -1351,6 +1357,14 @@ pub(crate) struct FakeOciProvider {
     pub stop_result: Result<(), OciProviderError>,
     pub remove_result: Result<(), OciProviderError>,
     pub semantics: OciProviderSemantics,
+    // ── call tracking (shared so clones share state) ──────────────────────────
+    pub call_log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub create_container_queue: std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<Result<String, OciProviderError>>>,
+    >,
+    pub create_container_requests: std::sync::Arc<std::sync::Mutex<Vec<OciContainerRequest>>>,
+    pub start_result_queue:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Result<(), OciProviderError>>>>,
 }
 
 impl FakeOciProvider {
@@ -1370,6 +1384,14 @@ impl FakeOciProvider {
             stop_result: Ok(()),
             remove_result: Ok(()),
             semantics: fake_oci_semantics(),
+            call_log: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            create_container_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            create_container_requests: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            start_result_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
         }
     }
 
@@ -1438,7 +1460,11 @@ impl OciProvider for FakeOciProvider {
         self.probe_result.clone()
     }
 
-    async fn pull_image(&self, _image: &OciImageResolution) -> Result<(), OciProviderError> {
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("pull:{}", image.declared_ref));
         self.pull_result.clone()
     }
 
@@ -1446,28 +1472,62 @@ impl OciProvider for FakeOciProvider {
         &self,
         request: &OciNetworkRequest,
     ) -> Result<String, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("create_network:{}", request.name));
         Ok(format!("fake-network-{}", request.name))
     }
 
-    async fn remove_network(&self, _network_name: &str) -> Result<(), OciProviderError> {
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("remove_network:{}", network_name));
         Ok(())
     }
 
     async fn create_container(
         &self,
-        _request: &OciContainerRequest,
+        request: &OciContainerRequest,
     ) -> Result<String, OciProviderError> {
-        self.create_container_result.clone()
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("create:{}", request.name));
+        self.create_container_requests
+            .lock()
+            .unwrap()
+            .push(request.clone());
+        let mut queue = self.create_container_queue.lock().unwrap();
+        if let Some(result) = queue.pop_front() {
+            result
+        } else {
+            self.create_container_result.clone()
+        }
     }
 
-    async fn start_container(&self, _container_id: &str) -> Result<(), OciProviderError> {
-        self.start_result.clone()
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("start:{}", container_id));
+        let mut queue = self.start_result_queue.lock().unwrap();
+        if let Some(result) = queue.pop_front() {
+            result
+        } else {
+            self.start_result.clone()
+        }
     }
 
     async fn inspect_container(
         &self,
-        _container_id: &str,
+        container_id: &str,
     ) -> Result<OciContainerInspect, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("inspect:{}", container_id));
         self.inspect_result.clone()
     }
 
@@ -1489,17 +1549,25 @@ impl OciProvider for FakeOciProvider {
 
     async fn stop_container(
         &self,
-        _container_id: &str,
+        container_id: &str,
         _timeout_secs: i64,
     ) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("stop:{}", container_id));
         self.stop_result.clone()
     }
 
     async fn remove_container(
         &self,
-        _container_id: &str,
+        container_id: &str,
         _force: bool,
     ) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("remove:{}", container_id));
         self.remove_result.clone()
     }
 }
