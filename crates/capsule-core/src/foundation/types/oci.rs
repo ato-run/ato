@@ -156,6 +156,34 @@ pub struct OciLaunchEnvelope {
     pub policy: OciPolicyEnvelope,
 }
 
+impl OciProviderSemantics {
+    /// A stable, coarse label suitable for lock identity comparisons.
+    ///
+    /// Format: `"<kind>-<mode>-<substrate>-v1"`.
+    /// Only the four enum values are used — fine-grained version strings are
+    /// intentionally excluded so that minor Podman patch upgrades do not
+    /// invalidate existing locks.
+    pub fn coarse_label(&self) -> String {
+        let kind = match self.kind {
+            OciProviderKind::Podman => "podman",
+            OciProviderKind::DockerCompatible => "docker",
+            OciProviderKind::AtoNative => "ato-native",
+        };
+        let mode = match self.mode {
+            OciProviderMode::Rootless => "rootless",
+            OciProviderMode::Rootful => "rootful",
+            OciProviderMode::Unknown => "unknown",
+        };
+        let substrate = match self.substrate {
+            OciProviderSubstrate::NativeLinux => "native",
+            OciProviderSubstrate::PodmanMachine => "machine",
+            OciProviderSubstrate::DockerDesktop => "desktop",
+            OciProviderSubstrate::Unknown => "unknown",
+        };
+        format!("{kind}-{mode}-{substrate}-v1")
+    }
+}
+
 impl OciLaunchEnvelope {
     pub fn new(
         provider: OciProviderSemantics,
