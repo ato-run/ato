@@ -93,6 +93,24 @@ cache yet.
   before projection. A verification failure cannot satisfy `--no-build`; a
   normal run may fall back to executing the local build.
 
+#### Remote CAS lookup, read-only MVP
+
+- Remote lookup is optional and disabled by default. The first MVP enables only
+  a file-backed mirror through `ATO_PHASE_MATERIALIZATION_REMOTE_ROOT`.
+- Remote build submit is out of scope. A miss never asks a server or worker to
+  build; normal runs fall back to the local build executor, while `--no-build`
+  keeps its hard-fail semantics.
+- Remote blobs are never projected directly into the workspace. A remote hit is
+  validated, imported into the local immutable CAS with staging plus atomic
+  rename, verified again locally, and only then projected with the same local
+  projection path.
+- Secrets, persistent state, session IDs, allocated ports, local environment
+  values, and user workspace state are not sent to the mirror. The lookup path
+  uses only the materialization key and layer metadata for the declared build
+  output contract.
+- This MVP does not define production HTTP CAS, signing policy, trust registry,
+  dependency layer materialization, or package-manager relocation.
+
 ## Alternatives Considered
 
 ### Option A: Start with deps and build layers together

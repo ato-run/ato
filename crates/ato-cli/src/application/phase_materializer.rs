@@ -158,6 +158,37 @@ fn build_projection_plan(
     observation: &BuildObservation,
     layer: &BuildOutputLayerRecord,
 ) -> Result<Vec<ProjectionPlanEntry>> {
+    validate_build_output_layer_metadata(observation, layer)?;
+    let address = verify_local_build_output_blob(&layer.blob_hash)?;
+    let payload = address.payload_dir();
+    let outputs = normalize_outputs(&observation.outputs)
+        .context("failed to normalize build output contract for projection")?;
+    let working_dir = working_dir(workspace_root, &observation.working_dir_relative);
+    let mut plan = Vec::new();
+    for output in &outputs {
+        let source = payload.join(&output.relative_path);
+        let metadata = validate_output_entry(&source).with_context(|| {
+            format!(
+                "build output layer {} is missing declared output {}",
+                layer.blob_hash,
+                output.relative_path.display()
+            )
+        })?;
+        let target = working_dir.join(&output.relative_path);
+        ensure_projection_target_absent(&target)?;
+        plan.push(ProjectionPlanEntry {
+            source,
+            target,
+            metadata,
+        });
+    }
+    Ok(plan)
+}
+
+pub(crate) fn validate_build_output_layer_metadata(
+    observation: &BuildObservation,
+    layer: &BuildOutputLayerRecord,
+) -> Result<()> {
     let outputs = normalize_outputs(&observation.outputs)
         .context("failed to normalize build output contract for projection")?;
     let expected_paths = normalized_output_paths(&outputs);
@@ -183,29 +214,7 @@ fn build_projection_plan(
             current_platform_profile()
         );
     }
-
-    let address = verify_blob(&layer.blob_hash)?;
-    let payload = address.payload_dir();
-    let working_dir = working_dir(workspace_root, &observation.working_dir_relative);
-    let mut plan = Vec::new();
-    for output in &outputs {
-        let source = payload.join(&output.relative_path);
-        let metadata = validate_output_entry(&source).with_context(|| {
-            format!(
-                "build output layer {} is missing declared output {}",
-                layer.blob_hash,
-                output.relative_path.display()
-            )
-        })?;
-        let target = working_dir.join(&output.relative_path);
-        ensure_projection_target_absent(&target)?;
-        plan.push(ProjectionPlanEntry {
-            source,
-            target,
-            metadata,
-        });
-    }
-    Ok(plan)
+    Ok(())
 }
 
 pub(crate) fn build_output_materialization_key(
@@ -224,7 +233,9 @@ pub(crate) fn build_output_materialization_key(
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
-fn materialization_key_for_observation(observation: &BuildObservation) -> Result<String> {
+pub(crate) fn materialization_key_for_observation(
+    observation: &BuildObservation,
+) -> Result<String> {
     let outputs = normalize_outputs(&observation.outputs)
         .context("failed to normalize build output contract for materialization lock")?;
     let output_contract_digest = output_contract_digest(&outputs);
@@ -290,7 +301,7 @@ fn freeze_build_output_tree_unlocked(
                 blob_dir = %address.dir().display(),
                 "build output blob freeze observed existing target: {err}"
             );
-            verify_blob(&blob_hash).with_context(|| {
+            verify_local_build_output_blob(&blob_hash).with_context(|| {
                 format!(
                     "existing build output blob target is present but failed integrity check \
                      after freeze race: {}",
@@ -312,7 +323,7 @@ fn freeze_build_output_tree_unlocked(
     Ok(blob_hash)
 }
 
-fn verify_blob(blob_hash: &str) -> Result<BlobAddress> {
+pub(crate) fn verify_local_build_output_blob(blob_hash: &str) -> Result<BlobAddress> {
     let address = BlobAddress::parse(blob_hash)
         .with_context(|| format!("blob hash {blob_hash} could not be parsed"))?;
     let manifest = BlobManifest::read_from(&address.manifest_path())
@@ -400,11 +411,11 @@ fn capture_root(materialization_key: &str) -> PathBuf {
     ato_cache_dir()
         .join("phase-materialization")
         .join("build-output")
-        .join(path_component(materialization_key))
+        .join(materialization_key_path_component(materialization_key))
         .join(format!("capture-{:016x}", rand::random::<u64>()))
 }
 
-fn path_component(value: &str) -> String {
+pub(crate) fn materialization_key_path_component(value: &str) -> String {
     value.replace(':', "-")
 }
 
@@ -465,7 +476,7 @@ fn projection_staging_root(workspace_root: &Path, materialization_key: &str) -> 
     workspace_tmp_dir(workspace_root)
         .join("phase-materialization")
         .join("build-output-projection")
-        .join(path_component(materialization_key))
+        .join(materialization_key_path_component(materialization_key))
         .join(format!("projection-{:016x}", rand::random::<u64>()))
 }
 

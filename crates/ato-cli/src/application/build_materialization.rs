@@ -27,7 +27,7 @@ use crate::application::source_inventory::{
 
 /// Marker version for the digest layout. Bump if the digest composition
 /// changes so previously-recorded materializations invalidate naturally.
-const MATERIALIZATION_DIGEST_VERSION: &str = "ato-build-materialization-v1";
+const MATERIALIZATION_DIGEST_VERSION: &str = "ato-build-materialization-v2";
 
 /// User-controlled build policy. v0 supports three policies; default is
 /// `IfStale`, which skips the build executor when an existing materialization
@@ -193,13 +193,10 @@ fn derive_toolchain_fingerprint(
         .execution_driver()
         .unwrap_or_else(|| "unknown".to_string());
     let target = plan.selected_target_label();
-    let working = plan
-        .execution_working_dir()
-        .unwrap_or_else(|| ".".to_string());
     let os_arch = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     format!(
-        "runtime:{}|driver:{}|target:{}|workdir:{}|os:{}|schema:{}",
-        runtime, driver, target, working, os_arch, MATERIALIZATION_DIGEST_VERSION
+        "runtime:{}|driver:{}|target:{}|os:{}|schema:{}",
+        runtime, driver, target, os_arch, MATERIALIZATION_DIGEST_VERSION
     )
 }
 
@@ -467,7 +464,10 @@ fn compute_input_digest(
     // lockfiles (delegated to existing source_inventory helper)
     update_text(&mut hasher, "lockfiles");
     for lockfile in native_lockfiles(working_dir_absolute) {
-        update_text(&mut hasher, &lockfile.display().to_string());
+        let lockfile_label = lockfile
+            .strip_prefix(working_dir_absolute)
+            .unwrap_or(lockfile.as_path());
+        update_text(&mut hasher, &lockfile_label.display().to_string());
         hash_file(&mut hasher, &lockfile)?;
     }
 
@@ -939,6 +939,40 @@ pub(crate) fn prepare_decision(
 /// lock, then pass the result here so that capture and state-record write are
 /// covered by the same lock region as the build executor.
 pub(crate) fn persist_after_execute(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &Path,
+    observation: &BuildObservation,
+    suppress_recommendation: bool,
+    output_layer: Option<BuildOutputLayerRecord>,
+) {
+    persist_materialization_record(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        output_layer,
+    );
+}
+
+/// After a successful remote build-output projection, upsert the
+/// materialization record without implying that the local build executor ran.
+pub(crate) fn persist_after_remote_project(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &Path,
+    observation: &BuildObservation,
+    suppress_recommendation: bool,
+    output_layer: BuildOutputLayerRecord,
+) {
+    persist_materialization_record(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        Some(output_layer),
+    );
+}
+
+fn persist_materialization_record(
     plan: &capsule_core::router::ManifestData,
     workspace_root: &Path,
     observation: &BuildObservation,
