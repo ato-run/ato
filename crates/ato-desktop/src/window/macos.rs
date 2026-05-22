@@ -15,9 +15,7 @@
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2_app_kit::{
-    NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode,
-};
+use objc2_app_kit::{NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
@@ -295,8 +293,7 @@ pub fn attach_as_child(
 fn find_wkwebview_in_content(content: &NSView) -> Option<Retained<NSView>> {
     use objc2::msg_send;
 
-    static WK_CLASS: std::sync::OnceLock<Option<&'static AnyClass>> =
-        std::sync::OnceLock::new();
+    static WK_CLASS: std::sync::OnceLock<Option<&'static AnyClass>> = std::sync::OnceLock::new();
     let wk_class = *WK_CLASS.get_or_init(|| {
         let name = std::ffi::CStr::from_bytes_with_nul(b"WKWebView\0").unwrap();
         AnyClass::get(name)
@@ -349,31 +346,26 @@ pub fn request_wkwebview_snapshot(
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
     use objc2_foundation::{NSDictionary, NSString};
 
-    let handler = RcBlock::new(
-        move |image: *mut NSImage, _error: *mut AnyObject| {
-            let data_url = if !image.is_null() {
-                let img = unsafe { &*image };
-                let tiff = unsafe { img.TIFFRepresentation() };
-                let rep = tiff
-                    .as_ref()
-                    .and_then(|t| unsafe { NSBitmapImageRep::imageRepWithData(t) });
-                let empty = NSDictionary::<NSString, AnyObject>::new();
-                let png = rep
-                    .as_ref()
-                    .and_then(|r| unsafe {
-                        r.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
-                    });
-                png.map(|data| {
-                    let b64 =
-                        base64::engine::general_purpose::STANDARD.encode(&data.to_vec());
-                    format!("data:image/png;base64,{}", b64)
-                })
-            } else {
-                None
-            };
-            let _ = tx.send(data_url);
-        },
-    );
+    let handler = RcBlock::new(move |image: *mut NSImage, _error: *mut AnyObject| {
+        let data_url = if !image.is_null() {
+            let img = unsafe { &*image };
+            let tiff = unsafe { img.TIFFRepresentation() };
+            let rep = tiff
+                .as_ref()
+                .and_then(|t| unsafe { NSBitmapImageRep::imageRepWithData(t) });
+            let empty = NSDictionary::<NSString, AnyObject>::new();
+            let png = rep.as_ref().and_then(|r| unsafe {
+                r.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
+            });
+            png.map(|data| {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data.to_vec());
+                format!("data:image/png;base64,{}", b64)
+            })
+        } else {
+            None
+        };
+        let _ = tx.send(data_url);
+    });
 
     unsafe {
         let _: () = msg_send![
