@@ -278,11 +278,8 @@ impl LaunchMaterializationInput {
         let resolved_execution_id =
             Some(bundle.derived.execution_ids.resolved_execution_id.clone())
                 .filter(|id| !id.is_empty());
-        let launch_envelope = bundle
-            .derived
-            .launch
-            .as_ref()
-            .map(|view| LaunchEnvelopeFacets {
+        let launch_envelope = bundle.derived.launch.as_ref().map(|view| {
+            LaunchEnvelopeFacets {
                 command: view.command.clone(),
                 args: view.args.clone(),
                 logical_cwd: view.logical_cwd.clone(),
@@ -293,7 +290,8 @@ impl LaunchMaterializationInput {
                 build_input_digest: view.build_input_digest.clone(),
                 lock_digest: view.lock_digest.clone(),
                 toolchain_fingerprint: view.toolchain_fingerprint.clone(),
-            });
+            }
+        });
         Self {
             declared_execution_id: bundle.derived.execution_ids.declared_execution_id.clone(),
             resolved_execution_id,
@@ -542,10 +540,7 @@ contract = "service@1"
         assert_eq!(view.version.as_deref(), Some("1.2.3"));
         assert_eq!(view.target_label.as_deref(), Some("web"));
         assert_eq!(view.policy_segment_hash.as_deref(), Some("blake3:cap"));
-        assert_eq!(
-            view.provisioning_policy_hash.as_deref(),
-            Some("blake3:prov")
-        );
+        assert_eq!(view.provisioning_policy_hash.as_deref(), Some("blake3:prov"));
 
         // Dependency aliases still flow through the preflight projection.
         let mut bundle_aliases = view.dependency_aliases.clone();

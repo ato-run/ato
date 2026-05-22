@@ -479,8 +479,8 @@ mod tests {
             host_ports: BTreeMap::new(),
             published_port: None,
         };
-        let signalled =
-            stop_orchestration_service_record(&service, Duration::from_secs(0)).expect("ok");
+        let signalled = stop_orchestration_service_record(&service, Duration::from_secs(0))
+            .expect("ok");
         assert!(!signalled);
     }
 
@@ -496,8 +496,8 @@ mod tests {
         };
         // local_pid is Some(0); the pid>0 gate skips kill. published_port
         // is None so the lsof fallback is also skipped. No container.
-        let signalled =
-            stop_orchestration_service_record(&service, Duration::from_secs(0)).expect("ok");
+        let signalled = stop_orchestration_service_record(&service, Duration::from_secs(0))
+            .expect("ok");
         assert!(!signalled);
     }
 }

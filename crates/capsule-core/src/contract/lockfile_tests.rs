@@ -22,8 +22,9 @@ use super::{
     lockfile_runtime_platforms, lockfile_runtime_target_labels,
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
     required_runtime_version, resolve_external_capsule_dependencies,
-    semantic_manifest_hash_from_text, tool_capsule_env_bindings, verify_lockfile_against_contracts,
-    verify_lockfile_external_dependencies, verify_lockfile_manifest, CapsuleLock, LockMeta,
+    semantic_manifest_hash_from_text, tool_capsule_env_bindings,
+    verify_lockfile_against_contracts, verify_lockfile_external_dependencies,
+    verify_lockfile_manifest, CapsuleLock, LockMeta,
     LockedCapsuleDependency, LockedToolCapsule, LockedToolExports, RuntimeArtifact, RuntimeEntry,
     RuntimeSection, ToolArtifact, ToolSection, ToolTargets, CAPSULE_LOCK_FILE_NAME,
     ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, SUPPORTED_RUNTIME_PLATFORMS, UV_VERSION,
@@ -1433,7 +1434,9 @@ fn tool_capsule_env_bindings_detects_conflicts() {
 /// `verify_lockfile_external_dependencies(manifest, lock)` accepts.
 #[test]
 fn verify_lockfile_against_contracts_parity_with_legacy_verifier() {
-    use crate::engine::execution_graph::{DerivedDependencyContracts, DerivedDependencyProvider};
+    use crate::engine::execution_graph::{
+        DerivedDependencyContracts, DerivedDependencyProvider,
+    };
 
     let manifest: toml::Value = toml::from_str(
         r#"
@@ -1506,7 +1509,9 @@ external_dependencies = [
 
 #[test]
 fn verify_lockfile_against_contracts_rejects_tampered_lock() {
-    use crate::engine::execution_graph::{DerivedDependencyContracts, DerivedDependencyProvider};
+    use crate::engine::execution_graph::{
+        DerivedDependencyContracts, DerivedDependencyProvider,
+    };
 
     let contracts = DerivedDependencyContracts {
         providers: vec![DerivedDependencyProvider {
@@ -1553,7 +1558,8 @@ fn verify_lockfile_against_contracts_rejects_tampered_lock() {
     assert!(verify_lockfile_against_contracts(&contracts, &bad_lockfile).is_err());
 
     // Fix the source, now passes.
-    bad_lockfile.capsule_dependencies[0].source = "capsule://store/acme/postgres".to_string();
+    bad_lockfile.capsule_dependencies[0].source =
+        "capsule://store/acme/postgres".to_string();
     verify_lockfile_against_contracts(&contracts, &bad_lockfile).unwrap();
 }
 

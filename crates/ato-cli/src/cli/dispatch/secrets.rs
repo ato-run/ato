@@ -333,7 +333,9 @@ enum BridgeRequest {
         namespace: Option<String>,
     },
     #[serde(rename = "resolve_for_capsule")]
-    ResolveForCapsule { capsule_handle: String },
+    ResolveForCapsule {
+        capsule_handle: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -345,7 +347,10 @@ enum BridgeResponse {
         data: Value,
     },
     #[serde(rename = "error")]
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 impl BridgeResponse {
@@ -503,7 +508,14 @@ fn bridge_set(
         Err(e) => return e,
     };
     let ns = namespace.as_deref().unwrap_or("default");
-    match store.set_in_namespace(&key, ns, &value, description.as_deref(), allow, deny) {
+    match store.set_in_namespace(
+        &key,
+        ns,
+        &value,
+        description.as_deref(),
+        allow,
+        deny,
+    ) {
         Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
         Err(e) => normalize_bridge_error("set_failed", &format!("{}", e)),
     }
@@ -526,14 +538,20 @@ fn bridge_delete(key: String, namespace: Option<String>) -> BridgeResponse {
                 use crate::application::credential::backend::traits::{
                     CredentialBackend, CredentialKey,
                 };
-                let ns_full = crate::application::secrets::store::secrets_ns(ns);
+                let ns_full =
+                    crate::application::secrets::store::secrets_ns(ns);
                 let ck = CredentialKey::new(ns_full, &key);
                 match age.delete(&ck) {
-                    Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
+                    Ok(()) => {
+                        BridgeResponse::ok_data(serde_json::json!({"key": key}))
+                    }
                     Err(e) => normalize_bridge_error("delete_failed", &format!("{}", e)),
                 }
             }
-            None => BridgeResponse::error("identity_not_loaded", "run `ato secrets init` first"),
+            None => BridgeResponse::error(
+                "identity_not_loaded",
+                "run `ato secrets init` first",
+            ),
         }
     }
 }
@@ -560,14 +578,20 @@ fn bridge_update_acl(
                 use crate::application::credential::backend::traits::{
                     CredentialBackend, CredentialKey,
                 };
-                let ns_full = crate::application::secrets::store::secrets_ns(ns);
+                let ns_full =
+                    crate::application::secrets::store::secrets_ns(ns);
                 let ck = CredentialKey::new(ns_full, &key);
                 match age.update_acl(&ck, allow, deny) {
-                    Ok(()) => BridgeResponse::ok_data(serde_json::json!({"key": key})),
+                    Ok(()) => {
+                        BridgeResponse::ok_data(serde_json::json!({"key": key}))
+                    }
                     Err(e) => normalize_bridge_error("update_acl_failed", &format!("{}", e)),
                 }
             }
-            None => BridgeResponse::error("identity_not_loaded", "run `ato secrets init` first"),
+            None => BridgeResponse::error(
+                "identity_not_loaded",
+                "run `ato secrets init` first",
+            ),
         }
     }
 }

@@ -1796,7 +1796,9 @@ impl CapsuleManifest {
     ///
     /// The returned set is what the host MUST grant at session creation time
     /// (after user consent) for the capsule to operate correctly.
-    pub fn host_capability_grants(&self) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
+    pub fn host_capability_grants(
+        &self,
+    ) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
         self.host_capabilities
             .iter()
             .filter_map(|spec| match spec.name {
@@ -1890,14 +1892,8 @@ run = "node index.js"
 "#;
         let manifest = CapsuleManifest::from_toml(toml).unwrap();
         assert_eq!(manifest.host_capabilities.len(), 2);
-        assert_eq!(
-            manifest.host_capabilities[0].name,
-            HostCapabilityName::OpenEditor
-        );
-        assert_eq!(
-            manifest.host_capabilities[1].name,
-            HostCapabilityName::RevealWorkspace
-        );
+        assert_eq!(manifest.host_capabilities[0].name, HostCapabilityName::OpenEditor);
+        assert_eq!(manifest.host_capabilities[1].name, HostCapabilityName::RevealWorkspace);
     }
 
     #[test]
@@ -1942,17 +1938,13 @@ runtime = "source/node"
 run = "node index.js"
 "#;
         let manifest = CapsuleManifest::from_toml(toml).unwrap();
-        let errors = manifest
-            .validate()
-            .expect_err("empty reason must fail validation");
+        let errors = manifest.validate().expect_err("empty reason must fail validation");
         let details = errors
             .iter()
             .map(|err| err.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            details.contains("host_capability 'open-file' must have a non-empty `reason` field")
-        );
+        assert!(details.contains("host_capability 'open-file' must have a non-empty `reason` field"));
     }
 
     #[test]
