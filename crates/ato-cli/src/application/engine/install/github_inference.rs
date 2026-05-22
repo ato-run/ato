@@ -115,6 +115,8 @@ pub(super) fn normalize_github_install_preview_toml(
             }
         }
 
+        recover_flat_source_node_preview_from_checkout(&mut parsed, checkout_dir)?;
+
         let runtime = parsed
             .get("runtime")
             .and_then(toml::Value::as_str)
@@ -726,6 +728,116 @@ fn package_json_primary_bin_path(package_json: &serde_json::Value) -> Option<Str
     None
 }
 
+fn recover_flat_source_node_preview_from_checkout(
+    parsed: &mut toml::Value,
+    checkout_dir: &Path,
+) -> Result<()> {
+    let Some(table) = parsed.as_table_mut() else {
+        return Ok(());
+    };
+
+    let runtime = table
+        .get("runtime")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if runtime != "source" {
+        return Ok(());
+    }
+
+    let driver = table
+        .get("driver")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let run = table
+        .get("run")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !flat_source_preview_looks_generic_fallback(driver, run) {
+        return Ok(());
+    }
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(());
+    };
+    if !checkout_looks_like_node_project(checkout_dir, &package_json) {
+        return Ok(());
+    }
+
+    table.insert(
+        "runtime".to_string(),
+        toml::Value::String("source/node".to_string()),
+    );
+    table.remove("driver");
+
+    if let Some(run_command) = preferred_node_run_command(checkout_dir, &package_json) {
+        table.insert("run".to_string(), toml::Value::String(run_command));
+    }
+
+    if table
+        .get("runtime_version")
+        .and_then(toml::Value::as_str)
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        if let Some(version) = infer_github_install_runtime_version(checkout_dir, "node") {
+            table.insert("runtime_version".to_string(), toml::Value::String(version));
+        }
+    }
+
+    Ok(())
+}
+
+fn flat_source_preview_looks_generic_fallback(driver: &str, run: &str) -> bool {
+    (driver.is_empty() || driver.eq_ignore_ascii_case("python"))
+        && matches!(run, "" | "main.py" | "python main.py" | "python3 main.py")
+}
+
+fn checkout_looks_like_node_project(checkout_dir: &Path, package_json: &serde_json::Value) -> bool {
+    checkout_dir.join("package-lock.json").exists()
+        || checkout_dir.join("pnpm-lock.yaml").exists()
+        || checkout_dir.join("yarn.lock").exists()
+        || checkout_dir.join("bun.lock").exists()
+        || checkout_dir.join("bun.lockb").exists()
+        || package_json
+            .get("packageManager")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || package_json.get("workspaces").is_some()
+        || package_json
+            .get("scripts")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|scripts| {
+                scripts.contains_key("dev")
+                    || scripts.contains_key("start")
+                    || scripts.contains_key("build")
+            })
+}
+
+fn preferred_node_run_command(
+    checkout_dir: &Path,
+    package_json: &serde_json::Value,
+) -> Option<String> {
+    let scripts = package_json.get("scripts")?.as_object()?;
+    let (script_name, script_body) =
+        if let Some(dev) = scripts.get("dev").and_then(serde_json::Value::as_str) {
+            ("dev", dev)
+        } else if let Some(start) = scripts.get("start").and_then(serde_json::Value::as_str) {
+            ("start", start)
+        } else {
+            return None;
+        };
+
+    let package_manager = infer_node_package_manager_command_prefix(checkout_dir, package_json);
+    Some(normalize_package_script_command(
+        package_manager,
+        script_name,
+        script_body,
+    ))
+}
+
 fn infer_node_package_manager_command_prefix(
     checkout_dir: &Path,
     package_json: &serde_json::Value,
@@ -1190,6 +1302,13 @@ fn changed_pack_include_from_checkout(
         }
     }
 
+    changed |= include_checkout_node_workspace_roots(
+        checkout_dir,
+        &targets,
+        include,
+        &mut normalized_include,
+    )?;
+
     for target in targets {
         let execution_working_directory = target
             .working_dir
@@ -1278,6 +1397,176 @@ fn ensure_pack_include_entry(
     include.push(toml::Value::String(entry.to_string()));
     normalized_include.push(entry.to_string());
     true
+}
+
+fn include_checkout_node_workspace_roots(
+    checkout_dir: &Path,
+    targets: &[GitHubInstallPreviewTargetInspection],
+    include: &mut Vec<toml::Value>,
+    normalized_include: &mut Vec<String>,
+) -> Result<bool> {
+    if !targets
+        .iter()
+        .any(|target| target.driver.eq_ignore_ascii_case("node"))
+    {
+        return Ok(false);
+    }
+
+    let workspace_roots = detect_checkout_workspace_roots(checkout_dir)?;
+    if workspace_roots.is_empty() {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    for file in [
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "turbo.json5",
+        "tsup.config.ts",
+        "tsup.config.js",
+        "tsup.config.cjs",
+        "tsup.config.mjs",
+    ] {
+        if checkout_dir.join(file).exists() {
+            changed |= ensure_pack_include_entry(include, normalized_include, file);
+        }
+    }
+
+    if checkout_dir.join("prisma").is_dir() {
+        changed |= ensure_pack_include_entry(include, normalized_include, "prisma/**");
+    }
+
+    for relative in workspace_roots {
+        changed |=
+            ensure_pack_include_entry(include, normalized_include, &format!("{relative}/**"));
+    }
+
+    Ok(changed)
+}
+
+fn detect_checkout_workspace_roots(checkout_dir: &Path) -> Result<Vec<String>> {
+    let Some(patterns) = detect_checkout_workspace_patterns(checkout_dir)? else {
+        return Ok(Vec::new());
+    };
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let matcher = build_checkout_workspace_matcher(&patterns)?;
+    let mut roots = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    for entry in walkdir::WalkDir::new(checkout_dir)
+        .min_depth(1)
+        .max_depth(4)
+        .into_iter()
+        .filter_entry(should_walk_checkout_workspace_entry)
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(checkout_dir) else {
+            continue;
+        };
+        let relative = normalize_relative_path(relative);
+        if relative.is_empty() || !matcher.is_match(&relative) {
+            continue;
+        }
+        if !entry.path().join("package.json").is_file() {
+            continue;
+        }
+        if seen.insert(relative.clone()) {
+            roots.push(relative);
+        }
+    }
+
+    Ok(roots)
+}
+
+fn detect_checkout_workspace_patterns(checkout_dir: &Path) -> Result<Option<Vec<String>>> {
+    let pnpm_workspace = checkout_dir.join("pnpm-workspace.yaml");
+    if pnpm_workspace.is_file() {
+        let text = std::fs::read_to_string(&pnpm_workspace)
+            .with_context(|| format!("failed to read {}", pnpm_workspace.display()))?;
+        let packages = text
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                trimmed.strip_prefix("- ").map(|value| {
+                    value
+                        .trim()
+                        .trim_matches('\'')
+                        .trim_matches('"')
+                        .to_string()
+                })
+            })
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if !packages.is_empty() {
+            return Ok(Some(packages));
+        }
+    }
+
+    let Some(package_json) = read_package_json(checkout_dir) else {
+        return Ok(None);
+    };
+    let Some(workspaces) = package_json.get("workspaces") else {
+        return Ok(None);
+    };
+
+    let packages = if let Some(array) = workspaces.as_array() {
+        array
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else if let Some(packages) = workspaces
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+    {
+        packages
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    if packages.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(packages))
+    }
+}
+
+fn build_checkout_workspace_matcher(patterns: &[String]) -> Result<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(
+            globset::Glob::new(pattern)
+                .with_context(|| format!("invalid workspace pattern '{pattern}'"))?,
+        );
+    }
+    builder
+        .build()
+        .context("failed to build workspace matcher for GitHub inference")
+}
+
+fn should_walk_checkout_workspace_entry(entry: &walkdir::DirEntry) -> bool {
+    let file_name = entry.file_name().to_string_lossy();
+    !(file_name.starts_with('.') || file_name == "node_modules")
 }
 
 fn referenced_deno_import_map(checkout_dir: &Path) -> Result<Option<String>> {

@@ -657,6 +657,77 @@ include = ["package.json", "src/**"]
 }
 
 #[test]
+fn normalize_github_install_preview_toml_includes_all_workspace_roots_for_node_monorepo() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for workspace in ["app", "server", "shared"] {
+        let dir = tmp.path().join(workspace);
+        std::fs::create_dir_all(&dir).expect("workspace dir");
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"@blinko/{workspace}"}}"#),
+        )
+        .expect("workspace package.json");
+    }
+    std::fs::create_dir_all(tmp.path().join("prisma")).expect("prisma dir");
+    std::fs::write(
+        tmp.path().join("prisma/schema.prisma"),
+        r#"datasource db { provider = "sqlite" url = "file:dev.db" }
+"#,
+    )
+    .expect("schema.prisma");
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{
+  "name": "blinko",
+  "private": true,
+  "workspaces": ["app", "server", "shared"]
+}"#,
+    )
+    .expect("root package.json");
+    std::fs::write(
+        tmp.path().join("bun.lock"),
+        "# bun lockfile v0
+",
+    )
+    .expect("bun.lock");
+    std::fs::write(
+        tmp.path().join("turbo.json"),
+        "{}
+",
+    )
+    .expect("turbo.json");
+
+    let manifest = r#"
+schema_version = "0.3"
+name = "blinko"
+version = "0.1.0"
+type = "app"
+
+runtime = "source/node"
+working_dir = "app"
+run = "bun dev"
+[pack]
+include = ["package.json", "app/**", "shared/**", "bun.lock", "README.md", "tsconfig.json", "tsconfig.node.json"]
+"#;
+
+    let normalized =
+        normalize_github_install_preview_toml(tmp.path(), manifest).expect("normalize");
+
+    assert!(
+        normalized.contains(r#""server/**""#),
+        "workspace-aware pack.include must add missing workspace roots: {normalized}"
+    );
+    assert!(
+        normalized.contains(r#""turbo.json""#),
+        "root turbo.json must be preserved for monorepo task graphs: {normalized}"
+    );
+    assert!(
+        normalized.contains(r#""prisma/**""#),
+        "root prisma directory must be preserved for workspace builds: {normalized}"
+    );
+}
+
+#[test]
 fn github_checkout_root_is_outside_workspace_internal_subtree() {
     use capsule_core::common::paths::path_contains_workspace_internal_subtree;
     let root = super::github_checkout_root().expect("checkout root");
