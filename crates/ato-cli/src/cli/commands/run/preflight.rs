@@ -271,8 +271,12 @@ pub(crate) async fn run_v03_lifecycle_steps(
         // Log lifecycle phase context for debugging workspace isolation issues.
         // Gate behind ATO_DEBUG_LIFECYCLE=1 to avoid verbose output in normal runs.
         if std::env::var_os("ATO_DEBUG_LIFECYCLE").as_deref() == Some(std::ffi::OsStr::new("1")) {
-            let which_bun = std::process::Command::new("which").arg("bun").output().ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+            let which_bun = std::process::Command::new("which")
+                .arg("bun")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
             let node_modules_at_cwd = working_dir.join("node_modules").is_dir();
             tracing::info!(
                 phase = "pre-install", %target_label,
@@ -294,8 +298,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
             reporter
                 .notify(format!("⚙️  Install [{}]: {}", target_label, command))
                 .await?;
-            let extra_path =
-                ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            let extra_path = ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
             run_lifecycle_shell_command(
                 &target_plan,
                 launch_ctx,

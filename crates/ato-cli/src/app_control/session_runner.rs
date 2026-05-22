@@ -17,7 +17,7 @@
 //! focused on closing the build-skip gap. They will be filled in once the
 //! desktop has a UX for consent prompts and sandbox preflight.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -71,6 +71,36 @@ pub(crate) fn legacy_supervisor_enabled() -> bool {
 /// `Some("yes")`, etc. all keep the in-process path.
 pub(crate) fn legacy_supervisor_enabled_for_value(value: Option<&str>) -> bool {
     matches!(value, Some("1"))
+}
+
+fn try_remote_build_output_projection(
+    plan: &ManifestData,
+    workspace_root: &Path,
+    observation: &bm::BuildObservation,
+    suppress_recommendation: bool,
+) -> Result<bool> {
+    let Some(layer) =
+        crate::application::phase_materializer_remote::lookup_remote_build_output_layer(
+            workspace_root,
+            observation,
+        )?
+    else {
+        return Ok(false);
+    };
+    crate::application::phase_materializer::project_build_outputs(
+        workspace_root,
+        observation,
+        &layer,
+    )
+    .context("failed to project imported remote build output layer")?;
+    bm::persist_after_remote_project(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        layer,
+    );
+    Ok(true)
 }
 
 #[derive(Clone)]
@@ -620,7 +650,7 @@ impl SessionStartPhaseRunner {
         self.build_decision_kind = Some(prepared.decision.result_kind);
         let build_output_lock = if matches!(
             &prepared.decision.action,
-            bm::DecisionAction::Project(_) | bm::DecisionAction::Execute
+            bm::DecisionAction::Project(_) | bm::DecisionAction::Execute | bm::DecisionAction::Fail
         ) {
             prepared
                 .observation
@@ -648,14 +678,58 @@ impl SessionStartPhaseRunner {
                         drop(build_output_lock);
                         return Ok(());
                     }
-                    Err(error) => eprintln!(
-                        "ATO-WARN failed to project build output layer; build will execute: {}",
-                        error
-                    ),
+                    Err(error) => {
+                        eprintln!(
+                            "ATO-WARN failed to project build output layer; trying remote \
+                             materialization before local build: {}",
+                            error
+                        );
+                        match try_remote_build_output_projection(
+                            plan,
+                            &workspace_root,
+                            observation,
+                            self.json,
+                        ) {
+                            Ok(true) => {
+                                drop(build_output_lock);
+                                self.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                                return Ok(());
+                            }
+                            Ok(false) => {}
+                            Err(remote_error) => {
+                                eprintln!(
+                                    "ATO-WARN remote build output materialization unavailable; \
+                                     build will execute: {remote_error:#}"
+                                );
+                            }
+                        }
+                    }
                 }
             }
             bm::DecisionAction::Fail => return Err(bm::no_build_error(&prepared.decision)),
-            bm::DecisionAction::Execute => {}
+            bm::DecisionAction::Execute => {
+                if let Some(observation) = prepared.observation.as_ref() {
+                    match try_remote_build_output_projection(
+                        plan,
+                        &workspace_root,
+                        observation,
+                        self.json,
+                    ) {
+                        Ok(true) => {
+                            drop(build_output_lock);
+                            self.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                            return Ok(());
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "ATO-WARN remote build output materialization unavailable; \
+                                 build will execute: {error:#}"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // In `--json` mode the caller (Desktop orchestrator) parses the

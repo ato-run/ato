@@ -8,8 +8,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use capsule_core::foundation::types::command_spec::contains_shell_operators;
 use crate::cli::ImportArgs;
+use capsule_core::foundation::types::command_spec::contains_shell_operators;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "ato-cli-source-import";
@@ -206,7 +206,10 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
                     fallback: Some(origin.clone()),
                     error_class: Some("api_unavailable".to_string()),
                 });
-                tracing::debug!(?error, "remote recipe resolution failed; falling back to inference");
+                tracing::debug!(
+                    ?error,
+                    "remote recipe resolution failed; falling back to inference"
+                );
                 (toml, origin)
             }
         }
@@ -629,7 +632,9 @@ fn run_shadow_workspace_readiness_only(
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
-    let mut child = command.spawn().context("failed to spawn shadow workspace")?;
+    let mut child = command
+        .spawn()
+        .context("failed to spawn shadow workspace")?;
 
     // Poll readiness for up to 120s
     let client = reqwest::blocking::Client::builder()
@@ -674,7 +679,11 @@ fn run_shadow_workspace_readiness_only(
         anyhow::bail!(
             "readiness probe {} did not pass within 120s\n{}",
             ready_url,
-            String::from_utf8_lossy(&stderr).lines().take(20).collect::<Vec<_>>().join("\n"),
+            String::from_utf8_lossy(&stderr)
+                .lines()
+                .take(20)
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
     }
 
@@ -725,7 +734,9 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
-    let mut child = command.spawn().context("failed to spawn shadow workspace")?;
+    let mut child = command
+        .spawn()
+        .context("failed to spawn shadow workspace")?;
     // Wait up to 120s for the run to complete, then time out gracefully.
     // Foreground servers (e.g. Bun) will keep running; we collect their
     // exit status or timeout output.
@@ -736,7 +747,11 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
             Some(status) => {
                 let stdout = read_all(child.stdout.take());
                 let stderr = read_all(child.stderr.take());
-                return Ok(Output { status, stdout, stderr });
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             None if start.elapsed() >= timeout => {
                 let _ = child.kill();
@@ -746,7 +761,11 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
                     "shadow workspace run timed out after {}s\n---stdout---\n{}\n---stderr---\n{}",
                     timeout.as_secs(),
                     String::from_utf8_lossy(&stdout),
-                    String::from_utf8_lossy(&stderr).lines().take(80).collect::<Vec<_>>().join("\n"),
+                    String::from_utf8_lossy(&stderr)
+                        .lines()
+                        .take(80)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 );
             }
             None => std::thread::sleep(std::time::Duration::from_millis(500)),
@@ -756,8 +775,8 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
 
 /// Attempt to resolve a verified recipe binding from the ato-api.
 fn resolve_remote_recipe(source: &ImportSource) -> Result<Option<(String, String)>> {
-    let api_base = std::env::var("ATO_STORE_API_URL")
-        .unwrap_or_else(|_| "https://api.ato.run".to_string());
+    let api_base =
+        std::env::var("ATO_STORE_API_URL").unwrap_or_else(|_| "https://api.ato.run".to_string());
     let api_base = api_base.trim_end_matches('/');
     let mut url = reqwest::Url::parse(&format!("{}/v1/source-imports/bindings/resolve", api_base))
         .context("invalid API base URL")?;
@@ -864,7 +883,10 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
     {
         return ("run", "missing_required_env");
     }
-    if lowered.contains("database_url") && (lowered.contains("not set") || lowered.contains("missing") || lowered.contains("undefined"))
+    if lowered.contains("database_url")
+        && (lowered.contains("not set")
+            || lowered.contains("missing")
+            || lowered.contains("undefined"))
     {
         return ("run", "database_url_missing");
     }
@@ -882,11 +904,13 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
         if lowered.contains("failed migrations") || lowered.contains("p3009") {
             return ("prestart", "prisma_failed_migration_state");
         }
-        if lowered.contains("query engine") && (lowered.contains("could not locate") || lowered.contains("not found"))
+        if lowered.contains("query engine")
+            && (lowered.contains("could not locate") || lowered.contains("not found"))
         {
             return ("run", "prisma_query_engine_not_found");
         }
-        if lowered.contains("schema.prisma") && (lowered.contains("not found") || lowered.contains("does not exist"))
+        if lowered.contains("schema.prisma")
+            && (lowered.contains("not found") || lowered.contains("does not exist"))
         {
             return ("prestart", "prisma_schema_not_found");
         }
@@ -1143,8 +1167,9 @@ mod tests {
 
     #[test]
     fn unknown_provider_failure_falls_through_to_unknown() {
-        let (phase, class) =
-            classify_run_failure("some completely unfamiliar error text that does not match any known pattern");
+        let (phase, class) = classify_run_failure(
+            "some completely unfamiliar error text that does not match any known pattern",
+        );
         assert_eq!(class, "unknown");
     }
 
@@ -1158,17 +1183,15 @@ mod tests {
 
     #[test]
     fn prisma_database_url_missing_classified() {
-        let (phase, class) = classify_run_failure(
-            "prisma:error Environment variable not found: DATABASE_URL",
-        );
+        let (phase, class) =
+            classify_run_failure("prisma:error Environment variable not found: DATABASE_URL");
         assert_eq!(class, "prisma_database_url_missing");
     }
 
     #[test]
     fn prisma_database_connection_failed_classified() {
-        let (phase, class) = classify_run_failure(
-            "prisma:error Can't reach database server at `localhost:5432`",
-        );
+        let (phase, class) =
+            classify_run_failure("prisma:error Can't reach database server at `localhost:5432`");
         assert_eq!(class, "prisma_database_connection_failed");
     }
 
@@ -1182,9 +1205,8 @@ mod tests {
 
     #[test]
     fn prisma_schema_not_found_classified() {
-        let (phase, class) = classify_run_failure(
-            "Prisma schema file prisma/schema.prisma not found",
-        );
+        let (phase, class) =
+            classify_run_failure("Prisma schema file prisma/schema.prisma not found");
         assert_eq!(class, "prisma_schema_not_found");
     }
 

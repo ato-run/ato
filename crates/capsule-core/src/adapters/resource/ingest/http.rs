@@ -10,8 +10,8 @@ use tracing::info;
 /// Validate that `url` uses the HTTPS scheme and is well-formed.
 /// Returns the parsed URL on success.
 fn validate_https_url(raw: &str) -> Result<()> {
-    let parsed = url::Url::parse(raw)
-        .map_err(|e| CapsuleError::Config(format!("Invalid URL: {}", e)))?;
+    let parsed =
+        url::Url::parse(raw).map_err(|e| CapsuleError::Config(format!("Invalid URL: {}", e)))?;
     if parsed.scheme() != "https" {
         return Err(CapsuleError::Config(format!(
             "only HTTPS URLs are allowed (got {})",
@@ -68,7 +68,11 @@ pub async fn download_file(url: &str, destination: &str, allowed_paths: &[String
 
     // 4. Perform Download with HTTPS-only redirect policy
     let client = https_only_client();
-    let response = client.get(url).send().await.map_err(CapsuleError::Network)?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(CapsuleError::Network)?;
     let status = response.status();
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         return Err(CapsuleError::AuthRequired(url.to_string()));

@@ -24,6 +24,7 @@ use capsule_core::CapsuleReporter;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
+use crate::application::build_materialization as bm;
 use crate::application::dependency_credentials::{HostEnv, ProcessHostEnv, RedactionRegistry};
 use crate::application::dependency_materializer::{
     digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
@@ -2402,8 +2403,6 @@ pub(crate) async fn run_build_phase<P>(
 where
     P: ConsumerRunProgress,
 {
-    use crate::application::build_materialization as bm;
-
     progress.start(HourglassPhase::Build);
 
     let workspace_root = state.prepared.workspace_root.clone();
@@ -2417,7 +2416,7 @@ where
     state.build_decision_kind = Some(prepared.decision.result_kind);
     let build_output_lock = if matches!(
         &prepared.decision.action,
-        bm::DecisionAction::Project(_) | bm::DecisionAction::Execute
+        bm::DecisionAction::Project(_) | bm::DecisionAction::Execute | bm::DecisionAction::Fail
     ) {
         prepared
             .observation
@@ -2455,27 +2454,123 @@ where
                     );
                     return Ok(state);
                 }
-                Err(error)
-                    if matches!(
+                Err(error) => {
+                    let no_build = matches!(
                         request.build_policy,
                         crate::application::build_materialization::BuildPolicy::NoBuild
-                    ) =>
-                {
-                    eprintln!("ATO-ERROR failed to project required build output layer: {error:#}");
-                    return Err(error.context("failed to project required build output layer"));
-                }
-                Err(error) => {
-                    eprintln!(
-                        "ATO-WARN failed to project build output layer; build will execute: {}",
-                        error
                     );
+                    if no_build {
+                        eprintln!(
+                            "ATO-WARN failed to project required local build output layer; \
+                             trying remote materialization: {error:#}"
+                        );
+                    } else {
+                        eprintln!(
+                            "ATO-WARN failed to project build output layer; trying remote \
+                             materialization before local build: {}",
+                            error
+                        );
+                    }
+                    match try_remote_build_output_projection(
+                        &state.decision.plan,
+                        &workspace_root,
+                        observation,
+                        request.reporter.is_json(),
+                    ) {
+                        Ok(true) => {
+                            drop(build_output_lock);
+                            maybe_apply_dependency_materialization(request, &mut state).await?;
+                            state.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                            progress.ok(
+                                HourglassPhase::Build,
+                                "remote build output layer projected — executor skipped",
+                            );
+                            return Ok(state);
+                        }
+                        Ok(false) => {}
+                        Err(remote_error) => {
+                            if no_build {
+                                eprintln!(
+                                    "ATO-ERROR failed to use remote build output \
+                                     materialization: {remote_error:#}"
+                                );
+                                return Err(remote_error
+                                    .context("failed to use remote build output materialization"));
+                            } else {
+                                eprintln!(
+                                    "ATO-WARN remote build output materialization unavailable; \
+                                     build will execute: {remote_error:#}"
+                                );
+                            }
+                        }
+                    }
+                    if no_build {
+                        eprintln!(
+                            "ATO-ERROR failed to project required build output layer: {error:#}"
+                        );
+                        return Err(error.context("failed to project required build output layer"));
+                    }
                 }
             }
         }
         bm::DecisionAction::Fail => {
+            let Some(observation) = prepared.observation.as_ref() else {
+                return Err(bm::no_build_error(&prepared.decision));
+            };
+            match try_remote_build_output_projection(
+                &state.decision.plan,
+                &workspace_root,
+                observation,
+                request.reporter.is_json(),
+            ) {
+                Ok(true) => {
+                    drop(build_output_lock);
+                    maybe_apply_dependency_materialization(request, &mut state).await?;
+                    state.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                    progress.ok(
+                        HourglassPhase::Build,
+                        "remote build output layer projected — executor skipped",
+                    );
+                    return Ok(state);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "ATO-ERROR failed to use remote build output materialization: {error:#}"
+                    );
+                    return Err(error.context("failed to use remote build output materialization"));
+                }
+            }
             return Err(bm::no_build_error(&prepared.decision));
         }
-        bm::DecisionAction::Execute => {}
+        bm::DecisionAction::Execute => {
+            if let Some(observation) = prepared.observation.as_ref() {
+                match try_remote_build_output_projection(
+                    &state.decision.plan,
+                    &workspace_root,
+                    observation,
+                    request.reporter.is_json(),
+                ) {
+                    Ok(true) => {
+                        drop(build_output_lock);
+                        maybe_apply_dependency_materialization(request, &mut state).await?;
+                        state.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                        progress.ok(
+                            HourglassPhase::Build,
+                            "remote build output layer projected — executor skipped",
+                        );
+                        return Ok(state);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "ATO-WARN remote build output materialization unavailable; \
+                             build will execute: {error:#}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     if let Err(error) = crate::commands::run::run_v03_lifecycle_steps(
@@ -2583,6 +2678,36 @@ async fn maybe_apply_dependency_materialization(
             .with_injected_mounts(vec![materialization.mount]);
     }
     Ok(())
+}
+
+fn try_remote_build_output_projection(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &std::path::Path,
+    observation: &bm::BuildObservation,
+    suppress_recommendation: bool,
+) -> Result<bool> {
+    let Some(layer) =
+        crate::application::phase_materializer_remote::lookup_remote_build_output_layer(
+            workspace_root,
+            observation,
+        )?
+    else {
+        return Ok(false);
+    };
+    crate::application::phase_materializer::project_build_outputs(
+        workspace_root,
+        observation,
+        &layer,
+    )
+    .context("failed to project imported remote build output layer")?;
+    bm::persist_after_remote_project(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        layer,
+    );
+    Ok(true)
 }
 
 pub(crate) async fn run_verify_phase<P>(
