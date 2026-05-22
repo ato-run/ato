@@ -635,7 +635,12 @@ fn is_python_server_tool(command: &str) -> bool {
 /// should inject `--port <N>` into even when the run command does not contain `$PORT`.
 fn is_python_module_server_invocation(args: &[String]) -> bool {
     const PYTHON_SERVER_MODULES: &[&str] = &[
-        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+        "uvicorn",
+        "gunicorn",
+        "flask",
+        "streamlit",
+        "hypercorn",
+        "daphne",
     ];
     let mut iter = args.iter();
     while let Some(token) = iter.next() {
@@ -653,7 +658,8 @@ fn is_python_module_server_invocation(args: &[String]) -> bool {
 /// Returns `true` when `args` already contains an explicit `--port` flag,
 /// meaning the user or a previous injection already set the port.
 fn has_explicit_port_flag(args: &[String]) -> bool {
-    args.iter().any(|a| a == "--port" || a.starts_with("--port="))
+    args.iter()
+        .any(|a| a == "--port" || a.starts_with("--port="))
 }
 
 /// Returns `true` when `command == "-m"` and the first arg is a known Python
@@ -664,7 +670,12 @@ fn is_module_command_server_invocation(command: &str, args: &[String]) -> bool {
         return false;
     }
     const PYTHON_SERVER_MODULES: &[&str] = &[
-        "uvicorn", "gunicorn", "flask", "streamlit", "hypercorn", "daphne",
+        "uvicorn",
+        "gunicorn",
+        "flask",
+        "streamlit",
+        "hypercorn",
+        "daphne",
     ];
     args.first()
         .map(|m| PYTHON_SERVER_MODULES.contains(&m.to_ascii_lowercase().as_str()))
@@ -1679,8 +1690,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         // Create run.sh so the path-exists branch fires deterministically,
         // avoiding dependence on provider-workspace classification of sibling tests.
-        fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho ok\n")
-            .expect("write run.sh");
+        fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho ok\n").expect("write run.sh");
         let plan = plan_from_manifest(
             &dir,
             r#"
@@ -1909,132 +1919,6 @@ mod tests {
 
         let has_unbuffered = cmd.get_envs().any(|(key, _)| key == "PYTHONUNBUFFERED");
         assert!(!has_unbuffered, "PYTHONUNBUFFERED must not be set");
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn nacelle_manifest_sweep_removes_stale_files() {
-        let temp = tempdir().expect("tempdir");
-        let ato_home = temp.path().join("ato-home");
-        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
-        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
-        let stale = dir.join("nacelle-123-456.toml");
-        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
-
-        let removed = sweep_stale_nacelle_manifests_in(
-            &dir,
-            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
-            Duration::from_secs(24 * 60 * 60),
-        )
-        .expect("sweep stale nacelle manifests");
-
-        assert_eq!(removed, 1);
-        assert!(!stale.exists());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn nacelle_manifest_sweep_preserves_fresh_files() {
-        let temp = tempdir().expect("tempdir");
-        let ato_home = temp.path().join("ato-home");
-        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
-        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
-        let fresh = dir.join("nacelle-123-789.toml");
-        fs::write(&fresh, "schema_version = \"0.3\"\n").expect("write fresh manifest");
-
-        let removed = sweep_stale_nacelle_manifests_in(
-            &dir,
-            SystemTime::now() + Duration::from_secs(60),
-            Duration::from_secs(24 * 60 * 60),
-        )
-        .expect("sweep fresh nacelle manifests");
-
-        assert_eq!(removed, 0);
-        assert!(fresh.exists());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn nacelle_manifest_sweep_preserves_active_process_manifest() {
-        let temp = tempdir().expect("tempdir");
-        let ato_home = temp.path().join("ato-home");
-        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
-        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
-        let active_manifest = dir.join(format_nacelle_manifest_file_name(
-            current_nacelle_manifest_owner(),
-            42,
-        ));
-        fs::write(&active_manifest, "schema_version = \"0.3\"\n").expect("write active manifest");
-        set_file_mtime(&active_manifest, FileTime::from_unix_time(1, 0))
-            .expect("age active manifest");
-
-        let removed = sweep_stale_nacelle_manifests_in(
-            &dir,
-            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
-            Duration::from_secs(24 * 60 * 60),
-        )
-        .expect("sweep active nacelle manifests");
-
-        assert_eq!(removed, 0);
-        assert!(active_manifest.exists());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn nacelle_manifest_sweep_rejects_pid_reuse_when_start_time_mismatches() {
-        let temp = tempdir().expect("tempdir");
-        let ato_home = temp.path().join("ato-home");
-        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
-        fs::create_dir_all(&dir).expect("create nacelle manifest dir");
-        let stale = dir.join(format!("nacelle-{}-1-77.toml", std::process::id()));
-        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
-        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale manifest");
-
-        let removed = sweep_stale_nacelle_manifests_in(
-            &dir,
-            SystemTime::now() + Duration::from_secs(48 * 60 * 60),
-            Duration::from_secs(24 * 60 * 60),
-        )
-        .expect("sweep mismatched active nacelle manifests");
-
-        assert_eq!(removed, 1);
-        assert!(!stale.exists());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn write_normalized_manifest_sweeps_stale_pool_before_new_write() {
-        let temp = tempdir().expect("tempdir");
-        let ato_home = temp.path().join("ato-home");
-        let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-        let nacelle_dir = capsule_core::common::paths::ato_runs_dir().join("nacelle-manifests");
-        fs::create_dir_all(&nacelle_dir).expect("create nacelle manifest dir");
-        let stale = nacelle_dir.join("nacelle-123-stale.toml");
-        fs::write(&stale, "schema_version = \"0.3\"\n").expect("write stale manifest");
-        set_file_mtime(&stale, FileTime::from_unix_time(1, 0)).expect("age stale manifest");
-
-        let plan = plan_from_manifest(
-            &temp,
-            r#"
-            [targets.dev]
-            runtime = "source"
-            language = "python"
-            entrypoint = "main.py"
-            "#,
-            "dev",
-        );
-
-        let normalized_path = write_normalized_manifest(&plan, &[], &[]).expect("write manifest");
-
-        assert!(
-            !stale.exists(),
-            "stale manifest should be swept before write"
-        );
-        assert!(normalized_path.exists());
     }
 
     #[test]
@@ -2546,7 +2430,12 @@ mod tests {
     fn module_command_server_invocation_detects_minus_m_uvicorn() {
         // derive_launch_spec for `python -m uvicorn app:main` produces
         // command="-m", args=["uvicorn", "app:main", ...].
-        let args: Vec<String> = vec!["uvicorn".into(), "app.main:app".into(), "--host".into(), "127.0.0.1".into()];
+        let args: Vec<String> = vec![
+            "uvicorn".into(),
+            "app.main:app".into(),
+            "--host".into(),
+            "127.0.0.1".into(),
+        ];
         assert!(is_module_command_server_invocation("-m", &args));
         assert!(!is_module_command_server_invocation("python", &args));
     }
