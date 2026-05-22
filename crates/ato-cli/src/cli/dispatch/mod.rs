@@ -101,6 +101,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             no_build,
             plan_only,
             oci_compose,
+            oci_install_sh,
             read,
             write,
             read_write,
@@ -148,6 +149,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             deprecation_warning: None,
             plan_only,
             oci_compose,
+            oci_install_sh,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 
