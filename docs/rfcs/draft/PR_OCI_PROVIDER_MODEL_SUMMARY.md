@@ -286,6 +286,28 @@ oci_compose_lock:   18/18 ✅
 - Full Desktop OCI session UX (Desktop shell `ato ps` / `ato stop` integration)
 - Rich per-container status / logs from `ato ps`
 - Podman machine-specific session cleanup on macOS shutdown
-- Real Blinko AODD Scenario C live rerun (blocked by: no persistent ATO_HOME between test runs)
-
 Receipt: `.tmp/aodd-receipts/oci-blinko-cleanup.yaml` updated to `result: complete`.
+
+### Live Scenario C rerun (PR 11.7) ✅
+
+Confirmed 2026-05-23 with real Podman 5.7.1 (macOS arm64, applehv machine running):
+
+```
+$ ato ps
+Total: 1 capsule(s) (1 OCI)
+  — ato-blin docker-run-script  🐳 running  oci/docker-run-script  http://127.0.0.1:33135/
+
+$ ato stop --all
+🐳 Stopping OCI session ato-blinko-aodd-aabcae6f (docker-run-script, 2 service(s))...
+  ✅ Stopped container: ato-blinko-aodd-blinko-website-aabcae6f
+  ✅ Stopped container: ato-blinko-aodd-blinko-postgres-aabcae6f
+  🔗 Removed network: ato-blinko-aodd-aabcae6f
+
+$ podman ps --filter label=io.ato.managed=true
+(empty — 0 containers)
+
+$ ato ps
+No capsules found.
+```
+
+All lifecycle invariants confirmed live. No remaining Scenario C blockers.
