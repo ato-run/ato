@@ -1,6 +1,9 @@
 use super::*;
 
-use crate::adapters::runtime::provisioning::dependency_root;
+use crate::adapters::runtime::provisioning::{
+    build_lifecycle_path_plan, dependency_root, materialize_lifecycle_toolchains,
+    LifecyclePathPlan, LifecyclePhase,
+};
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
 use crate::executors::target_runner;
@@ -265,6 +268,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
 
     let lifecycle_targets = build_lifecycle_targets(plan, &targets_to_provision)?;
     let root_install_plan = build_root_install_plan(&lifecycle_targets)?;
+    let lifecycle_roots = root_order(&lifecycle_targets);
     let typed_manifest = typed_manifest.as_ref();
 
     let mut provisioned_roots = std::collections::HashSet::new();
@@ -305,15 +309,21 @@ pub(crate) async fn run_v03_lifecycle_steps(
                 ))
                 .await?;
             let install_plan = plan.with_selected_target(install.label.clone());
-            let extra_path =
-                ensure_lifecycle_extra_path(&install_plan, &install.command, reporter).await?;
+            let path_plan = build_lifecycle_phase_path_plan(
+                &install_plan,
+                LifecyclePhase::Install,
+                &install.command,
+                &lifecycle_roots,
+                reporter,
+            )
+            .await?;
             run_lifecycle_shell_command(
                 &install_plan,
                 launch_ctx,
                 &install.command,
                 "install",
                 &root,
-                extra_path.as_deref(),
+                &path_plan,
             )?;
         } else if provisioned_roots.insert(root.clone()) {
             let cmd_opt = match plan_v03_provision_command(&target_plan)? {
@@ -331,15 +341,21 @@ pub(crate) async fn run_v03_lifecycle_steps(
                         root_target.label, command
                     ))
                     .await?;
-                let extra_path =
-                    ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+                let path_plan = build_lifecycle_phase_path_plan(
+                    &target_plan,
+                    LifecyclePhase::Install,
+                    &command,
+                    &lifecycle_roots,
+                    reporter,
+                )
+                .await?;
                 run_lifecycle_shell_command(
                     &target_plan,
                     launch_ctx,
                     &command,
                     "provision",
                     &root,
-                    extra_path.as_deref(),
+                    &path_plan,
                 )?;
             }
         }
@@ -355,14 +371,21 @@ pub(crate) async fn run_v03_lifecycle_steps(
             reporter
                 .notify(format!("🏗️  Build [{}]: {}", target.label, command))
                 .await?;
-            let extra_path = ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            let path_plan = build_lifecycle_phase_path_plan(
+                &target_plan,
+                LifecyclePhase::Build,
+                &command,
+                &lifecycle_roots,
+                reporter,
+            )
+            .await?;
             run_lifecycle_shell_command(
                 &target_plan,
                 launch_ctx,
                 &command,
                 "build",
                 &target.working_dir,
-                extra_path.as_deref(),
+                &path_plan,
             )?;
         }
     }
@@ -494,48 +517,18 @@ fn install_command_from_scope(manifest: &toml::Value, path: &[&str]) -> Result<O
     Ok(value)
 }
 
-/// Returns an optional directory that must be prepended to PATH for the given
-/// lifecycle command. Looks up the command's leading token in the unified
-/// runtime tools registry (`capsule_core::tools`); if it matches a known tool
-/// (e.g. `pnpm`), the tool is provisioned and the shim directory is returned
-/// for PATH prepending. This is what lets capsules with `pnpm-lock.yaml` run
-/// on hosts with only `ato` installed.
-async fn ensure_lifecycle_extra_path(
+/// Build the phase-aware PATH plan used by both consent preview and session start.
+/// Install runs with managed toolchains only; build/run are allowed to see
+/// dependency output bins materialized by the completed install phase.
+async fn build_lifecycle_phase_path_plan(
     plan: &capsule_core::router::ManifestData,
+    phase: LifecyclePhase,
     command: &str,
+    lifecycle_roots: &[PathBuf],
     reporter: &Arc<CliReporter>,
-) -> Result<Option<PathBuf>> {
-    let leading = command
-        .split_whitespace()
-        .next()
-        .map(|tok| tok.trim_matches(|c: char| c == '"' || c == '\''))
-        .unwrap_or("");
-    let Some(spec) = capsule_core::tools::lookup(leading) else {
-        return Ok(None);
-    };
-
-    let version_override = capsule_core::tools::read_tool_version(
-        &plan.manifest,
-        plan.selected_target_label(),
-        spec.name,
-    );
-
-    let mut deps = capsule_core::tools::ToolDeps::default();
-    if spec.depends_on.contains(&"node") {
-        deps.node_bin = Some(runtime_manager::ensure_node_binary_with_authority(
-            plan, None,
-        )?);
-    }
-
-    let reporter_dyn: Arc<dyn capsule_core::reporter::CapsuleReporter + 'static> = reporter.clone();
-    let handle = capsule_core::tools::ensure_runtime_tool(
-        spec,
-        version_override.as_deref(),
-        &deps,
-        reporter_dyn,
-    )
-    .await?;
-    Ok(Some(handle.bin_dir))
+) -> Result<LifecyclePathPlan> {
+    let toolchains = materialize_lifecycle_toolchains(plan, command, reporter)?;
+    build_lifecycle_path_plan(plan, phase, command, lifecycle_roots, toolchains, reporter).await
 }
 
 pub(super) fn plan_v03_provision_command(
@@ -761,63 +754,19 @@ fn run_lifecycle_shell_command(
     command: &str,
     phase: &str,
     working_dir: &Path,
-    extra_path: Option<&Path>,
+    path_plan: &LifecyclePathPlan,
 ) -> Result<()> {
-    // Prepend the ato-managed Node bin dir to PATH inside the command string itself
-    // (#294). We cannot rely on setting PATH in the subprocess env because `sh -l`
-    // sources login profile scripts (e.g. /etc/profile) which unconditionally reset
-    // PATH. By prefixing "export PATH=<dir>:$PATH;" we run after the profile reset
-    // and guarantee the managed npm/node are found first.
-    // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
-    // (npm:pkg) that store runtime_version in capsule.toml are handled correctly —
-    // `ensure_node_binary` alone requires capsule.lock.json which providers don't create.
-    let managed_node_dir = runtime_manager::ensure_node_binary_with_authority(plan, None)
-        .ok()
-        .and_then(|node_bin| node_bin.parent().map(Path::to_path_buf));
-    let mut path_prefix_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(extra) = extra_path {
-        path_prefix_dirs.push(extra.to_path_buf());
-    }
-    if let Some(dir) = managed_node_dir {
-        path_prefix_dirs.push(dir);
-    }
-    let managed_node_path_prefix = if path_prefix_dirs.is_empty() {
-        String::new()
-    } else {
-        #[cfg(windows)]
-        {
-            // On Windows, `cmd /C` doesn't understand `export` or `:` separators.
-            // Use `set PATH=<dir>;<dir>;%PATH%&` which cmd.exe does understand.
-            let joined = path_prefix_dirs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(";");
-            format!("set \"PATH={joined};%PATH%\"& ")
-        }
-        #[cfg(not(windows))]
-        {
-            let joined = path_prefix_dirs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":");
-            format!("export PATH={joined}:$PATH; ")
-        }
-    };
-    let effective_command = format!("{}{}", managed_node_path_prefix, command);
-
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", &effective_command]);
+        cmd.args(["/C", command]);
         cmd
     };
 
     #[cfg(not(windows))]
     let mut cmd = {
         let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", &effective_command]);
+        cmd.args(["-c", command]);
         cmd
     };
 
@@ -833,7 +782,8 @@ fn run_lifecycle_shell_command(
         // Skip git-hooks managers (husky, lefthook, etc.): the capsule workspace
         // has no .git dir so their prepare/postinstall scripts would fail with exit 128.
         .env("HUSKY", "0")
-        .env("LEFTHOOK", "0");
+        .env("LEFTHOOK", "0")
+        .env("PATH", path_plan.path_env()?);
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
