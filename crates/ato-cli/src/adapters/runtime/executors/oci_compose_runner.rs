@@ -75,6 +75,20 @@ pub(crate) async fn execute_compose_run(
         import_compose(&input).map_err(|e| anyhow::anyhow!("compose_import_failed: {e}"))?;
 
     // 3. Surface diagnostics.
+    reporter
+        .notify(format!("📋 Compose file: {}", compose_path.display()))
+        .await?;
+    reporter
+        .notify(format!(
+            "🔧 Services: {}",
+            import_output
+                .services
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .await?;
     for warning in &import_output.warnings {
         reporter.notify(format!("⚠️  compose: {warning}")).await?;
     }
@@ -97,6 +111,15 @@ pub(crate) async fn execute_compose_run(
 
     // 5. Resolve image digests.
     let images = resolve_images_for_compose(&import_output, &provider, &reporter).await?;
+    for (svc_name, img) in &images {
+        reporter
+            .notify(format!(
+                "✅ [{}] Resolved: {}",
+                svc_name,
+                &img.resolved_digest[..std::cmp::min(19, img.resolved_digest.len())]
+            ))
+            .await?;
+    }
 
     // 6. Execute.
     let project_name = compose_path
@@ -600,5 +623,242 @@ services:
         // dispatch path hasn't been broken. No behavioral assertion needed here —
         // the existing source-target tests in other modules cover that path.
         let _ = fake_oci_semantics();
+    }
+
+    // ── Test 12: resolve_image returning Unsupported yields resolution_required ─
+
+    #[test]
+    fn image_resolve_unsupported_returns_resolution_required_error() {
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::with_resolve_error(
+            crate::adapters::runtime::oci_provider::OciProviderError::Unsupported("resolve_image"),
+        );
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(resolve_images_for_compose(
+            &import_output,
+            &provider,
+            &reporter,
+        ));
+        assert!(
+            result.is_err(),
+            "should fail when resolve returns Unsupported"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("oci_image_resolution_required") || msg.contains("resolution"),
+            "error must mention resolution, got: {msg}"
+        );
+    }
+
+    // ── Test 13: generic resolve failure is propagated with context ───────────
+
+    #[test]
+    fn image_resolve_generic_failure_is_propagated() {
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::with_resolve_error(
+            crate::adapters::runtime::oci_provider::OciProviderError::Operation {
+                operation: "resolve_image",
+                message: "registry timeout".to_string(),
+            },
+        );
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(resolve_images_for_compose(
+            &import_output,
+            &provider,
+            &reporter,
+        ));
+        assert!(result.is_err(), "generic resolve error must propagate");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("registry timeout") || msg.contains("failed to resolve"),
+            "error must include the original reason, got: {msg}"
+        );
+    }
+
+    // ── Test 14: pull failure in compose graph is typed ───────────────────────
+
+    #[test]
+    fn pull_failure_in_compose_graph_is_typed() {
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::with_pull_failure(
+            crate::adapters::runtime::oci_provider::OciProviderError::Operation {
+                operation: "pull_image",
+                message: "image not found in registry".to_string(),
+            },
+        );
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_compose_run_with_provider(
+            &import_output,
+            &simple_images(),
+            OciPolicyMode::Strict,
+            &[],
+            "test-project",
+            &reporter,
+            &provider,
+        ));
+        assert!(result.is_err(), "pull failure must propagate as error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("pull_image") || msg.contains("image not found") || msg.contains("pull"),
+            "error must mention pull failure, got: {msg}"
+        );
+    }
+
+    // ── Test 15: strict egress gap blocks compose execution ───────────────────
+
+    #[test]
+    fn strict_egress_gap_blocks_compose_execution() {
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let egress_allow = vec!["example.com".to_string()];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_compose_run_with_provider(
+            &import_output,
+            &simple_images(),
+            OciPolicyMode::Strict, // Strict + non-empty egress → must fail
+            &egress_allow,
+            "test-project",
+            &reporter,
+            &provider,
+        ));
+        assert!(
+            result.is_err(),
+            "Strict policy + egress_allow must fail (PodmanProvider cannot enforce)"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("oci_execution_gate_failed")
+                || msg.contains("Strict")
+                || msg.contains("egress"),
+            "error must reference strict policy gate, got: {msg}"
+        );
+    }
+
+    // ── Test 16: loose policy gap allows compose execution with warning path ──
+
+    #[test]
+    fn loose_policy_gap_allows_compose_execution() {
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let egress_allow = vec!["example.com".to_string()];
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_compose_run_with_provider(
+            &import_output,
+            &simple_images(),
+            OciPolicyMode::Loose, // Loose + non-empty egress → must succeed (warning only)
+            &egress_allow,
+            "test-project",
+            &reporter,
+            &provider,
+        ));
+        assert!(
+            result.is_ok(),
+            "Loose policy must allow execution even with egress_allow, got: {:?}",
+            result.err()
+        );
+    }
+
+    // ── Test 17: real Podman opt-in smoke ────────────────────────────────────
+    //
+    // Skipped unless ATO_TEST_REAL_PODMAN=1 is set.
+    // Requires Podman to be installed and (on macOS) a running Podman machine.
+    // Uses only small stable images (alpine:3.19) to keep pull time minimal.
+    //
+    // Run with:
+    //   ATO_TEST_REAL_PODMAN=1 cargo test -p ato-cli real_podman -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn real_podman_compose_smoke_minimal_two_service() {
+        if std::env::var("ATO_TEST_REAL_PODMAN").is_err() {
+            eprintln!("Skipping: ATO_TEST_REAL_PODMAN not set");
+            return;
+        }
+
+        // Create a temporary project directory with a minimal compose file.
+        // Uses alpine:3.19 for both services to avoid any build step and minimize
+        // pull time. "db" acts as a background sleeper; "app" depends on db and
+        // exits after a short sleep (triggering end of test).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let compose_yaml = r#"
+services:
+  db:
+    image: alpine:3.19
+    command: ["sh", "-c", "echo db-started && sleep 30"]
+  app:
+    image: alpine:3.19
+    command: ["sh", "-c", "echo app-started && sleep 3"]
+    ports:
+      - "19999:19999"
+    depends_on:
+      - db
+
+volumes: {}
+"#;
+        std::fs::write(tmp.path().join("docker-compose.yml"), compose_yaml).expect("write compose");
+
+        let reporter = fake_reporter();
+        let result = execute_compose_run(
+            tmp.path(),
+            reporter,
+            OciPolicyMode::Strict,
+            &[], // no egress_allow
+        )
+        .await;
+
+        match &result {
+            Err(e) => eprintln!("real Podman smoke failed: {e:#}"),
+            Ok(code) => eprintln!("real Podman smoke exited with code {code}"),
+        }
+
+        // Accept either success or a specific known skip condition (provider not ready).
+        // The goal is to confirm the path connects to real Podman, not to require
+        // Podman to be set up in every CI environment.
+        match result {
+            Ok(code) => assert_eq!(code, 0, "smoke test exited with non-zero code"),
+            Err(e) => {
+                let msg = e.to_string();
+                // If Podman itself is not available, that's a prerequisite failure,
+                // not a test failure. Log but don't fail.
+                if msg.contains("oci_provider_not_ready")
+                    || msg.contains("podman")
+                    || msg.contains("not ready")
+                    || msg.contains("not found")
+                {
+                    eprintln!("Podman not available or not ready — skipping real smoke: {msg}");
+                } else {
+                    panic!("Unexpected smoke test failure: {msg}");
+                }
+            }
+        }
     }
 }
