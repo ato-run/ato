@@ -72,6 +72,27 @@ pub fn derive_launch_spec(plan: &ManifestData) -> Result<LaunchSpec> {
         }
     }
 
+    // OCI containers with no explicit entrypoint/run_command use the image's
+    // built-in CMD/ENTRYPOINT. Return a stub LaunchSpec so receipt builders
+    // and diagnostics can proceed without treating this as a config error.
+    if runtime.as_deref() == Some("oci") {
+        let image = plan
+            .targets_oci_image()
+            .unwrap_or_else(|| plan.selected_target_label().to_string());
+        return Ok(LaunchSpec {
+            working_dir: std::path::PathBuf::from("."),
+            command: image,
+            args: plan.targets_oci_cmd(),
+            env_vars,
+            required_lockfile: None,
+            runtime,
+            driver,
+            language,
+            port,
+            source: LaunchSpecSource::Entrypoint,
+        });
+    }
+
     let run_command = plan
         .execution_run_command()
         .filter(|value| !value.trim().is_empty())
