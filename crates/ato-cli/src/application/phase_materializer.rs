@@ -27,8 +27,8 @@ use crate::application::projection::project_payload;
 use crate::application::source_inventory::{normalize_outputs, OutputSpec};
 
 const BUILD_OUTPUT_KEY_VERSION: &str = "ato-phase-build-output-key-v1";
-const MATERIALIZER_SCHEMA_VERSION: &str = "ato-phase-materializer-schema-v1";
-const PROJECTION_ALGORITHM_VERSION: &str = "ato-build-output-projection-v1";
+pub(crate) const MATERIALIZER_SCHEMA_VERSION: &str = "ato-phase-materializer-schema-v1";
+pub(crate) const PROJECTION_ALGORITHM_VERSION: &str = "ato-build-output-projection-v1";
 
 /// Store handle for a relocatable build-output layer.
 ///
@@ -236,13 +236,22 @@ pub(crate) fn build_output_materialization_key(
 pub(crate) fn materialization_key_for_observation(
     observation: &BuildObservation,
 ) -> Result<String> {
-    let outputs = normalize_outputs(&observation.outputs)
-        .context("failed to normalize build output contract for materialization lock")?;
-    let output_contract_digest = output_contract_digest(&outputs);
+    let (output_contract_digest, _) = build_output_contract_for_observation(observation)?;
     Ok(build_output_materialization_key(
         &observation.input_digest,
         &output_contract_digest,
         &current_platform_profile(),
+    ))
+}
+
+pub(crate) fn build_output_contract_for_observation(
+    observation: &BuildObservation,
+) -> Result<(String, Vec<String>)> {
+    let outputs = normalize_outputs(&observation.outputs)
+        .context("failed to normalize build output contract for materialization lock")?;
+    Ok((
+        output_contract_digest(&outputs),
+        normalized_output_paths(&outputs),
     ))
 }
 

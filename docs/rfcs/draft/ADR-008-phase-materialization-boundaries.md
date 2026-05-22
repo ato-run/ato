@@ -128,6 +128,17 @@ cache yet.
   build-output layer and does not widen scope to dependency layers or production
   remote CAS transport.
 
+#### Artifact producer contract boundary
+
+- ADR-008 defines phase build-output local/remote layer mechanics:
+  materialization records, immutable blobs, file-backed CAS exchange, and local
+  projection before run.
+- ADR-009 defines the artifact build producer request/response boundary for
+  future remote-first build and output-first install flows.
+- `artifact_build_id` is the ADR-level reusable build artifact identity.
+  Current phase materialization keeps `materialization_key` as its existing
+  implementation key and v0 compatibility alias.
+
 ## Alternatives Considered
 
 ### Option A: Start with deps and build layers together
