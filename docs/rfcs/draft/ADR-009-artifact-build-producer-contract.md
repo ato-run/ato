@@ -97,6 +97,30 @@ Producer output may later become input to an `install_revision_id`. The worker
 itself does not allocate `installed_app_id`, `profile_id`, `install_profile_key`,
 `install_revision_id`, or `capsule_instance_key`.
 
+### File-backed local worker simulation
+
+The first worker harness is file-backed and local. It validates the producer
+request/response boundary without adding a submit API, HTTP service, scheduler,
+or trust registry.
+
+The simulator receives a local source fixture out of band, copies it into a
+disposable worker workspace, runs only the build phase there, captures the
+declared outputs, and exports the same remote CAS mirror layout that ADR-008's
+phase materializer already looks up:
+
+```text
+<remote_root>/build-output/<materialization_key>/
+  layer.json
+  blob/
+    manifest.json
+    payload/
+```
+
+The harness is deliberately install-agnostic. It does not allocate
+`install_revision_id`, and its producer request still does not receive launch
+profiles, secret values, user state, consent records, dynamic session data, or
+runtime process identity.
+
 ## Consequences
 
 - Good: remote-first public-repo builds and output-first installs can share one
