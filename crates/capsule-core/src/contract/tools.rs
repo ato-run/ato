@@ -58,12 +58,14 @@ pub enum FetchKind {
     /// Tool is published as an npm tarball at
     /// `https://registry.npmjs.org/<package>/-/<package>-<version>.tgz`.
     NpmRegistry { package: &'static str },
-    /// Tool is a GitHub release asset. `asset_template` may contain
-    /// `{version}` and `{triple}` placeholders.
+    /// Tool is a GitHub release asset. `tag_template` and `asset_template`
+    /// may contain a `{version}` placeholder; `asset_template` may also
+    /// contain `{triple}`.
     /// `repo` is `"owner/repo"`.  `triple_style` controls how the current
     /// host platform is rendered into the `{triple}` placeholder.
     GithubRelease {
         repo: &'static str,
+        tag_template: &'static str,
         asset_template: &'static str,
         triple_style: TripleStyle,
     },
@@ -140,6 +142,7 @@ pub static BUN: RuntimeToolSpec = RuntimeToolSpec {
     depends_on: &[],
     fetch: FetchKind::GithubRelease {
         repo: "oven-sh/bun",
+        tag_template: "bun-v{version}",
         asset_template: "bun-{triple}.zip",
         triple_style: TripleStyle::Bun,
     },
@@ -159,6 +162,7 @@ pub static UV: RuntimeToolSpec = RuntimeToolSpec {
     depends_on: &[],
     fetch: FetchKind::GithubRelease {
         repo: "astral-sh/uv",
+        tag_template: "{version}",
         asset_template: "uv-{triple}.tar.gz",
         triple_style: TripleStyle::Rust,
     },
@@ -336,15 +340,17 @@ fn build_fetch_url(fetch: &FetchKind, version: &str) -> Result<String> {
         )),
         FetchKind::GithubRelease {
             repo,
+            tag_template,
             asset_template,
             triple_style,
         } => {
+            let tag = tag_template.replace("{version}", version);
             let triple = host_triple(*triple_style)?;
             let asset = asset_template
                 .replace("{version}", version)
                 .replace("{triple}", &triple);
             Ok(format!(
-                "https://github.com/{repo}/releases/download/{version}/{asset}"
+                "https://github.com/{repo}/releases/download/{tag}/{asset}"
             ))
         }
     }
@@ -942,11 +948,13 @@ mod tests {
         let bun_triple = host_triple(TripleStyle::Bun).unwrap();
         let uv_triple = host_triple(TripleStyle::Rust).unwrap();
         assert_eq!(
-            build_fetch_url(&BUN.fetch, "1.1.38").unwrap(),
-            format!("https://github.com/oven-sh/bun/releases/download/1.1.38/bun-{bun_triple}.zip")
+            build_fetch_url(&BUN.fetch, "1.2.8").unwrap(),
+            format!(
+                "https://github.com/oven-sh/bun/releases/download/bun-v1.2.8/bun-{bun_triple}.zip"
+            )
         );
         assert_eq!(
-            archive_filename(&BUN.fetch, "1.1.38").unwrap(),
+            archive_filename(&BUN.fetch, "1.2.8").unwrap(),
             format!("bun-{bun_triple}.zip")
         );
         assert_eq!(
