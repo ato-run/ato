@@ -833,6 +833,7 @@ mod tests {
                     libc: "system".to_string(),
                 },
             },
+            oci: None,
         };
 
         let error = validate_execution_plan_against_policy(&plan, &policy).expect_err("deny");

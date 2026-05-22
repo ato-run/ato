@@ -419,6 +419,7 @@ mod tests {
                     libc: "unknown".to_string(),
                 },
             },
+            oci: None,
         }
     }
 
