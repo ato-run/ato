@@ -248,7 +248,8 @@ Fixes the Scenario C degradation from PR 11.6: `ato ps` / `ato stop --all` now t
 
 ### Session record fields
 
-Written to `~/.ato/oci-sessions/<session_id>.json` after all containers start:
+Written to `${ATO_HOME}/oci-sessions/<session_id>.json` after all containers start
+(`ATO_HOME` defaults to `~/.ato` when the env var is not set):
 
 - `session_id`, `import_kind` (compose / docker-run-script), `provider` (podman)
 - `source_path`, `source_hash`
@@ -270,7 +271,7 @@ Deleted after `cleanup_services` completes (both success and failure paths).
 ### Test results
 
 ```
-oci_session_store:   7/7  ✅
+oci_session_store:  11/11 ✅  (includes 4 ATO_HOME isolation regression tests)
 oci_multi_service:  18/18 ✅
 install_sh:         11/11 ✅
 oci_compose:        23/23 ✅

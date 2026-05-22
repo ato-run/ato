@@ -2,9 +2,13 @@
 //!
 //! When `ato run` starts an OCI multi-service graph (via `--oci-compose`,
 //! `--oci-install-sh`, or an explicit `[services]` capsule), a `OciSessionRecord`
-//! is written to `~/.ato/oci-sessions/<session_id>.json` before the service
+//! is written to `${ATO_HOME}/oci-sessions/<session_id>.json` before the service
 //! graph enters the wait/log-stream loop.  The record is deleted when the
 //! session exits (normal or cleanup).
+//!
+//! `ATO_HOME` defaults to `~/.ato` when the environment variable is not set.
+//! All reads and writes use [`capsule_core::common::paths::ato_path_or_workspace_tmp`],
+//! so the path is always ATO_HOME-correct and never hardcoded to `~/.ato`.
 //!
 //! This lets `ato ps` show running OCI sessions and `ato stop --all` stop
 //! Podman containers/networks that were started by Ato.
@@ -338,6 +342,47 @@ fn is_leap(year: u64) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            #[allow(deprecated)]
+            std::env::set_var(key, value);
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+
+        fn remove(key: &str) -> Self {
+            let previous = std::env::var_os(key);
+            #[allow(deprecated)]
+            std::env::remove_var(key);
+            Self {
+                key: key.to_string(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                #[allow(deprecated)]
+                Some(v) => std::env::set_var(&self.key, v),
+                #[allow(deprecated)]
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
 
     fn make_record(session_id: &str) -> OciSessionRecord {
         OciSessionRecord {
@@ -447,5 +492,116 @@ mod tests {
         assert_eq!(&ts[4..5], "-");
         assert_eq!(&ts[7..8], "-");
         assert_eq!(&ts[10..11], "T");
+    }
+
+    // ── ATO_HOME path isolation tests ─────────────────────────────────────────
+
+    /// OciSessionStore::new() must write under ${ATO_HOME}/oci-sessions/, not
+    /// under HOME/.ato/oci-sessions/ when ATO_HOME is set to a different path.
+    #[test]
+    fn oci_session_store_uses_ato_home_not_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let ato_home = tempfile::tempdir().unwrap();
+        let fake_home = tempfile::tempdir().unwrap();
+
+        let _guard_ato = EnvVarGuard::set("ATO_HOME", ato_home.path().to_str().unwrap());
+        let _guard_home = EnvVarGuard::set("HOME", fake_home.path().to_str().unwrap());
+
+        let record = make_record("ato-ato-home-test");
+        let store = OciSessionStore::new().expect("OciSessionStore::new should succeed");
+        store.write_session(&record).expect("write_session");
+
+        // File must exist under ATO_HOME.
+        let expected = ato_home
+            .path()
+            .join("oci-sessions")
+            .join("ato-ato-home-test.json");
+        assert!(
+            expected.exists(),
+            "session file not found under ATO_HOME: {}",
+            expected.display()
+        );
+
+        // File must NOT exist under HOME/.ato.
+        let forbidden = fake_home
+            .path()
+            .join(".ato")
+            .join("oci-sessions")
+            .join("ato-ato-home-test.json");
+        assert!(
+            !forbidden.exists(),
+            "session file leaked to HOME/.ato: {}",
+            forbidden.display()
+        );
+    }
+
+    /// list/mark_stopped/delete in OciSessionStore::new() must also resolve
+    /// through ATO_HOME.
+    #[test]
+    fn stop_all_oci_sessions_reads_from_ato_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let ato_home = tempfile::tempdir().unwrap();
+        let _guard_ato = EnvVarGuard::set("ATO_HOME", ato_home.path().to_str().unwrap());
+
+        let record = make_record("ato-stop-test-1234");
+        let store = OciSessionStore::new().unwrap();
+        store.write_session(&record).unwrap();
+
+        // A fresh store created with the same ATO_HOME must see it.
+        let store2 = OciSessionStore::new().unwrap();
+        let sessions = store2.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "ato-stop-test-1234");
+
+        store2.mark_stopped("ato-stop-test-1234").unwrap();
+        let sessions = store2.list_sessions().unwrap();
+        assert_eq!(sessions[0].status, OciSessionStatus::Stopped);
+    }
+
+    /// Secret values must not appear in session records regardless of ATO_HOME.
+    #[test]
+    fn secret_values_not_written_to_ato_home_session_record() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let ato_home = tempfile::tempdir().unwrap();
+        let _guard_ato = EnvVarGuard::set("ATO_HOME", ato_home.path().to_str().unwrap());
+
+        let record = make_record("ato-noleak-check-12");
+        let store = OciSessionStore::new().unwrap();
+        let path = store.write_session(&record).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("password"),
+            "password leaked in ATO_HOME record: {content}"
+        );
+        assert!(
+            !content.contains("secret"),
+            "secret leaked in ATO_HOME record: {content}"
+        );
+        assert!(
+            !content.contains("DATABASE_URL"),
+            "DATABASE_URL leaked: {content}"
+        );
+    }
+
+    /// A clean ATO_HOME starts with no OCI sessions.
+    #[test]
+    fn clean_ato_home_has_no_cross_contamination_from_default_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let fresh_home = tempfile::tempdir().unwrap();
+        let _guard_ato = EnvVarGuard::set("ATO_HOME", fresh_home.path().to_str().unwrap());
+
+        // Should succeed and return empty list.
+        let store = OciSessionStore::new().unwrap();
+        let sessions = store.list_sessions().unwrap();
+        assert!(
+            sessions.is_empty(),
+            "fresh ATO_HOME should have no sessions, got: {:?}",
+            sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>()
+        );
     }
 }
