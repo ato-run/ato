@@ -210,6 +210,16 @@ pub(crate) enum Commands {
         #[arg(long = "plan-only", default_value_t = false)]
         plan_only: bool,
 
+        /// Import from docker-compose.yml and run as an Ato OCI service graph
+        /// through PodmanProvider (experimental, requires Podman)
+        #[arg(long = "oci-compose", default_value_t = false, hide = true)]
+        oci_compose: bool,
+
+        /// Import docker run commands from install.sh and run as an Ato OCI
+        /// service graph through PodmanProvider (experimental, requires Podman)
+        #[arg(long = "oci-install-sh", default_value_t = false, hide = true)]
+        oci_install_sh: bool,
+
         /// Grant read-only access to a host file or directory in sandbox mode
         #[arg(long = "read", value_name = "PATH")]
         read: Vec<String>,

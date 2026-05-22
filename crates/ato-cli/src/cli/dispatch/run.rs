@@ -57,6 +57,12 @@ pub(crate) struct RunLikeCommandArgs {
     pub(crate) cache_strategy: CacheStrategyArg,
     pub(crate) deprecation_warning: Option<&'static str>,
     pub(crate) plan_only: bool,
+    /// When true, detect a compose file, import it, and run through PodmanProvider.
+    /// This is an experimental explicit flag — it does not affect normal `ato run` behavior.
+    pub(crate) oci_compose: bool,
+    /// When true, detect an install script (install.sh / setup.sh / …), extract
+    /// docker run intent, and run through PodmanProvider. Experimental.
+    pub(crate) oci_install_sh: bool,
     pub(crate) reporter: Arc<reporters::CliReporter>,
 }
 
@@ -87,6 +93,46 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
 
     if let Some(warning) = args.deprecation_warning {
         eprintln!("{warning}");
+    }
+
+    // --oci-compose: import docker-compose.yml and run via PodmanProvider.
+    // This early-return path bypasses the normal capsule resolution pipeline.
+    if args.oci_compose {
+        let project_dir = args.path.clone();
+        let reporter = args.reporter.clone();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt
+            .block_on(
+                crate::adapters::runtime::executors::oci_compose_runner::execute_compose_run(
+                    &project_dir,
+                    reporter,
+                    capsule_core::execution_plan::model::OciPolicyMode::Strict,
+                    &[],
+                ),
+            )
+            .map(|_| ());
+    }
+
+    // --oci-install-sh: extract docker run intent from install.sh and run via PodmanProvider.
+    // This early-return path bypasses the normal capsule resolution pipeline.
+    if args.oci_install_sh {
+        let project_dir = args.path.clone();
+        let reporter = args.reporter.clone();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt
+            .block_on(
+                crate::adapters::runtime::executors::install_sh_runner::execute_install_sh_run(
+                    &project_dir,
+                    reporter,
+                    capsule_core::execution_plan::model::OciPolicyMode::Strict,
+                    &[],
+                ),
+            )
+            .map(|_| ());
     }
 
     let sandbox_requested =
@@ -578,6 +624,8 @@ mod tests {
             cache_strategy: crate::cli::shared::CacheStrategyArg::Auto,
             deprecation_warning: None,
             plan_only: false,
+            oci_compose: false,
+            oci_install_sh: false,
             reporter,
         })
         .expect("canonical handle should normalize");

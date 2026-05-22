@@ -785,6 +785,28 @@ impl ExecutionDescriptor {
         })
     }
 
+    /// Returns `true` when every service in the orchestration plan declares `runtime = "oci"`.
+    /// Used to route to the Podman-backed multi-service executor instead of the legacy Bollard path.
+    pub fn all_services_are_oci(&self) -> bool {
+        let services = self.services();
+        if services.is_empty() {
+            return false;
+        }
+        services.values().all(|service| {
+            let Some(target_label) = service
+                .target
+                .as_ref()
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+            else {
+                return false;
+            };
+            self.compat_str(&["targets", target_label, "runtime"])
+                .map(|r| r.eq_ignore_ascii_case("oci"))
+                .unwrap_or(false)
+        })
+    }
+
     pub fn is_web_services_mode(&self) -> bool {
         self.execution_runtime()
             .map(|runtime| runtime.eq_ignore_ascii_case("web"))

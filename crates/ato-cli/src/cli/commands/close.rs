@@ -1,6 +1,9 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::adapters::runtime::oci_session_store::{
+    apply_stop_result, stop_oci_session, OciSessionStatus, OciSessionStore,
+};
 use crate::reporters::CliReporter;
 use crate::runtime::process::ProcessManager;
 use capsule_core::CapsuleReporter;
@@ -19,38 +22,62 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
         let processes = pm.list_processes()?;
         let running: Vec<_> = processes.iter().filter(|p| p.status.is_active()).collect();
 
-        if running.is_empty() {
+        // Check OCI sessions before stopping so we know total activity.
+        let oci_running = OciSessionStore::new()
+            .ok()
+            .and_then(|s| s.list_sessions().ok())
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|s| {
+                        s.status == OciSessionStatus::Running
+                            || s.status == OciSessionStatus::StopFailed
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+
+        if running.is_empty() && oci_running == 0 {
             futures::executor::block_on(reporter.notify("No active capsules.".to_string()))?;
             return Ok(());
         }
 
-        futures::executor::block_on(
-            reporter.notify(format!("Stopping {} active capsule(s)...", running.len())),
-        )?;
+        // Stop source-runtime (PID-based) processes.
+        if !running.is_empty() {
+            futures::executor::block_on(
+                reporter.notify(format!("Stopping {} active capsule(s)...", running.len())),
+            )?;
 
-        let mut stopped = 0;
-        for p in &running {
-            match pm.stop_process(&p.id, args.force) {
-                Ok(true) => {
-                    futures::executor::block_on(
-                        reporter.notify(format!("✅ Stopped: {} (PID: {})", p.name, p.pid)),
-                    )?;
-                    stopped += 1;
-                }
-                Ok(false) => {
-                    futures::executor::block_on(
-                        reporter.warn(format!("⚠️  Already stopped: {}", p.name)),
-                    )?;
-                }
-                Err(err) => {
-                    futures::executor::block_on(
-                        reporter.warn(format!("❌ Failed to stop {}: {}", p.name, err)),
-                    )?;
+            let mut stopped = 0;
+            for p in &running {
+                match pm.stop_process(&p.id, args.force) {
+                    Ok(true) => {
+                        futures::executor::block_on(
+                            reporter.notify(format!("✅ Stopped: {} (PID: {})", p.name, p.pid)),
+                        )?;
+                        stopped += 1;
+                    }
+                    Ok(false) => {
+                        futures::executor::block_on(
+                            reporter.warn(format!("⚠️  Already stopped: {}", p.name)),
+                        )?;
+                    }
+                    Err(err) => {
+                        futures::executor::block_on(
+                            reporter.warn(format!("❌ Failed to stop {}: {}", p.name, err)),
+                        )?;
+                    }
                 }
             }
+
+            futures::executor::block_on(
+                reporter.notify(format!("✅ Stopped {} capsule(s)", stopped)),
+            )?;
         }
 
-        futures::executor::block_on(reporter.notify(format!("✅ Stopped {} capsule(s)", stopped)))?;
+        // Stop OCI sessions.
+        stop_all_oci_sessions(&args, &reporter)?;
+
         return Ok(());
     }
 
@@ -121,6 +148,54 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
         futures::executor::block_on(reporter.notify(format!("✅ Stopped {} capsule(s)", stopped)))?;
     } else {
         anyhow::bail!("Either --id, --name, or --all is required");
+    }
+
+    Ok(())
+}
+
+/// Stop all running OCI sessions (containers + networks).
+fn stop_all_oci_sessions(args: &CloseArgs, reporter: &Arc<CliReporter>) -> Result<()> {
+    let store = match OciSessionStore::new() {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // No OCI sessions directory yet
+    };
+    let sessions = store.list_sessions().unwrap_or_default();
+    // Retry both Running and StopFailed sessions so that a previous partial
+    // failure can be recovered on the next invocation.
+    let to_stop: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            s.status == OciSessionStatus::Running || s.status == OciSessionStatus::StopFailed
+        })
+        .collect();
+
+    for session in to_stop {
+        futures::executor::block_on(reporter.notify(format!(
+            "🐳 Stopping OCI session {} ({}, {} service(s))...",
+            session.session_id,
+            session.import_kind,
+            session.services.len()
+        )))?;
+
+        let result = stop_oci_session(session, args.force);
+
+        for name in &result.stopped_containers {
+            futures::executor::block_on(
+                reporter.notify(format!("  ✅ Stopped container: {name}")),
+            )?;
+        }
+        for name in &result.errors {
+            futures::executor::block_on(reporter.warn(format!("  ⚠️  {name}")))?;
+        }
+        if result.network_removed {
+            futures::executor::block_on(
+                reporter.notify(format!("  🔗 Removed network: {}", session.network_name)),
+            )?;
+        }
+
+        // Delete on full success; keep the record (as StopFailed) on partial
+        // failure so a later `ato stop --all` can retry.
+        apply_stop_result(&store, &session.session_id, &result);
     }
 
     Ok(())

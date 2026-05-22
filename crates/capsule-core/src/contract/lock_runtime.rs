@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::ato_lock::AtoLock;
 use crate::execution_plan::error::AtoExecutionError;
 use crate::python_runtime::extend_python_selector_env;
-use crate::types::{NetworkConfig, ReadinessProbe, ResolvedTargetRuntime};
+use crate::types::{NetworkConfig, OciImageResolution, ReadinessProbe, ResolvedTargetRuntime};
 
 #[derive(Debug, Clone, Default)]
 pub struct LockCompilerOverlay {
@@ -14,6 +14,46 @@ pub struct LockCompilerOverlay {
     pub filesystem_read_only: Option<Vec<String>>,
     pub filesystem_read_write: Option<Vec<String>>,
     pub secret_ids: Option<Vec<String>>,
+}
+
+fn oci_image_resolution_from_lock(
+    lock: &AtoLock,
+    target_label: &str,
+) -> Result<Option<OciImageResolution>, AtoExecutionError> {
+    let Some(oci_images) = lock.resolution.entries.get("oci_images") else {
+        return Ok(None);
+    };
+    let Some(oci_images) = oci_images.as_object() else {
+        return Err(AtoExecutionError::execution_contract_invalid(
+            "resolution.oci_images must be an object keyed by target label",
+            Some("resolution.oci_images"),
+            None,
+        ));
+    };
+    let Some(entry) = oci_images.get(target_label) else {
+        return Ok(None);
+    };
+    serde_json::from_value(entry.clone())
+        .map(Some)
+        .map_err(|err| {
+            AtoExecutionError::execution_contract_invalid(
+                format!("resolution.oci_images.{target_label} is invalid: {err}"),
+                Some("resolution.oci_images"),
+                None,
+            )
+        })
+}
+
+/// Look up the resolved OCI image for a given target label from the lock file.
+///
+/// Returns `Ok(None)` when no `resolution.oci_images` section is present or the label is absent.
+/// This does **not** call `ensure_execution_ready`, so it works for pure-OCI service capsules
+/// that have no `contract.process` entry.
+pub fn resolve_oci_image_for_target(
+    lock: &AtoLock,
+    target_label: &str,
+) -> Result<Option<OciImageResolution>, AtoExecutionError> {
+    oci_image_resolution_from_lock(lock, target_label)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,6 +69,7 @@ pub struct LockServiceUnit {
     pub name: String,
     pub target_label: String,
     pub runtime: ResolvedTargetRuntime,
+    pub oci_image: Option<OciImageResolution>,
     pub depends_on: Vec<String>,
     pub readiness_probe: Option<ReadinessProbe>,
 }
@@ -210,7 +251,7 @@ fn build_services(
         .iter()
         .enumerate()
         .map(|(index, workload)| {
-            service_from_workload(workload, targets, selected_target_label, index)
+            service_from_workload(lock, workload, targets, selected_target_label, index)
         })
         .collect()
 }
@@ -232,12 +273,14 @@ fn synthesized_service(
         name: "main".to_string(),
         target_label: selected_target_label.to_string(),
         runtime: runtime_from_target(process, targets, selected_target_label)?,
+        oci_image: oci_image_resolution_from_lock(lock, selected_target_label)?,
         depends_on: Vec::new(),
         readiness_probe: None,
     })
 }
 
 fn service_from_workload(
+    lock: &AtoLock,
     workload: &Value,
     targets: &[Value],
     selected_target_label: &str,
@@ -263,6 +306,7 @@ fn service_from_workload(
         name,
         target_label: target_label.clone(),
         runtime: runtime_from_target(process, targets, &target_label)?,
+        oci_image: oci_image_resolution_from_lock(lock, &target_label)?,
         depends_on: workload
             .get("depends_on")
             .and_then(json_string_array)
@@ -548,7 +592,54 @@ mod tests {
         assert_eq!(model.selected.name, "main");
         assert_eq!(model.selected.target_label, "web");
         assert_eq!(model.selected.runtime.driver.as_deref(), Some("deno"));
+        assert!(model.selected.oci_image.is_none());
         assert_eq!(model.services.len(), 1);
+    }
+
+    #[test]
+    fn parses_oci_image_resolution_by_target_label() {
+        let mut lock = sample_lock();
+        lock.resolution.entries.insert(
+            "oci_images".to_string(),
+            json!({
+                "web": {
+                    "declared_ref": "ghcr.io/acme/app:latest",
+                    "resolved_digest": "sha256:abc",
+                    "platform": {
+                        "os": "linux",
+                        "architecture": "arm64"
+                    },
+                    "importer_input_hash": "blake3:input"
+                }
+            }),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        let image = model.selected.oci_image.expect("oci image");
+
+        assert_eq!(image.declared_ref, "ghcr.io/acme/app:latest");
+        assert_eq!(image.resolved_digest, "sha256:abc");
+        assert_eq!(image.platform.os, "linux");
+        assert_eq!(image.platform.architecture, "arm64");
+        assert_eq!(image.importer_input_hash.as_deref(), Some("blake3:input"));
+    }
+
+    #[test]
+    fn rejects_malformed_oci_image_resolution() {
+        let mut lock = sample_lock();
+        lock.resolution.entries.insert(
+            "oci_images".to_string(),
+            json!({
+                "web": {
+                    "declared_ref": "ghcr.io/acme/app:latest"
+                }
+            }),
+        );
+
+        let error = resolve_lock_runtime_model(&lock, None).expect_err("missing digest must fail");
+
+        assert_eq!(error.code, "ATO_ERR_EXECUTION_CONTRACT_INVALID");
+        assert!(error.to_string().contains("resolution.oci_images.web"));
     }
 
     #[test]
@@ -585,6 +676,44 @@ mod tests {
 
         let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
         assert!(model.network.is_none());
+    }
+
+    #[test]
+    fn lock_update_records_declared_ref_digest_and_platform() {
+        let mut lock = sample_lock();
+        // Simulate writing a resolved image (as produced by OciResolvedImage::into_lock_resolution)
+        // into the lock's oci_images map.  The key must match the workload's target label ("web")
+        // which is already present in the sample_lock workloads.
+        lock.resolution.entries.insert(
+            "oci_images".to_string(),
+            json!({
+                "web": {
+                    "declared_ref": "postgres:14",
+                    "resolved_digest":
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "platform": {
+                        "os": "linux",
+                        "architecture": "amd64"
+                    }
+                    // importer_input_hash absent (None → omitted in into_lock_resolution)
+                }
+            }),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        let image = model.selected.oci_image.expect("oci_image must be present");
+
+        assert_eq!(image.declared_ref, "postgres:14");
+        assert_eq!(
+            image.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(image.platform.os, "linux");
+        assert_eq!(image.platform.architecture, "amd64");
+        assert!(
+            image.importer_input_hash.is_none(),
+            "importer_input_hash must be absent when not provided by OciResolvedImage::into_lock_resolution"
+        );
     }
 
     #[test]
