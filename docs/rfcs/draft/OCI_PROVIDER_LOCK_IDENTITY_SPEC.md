@@ -618,3 +618,99 @@ port in identity, Podman machine id in identity.
 
 Docker Compose subset importer and `install.sh` intent extractor remain
 deferred to PR 9.
+
+---
+
+## §10 PR 9 — Docker Compose Subset Importer
+
+### 10.1 Overview
+
+PR 9 adds a **pure Docker Compose subset importer** in
+`capsule-core::routing::importer::compose`. The importer converts a
+`docker-compose.yml` / `compose.yml` into an Ato OCI service graph projection
+without executing Docker Compose, shelling out, or performing any host I/O
+beyond reading the file text supplied through `ComposeImportInput`.
+
+### 10.2 Entry points
+
+| Function | Description |
+|---|---|
+| `detect_compose_candidate(dir)` | Returns the first candidate file found in priority order |
+| `import_compose(input)` | Pure converter; returns `ComposeImportOutput` or `ComposeImportError` |
+| `ComposeImportOutput::to_orchestration_plan()` | Converts output to `OrchestrationPlan` for use with the PR 8 executor |
+
+### 10.3 File discovery priority
+
+1. `docker-compose.yml`
+2. `docker-compose.yaml`
+3. `compose.yml`
+4. `compose.yaml`
+
+### 10.4 Supported Compose subset
+
+| Field | Support |
+|---|---|
+| `services.<n>.image` | ✅ Required |
+| `services.<n>.command` | ✅ |
+| `services.<n>.entrypoint` | ✅ |
+| `services.<n>.environment` (map + list) | ✅ |
+| `services.<n>.ports` | ✅ — container port only; host port discarded |
+| `services.<n>.volumes` (named) | ✅ → Ato state binding |
+| `services.<n>.volumes` (relative bind `./`) | ⚠️ Allowed with warning |
+| `services.<n>.volumes` (absolute bind `/`) | ❌ Hard rejected |
+| `services.<n>.depends_on` (list + map) | ✅ |
+| `services.<n>.healthcheck` | ✅ Conservative |
+| `services.<n>.container_name` | ⚠️ Source metadata only |
+| `services.<n>.build` (no image) | ❌ Rejected |
+| `services.<n>.privileged: true` | ❌ Rejected |
+| `services.<n>.network_mode: host` | ❌ Rejected |
+| All other keys | ⚠️ Reported in `unsupported_features` |
+
+### 10.5 Mapping rules
+
+- **Service name → logical alias**: the Compose service key becomes the Ato
+  network alias and logical service label. `container_name` is stored in
+  `source_container_name` as metadata only and is never used as the runtime
+  container name.
+- **Ports**: only the container port is preserved. Host port is discarded
+  because Ato auto-allocates host ports and records them in Session/Receipt
+  only.
+- **Named volumes**: mapped to Ato state bindings with `StateBindingKind::Named`.
+- **Absolute bind mounts**: hard rejected with
+  `ComposeImportError::AbsoluteBindMountRejected`.
+- **Relative bind mounts**: allowed with warning; recorded as
+  `StateBindingKind::ProjectRootBind`.
+- **`depends_on` list**: `DependencyCondition::ServiceStarted`.
+- **`depends_on` map + `condition: service_healthy`**: `DependencyCondition::ServiceHealthy`.
+- **Unknown `depends_on` target**: `ComposeImportError::UnknownDependency`.
+- **Dependency cycles**: detected via `startup_order_from_dependencies`;
+  `ComposeImportError::DependencyCycle`.
+
+### 10.6 Env and secret handling
+
+Keys containing `PASSWORD`, `SECRET`, `TOKEN`, `PASSWD`, `CREDENTIAL`,
+`AUTH`, `CERT`, or `_KEY` (case-insensitive) are classified as secret-like
+(`is_secret_like: true`) and a warning is emitted. Callers must use this flag
+to redact values from Receipt output. The literal value is preserved in the
+import projection to allow the caller to substitute a generated secret.
+
+`RequiredExternal` env entries (key without value, or `KEY` in list form) are
+passed through to `ResolvedTargetRuntime.required_env`.
+
+### 10.7 Cycle detection
+
+`import_compose` reuses `capsule_core::engine::orchestration::startup_order_from_dependencies`
+for DFS topological sort and cycle detection. The same function is used in
+`to_orchestration_plan()` to produce `OrchestrationPlan.startup_order`.
+
+### 10.8 Integration with PR 8 executor
+
+`ComposeImportOutput::to_orchestration_plan()` converts the import output to
+an `OrchestrationPlan` using `ResolvedServiceRuntime::Oci`. The caller must
+supply `HashMap<String, OciImageResolution>` (resolved digests from the lock)
+before passing to `execute_service_graph_with_provider`. Digest resolution is
+not part of the importer.
+
+### 10.9 install.sh importer
+
+`install.sh` intent extractor remains deferred to PR 10.
