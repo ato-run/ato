@@ -3037,9 +3037,12 @@ where
         }
 
         target_runner::preflight_required_environment_variables(&decision.plan, &launch_ctx)?;
-        let exit =
-            crate::executors::oci::execute(&decision.plan, request.reporter.clone(), &launch_ctx)
-                .await?;
+        let exit = crate::executors::oci_single_target::execute_single_target(
+            &decision.plan,
+            request.reporter.clone(),
+            &launch_ctx,
+        )
+        .await?;
         if exit != 0 {
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
