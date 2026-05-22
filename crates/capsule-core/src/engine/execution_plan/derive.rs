@@ -9,11 +9,12 @@ use crate::execution_plan::canonical::{
 use crate::execution_plan::error::AtoExecutionError;
 use crate::execution_plan::model::{
     CapsuleRef, Consent, ConsentKey, ExecutionDriver, ExecutionPlan, ExecutionRuntime,
-    ExecutionTier, NonInteractiveBehavior, Platform, Provisioning, ProvisioningNetwork,
-    Reproducibility, Runtime, RuntimeFilesystemPolicy, RuntimeNetworkPolicy, RuntimePolicy,
-    RuntimeSecretsPolicy, SecretDelivery, TargetRef, EXECUTION_PLAN_SCHEMA_VERSION,
-    MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION,
+    ExecutionTier, NonInteractiveBehavior, OciPolicyEnvelope, OciPolicyMode, Platform,
+    Provisioning, ProvisioningNetwork, Reproducibility, Runtime, RuntimeFilesystemPolicy,
+    RuntimeNetworkPolicy, RuntimePolicy, RuntimeSecretsPolicy, SecretDelivery, TargetRef,
+    EXECUTION_PLAN_SCHEMA_VERSION, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION,
 };
+use crate::foundation::types::oci::OciImageResolution;
 use crate::lock_runtime::{LockCompilerOverlay, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::router::{self, ExecutionProfile, RuntimeDecision};
@@ -97,12 +98,6 @@ pub fn compile_execution_plan_with_validation_mode(
         ))
     })?;
 
-    if matches!(runtime, ExecutionRuntime::Oci) {
-        return Err(AtoExecutionError::policy_violation(
-            "runtime=oci is not supported by the ExecutionPlan isolation model",
-        ));
-    }
-
     let runtime_driver = runtime_driver_from_manifest(&named_target.runtime);
     let driver = resolve_driver(
         runtime,
@@ -115,15 +110,17 @@ pub fn compile_execution_plan_with_validation_mode(
     let scoped_id = loaded.model.name.clone();
     let version = loaded.model.version.clone();
 
+    let egress_allow = loaded
+        .model
+        .network
+        .as_ref()
+        .map(|network| network.egress_allow.clone())
+        .unwrap_or_default();
+
     let runtime_section = build_runtime_section(
         runtime,
         driver,
-        loaded
-            .model
-            .network
-            .as_ref()
-            .map(|network| network.egress_allow.clone())
-            .unwrap_or_default(),
+        egress_allow.clone(),
         named_target.entrypoint.clone(),
         named_target.cmd.clone(),
         decision.plan.execution_port(),
@@ -133,6 +130,17 @@ pub fn compile_execution_plan_with_validation_mode(
     let policy_segment_hash =
         compute_policy_segment_hash(&runtime_section, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION)?;
     let provisioning_policy_hash = compute_provisioning_policy_hash(&provisioning)?;
+
+    let oci_policy = if matches!(runtime, ExecutionRuntime::Oci) {
+        Some(build_oci_policy_envelope(
+            named_target.image.as_deref().unwrap_or(""),
+            decision.plan.execution_port(),
+            egress_allow,
+            None,
+        ))
+    } else {
+        None
+    };
 
     let execution_plan = ExecutionPlan {
         schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
@@ -162,6 +170,7 @@ pub fn compile_execution_plan_with_validation_mode(
         reproducibility: Reproducibility {
             platform: platform_from_snapshot(&PlatformSnapshot::current()),
         },
+        oci: oci_policy,
     };
 
     Ok(CompiledExecutionPlan {
@@ -199,12 +208,6 @@ pub fn compile_execution_plan_from_lock(
         ))
     })?;
 
-    if matches!(runtime, ExecutionRuntime::Oci) {
-        return Err(AtoExecutionError::policy_violation(
-            "runtime=oci is not supported by the ExecutionPlan isolation model",
-        ));
-    }
-
     let driver = resolve_driver(
         runtime,
         selected.runtime.driver.as_deref(),
@@ -212,14 +215,15 @@ pub fn compile_execution_plan_from_lock(
         &selected.runtime.cmd,
     )?;
     let tier = derive_tier(runtime, driver)?;
+    let egress_allow = resolved
+        .network
+        .as_ref()
+        .map(|network| network.egress_allow.clone())
+        .unwrap_or_default();
     let runtime_section = build_runtime_section(
         runtime,
         driver,
-        resolved
-            .network
-            .as_ref()
-            .map(|network| network.egress_allow.clone())
-            .unwrap_or_default(),
+        egress_allow.clone(),
         selected.runtime.entrypoint.clone(),
         selected.runtime.cmd.clone(),
         selected.runtime.port,
@@ -229,6 +233,18 @@ pub fn compile_execution_plan_from_lock(
     let policy_segment_hash =
         compute_policy_segment_hash(&runtime_section, MOUNT_SET_ALGO_ID, MOUNT_SET_ALGO_VERSION)?;
     let provisioning_policy_hash = compute_provisioning_policy_hash(&provisioning)?;
+
+    let oci_policy = if matches!(runtime, ExecutionRuntime::Oci) {
+        let declared_ref = selected.runtime.image.as_deref().unwrap_or("");
+        Some(build_oci_policy_envelope(
+            declared_ref,
+            selected.runtime.port,
+            egress_allow,
+            selected.oci_image.clone(),
+        ))
+    } else {
+        None
+    };
 
     Ok(ExecutionPlan {
         schema_version: EXECUTION_PLAN_SCHEMA_VERSION.to_string(),
@@ -258,6 +274,7 @@ pub fn compile_execution_plan_from_lock(
         reproducibility: Reproducibility {
             platform: platform_from_snapshot(platform),
         },
+        oci: oci_policy,
     })
 }
 
@@ -414,9 +431,8 @@ fn resolve_driver(
             }
         }
         ExecutionRuntime::Oci => {
-            return Err(AtoExecutionError::policy_violation(
-                "runtime=oci is not supported",
-            ));
+            // OCI runtime always uses the Oci driver; explicit driver override is not supported.
+            return Ok(ExecutionDriver::Oci);
         }
     };
 
@@ -462,6 +478,7 @@ pub fn derive_tier(
         (ExecutionRuntime::Web, ExecutionDriver::Python)
         | (ExecutionRuntime::Source, ExecutionDriver::Python)
         | (ExecutionRuntime::Source, ExecutionDriver::Native) => Ok(ExecutionTier::Tier2),
+        (ExecutionRuntime::Oci, ExecutionDriver::Oci) => Ok(ExecutionTier::Tier3),
         _ => Err(AtoExecutionError::policy_violation(format!(
             "unable to derive tier from runtime='{}' driver='{}'",
             runtime.as_str(),
@@ -486,6 +503,21 @@ fn detect_libc() -> &'static str {
     #[cfg(not(any(target_env = "gnu", target_env = "musl", target_env = "msvc")))]
     {
         "unknown"
+    }
+}
+
+fn build_oci_policy_envelope(
+    declared_image_ref: &str,
+    port_exposure: Option<u16>,
+    egress_allow: Vec<String>,
+    resolved_image: Option<OciImageResolution>,
+) -> OciPolicyEnvelope {
+    OciPolicyEnvelope {
+        declared_image_ref: declared_image_ref.to_string(),
+        resolved_image,
+        port_exposure,
+        egress_allow,
+        policy_mode: OciPolicyMode::Strict,
     }
 }
 
@@ -638,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn compile_rejects_oci_runtime() {
+    fn compile_accepts_oci_runtime_into_execution_plan() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manifest_path = temp.path().join("capsule.toml");
         fs::write(
@@ -648,14 +680,124 @@ schema_version = "0.3"
 name = "oci-app"
 version = "1.0.0"
 type = "app"
+default_target = "main"
 
+[targets.main]
 runtime = "oci"
-run = "ghcr.io/example/app:latest""#,
+image = "ghcr.io/example/app:latest"
+port = 8080"#,
         )
         .expect("write manifest");
 
-        let err = compile_execution_plan(&manifest_path, ExecutionProfile::Dev, None).unwrap_err();
-        assert_eq!(err.code, "ATO_ERR_POLICY_VIOLATION");
+        let plan = compile_execution_plan(&manifest_path, ExecutionProfile::Dev, Some("main"))
+            .expect("should compile OCI plan");
+        assert!(matches!(
+            plan.execution_plan.target.runtime,
+            ExecutionRuntime::Oci
+        ));
+        assert!(matches!(
+            plan.execution_plan.target.driver,
+            ExecutionDriver::Oci
+        ));
+        assert!(matches!(plan.tier, ExecutionTier::Tier3));
+        let oci = plan
+            .execution_plan
+            .oci
+            .expect("oci policy envelope must be present");
+        assert_eq!(oci.declared_image_ref, "ghcr.io/example/app:latest");
+        assert_eq!(oci.port_exposure, Some(8080));
+        assert!(matches!(oci.policy_mode, OciPolicyMode::Strict));
+        assert!(
+            oci.resolved_image.is_none(),
+            "no lock provided so resolved_image must be absent"
+        );
+    }
+
+    #[test]
+    fn oci_execution_plan_has_policy_envelope_with_declared_ref() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "oci-app"
+version = "1.0.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "oci"
+image = "docker.io/library/nginx:1.25"
+port = 80"#,
+        )
+        .expect("write manifest");
+
+        let plan = compile_execution_plan(&manifest_path, ExecutionProfile::Dev, Some("main"))
+            .expect("should compile OCI plan");
+        let oci = plan.execution_plan.oci.expect("policy envelope");
+        assert_eq!(oci.declared_image_ref, "docker.io/library/nginx:1.25");
+        assert_eq!(oci.port_exposure, Some(80));
+    }
+
+    #[test]
+    fn oci_policy_mode_defaults_to_strict() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "oci-app"
+version = "1.0.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "oci"
+image = "docker.io/library/redis:7"
+"#,
+        )
+        .expect("write manifest");
+
+        let plan = compile_execution_plan(&manifest_path, ExecutionProfile::Dev, Some("main"))
+            .expect("OCI plan");
+        let oci = plan.execution_plan.oci.expect("policy envelope");
+        assert!(matches!(oci.policy_mode, OciPolicyMode::Strict));
+    }
+
+    #[test]
+    fn derive_tier_oci_is_tier3() {
+        let tier = derive_tier(ExecutionRuntime::Oci, ExecutionDriver::Oci).expect("tier");
+        assert!(matches!(tier, ExecutionTier::Tier3));
+    }
+
+    #[test]
+    fn non_oci_plan_has_no_oci_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("capsule.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+schema_version = "0.3"
+name = "web-app"
+version = "1.0.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "web/node"
+run = "server.js"
+port = 3000"#,
+        )
+        .expect("write manifest");
+
+        let plan = compile_execution_plan(&manifest_path, ExecutionProfile::Dev, Some("main"))
+            .expect("node plan");
+        assert!(
+            plan.execution_plan.oci.is_none(),
+            "non-OCI plan must have no OCI envelope"
+        );
     }
 
     #[test]

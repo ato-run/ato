@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::error::{CapsuleError, Result};
+use crate::types::OciLaunchEnvelope;
 pub use env_origin::{default_env_origin, EnvOrigin};
 pub use filesystem_builder::FilesystemIdentityBuilder;
 pub use policy_builder::PolicyIdentityBuilder;
@@ -191,6 +192,8 @@ pub struct ExecutionIdentityInputV2 {
     pub filesystem: FilesystemIdentityV2,
     pub policy: PolicyIdentityV2,
     pub launch: LaunchIdentityV2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci: Option<OciLaunchEnvelope>,
     pub local: Option<LocalExecutionLocator>,
     pub reproducibility: ReproducibilityIdentity,
     /// Graph-derived identity in the `Declared` domain (manifest + lock +
@@ -248,6 +251,7 @@ impl ExecutionIdentityInputV2 {
             filesystem,
             policy,
             launch,
+            oci: None,
             local,
             reproducibility,
             declared_execution_id: None,
@@ -276,6 +280,11 @@ impl ExecutionIdentityInputV2 {
         self
     }
 
+    pub fn with_oci_launch_envelope(mut self, envelope: Option<OciLaunchEnvelope>) -> Self {
+        self.oci = envelope;
+        self
+    }
+
     pub fn compute_id(&self) -> Result<ExecutionIdentityDigest> {
         compute_execution_id_v2(self)
     }
@@ -299,6 +308,8 @@ pub struct ExecutionReceiptV2 {
     pub filesystem: FilesystemIdentityV2,
     pub policy: PolicyIdentityV2,
     pub launch: LaunchIdentityV2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oci: Option<OciLaunchEnvelope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalExecutionLocator>,
     pub reproducibility: ReproducibilityIdentity,
@@ -382,6 +393,7 @@ impl ExecutionReceiptV2 {
             filesystem: input.filesystem,
             policy: input.policy,
             launch: input.launch,
+            oci: input.oci,
             local: input.local,
             reproducibility: input.reproducibility,
             declared_execution_id: input.declared_execution_id,
@@ -559,6 +571,7 @@ impl ExecutionReceiptV2 {
                 argv: Vec::new(),
                 working_directory: untracked_string(),
             },
+            oci: None,
             local,
             reproducibility: ReproducibilityIdentity {
                 class: ReproducibilityClass::BestEffort,
@@ -1343,6 +1356,8 @@ struct IdentityProjectionV2<'a> {
     filesystem: FilesystemProjectionV2<'a>,
     policy: PolicyProjectionV2<'a>,
     launch: LaunchProjectionV2<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oci: Option<&'a OciLaunchEnvelope>,
 }
 
 #[derive(Serialize)]
@@ -1605,6 +1620,7 @@ fn identity_projection_v2(input: &ExecutionIdentityInputV2) -> IdentityProjectio
             argv: &input.launch.argv,
             working_directory: (&input.launch.working_directory).into(),
         },
+        oci: input.oci.as_ref(),
     }
 }
 
@@ -1654,6 +1670,12 @@ fn hash_normalized_value(value: &str) -> String {
 #[cfg(test)]
 pub(in crate::engine::execution_identity) mod tests {
     use super::*;
+    use crate::types::{
+        OciImageResolution, OciLaunchEnvelope, OciPlatform, OciPolicyEnforcementLevel,
+        OciPolicyEnforcementMode, OciPolicyEnvelope, OciPortExposureShape, OciPortPublishPolicy,
+        OciProviderKind, OciProviderMode, OciProviderSemantics, OciProviderSubstrate,
+        OciSecretDeliveryShape, OciSecretReferenceShape, OciServiceLaunchShape, OciStateMountShape,
+    };
 
     fn sample_input() -> ExecutionIdentityInput {
         ExecutionIdentityInput::new(
@@ -1706,6 +1728,63 @@ pub(in crate::engine::execution_identity) mod tests {
                     ReproducibilityCause::UnknownDependencyOutput,
                     ReproducibilityCause::UnknownRuntimeIdentity,
                 ],
+            },
+        )
+    }
+
+    fn sample_oci_envelope() -> OciLaunchEnvelope {
+        OciLaunchEnvelope::new(
+            OciProviderSemantics {
+                kind: OciProviderKind::Podman,
+                mode: OciProviderMode::Rootless,
+                substrate: OciProviderSubstrate::PodmanMachine,
+                policy_profile: "oci-podman-v1".to_string(),
+            },
+            vec![OciServiceLaunchShape {
+                name: "main".to_string(),
+                target_label: "app".to_string(),
+                image: OciImageResolution {
+                    declared_ref: "ghcr.io/acme/app:latest".to_string(),
+                    resolved_digest: "sha256:111".to_string(),
+                    platform: OciPlatform {
+                        os: "linux".to_string(),
+                        architecture: "arm64".to_string(),
+                        variant: None,
+                    },
+                    importer_input_hash: Some("blake3:compose-input".to_string()),
+                },
+                entrypoint: None,
+                command: vec!["serve".to_string()],
+                working_dir: Some("/app".to_string()),
+                env_keys: vec!["DATABASE_URL".to_string()],
+                secret_refs: vec![OciSecretReferenceShape {
+                    id: "db-password".to_string(),
+                    delivery: OciSecretDeliveryShape::Env {
+                        key: "POSTGRES_PASSWORD".to_string(),
+                    },
+                }],
+                state_mounts: vec![OciStateMountShape {
+                    state: "app_data".to_string(),
+                    target: "/app/data".to_string(),
+                    readonly: false,
+                    durability: Some("persistent".to_string()),
+                    snapshot_hash: None,
+                }],
+                ports: vec![OciPortExposureShape {
+                    container_port: 3000,
+                    protocol: "tcp".to_string(),
+                    publish: OciPortPublishPolicy::LocalhostDynamic,
+                }],
+                network_aliases: vec!["main".to_string()],
+                readiness_probe: Some("http-get:/health".to_string()),
+            }],
+            OciPolicyEnvelope {
+                enforcement_mode: OciPolicyEnforcementMode::Strict,
+                enforcement_level: OciPolicyEnforcementLevel::Enforced,
+                network_policy_hash: Some("blake3:network".to_string()),
+                filesystem_policy_hash: Some("blake3:fs-policy".to_string()),
+                capability_policy_hash: None,
+                unsupported_policy: Vec::new(),
             },
         )
     }
@@ -2003,6 +2082,62 @@ pub(in crate::engine::execution_identity) mod tests {
             before, after,
             "declared/resolved/observed_execution_id must be parallel diagnostic ids, not JCS inputs"
         );
+    }
+
+    #[test]
+    fn v2_non_oci_projection_omits_oci_field() {
+        let input = sample_input_v2();
+        let projection = identity_projection_v2(&input);
+        let canonical =
+            String::from_utf8(serde_jcs::to_vec(&projection).expect("canonical")).unwrap();
+        assert!(
+            !canonical.contains("\"oci\""),
+            "non-OCI identity projection must remain byte-compatible by omitting the OCI envelope"
+        );
+    }
+
+    #[test]
+    fn v2_oci_digest_drift_changes_execution_id() {
+        let before = sample_input_v2()
+            .with_oci_launch_envelope(Some(sample_oci_envelope()))
+            .compute_id()
+            .expect("before")
+            .execution_id;
+        let mut envelope = sample_oci_envelope();
+        envelope.services[0].image.resolved_digest = "sha256:222".to_string();
+        let after = sample_input_v2()
+            .with_oci_launch_envelope(Some(envelope))
+            .compute_id()
+            .expect("after")
+            .execution_id;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn v2_oci_provider_semantics_change_execution_id() {
+        let before = sample_input_v2()
+            .with_oci_launch_envelope(Some(sample_oci_envelope()))
+            .compute_id()
+            .expect("before")
+            .execution_id;
+        let mut envelope = sample_oci_envelope();
+        envelope.provider.substrate = OciProviderSubstrate::NativeLinux;
+        let after = sample_input_v2()
+            .with_oci_launch_envelope(Some(envelope))
+            .compute_id()
+            .expect("after")
+            .execution_id;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn v2_oci_envelope_excludes_live_runtime_state() {
+        let envelope = sample_oci_envelope();
+        let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+        assert!(!serialized.contains("container_id"));
+        assert!(!serialized.contains("host_port"));
+        assert!(!serialized.contains("network_id"));
+        assert!(!serialized.contains("volume_id"));
     }
 
     #[test]

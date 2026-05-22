@@ -39,6 +39,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::runtime::oci_provider::{
+    OciImageResolutionMode, OciImageResolutionRequest, OciProvider, OciProviderError,
+    OciProviderProbe, OciProviderSelector, OciResolvedImage,
+};
 use capsule_core::execution_plan::derive::compile_execution_plan;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::interactive_resolution::{
@@ -46,7 +50,7 @@ use capsule_core::interactive_resolution::{
 };
 use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ExecutionProfile;
-use capsule_core::types::{ConfigField, ConfigKind};
+use capsule_core::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode};
 
 use crate::application::auth::consent_store::{consent_summary, has_consent};
 use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
@@ -78,6 +82,155 @@ impl AggregatePreflightResult {
     pub fn is_empty(&self) -> bool {
         self.requirements.is_empty()
     }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciProviderReadinessMode {
+    Required,
+    BestEffort,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OciProviderReadinessRequirements {
+    pub rootless: OciRootlessRequirement,
+}
+
+impl Default for OciProviderReadinessRequirements {
+    fn default() -> Self {
+        Self {
+            rootless: OciRootlessRequirement::Any,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciRootlessRequirement {
+    Any,
+    Required,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OciProviderReadinessOutcome {
+    Ready(OciProviderProbe),
+    NotReady(OciProviderError),
+}
+
+#[allow(dead_code)]
+pub(crate) async fn preflight_oci_provider_readiness<S>(
+    selector: &S,
+    mode: OciProviderReadinessMode,
+    requirements: OciProviderReadinessRequirements,
+) -> Result<OciProviderReadinessOutcome, OciProviderError>
+where
+    S: OciProviderSelector,
+{
+    let provider = selector.select_provider();
+    evaluate_oci_provider_readiness(provider.probe().await, mode, requirements)
+}
+
+fn evaluate_oci_provider_readiness(
+    probe: Result<OciProviderProbe, OciProviderError>,
+    mode: OciProviderReadinessMode,
+    requirements: OciProviderReadinessRequirements,
+) -> Result<OciProviderReadinessOutcome, OciProviderError> {
+    let probe = match probe {
+        Ok(probe) => probe,
+        Err(error) => return oci_provider_readiness_failure(mode, error),
+    };
+
+    if !probe.ready {
+        let error = probe
+            .require_ready()
+            .expect_err("non-ready OCI provider probe must produce a typed readiness error");
+        return oci_provider_readiness_failure(mode, error);
+    }
+
+    if let Err(error) = validate_oci_provider_readiness_requirements(&probe, requirements) {
+        return oci_provider_readiness_failure(mode, error);
+    }
+
+    Ok(OciProviderReadinessOutcome::Ready(probe))
+}
+
+fn oci_provider_readiness_failure(
+    mode: OciProviderReadinessMode,
+    error: OciProviderError,
+) -> Result<OciProviderReadinessOutcome, OciProviderError> {
+    match mode {
+        OciProviderReadinessMode::Required => Err(error),
+        OciProviderReadinessMode::BestEffort => Ok(OciProviderReadinessOutcome::NotReady(error)),
+    }
+}
+
+fn validate_oci_provider_readiness_requirements(
+    probe: &OciProviderProbe,
+    requirements: OciProviderReadinessRequirements,
+) -> Result<(), OciProviderError> {
+    if requirements.rootless == OciRootlessRequirement::Required
+        && probe.inventory.mode != OciProviderMode::Rootless
+    {
+        return Err(OciProviderError::CapabilityUnsupported {
+            provider: oci_provider_name(probe.inventory.kind),
+            capability: "rootless",
+            detected: format!("{:?}", probe.inventory.mode),
+        });
+    }
+
+    Ok(())
+}
+
+fn oci_provider_name(kind: OciProviderKind) -> &'static str {
+    match kind {
+        OciProviderKind::Podman => "podman",
+        OciProviderKind::DockerCompatible => "docker-compatible",
+        OciProviderKind::AtoNative => "ato-native",
+    }
+}
+
+/// Resolved images and per-target failures from an image resolution pass.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciImageResolutionReport {
+    pub resolved: Vec<OciResolvedImage>,
+    /// `(target_label, error)` pairs for targets that failed to resolve.
+    pub failures: Vec<(String, OciProviderError)>,
+}
+
+/// Resolve OCI images for every request using the provider from `selector`.
+///
+/// - `Required`: returns `Err` on the first resolution failure.
+/// - `BestEffort`: continues collecting failures and returns `Ok` with a
+///   report that may contain both resolved images and failures.
+#[allow(dead_code)]
+pub(crate) async fn preflight_oci_image_resolution<S>(
+    selector: &S,
+    requests: &[OciImageResolutionRequest],
+    mode: OciImageResolutionMode,
+) -> Result<OciImageResolutionReport, OciProviderError>
+where
+    S: OciProviderSelector,
+{
+    let provider = selector.select_provider();
+    let mut resolved = Vec::new();
+    let mut failures: Vec<(String, OciProviderError)> = Vec::new();
+
+    for request in requests {
+        match provider.resolve_image(request).await {
+            Ok(image) => resolved.push(image),
+            Err(error) => match mode {
+                OciImageResolutionMode::Required => return Err(error),
+                OciImageResolutionMode::BestEffort => {
+                    failures.push((request.target_label.clone(), error));
+                }
+            },
+        }
+    }
+
+    Ok(OciImageResolutionReport { resolved, failures })
 }
 
 /// Errors specific to the preflight collector. Anything that prevents
@@ -621,7 +774,13 @@ fn config_field_for_env(name: &str, description: &str) -> ConfigField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::oci_provider::{
+        CommandOutput, OciCommandRunner, OciProviderMachineStatus, PodmanProbePlatform,
+        PodmanProvider,
+    };
+    use std::collections::HashMap;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     /// Writes a multi-target capsule.toml that mimics the shape of
@@ -673,7 +832,354 @@ egress_allow = ["smtp.gmail.com"]
         path
     }
 
-    /// The collector must visit BOTH targets and return ONE
+    #[derive(Clone, Default)]
+    struct FakeRunner {
+        outputs: Arc<Mutex<HashMap<String, std::io::Result<CommandOutput>>>>,
+    }
+
+    impl FakeRunner {
+        fn with_output(self, command: &[&str], output: CommandOutput) -> Self {
+            self.outputs
+                .lock()
+                .unwrap()
+                .insert(command.join(" "), Ok(output));
+            self
+        }
+
+        fn with_error(self, command: &[&str], error: std::io::Error) -> Self {
+            self.outputs
+                .lock()
+                .unwrap()
+                .insert(command.join(" "), Err(error));
+            self
+        }
+    }
+
+    impl OciCommandRunner for FakeRunner {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            let key = std::iter::once(program)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut outputs = self.outputs.lock().unwrap();
+            match outputs.remove(&key) {
+                Some(result) => result,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing fake command: {key}"),
+                )),
+            }
+        }
+    }
+
+    struct TestOciProviderSelector {
+        runner: FakeRunner,
+        platform: PodmanProbePlatform,
+    }
+
+    impl crate::runtime::oci_provider::OciProviderSelector for TestOciProviderSelector {
+        type Provider = PodmanProvider<FakeRunner>;
+
+        fn select_provider(&self) -> Self::Provider {
+            PodmanProvider::with_runner(self.runner.clone(), self.platform.clone())
+        }
+    }
+
+    fn output(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            status,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    fn selector(runner: FakeRunner, platform: PodmanProbePlatform) -> TestOciProviderSelector {
+        TestOciProviderSelector { runner, platform }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_fails_when_podman_missing() {
+        let selector = selector(
+            FakeRunner::default().with_error(
+                &["podman", "--version"],
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing podman"),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let error = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements::default(),
+        )
+        .await
+        .expect_err("required readiness must fail");
+
+        assert_eq!(error.code(), "oci_provider_missing");
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_best_effort_reports_missing_without_failing() {
+        let selector = selector(
+            FakeRunner::default().with_error(
+                &["podman", "--version"],
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing podman"),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let outcome = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::BestEffort,
+            OciProviderReadinessRequirements::default(),
+        )
+        .await
+        .expect("best-effort readiness should not fail parent operation");
+
+        match outcome {
+            OciProviderReadinessOutcome::NotReady(error) => {
+                assert_eq!(error.code(), "oci_provider_missing");
+            }
+            OciProviderReadinessOutcome::Ready(probe) => {
+                panic!("expected missing provider diagnostic, got ready probe: {probe:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_fails_when_podman_machine_not_running() {
+        let selector = selector(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(
+                        0,
+                        r#"[{"Name":"podman-machine-default","MachineId":"volatile","Running":false}]"#,
+                        "",
+                    ),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+
+        let error = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements::default(),
+        )
+        .await
+        .expect_err("required readiness must fail");
+
+        assert_eq!(error.code(), "oci_provider_not_ready");
+        match error {
+            OciProviderError::NotReady {
+                inventory: Some(inventory),
+                ..
+            } => {
+                assert_eq!(
+                    inventory.machine,
+                    OciProviderMachineStatus::MachineNotRunning
+                );
+            }
+            other => panic!("expected not-ready inventory, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_succeeds_when_podman_rootless_ready() {
+        let selector = selector(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(0, "true\n", ""),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let outcome = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements {
+                rootless: OciRootlessRequirement::Required,
+            },
+        )
+        .await
+        .expect("required readiness");
+
+        match outcome {
+            OciProviderReadinessOutcome::Ready(probe) => {
+                assert!(probe.ready);
+                assert_eq!(probe.inventory.mode, OciProviderMode::Rootless);
+            }
+            OciProviderReadinessOutcome::NotReady(error) => {
+                panic!("expected ready provider, got {error:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_rootless_rejects_ambiguous_mode() {
+        let selector = selector(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(0, "not-a-bool\n", ""),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let error = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements {
+                rootless: OciRootlessRequirement::Required,
+            },
+        )
+        .await
+        .expect_err("ambiguous rootless mode must not satisfy a rootless requirement");
+
+        assert_eq!(error.code(), "oci_provider_capability_unsupported");
+    }
+
+    // ── OCI image resolution preflight tests ─────────────────────────────────
+
+    fn resolution_selector(runner: FakeRunner) -> TestOciProviderSelector {
+        selector(runner, PodmanProbePlatform::Linux)
+    }
+
+    fn multi_arch_manifest_json() -> &'static str {
+        r#"{
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+          "manifests": [
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "platform": { "os": "linux", "architecture": "amd64" }
+            },
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "platform": { "os": "linux", "architecture": "arm64", "variant": "v8" }
+            }
+          ]
+        }"#
+    }
+
+    #[tokio::test]
+    async fn preflight_image_resolution_required_mode_fails_on_first_error() {
+        use crate::runtime::oci_provider::{OciImageResolutionMode, OciImageResolutionRequest};
+        use capsule_core::types::OciPlatform;
+
+        let selector = resolution_selector(
+            FakeRunner::default()
+                // First request: bad ref, will fail before hitting the runner
+                // (malformed ref)
+                .with_output(
+                    &["podman", "manifest", "inspect", "postgres:14"],
+                    output(0, multi_arch_manifest_json(), ""),
+                ),
+        );
+
+        let requests = vec![
+            OciImageResolutionRequest {
+                target_label: "db".to_string(),
+                declared_ref: "has space".to_string(), // malformed
+                requested_platform: None,
+                resolution_mode: OciImageResolutionMode::Required,
+                importer_input_hash: None,
+            },
+            OciImageResolutionRequest {
+                target_label: "app".to_string(),
+                declared_ref: "postgres:14".to_string(),
+                requested_platform: Some(OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                }),
+                resolution_mode: OciImageResolutionMode::Required,
+                importer_input_hash: None,
+            },
+        ];
+
+        let err =
+            preflight_oci_image_resolution(&selector, &requests, OciImageResolutionMode::Required)
+                .await
+                .expect_err("required mode must fail on first error");
+        assert_eq!(err.code(), "oci_image_ref_malformed");
+    }
+
+    #[tokio::test]
+    async fn preflight_image_resolution_best_effort_collects_all_failures() {
+        use crate::runtime::oci_provider::{OciImageResolutionMode, OciImageResolutionRequest};
+        use capsule_core::types::OciPlatform;
+
+        let selector = resolution_selector(FakeRunner::default().with_output(
+            &["podman", "manifest", "inspect", "postgres:14"],
+            output(0, multi_arch_manifest_json(), ""),
+        ));
+
+        let requests = vec![
+            OciImageResolutionRequest {
+                target_label: "db".to_string(),
+                declared_ref: "has space".to_string(), // malformed
+                requested_platform: None,
+                resolution_mode: OciImageResolutionMode::BestEffort,
+                importer_input_hash: None,
+            },
+            OciImageResolutionRequest {
+                target_label: "app".to_string(),
+                declared_ref: "postgres:14".to_string(),
+                requested_platform: Some(OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                }),
+                resolution_mode: OciImageResolutionMode::BestEffort,
+                importer_input_hash: None,
+            },
+        ];
+
+        let report = preflight_oci_image_resolution(
+            &selector,
+            &requests,
+            OciImageResolutionMode::BestEffort,
+        )
+        .await
+        .expect("best effort must not fail");
+
+        assert_eq!(report.failures.len(), 1, "one failure expected");
+        assert_eq!(report.failures[0].0, "db", "failure is for 'db'");
+        assert_eq!(report.failures[0].1.code(), "oci_image_ref_malformed");
+        assert_eq!(report.resolved.len(), 1, "one resolved image");
+        assert_eq!(report.resolved[0].declared_ref, "postgres:14");
+    }
+
+    #[tokio::test]
+    async fn preflight_image_resolution_empty_requests_returns_empty_report() {
+        use crate::runtime::oci_provider::OciImageResolutionMode;
+
+        let selector = resolution_selector(FakeRunner::default());
+
+        let report =
+            preflight_oci_image_resolution(&selector, &[], OciImageResolutionMode::Required)
+                .await
+                .expect("empty requests must succeed");
+
+        assert!(report.resolved.is_empty());
+        assert!(report.failures.is_empty());
+    }
     /// aggregate envelope rather than emitting them serially via
     /// E103/E302 errors.
     ///

@@ -1,0 +1,2297 @@
+#![allow(dead_code)]
+
+use async_trait::async_trait;
+use capsule_core::runtime::oci::{
+    BollardOciRuntimeClient, OciContainerInspect, OciContainerRequest, OciLogChunk,
+    OciNetworkRequest, OciRuntimeClient,
+};
+use capsule_core::types::{
+    OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
+    OciProviderSubstrate,
+};
+use std::process::Command;
+use thiserror::Error;
+use tokio::sync::mpsc;
+
+const PODMAN_POLICY_PROFILE_V1: &str = "oci-podman-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciProviderProbe {
+    pub ready: bool,
+    pub semantics: OciProviderSemantics,
+    pub inventory: OciProviderInventory,
+    pub detail: Option<String>,
+}
+
+impl OciProviderProbe {
+    pub(crate) fn require_ready(self) -> Result<Self, OciProviderError> {
+        if self.ready {
+            return Ok(self);
+        }
+        let provider = match self.inventory.kind {
+            OciProviderKind::Podman => "podman",
+            OciProviderKind::DockerCompatible => "docker-compatible",
+            OciProviderKind::AtoNative => "ato-native",
+        };
+        Err(OciProviderError::NotReady {
+            provider,
+            reason: self
+                .detail
+                .clone()
+                .unwrap_or_else(|| "provider readiness probe reported not ready".to_string()),
+            inventory: Some(self.inventory.clone()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciImageResolutionRequest {
+    pub target_label: String,
+    pub declared_ref: String,
+    pub requested_platform: Option<OciPlatform>,
+    pub resolution_mode: OciImageResolutionMode,
+    pub importer_input_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciImageResolutionMode {
+    Required,
+    BestEffort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciResolvedImage {
+    pub declared_ref: String,
+    pub resolved_digest: String,
+    pub platform: OciPlatform,
+    pub media_type: Option<String>,
+    pub provider_semantics: OciProviderSemantics,
+}
+
+impl OciResolvedImage {
+    pub(crate) fn into_lock_resolution(self) -> OciImageResolution {
+        OciImageResolution {
+            declared_ref: self.declared_ref,
+            resolved_digest: self.resolved_digest,
+            platform: self.platform,
+            importer_input_hash: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciProviderInventory {
+    pub kind: OciProviderKind,
+    pub binary: OciProviderBinaryStatus,
+    pub version: Option<String>,
+    pub mode: OciProviderMode,
+    pub machine: OciProviderMachineStatus,
+    pub semantics: OciProviderSemantics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciProviderBinaryStatus {
+    Found,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciProviderMachineStatus {
+    NativeLinux,
+    MachineRequired,
+    MachineRunning,
+    MachineNotRunning,
+    MachineUnknown,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(crate) enum OciProviderError {
+    #[error("OCI provider '{provider}' is missing required binary '{binary}'")]
+    Missing {
+        provider: &'static str,
+        binary: &'static str,
+    },
+    #[error("OCI provider '{provider}' is not ready: {reason}")]
+    NotReady {
+        provider: &'static str,
+        reason: String,
+        inventory: Option<OciProviderInventory>,
+    },
+    #[error("OCI provider '{provider}' probe failed: {message}")]
+    ProbeFailed {
+        provider: &'static str,
+        message: String,
+    },
+    #[error("OCI provider '{provider}' does not support platform '{platform}'")]
+    UnsupportedPlatform {
+        provider: &'static str,
+        platform: String,
+    },
+    #[error(
+        "OCI provider '{provider}' cannot satisfy required capability '{capability}': detected {detected}"
+    )]
+    CapabilityUnsupported {
+        provider: &'static str,
+        capability: &'static str,
+        detected: String,
+    },
+    #[error("OCI provider '{provider}' command failed: {command}: {message}")]
+    CommandFailed {
+        provider: &'static str,
+        command: String,
+        status: Option<i32>,
+        message: String,
+    },
+    #[error("OCI provider operation '{operation}' failed: {message}")]
+    Operation {
+        operation: &'static str,
+        message: String,
+    },
+    #[error("OCI provider does not support operation '{0}'")]
+    Unsupported(&'static str),
+
+    #[error("OCI image reference '{declared_ref}' is malformed: {reason}")]
+    ImageRefMalformed {
+        declared_ref: String,
+        reason: String,
+    },
+
+    #[error("OCI image '{declared_ref}' resolve failed: {reason}")]
+    ImageResolveFailed {
+        declared_ref: String,
+        reason: String,
+    },
+
+    #[error("OCI image '{declared_ref}' does not support platform '{platform}'")]
+    ImagePlatformUnsupported {
+        declared_ref: String,
+        platform: String,
+    },
+
+    #[error("OCI registry authentication required for '{declared_ref}'")]
+    RegistryAuthRequired { declared_ref: String },
+
+    #[error("OCI policy envelope is missing from the execution plan")]
+    OciPolicyEnvelopeMissing,
+
+    #[error(
+        "OCI image resolution required before execution: '{declared_ref}' has no resolved digest"
+    )]
+    OciImageResolutionRequired { declared_ref: String },
+
+    #[error("OCI execution gate failed: {reason}")]
+    OciExecutionGateFailed { reason: String },
+
+    #[error("OCI container '{container_name}' failed to start: {message}")]
+    OciContainerStartFailed {
+        container_name: String,
+        message: String,
+    },
+
+    #[error("OCI cleanup operation '{operation}' failed: {message}")]
+    OciCleanupFailed { operation: String, message: String },
+}
+
+impl OciProviderError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Missing { .. } => "oci_provider_missing",
+            Self::NotReady { .. } => "oci_provider_not_ready",
+            Self::ProbeFailed { .. } => "oci_provider_probe_failed",
+            Self::UnsupportedPlatform { .. } => "oci_provider_unsupported_platform",
+            Self::CapabilityUnsupported { .. } => "oci_provider_capability_unsupported",
+            Self::CommandFailed { .. } | Self::Operation { .. } => "oci_provider_command_failed",
+            Self::Unsupported(_) => "oci_provider_unsupported_operation",
+            Self::ImageRefMalformed { .. } => "oci_image_ref_malformed",
+            Self::ImageResolveFailed { .. } => "oci_image_resolve_failed",
+            Self::ImagePlatformUnsupported { .. } => "oci_image_platform_unsupported",
+            Self::RegistryAuthRequired { .. } => "oci_registry_auth_required",
+            Self::OciPolicyEnvelopeMissing => "oci_policy_envelope_missing",
+            Self::OciImageResolutionRequired { .. } => "oci_image_resolution_required",
+            Self::OciExecutionGateFailed { .. } => "oci_execution_gate_failed",
+            Self::OciContainerStartFailed { .. } => "oci_container_start_failed",
+            Self::OciCleanupFailed { .. } => "oci_cleanup_failed",
+        }
+    }
+
+    fn operation(operation: &'static str, err: capsule_core::CapsuleError) -> Self {
+        Self::Operation {
+            operation,
+            message: err.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+pub(crate) trait OciProvider: Send + Sync {
+    fn semantics(&self) -> &OciProviderSemantics;
+
+    async fn probe(&self) -> Result<OciProviderProbe, OciProviderError>;
+
+    async fn resolve_image(
+        &self,
+        _request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
+        Err(OciProviderError::Unsupported("resolve_image"))
+    }
+
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError>;
+
+    async fn create_network(&self, request: &OciNetworkRequest)
+        -> Result<String, OciProviderError>;
+
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError>;
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> Result<String, OciProviderError>;
+
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError>;
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> Result<OciContainerInspect, OciProviderError>;
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError>;
+
+    async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError>;
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> Result<(), OciProviderError>;
+
+    async fn remove_container(
+        &self,
+        container_id: &str,
+        force: bool,
+    ) -> Result<(), OciProviderError>;
+}
+
+pub(crate) trait OciProviderSelector: Send + Sync {
+    type Provider: OciProvider;
+
+    fn select_provider(&self) -> Self::Provider;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DefaultOciProviderSelector;
+
+impl OciProviderSelector for DefaultOciProviderSelector {
+    type Provider = PodmanProvider<SystemCommandRunner>;
+
+    fn select_provider(&self) -> Self::Provider {
+        PodmanProvider::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandOutput {
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl CommandOutput {
+    fn success(&self) -> bool {
+        self.status == 0
+    }
+}
+
+pub(crate) trait OciCommandRunner: Send + Sync {
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SystemCommandRunner;
+
+impl OciCommandRunner for SystemCommandRunner {
+    fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+        let output = Command::new(program).args(args).output()?;
+        Ok(CommandOutput {
+            status: output.status.code().unwrap_or(1),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PodmanProbePlatform {
+    Linux,
+    Macos,
+    Windows,
+    Unsupported(String),
+}
+
+impl PodmanProbePlatform {
+    fn current() -> Self {
+        match std::env::consts::OS {
+            "linux" => Self::Linux,
+            "macos" => Self::Macos,
+            "windows" => Self::Windows,
+            other => Self::Unsupported(other.to_string()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+            Self::Unsupported(value) => value.as_str(),
+        }
+    }
+}
+
+pub(crate) struct PodmanProvider<R = SystemCommandRunner> {
+    runner: R,
+    platform: PodmanProbePlatform,
+    semantics: OciProviderSemantics,
+}
+
+impl PodmanProvider<SystemCommandRunner> {
+    pub(crate) fn new() -> Self {
+        Self::with_runner(SystemCommandRunner, PodmanProbePlatform::current())
+    }
+}
+
+impl<R> PodmanProvider<R> {
+    pub(crate) fn with_runner(runner: R, platform: PodmanProbePlatform) -> Self {
+        Self {
+            runner,
+            platform,
+            semantics: podman_semantics(OciProviderMode::Unknown, OciProviderSubstrate::Unknown),
+        }
+    }
+}
+
+#[async_trait]
+impl<R> OciProvider for PodmanProvider<R>
+where
+    R: OciCommandRunner + Send + Sync,
+{
+    fn semantics(&self) -> &OciProviderSemantics {
+        &self.semantics
+    }
+
+    async fn probe(&self) -> Result<OciProviderProbe, OciProviderError> {
+        let version_output = run_provider_command(&self.runner, "podman", &["--version"])?;
+        if !version_output.success() {
+            return Err(command_failed("podman --version", version_output));
+        }
+        let version = parse_podman_version(&version_output.stdout);
+
+        match &self.platform {
+            PodmanProbePlatform::Linux => {
+                let mode = detect_linux_podman_mode(&self.runner);
+                let semantics = podman_semantics(mode, OciProviderSubstrate::NativeLinux);
+                let inventory = OciProviderInventory {
+                    kind: OciProviderKind::Podman,
+                    binary: OciProviderBinaryStatus::Found,
+                    version,
+                    mode,
+                    machine: OciProviderMachineStatus::NativeLinux,
+                    semantics: semantics.clone(),
+                };
+                Ok(OciProviderProbe {
+                    ready: true,
+                    semantics,
+                    inventory,
+                    detail: None,
+                })
+            }
+            PodmanProbePlatform::Macos | PodmanProbePlatform::Windows => {
+                let machine_output = run_provider_command(
+                    &self.runner,
+                    "podman",
+                    &["machine", "list", "--format", "json"],
+                )?;
+                if !machine_output.success() {
+                    return Err(command_failed(
+                        "podman machine list --format json",
+                        machine_output,
+                    ));
+                }
+                let machine = parse_machine_status(&machine_output.stdout);
+                let ready = matches!(machine, OciProviderMachineStatus::MachineRunning);
+                let substrate = match machine {
+                    OciProviderMachineStatus::MachineRunning
+                    | OciProviderMachineStatus::MachineNotRunning
+                    | OciProviderMachineStatus::MachineRequired => {
+                        OciProviderSubstrate::PodmanMachine
+                    }
+                    _ => OciProviderSubstrate::Unknown,
+                };
+                let semantics = podman_semantics(OciProviderMode::Unknown, substrate);
+                let detail = match machine {
+                    OciProviderMachineStatus::MachineRunning => None,
+                    OciProviderMachineStatus::MachineNotRunning => {
+                        Some("podman machine exists but is not running".to_string())
+                    }
+                    OciProviderMachineStatus::MachineRequired => {
+                        Some("podman machine is required but no machine is configured".to_string())
+                    }
+                    OciProviderMachineStatus::MachineUnknown => {
+                        Some("podman machine list output was not recognized".to_string())
+                    }
+                    OciProviderMachineStatus::NativeLinux => None,
+                };
+                let inventory = OciProviderInventory {
+                    kind: OciProviderKind::Podman,
+                    binary: OciProviderBinaryStatus::Found,
+                    version,
+                    mode: OciProviderMode::Unknown,
+                    machine,
+                    semantics: semantics.clone(),
+                };
+                Ok(OciProviderProbe {
+                    ready,
+                    semantics,
+                    inventory,
+                    detail,
+                })
+            }
+            PodmanProbePlatform::Unsupported(platform) => {
+                Err(OciProviderError::UnsupportedPlatform {
+                    provider: "podman",
+                    platform: platform.clone(),
+                })
+            }
+        }
+    }
+
+    async fn resolve_image(
+        &self,
+        request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
+        let declared_ref = &request.declared_ref;
+
+        // Validate basic format.
+        if declared_ref.trim().is_empty()
+            || declared_ref
+                .bytes()
+                .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return Err(OciProviderError::ImageRefMalformed {
+                declared_ref: declared_ref.clone(),
+                reason: "image reference must be non-empty and must not contain whitespace"
+                    .to_string(),
+            });
+        }
+
+        // Extract digest if already embedded in the ref (e.g. "image@sha256:...").
+        let ref_digest = extract_digest_from_ref(declared_ref);
+        if let Some(ref digest) = ref_digest {
+            if let Err(reason) = validate_oci_digest_format(digest) {
+                return Err(OciProviderError::ImageRefMalformed {
+                    declared_ref: declared_ref.clone(),
+                    reason,
+                });
+            }
+        }
+
+        // Always call `podman manifest inspect` to get manifest information.
+        // This is required for platform discovery in all cases.
+        let output = run_provider_command(
+            &self.runner,
+            "podman",
+            &["manifest", "inspect", declared_ref],
+        )?;
+
+        if !output.success() {
+            let combined = format!("{} {}", output.stdout, output.stderr);
+            if is_registry_auth_error(&combined) {
+                return Err(OciProviderError::RegistryAuthRequired {
+                    declared_ref: declared_ref.clone(),
+                });
+            }
+            let reason = if output.stderr.trim().is_empty() {
+                output.stdout.trim().to_string()
+            } else {
+                output.stderr.trim().to_string()
+            };
+            return Err(OciProviderError::ImageResolveFailed {
+                declared_ref: declared_ref.clone(),
+                reason,
+            });
+        }
+
+        let parsed = parse_manifest_inspect(&output.stdout).map_err(|reason| {
+            OciProviderError::ImageResolveFailed {
+                declared_ref: declared_ref.clone(),
+                reason: format!("could not parse manifest inspect output: {reason}"),
+            }
+        })?;
+
+        if parsed.is_list {
+            // Manifest list: select the platform entry and use its child digest.
+            // When no platform is requested, auto-select based on the host
+            // architecture so that `postgres:14` (16 platforms) just works
+            // without requiring an explicit `requested_platform`.
+            let auto_platform;
+            let (effective_requested, is_auto) = if request.requested_platform.is_some() {
+                (request.requested_platform.as_ref(), false)
+            } else {
+                auto_platform = auto_select_platform();
+                (Some(&auto_platform), true)
+            };
+            // Fallback to linux/amd64 only when the platform was auto-selected (not when
+            // the caller explicitly requested a specific platform that is not available).
+            let entry = if is_auto {
+                select_platform_entry(&parsed.entries, effective_requested, declared_ref).or_else(
+                    |_| {
+                        let fallback = OciPlatform {
+                            os: "linux".to_string(),
+                            architecture: "amd64".to_string(),
+                            variant: None,
+                        };
+                        select_platform_entry(&parsed.entries, Some(&fallback), declared_ref)
+                    },
+                )?
+            } else {
+                select_platform_entry(&parsed.entries, effective_requested, declared_ref)?
+            };
+            Ok(OciResolvedImage {
+                declared_ref: declared_ref.clone(),
+                resolved_digest: entry.digest.clone(),
+                platform: entry.platform.clone(),
+                media_type: entry.media_type.clone(),
+                provider_semantics: self.semantics.clone(),
+            })
+        } else {
+            // Single-arch manifest: only usable when we already have the digest from the ref.
+            if let Some(digest) = ref_digest {
+                let platform = request.requested_platform.clone().ok_or_else(|| {
+                    OciProviderError::ImagePlatformUnsupported {
+                        declared_ref: declared_ref.clone(),
+                        platform: "single-platform manifest: specify requested_platform to resolve"
+                            .to_string(),
+                    }
+                })?;
+                Ok(OciResolvedImage {
+                    declared_ref: declared_ref.clone(),
+                    resolved_digest: digest,
+                    platform,
+                    media_type: parsed.media_type,
+                    provider_semantics: self.semantics.clone(),
+                })
+            } else {
+                // Mutable tag + single-arch: cannot get digest without pulling.
+                Err(OciProviderError::ImageResolveFailed {
+                    declared_ref: declared_ref.clone(),
+                    reason: "single-platform manifest requires image pull for digest resolution; \
+                        use a digest reference or ensure the image has a manifest list"
+                        .to_string(),
+                })
+            }
+        }
+    }
+
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
+        let pull_ref = build_digest_pull_ref(image);
+        let output = tokio::process::Command::new("podman")
+            .args(["pull", &pull_ref])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman pull", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if is_registry_auth_error(&stderr) {
+                return Err(OciProviderError::RegistryAuthRequired {
+                    declared_ref: image.declared_ref.clone(),
+                });
+            }
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: format!("podman pull {pull_ref}"),
+                status: output.status.code(),
+                message: stderr,
+            });
+        }
+        Ok(())
+    }
+
+    async fn create_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        let mut args: Vec<String> = vec!["network".into(), "create".into()];
+        for (k, v) in &request.labels {
+            args.push("--label".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.push(request.name.clone());
+        let output = tokio::process::Command::new("podman")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman network create", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman network create".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["network", "rm", network_name])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman network rm", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "remove_network".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> Result<String, OciProviderError> {
+        let mut args: Vec<String> = vec!["create".into(), "--name".into(), request.name.clone()];
+        for (k, v) in &request.labels {
+            args.push("--label".into());
+            args.push(format!("{k}={v}"));
+        }
+        for (k, v) in &request.env {
+            args.push("--env".into());
+            args.push(format!("{k}={v}"));
+        }
+        for port in &request.ports {
+            args.push("-p".into());
+            match port.host_port {
+                Some(hp) => args.push(format!("{}:{}", hp, port.container_port)),
+                None => args.push(format!(":{}", port.container_port)),
+            }
+        }
+        if let Some(wd) = &request.working_dir {
+            args.push("--workdir".into());
+            args.push(wd.clone());
+        }
+        for mount in &request.mounts {
+            args.push("-v".into());
+            let opts = if mount.readonly { ":ro" } else { "" };
+            args.push(format!("{}:{}{}", mount.source, mount.target, opts));
+        }
+        if let Some(net) = &request.network {
+            args.push("--network".into());
+            args.push(net.clone());
+        }
+        for alias in &request.aliases {
+            args.push("--network-alias".into());
+            args.push(alias.clone());
+        }
+        args.push(request.image.clone());
+        args.extend(request.cmd.iter().cloned());
+        let output = tokio::process::Command::new("podman")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman create", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman create".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["start", container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman start", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciContainerStartFailed {
+                container_name: container_id.to_string(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> Result<OciContainerInspect, OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["inspect", "--format", "json", container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman inspect", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman inspect".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        parse_podman_inspect(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+        use tokio::io::AsyncBufReadExt;
+        let mut args = vec!["logs".to_string()];
+        if follow {
+            args.push("--follow".into());
+        }
+        args.push(container_id.to_string());
+        let mut child = tokio::process::Command::new("podman")
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| podman_async_io_error("podman logs", e))?;
+        let (tx, rx) = mpsc::channel(64);
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let tx_err = tx.clone();
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let chunk = OciLogChunk {
+                    stderr: false,
+                    message: (line + "\n").into_bytes(),
+                };
+                if tx.send(Ok(chunk)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let chunk = OciLogChunk {
+                    stderr: true,
+                    message: (line + "\n").into_bytes(),
+                };
+                if tx_err.send(Ok(chunk)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        // Drive child to completion so it doesn't become a zombie.
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        Ok(rx)
+    }
+
+    async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["wait", container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman wait", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman wait".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        let code = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
+        Ok(code)
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> Result<(), OciProviderError> {
+        let timeout = timeout_secs.to_string();
+        let output = tokio::process::Command::new("podman")
+            .args(["stop", "--time", &timeout, container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman stop", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "stop_container".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn remove_container(
+        &self,
+        container_id: &str,
+        force: bool,
+    ) -> Result<(), OciProviderError> {
+        let mut args = vec!["rm".to_string()];
+        if force {
+            args.push("--force".into());
+        }
+        args.push(container_id.to_string());
+        let output = tokio::process::Command::new("podman")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman rm", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "remove_container".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn run_provider_command<R: OciCommandRunner>(
+    runner: &R,
+    program: &'static str,
+    args: &[&str],
+) -> Result<CommandOutput, OciProviderError> {
+    runner.run(program, args).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            OciProviderError::Missing {
+                provider: "podman",
+                binary: program,
+            }
+        } else {
+            OciProviderError::ProbeFailed {
+                provider: "podman",
+                message: format!("failed to run {} {}: {err}", program, args.join(" ")),
+            }
+        }
+    })
+}
+
+fn command_failed(command: &'static str, output: CommandOutput) -> OciProviderError {
+    let message = if output.stderr.trim().is_empty() {
+        output.stdout.trim().to_string()
+    } else {
+        output.stderr.trim().to_string()
+    };
+    OciProviderError::CommandFailed {
+        provider: "podman",
+        command: command.to_string(),
+        status: Some(output.status),
+        message,
+    }
+}
+
+fn podman_semantics(
+    mode: OciProviderMode,
+    substrate: OciProviderSubstrate,
+) -> OciProviderSemantics {
+    OciProviderSemantics {
+        kind: OciProviderKind::Podman,
+        mode,
+        substrate,
+        policy_profile: PODMAN_POLICY_PROFILE_V1.to_string(),
+    }
+}
+
+fn parse_podman_version(stdout: &str) -> Option<String> {
+    let line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    line.strip_prefix("podman version ")
+        .or_else(|| line.strip_prefix("Podman version "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn detect_linux_podman_mode<R: OciCommandRunner>(runner: &R) -> OciProviderMode {
+    let Ok(output) = runner.run(
+        "podman",
+        &["info", "--format", "{{.Host.Security.Rootless}}"],
+    ) else {
+        return OciProviderMode::Unknown;
+    };
+    if !output.success() {
+        return OciProviderMode::Unknown;
+    }
+    match output.stdout.trim().to_ascii_lowercase().as_str() {
+        "true" => OciProviderMode::Rootless,
+        "false" => OciProviderMode::Rootful,
+        _ => OciProviderMode::Unknown,
+    }
+}
+
+fn parse_machine_status(stdout: &str) -> OciProviderMachineStatus {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return OciProviderMachineStatus::MachineUnknown;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return OciProviderMachineStatus::MachineUnknown;
+    };
+    let Some(machines) = value.as_array() else {
+        return OciProviderMachineStatus::MachineUnknown;
+    };
+    if machines.is_empty() {
+        return OciProviderMachineStatus::MachineRequired;
+    }
+    if machines.iter().any(machine_running) {
+        return OciProviderMachineStatus::MachineRunning;
+    }
+    OciProviderMachineStatus::MachineNotRunning
+}
+
+fn machine_running(value: &serde_json::Value) -> bool {
+    value
+        .get("Running")
+        .or_else(|| value.get("running"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+// ── Manifest inspect helpers ─────────────────────────────────────────────────
+
+struct ManifestEntry {
+    digest: String,
+    platform: OciPlatform,
+    media_type: Option<String>,
+}
+
+struct ManifestInspectParsed {
+    is_list: bool,
+    entries: Vec<ManifestEntry>,
+    media_type: Option<String>,
+}
+
+/// Parse `podman manifest inspect` JSON output.
+///
+/// Returns a manifest list (with per-platform entries) when the JSON contains
+/// a `"manifests"` array.  Returns a single-arch sentinel when it does not.
+fn parse_manifest_inspect(json: &str) -> Result<ManifestInspectParsed, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json.trim()).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let media_type = value
+        .get("mediaType")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    if let Some(manifests_arr) = value.get("manifests").and_then(|v| v.as_array()) {
+        let mut entries = Vec::with_capacity(manifests_arr.len());
+        for (i, m) in manifests_arr.iter().enumerate() {
+            let digest = m
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("manifests[{i}] missing 'digest'"))?
+                .to_string();
+            let platform_json = m
+                .get("platform")
+                .ok_or_else(|| format!("manifests[{i}] missing 'platform'"))?;
+            let os = platform_json
+                .get("os")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("manifests[{i}].platform missing 'os'"))?
+                .to_string();
+            let architecture = platform_json
+                .get("architecture")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("manifests[{i}].platform missing 'architecture'"))?
+                .to_string();
+            let variant = platform_json
+                .get("variant")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let entry_media_type = m
+                .get("mediaType")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            entries.push(ManifestEntry {
+                digest,
+                platform: OciPlatform {
+                    os,
+                    architecture,
+                    variant,
+                },
+                media_type: entry_media_type,
+            });
+        }
+        Ok(ManifestInspectParsed {
+            is_list: true,
+            entries,
+            media_type,
+        })
+    } else {
+        Ok(ManifestInspectParsed {
+            is_list: false,
+            entries: Vec::new(),
+            media_type,
+        })
+    }
+}
+
+/// Select the manifest entry that best matches `requested`.
+///
+/// - If `requested` is `Some`: find an exact `os/architecture[/variant]` match or fail.
+/// - If `requested` is `None` and there is exactly one entry: return it.
+/// - If `requested` is `None` and there are multiple entries: fail with an ambiguity error.
+fn select_platform_entry<'a>(
+    entries: &'a [ManifestEntry],
+    requested: Option<&OciPlatform>,
+    declared_ref: &str,
+) -> Result<&'a ManifestEntry, OciProviderError> {
+    if let Some(requested) = requested {
+        entries
+            .iter()
+            .find(|e| {
+                e.platform.os == requested.os
+                    && e.platform.architecture == requested.architecture
+                    && (requested.variant.is_none() || e.platform.variant == requested.variant)
+            })
+            .ok_or_else(|| {
+                let requested_platform = format!(
+                    "{}/{}{}",
+                    requested.os,
+                    requested.architecture,
+                    requested
+                        .variant
+                        .as_deref()
+                        .map(|v| format!("/{v}"))
+                        .unwrap_or_default()
+                );
+                OciProviderError::ImagePlatformUnsupported {
+                    declared_ref: declared_ref.to_string(),
+                    platform: requested_platform,
+                }
+            })
+    } else if entries.len() == 1 {
+        Ok(&entries[0])
+    } else {
+        let platforms: Vec<_> = entries
+            .iter()
+            .map(|e| format!("{}/{}", e.platform.os, e.platform.architecture))
+            .collect();
+        Err(OciProviderError::ImagePlatformUnsupported {
+            declared_ref: declared_ref.to_string(),
+            platform: format!(
+                "ambiguous: {} platform(s) available ({}); specify requested_platform",
+                entries.len(),
+                platforms.join(", ")
+            ),
+        })
+    }
+}
+
+/// Extract the `sha256:...` digest embedded in `image@sha256:...` style refs.
+fn extract_digest_from_ref(declared_ref: &str) -> Option<String> {
+    declared_ref
+        .find("@sha256:")
+        .map(|pos| declared_ref[pos + 1..].to_string())
+}
+
+/// Auto-select a platform for the current host when no `requested_platform`
+/// was specified.  Podman containers always run Linux, so OS is always
+/// `linux`; architecture is mapped from the Rust `ARCH` constant.
+fn auto_select_platform() -> OciPlatform {
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        "arm" => "arm",
+        other => other,
+    };
+    OciPlatform {
+        os: "linux".to_string(),
+        architecture: architecture.to_string(),
+        variant: None,
+    }
+}
+
+/// Require `sha256:` prefix followed by exactly 64 lowercase hex characters.
+fn validate_oci_digest_format(digest: &str) -> Result<(), String> {
+    let hex = digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("digest must start with 'sha256:', got '{digest}'"))?;
+    if hex.len() != 64 {
+        return Err(format!(
+            "sha256 digest must be 64 hex characters, got {}",
+            hex.len()
+        ));
+    }
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("sha256 digest must contain only hexadecimal characters".to_string());
+    }
+    Ok(())
+}
+
+fn is_registry_auth_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("unauthorized")
+        || lower.contains("authentication required")
+        || lower.contains("auth required")
+}
+
+/// Build a canonical pull reference that pins to the resolved digest.
+///
+/// `postgres:14` + `sha256:abc...` → `postgres@sha256:abc...`
+/// `myimage@sha256:abc...` → returned as-is (already a digest ref)
+pub(crate) fn build_digest_pull_ref(image: &OciImageResolution) -> String {
+    if image.declared_ref.contains('@') {
+        return image.declared_ref.clone();
+    }
+    let base = image
+        .declared_ref
+        .rsplit_once(':')
+        .filter(|(_, tag)| !tag.contains('/'))
+        .map(|(base, _)| base)
+        .unwrap_or(&image.declared_ref);
+    format!("{}@{}", base, image.resolved_digest)
+}
+
+fn podman_async_io_error(command: &'static str, err: std::io::Error) -> OciProviderError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        OciProviderError::Missing {
+            provider: "podman",
+            binary: "podman",
+        }
+    } else {
+        OciProviderError::CommandFailed {
+            provider: "podman",
+            command: command.to_string(),
+            status: None,
+            message: err.to_string(),
+        }
+    }
+}
+
+/// Parse `podman inspect --format json <id>` output into [`OciContainerInspect`].
+fn parse_podman_inspect(json: &str) -> Result<OciContainerInspect, OciProviderError> {
+    use std::collections::HashMap;
+    let value: serde_json::Value =
+        serde_json::from_str(json.trim()).map_err(|e| OciProviderError::ProbeFailed {
+            provider: "podman",
+            message: format!("failed to parse inspect output: {e}"),
+        })?;
+    let item = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let running = item["State"]["Status"]
+        .as_str()
+        .map(|s| s == "running")
+        .unwrap_or(false);
+    let exit_code = item["State"]["ExitCode"].as_i64();
+    let mut host_ports: HashMap<u16, u16> = HashMap::new();
+    if let Some(ports) = item["NetworkSettings"]["Ports"].as_object() {
+        for (key, bindings) in ports {
+            let Some((port_raw, _)) = key.split_once('/') else {
+                continue;
+            };
+            let Ok(container_port) = port_raw.parse::<u16>() else {
+                continue;
+            };
+            if let Some(binding) = bindings.as_array().and_then(|arr| arr.first()) {
+                if let Some(hp) = binding["HostPort"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u16>().ok())
+                {
+                    host_ports.insert(container_port, hp);
+                }
+            }
+        }
+    }
+    Ok(OciContainerInspect {
+        running,
+        exit_code,
+        host_ports,
+    })
+}
+
+pub(crate) struct DockerCompatibleOciProvider<C> {
+    client: C,
+    semantics: OciProviderSemantics,
+}
+
+impl<C> DockerCompatibleOciProvider<C> {
+    pub(crate) fn new(client: C, semantics: OciProviderSemantics) -> Self {
+        Self { client, semantics }
+    }
+}
+
+impl DockerCompatibleOciProvider<BollardOciRuntimeClient> {
+    pub(crate) fn connect_default(
+        semantics: OciProviderSemantics,
+    ) -> Result<Self, OciProviderError> {
+        let client = BollardOciRuntimeClient::connect_default().map_err(|err| {
+            OciProviderError::ProbeFailed {
+                provider: "docker-compatible",
+                message: err.to_string(),
+            }
+        })?;
+        Ok(Self { client, semantics })
+    }
+}
+
+#[async_trait]
+impl<C> OciProvider for DockerCompatibleOciProvider<C>
+where
+    C: OciRuntimeClient + Send + Sync,
+{
+    fn semantics(&self) -> &OciProviderSemantics {
+        &self.semantics
+    }
+
+    async fn probe(&self) -> Result<OciProviderProbe, OciProviderError> {
+        let inventory = OciProviderInventory {
+            kind: self.semantics.kind,
+            binary: OciProviderBinaryStatus::Found,
+            version: None,
+            mode: self.semantics.mode,
+            machine: OciProviderMachineStatus::MachineUnknown,
+            semantics: self.semantics.clone(),
+        };
+        Ok(OciProviderProbe {
+            ready: true,
+            semantics: self.semantics.clone(),
+            inventory,
+            detail: None,
+        })
+    }
+
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
+        self.client
+            .pull_image(&image.declared_ref)
+            .await
+            .map_err(|err| OciProviderError::operation("pull_image", err))
+    }
+
+    async fn create_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        self.client
+            .create_network(request)
+            .await
+            .map_err(|err| OciProviderError::operation("create_network", err))
+    }
+
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        self.client
+            .remove_network(network_name)
+            .await
+            .map_err(|err| OciProviderError::operation("remove_network", err))
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> Result<String, OciProviderError> {
+        self.client
+            .create_container(request)
+            .await
+            .map_err(|err| OciProviderError::operation("create_container", err))
+    }
+
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
+        self.client
+            .start_container(container_id)
+            .await
+            .map_err(|err| OciProviderError::operation("start_container", err))
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> Result<OciContainerInspect, OciProviderError> {
+        self.client
+            .inspect_container(container_id)
+            .await
+            .map_err(|err| OciProviderError::operation("inspect_container", err))
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+        self.client
+            .logs(container_id, follow)
+            .await
+            .map_err(|err| OciProviderError::operation("logs", err))
+    }
+
+    async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError> {
+        self.client
+            .wait_container(container_id)
+            .await
+            .map_err(|err| OciProviderError::operation("wait_container", err))
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> Result<(), OciProviderError> {
+        self.client
+            .stop_container(container_id, timeout_secs)
+            .await
+            .map_err(|err| OciProviderError::operation("stop_container", err))
+    }
+
+    async fn remove_container(
+        &self,
+        container_id: &str,
+        force: bool,
+    ) -> Result<(), OciProviderError> {
+        self.client
+            .remove_container(container_id, force)
+            .await
+            .map_err(|err| OciProviderError::operation("remove_container", err))
+    }
+}
+
+// ── FakeOciProvider ───────────────────────────────────────────────────────────
+// A fully-controllable in-process OCI provider for use in unit tests.
+// All lifecycle results are set up front; no real Podman is required.
+//
+// Call tracking:
+// - `call_log` records each method call as "<method>:<key_arg>" in order.
+// - `create_container_queue` and `start_result_queue` allow per-call result queues.
+//   When the queue is empty the flat result field is used as fallback.
+// - `create_container_requests` captures every OciContainerRequest for inspection.
+
+#[derive(Clone)]
+pub(crate) struct FakeOciProvider {
+    pub probe_result: Result<OciProviderProbe, OciProviderError>,
+    /// When `Some`, every `resolve_image` call returns this error instead of the fake digest.
+    pub resolve_error: Option<OciProviderError>,
+    pub pull_result: Result<(), OciProviderError>,
+    pub create_container_result: Result<String, OciProviderError>,
+    pub start_result: Result<(), OciProviderError>,
+    pub inspect_result: Result<OciContainerInspect, OciProviderError>,
+    pub log_chunks: Vec<OciLogChunk>,
+    pub wait_result: Result<i64, OciProviderError>,
+    pub stop_result: Result<(), OciProviderError>,
+    pub remove_result: Result<(), OciProviderError>,
+    pub semantics: OciProviderSemantics,
+    // ── call tracking (shared so clones share state) ──────────────────────────
+    pub call_log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub create_container_queue: std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<Result<String, OciProviderError>>>,
+    >,
+    pub create_container_requests: std::sync::Arc<std::sync::Mutex<Vec<OciContainerRequest>>>,
+    pub start_result_queue:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Result<(), OciProviderError>>>>,
+}
+
+impl FakeOciProvider {
+    pub(crate) fn ready() -> Self {
+        Self {
+            probe_result: Ok(fake_oci_probe_ready()),
+            resolve_error: None,
+            pull_result: Ok(()),
+            create_container_result: Ok("fake-container-id".to_string()),
+            start_result: Ok(()),
+            inspect_result: Ok(OciContainerInspect {
+                running: true,
+                exit_code: None,
+                host_ports: std::collections::HashMap::from([(8080u16, 45678u16)]),
+            }),
+            log_chunks: vec![],
+            wait_result: Ok(0),
+            stop_result: Ok(()),
+            remove_result: Ok(()),
+            semantics: fake_oci_semantics(),
+            call_log: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            create_container_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            create_container_requests: std::sync::Arc::new(std::sync::Mutex::new(vec![])),
+            start_result_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+        }
+    }
+
+    pub(crate) fn with_probe_missing() -> Self {
+        let mut f = Self::ready();
+        f.probe_result = Err(OciProviderError::Missing {
+            provider: "podman",
+            binary: "podman",
+        });
+        f
+    }
+
+    pub(crate) fn with_probe_not_ready() -> Self {
+        let mut f = Self::ready();
+        let sem = fake_oci_semantics();
+        f.probe_result = Ok(OciProviderProbe {
+            ready: false,
+            semantics: sem.clone(),
+            inventory: OciProviderInventory {
+                kind: OciProviderKind::Podman,
+                binary: OciProviderBinaryStatus::Found,
+                version: None,
+                mode: OciProviderMode::Unknown,
+                machine: OciProviderMachineStatus::MachineNotRunning,
+                semantics: sem,
+            },
+            detail: Some("podman machine is not running".to_string()),
+        });
+        f
+    }
+
+    /// Simulate an image resolution failure for all resolve_image calls.
+    pub(crate) fn with_resolve_error(error: OciProviderError) -> Self {
+        let mut f = Self::ready();
+        f.resolve_error = Some(error);
+        f
+    }
+
+    /// Simulate a pull failure for all pull_image calls.
+    pub(crate) fn with_pull_failure(error: OciProviderError) -> Self {
+        let mut f = Self::ready();
+        f.pull_result = Err(error);
+        f
+    }
+}
+
+pub(crate) fn fake_oci_semantics() -> OciProviderSemantics {
+    OciProviderSemantics {
+        kind: OciProviderKind::Podman,
+        mode: OciProviderMode::Rootless,
+        substrate: OciProviderSubstrate::NativeLinux,
+        policy_profile: PODMAN_POLICY_PROFILE_V1.to_string(),
+    }
+}
+
+pub(crate) fn fake_oci_probe_ready() -> OciProviderProbe {
+    let sem = fake_oci_semantics();
+    OciProviderProbe {
+        ready: true,
+        semantics: sem.clone(),
+        inventory: OciProviderInventory {
+            kind: OciProviderKind::Podman,
+            binary: OciProviderBinaryStatus::Found,
+            version: Some("4.0.0".to_string()),
+            mode: OciProviderMode::Rootless,
+            machine: OciProviderMachineStatus::NativeLinux,
+            semantics: sem,
+        },
+        detail: None,
+    }
+}
+
+#[async_trait]
+impl OciProvider for FakeOciProvider {
+    fn semantics(&self) -> &OciProviderSemantics {
+        &self.semantics
+    }
+
+    async fn probe(&self) -> Result<OciProviderProbe, OciProviderError> {
+        self.probe_result.clone()
+    }
+
+    async fn resolve_image(
+        &self,
+        request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("resolve:{}", request.declared_ref));
+        if let Some(ref err) = self.resolve_error {
+            return Err(err.clone());
+        }
+        Ok(OciResolvedImage {
+            declared_ref: request.declared_ref.clone(),
+            resolved_digest: format!("sha256:{}", "b".repeat(64)),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            media_type: None,
+            provider_semantics: self.semantics.clone(),
+        })
+    }
+
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("pull:{}", image.declared_ref));
+        self.pull_result.clone()
+    }
+
+    async fn create_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("create_network:{}", request.name));
+        Ok(format!("fake-network-{}", request.name))
+    }
+
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("remove_network:{}", network_name));
+        Ok(())
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> Result<String, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("create:{}", request.name));
+        self.create_container_requests
+            .lock()
+            .unwrap()
+            .push(request.clone());
+        let mut queue = self.create_container_queue.lock().unwrap();
+        if let Some(result) = queue.pop_front() {
+            result
+        } else {
+            self.create_container_result.clone()
+        }
+    }
+
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("start:{}", container_id));
+        let mut queue = self.start_result_queue.lock().unwrap();
+        if let Some(result) = queue.pop_front() {
+            result
+        } else {
+            self.start_result.clone()
+        }
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> Result<OciContainerInspect, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("inspect:{}", container_id));
+        self.inspect_result.clone()
+    }
+
+    async fn logs(
+        &self,
+        _container_id: &str,
+        _follow: bool,
+    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+        let (tx, rx) = mpsc::channel(64);
+        for chunk in &self.log_chunks {
+            let _ = tx.try_send(Ok(chunk.clone()));
+        }
+        Ok(rx)
+    }
+
+    async fn wait_container(&self, _container_id: &str) -> Result<i64, OciProviderError> {
+        self.wait_result.clone()
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        _timeout_secs: i64,
+    ) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("stop:{}", container_id));
+        self.stop_result.clone()
+    }
+
+    async fn remove_container(
+        &self,
+        container_id: &str,
+        _force: bool,
+    ) -> Result<(), OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("remove:{}", container_id));
+        self.remove_result.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capsule_core::runtime::oci::{OciContainerInspect, OciMountSpec, OciPortSpec};
+    use capsule_core::types::{OciProviderKind, OciProviderMode, OciProviderSubstrate};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct FakeRunner {
+        outputs: Arc<Mutex<HashMap<String, std::io::Result<CommandOutput>>>>,
+    }
+
+    impl FakeRunner {
+        fn with_output(self, args: &[&str], output: CommandOutput) -> Self {
+            self.outputs
+                .lock()
+                .unwrap()
+                .insert(args.join(" "), Ok(output));
+            self
+        }
+
+        fn with_error(self, args: &[&str], error: std::io::Error) -> Self {
+            self.outputs
+                .lock()
+                .unwrap()
+                .insert(args.join(" "), Err(error));
+            self
+        }
+    }
+
+    impl OciCommandRunner for FakeRunner {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            let key = std::iter::once(program)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut outputs = self.outputs.lock().unwrap();
+            match outputs.remove(&key) {
+                Some(result) => result,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing fake command: {key}"),
+                )),
+            }
+        }
+    }
+
+    fn output(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            status,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeClient {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl OciRuntimeClient for FakeClient {
+        async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+            self.events.lock().unwrap().push(format!("pull:{image}"));
+            Ok(())
+        }
+
+        async fn create_network(
+            &self,
+            request: &OciNetworkRequest,
+        ) -> capsule_core::Result<String> {
+            Ok(request.name.clone())
+        }
+
+        async fn remove_network(&self, _network_name: &str) -> capsule_core::Result<()> {
+            Ok(())
+        }
+
+        async fn create_container(
+            &self,
+            request: &OciContainerRequest,
+        ) -> capsule_core::Result<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("create:{}", request.image));
+            Ok(request.name.clone())
+        }
+
+        async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("start:{container_id}"));
+            Ok(())
+        }
+
+        async fn inspect_container(
+            &self,
+            _container_id: &str,
+        ) -> capsule_core::Result<OciContainerInspect> {
+            Ok(OciContainerInspect::default())
+        }
+
+        async fn logs(
+            &self,
+            _container_id: &str,
+            _follow: bool,
+        ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+
+        async fn wait_container(&self, _container_id: &str) -> capsule_core::Result<i64> {
+            Ok(0)
+        }
+
+        async fn stop_container(
+            &self,
+            _container_id: &str,
+            _timeout_secs: i64,
+        ) -> capsule_core::Result<()> {
+            Ok(())
+        }
+
+        async fn remove_container(
+            &self,
+            _container_id: &str,
+            _force: bool,
+        ) -> capsule_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn semantics() -> OciProviderSemantics {
+        OciProviderSemantics {
+            kind: OciProviderKind::DockerCompatible,
+            mode: OciProviderMode::Rootless,
+            substrate: OciProviderSubstrate::Unknown,
+            policy_profile: "oci-docker-compatible-v1".to_string(),
+        }
+    }
+
+    fn image() -> OciImageResolution {
+        OciImageResolution {
+            declared_ref: "ghcr.io/acme/app:latest".to_string(),
+            resolved_digest: "sha256:abc".to_string(),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "arm64".to_string(),
+                variant: None,
+            },
+            importer_input_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn podman_probe_reports_missing_binary_as_typed_error() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_error(
+                &["podman", "--version"],
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing podman"),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let error = provider.probe().await.expect_err("missing podman");
+
+        assert_eq!(error.code(), "oci_provider_missing");
+        assert!(matches!(
+            error,
+            OciProviderError::Missing {
+                provider: "podman",
+                binary: "podman"
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn podman_probe_linux_reports_version_native_and_rootless() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(0, "true\n", ""),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let probe = provider.probe().await.expect("probe");
+
+        assert!(probe.ready);
+        assert_eq!(probe.inventory.kind, OciProviderKind::Podman);
+        assert_eq!(probe.inventory.binary, OciProviderBinaryStatus::Found);
+        assert_eq!(probe.inventory.version.as_deref(), Some("5.2.1"));
+        assert_eq!(probe.inventory.mode, OciProviderMode::Rootless);
+        assert_eq!(
+            probe.inventory.machine,
+            OciProviderMachineStatus::NativeLinux
+        );
+        assert_eq!(probe.semantics.kind, OciProviderKind::Podman);
+        assert_eq!(probe.semantics.mode, OciProviderMode::Rootless);
+        assert_eq!(probe.semantics.substrate, OciProviderSubstrate::NativeLinux);
+        assert_eq!(probe.semantics.policy_profile, "oci-podman-v1");
+    }
+
+    #[tokio::test]
+    async fn podman_probe_macos_reports_machine_running() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(
+                        0,
+                        r#"[{"Name":"podman-machine-default","MachineId":"volatile-id","Running":true}]"#,
+                        "",
+                    ),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+
+        let probe = provider.probe().await.expect("probe");
+        let semantics = serde_json::to_string(&probe.semantics).expect("semantics");
+
+        assert!(probe.ready);
+        assert_eq!(
+            probe.inventory.machine,
+            OciProviderMachineStatus::MachineRunning
+        );
+        assert_eq!(probe.semantics.kind, OciProviderKind::Podman);
+        assert_eq!(probe.semantics.mode, OciProviderMode::Unknown);
+        assert_eq!(
+            probe.semantics.substrate,
+            OciProviderSubstrate::PodmanMachine
+        );
+        assert!(!semantics.contains("podman-machine-default"));
+        assert!(!semantics.contains("volatile-id"));
+    }
+
+    #[tokio::test]
+    async fn podman_probe_windows_reports_machine_not_running() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(
+                        0,
+                        r#"[{"Name":"podman-machine-default","Running":false}]"#,
+                        "",
+                    ),
+                ),
+            PodmanProbePlatform::Windows,
+        );
+
+        let probe = provider.probe().await.expect("probe");
+
+        assert!(!probe.ready);
+        assert_eq!(
+            probe.inventory.machine,
+            OciProviderMachineStatus::MachineNotRunning
+        );
+        assert_eq!(
+            probe.semantics.substrate,
+            OciProviderSubstrate::PodmanMachine
+        );
+        assert!(probe
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("not running")));
+        assert_eq!(
+            probe.clone().require_ready().expect_err("not ready").code(),
+            "oci_provider_not_ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn podman_probe_malformed_machine_output_does_not_panic() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, "not json", ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+
+        let probe = provider.probe().await.expect("probe");
+
+        assert!(!probe.ready);
+        assert_eq!(
+            probe.inventory.machine,
+            OciProviderMachineStatus::MachineUnknown
+        );
+        assert_eq!(probe.semantics.substrate, OciProviderSubstrate::Unknown);
+    }
+
+    #[tokio::test]
+    async fn podman_probe_empty_machine_list_reports_machine_required() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, "[]", ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+
+        let probe = provider.probe().await.expect("probe");
+
+        assert!(!probe.ready);
+        assert_eq!(
+            probe.inventory.machine,
+            OciProviderMachineStatus::MachineRequired
+        );
+        assert_eq!(
+            probe.semantics.substrate,
+            OciProviderSubstrate::PodmanMachine
+        );
+    }
+
+    #[test]
+    fn oci_provider_selector_defaults_to_official_podman_provider() {
+        let selector = DefaultOciProviderSelector;
+        let provider = selector.select_provider();
+        let semantics = provider.semantics();
+
+        assert_eq!(semantics.kind, OciProviderKind::Podman);
+        assert_eq!(semantics.mode, OciProviderMode::Unknown);
+        assert_eq!(semantics.substrate, OciProviderSubstrate::Unknown);
+        assert_eq!(semantics.policy_profile, "oci-podman-v1");
+    }
+
+    #[tokio::test]
+    async fn oci_provider_trait_delegates_docker_compatible_adapter_without_bollard_types() {
+        let client = FakeClient::default();
+        let events = client.events.clone();
+        let provider = DockerCompatibleOciProvider::new(client, semantics());
+
+        let probe = provider.probe().await.expect("probe");
+        assert!(probe.ready);
+        assert_eq!(probe.semantics.policy_profile, "oci-docker-compatible-v1");
+
+        provider.pull_image(&image()).await.expect("pull");
+        let container_id = provider
+            .create_container(&OciContainerRequest {
+                name: "ato-test".to_string(),
+                image: "ghcr.io/acme/app:latest".to_string(),
+                cmd: vec!["serve".to_string()],
+                env: HashMap::new(),
+                working_dir: None,
+                labels: HashMap::new(),
+                mounts: vec![OciMountSpec {
+                    source: "state://app".to_string(),
+                    target: "/data".to_string(),
+                    readonly: false,
+                }],
+                ports: vec![OciPortSpec {
+                    container_port: 3000,
+                    host_port: None,
+                    protocol: "tcp".to_string(),
+                    host_ip: Some("127.0.0.1".to_string()),
+                }],
+                network: None,
+                aliases: Vec::new(),
+            })
+            .await
+            .expect("create");
+        provider
+            .start_container(&container_id)
+            .await
+            .expect("start");
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "pull:ghcr.io/acme/app:latest".to_string(),
+                "create:ghcr.io/acme/app:latest".to_string(),
+                "start:ato-test".to_string(),
+            ]
+        );
+    }
+
+    // ── Image resolution tests ────────────────────────────────────────────────
+
+    fn multi_arch_manifest_json() -> &'static str {
+        r#"{
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+          "manifests": [
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "platform": { "os": "linux", "architecture": "amd64" }
+            },
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "platform": { "os": "linux", "architecture": "arm64", "variant": "v8" }
+            }
+          ]
+        }"#
+    }
+
+    fn single_arch_manifest_json() -> &'static str {
+        r#"{
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+          "config": { "mediaType": "application/vnd.docker.container.image.v1+json" }
+        }"#
+    }
+
+    fn fake_semantics() -> OciProviderSemantics {
+        OciProviderSemantics {
+            kind: OciProviderKind::Podman,
+            mode: OciProviderMode::Rootless,
+            substrate: OciProviderSubstrate::NativeLinux,
+            policy_profile: "oci-podman-v1".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolves_tag_to_digest_and_platform_with_fake_provider() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "postgres:14"],
+                output(0, multi_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: "postgres:14".to_string(),
+            requested_platform: Some(OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let resolved = provider.resolve_image(&request).await.expect("resolve");
+        assert_eq!(
+            resolved.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(resolved.platform.os, "linux");
+        assert_eq!(resolved.platform.architecture, "amd64");
+        assert_eq!(resolved.declared_ref, "postgres:14");
+    }
+
+    #[tokio::test]
+    async fn digest_ref_with_platform_resolves_single_arch_manifest() {
+        let digest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let declared_ref = format!("postgres@{digest}");
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", &declared_ref],
+                output(0, single_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: declared_ref.clone(),
+            requested_platform: Some(OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let resolved = provider.resolve_image(&request).await.expect("resolve");
+        assert_eq!(resolved.resolved_digest, digest);
+        assert_eq!(resolved.platform.architecture, "amd64");
+    }
+
+    #[tokio::test]
+    async fn mutable_tag_single_arch_manifest_fails_with_typed_error() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "myimage:latest"],
+                output(0, single_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "app".to_string(),
+            declared_ref: "myimage:latest".to_string(),
+            requested_platform: Some(OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("should fail for mutable tag on single-arch manifest");
+        assert_eq!(err.code(), "oci_image_resolve_failed");
+        assert!(
+            err.to_string().contains("requires image pull"),
+            "error should explain pull is needed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_image_ref_returns_typed_error() {
+        let provider =
+            PodmanProvider::with_runner(FakeRunner::default(), PodmanProbePlatform::Linux);
+
+        let request = OciImageResolutionRequest {
+            target_label: "app".to_string(),
+            declared_ref: "has space".to_string(),
+            requested_platform: None,
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("malformed ref must fail");
+        assert_eq!(err.code(), "oci_image_ref_malformed");
+    }
+
+    #[tokio::test]
+    async fn multi_arch_manifest_auto_selects_host_platform_when_no_platform_requested() {
+        // With no requested_platform, the provider should auto-select linux/<host_arch>
+        // (or fall back to linux/amd64) rather than failing with "ambiguous".
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "postgres:14"],
+                output(0, multi_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: "postgres:14".to_string(),
+            requested_platform: None, // auto-select host platform
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let resolved = provider
+            .resolve_image(&request)
+            .await
+            .expect("auto-selection must succeed on multi-arch manifest");
+        // The resolved platform must be linux/amd64 or linux/arm64 (both are in the fixture).
+        assert_eq!(resolved.platform.os, "linux");
+        assert!(
+            resolved.platform.architecture == "amd64" || resolved.platform.architecture == "arm64",
+            "unexpected platform architecture: {}",
+            resolved.platform.architecture
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_platform_returns_typed_error_when_not_found() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", "postgres:14"],
+                output(0, multi_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "db".to_string(),
+            declared_ref: "postgres:14".to_string(),
+            requested_platform: Some(OciPlatform {
+                os: "windows".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            }),
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+        };
+
+        let err = provider
+            .resolve_image(&request)
+            .await
+            .expect_err("unsupported platform must fail");
+        assert_eq!(err.code(), "oci_image_platform_unsupported");
+    }
+
+    #[test]
+    fn resolved_image_converts_to_lock_resolution() {
+        let resolved = OciResolvedImage {
+            declared_ref: "postgres:14".to_string(),
+            resolved_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            media_type: Some("application/vnd.docker.distribution.manifest.v2+json".to_string()),
+            provider_semantics: fake_semantics(),
+        };
+
+        let lock = resolved.into_lock_resolution();
+        assert_eq!(lock.declared_ref, "postgres:14");
+        assert_eq!(
+            lock.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(lock.platform.os, "linux");
+        assert_eq!(lock.platform.architecture, "amd64");
+        assert!(lock.importer_input_hash.is_none());
+    }
+}
