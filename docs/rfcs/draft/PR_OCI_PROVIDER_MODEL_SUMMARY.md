@@ -225,3 +225,67 @@ Classification: **follow-up** (containers carry `io.ato.managed=true` label for 
 | Bad image ref (nonexistent registry) | Typed E999 with "no such host" cause surfaced |
 | Absolute bind mount `/etc/passwd` | Import rejected at parse time |
 | `--privileged` flag | Import rejected at parse time |
+
+---
+
+## PR 11.7 — Minimal OCI session tracking: complete ✅
+
+Implemented 2026-05-23, branch `feat/oci-provider-model`.
+
+Fixes the Scenario C degradation from PR 11.6: `ato ps` / `ato stop --all` now track and stop OCI-managed sessions.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `adapters/runtime/oci_session_store.rs` (NEW) | `OciSessionRecord`, `OciSessionStore`, `stop_oci_session()`, `StopResult` |
+| `adapters/runtime/mod.rs` | `pub(crate) mod oci_session_store;` |
+| `executors/oci_multi_service.rs` | Write session record after containers start; delete after cleanup |
+| `executors/install_sh_runner.rs` | `session_meta: Option<OciSessionMeta>` param; production call passes `docker-run-script` |
+| `executors/oci_compose_runner.rs` | `session_meta: Option<OciSessionMeta>` param; production call passes `compose` |
+| `cli/commands/close.rs` | `stop_all_oci_sessions()` wired into `--all` path |
+| `cli/commands/ps.rs` | OCI sessions shown in text table and JSON output |
+
+### Session record fields
+
+Written to `~/.ato/oci-sessions/<session_id>.json` after all containers start:
+
+- `session_id`, `import_kind` (compose / docker-run-script), `provider` (podman)
+- `source_path`, `source_hash`
+- per-service: `container_name`, `image_ref`, `image_digest`, `platform`
+- `network_name`, `endpoint` (main service URL), `created_at`
+- `status`: running / stopped
+- NOT written: secret values, generated secrets, raw DATABASE_URL with password
+
+Deleted after `cleanup_services` completes (both success and failure paths).
+
+### Lifecycle invariants
+
+- `ato stop --all` reads running OCI sessions, stops containers via `podman stop/rm`, removes session network
+- Persistent volumes: preserved (named volumes with no `/` in source)
+- Ephemeral volumes: removed
+- Idempotent: already-removed containers/networks return success
+- Failed startup: no running session record persisted
+
+### Test results
+
+```
+oci_session_store:   7/7  ✅
+oci_multi_service:  18/18 ✅
+install_sh:         11/11 ✅
+oci_compose:        23/23 ✅
+stop:               17/17 ✅
+ps:                164/164 ✅
+oci_provider:       20/20 ✅
+docker_run_script:  19/19 ✅
+oci_compose_lock:   18/18 ✅
+```
+
+### Remaining future work (not blocking PR)
+
+- Full Desktop OCI session UX (Desktop shell `ato ps` / `ato stop` integration)
+- Rich per-container status / logs from `ato ps`
+- Podman machine-specific session cleanup on macOS shutdown
+- Real Blinko AODD Scenario C live rerun (blocked by: no persistent ATO_HOME between test runs)
+
+Receipt: `.tmp/aodd-receipts/oci-blinko-cleanup.yaml` updated to `result: complete`.

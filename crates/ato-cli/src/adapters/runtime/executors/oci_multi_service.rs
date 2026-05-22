@@ -39,6 +39,10 @@ use crate::adapters::runtime::oci_provider::{
     build_digest_pull_ref, DefaultOciProviderSelector, OciProvider, OciProviderError,
     OciProviderSelector,
 };
+use crate::adapters::runtime::oci_session_store::{
+    now_iso8601, OciServiceRecord, OciSessionMeta, OciSessionRecord, OciSessionStatus,
+    OciSessionStore,
+};
 use crate::application::preflight::{
     preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
 };
@@ -126,6 +130,7 @@ pub(crate) async fn execute_multi_service(
     let manifest_name = plan
         .manifest_name()
         .unwrap_or_else(|| "capsule".to_string());
+    let source_path = Some(plan.workspace_root.display().to_string());
 
     execute_service_graph_with_provider(
         &orch_plan,
@@ -136,6 +141,11 @@ pub(crate) async fn execute_multi_service(
         &ephemeral_mount_sources,
         &reporter,
         &provider,
+        Some(OciSessionMeta {
+            import_kind: "explicit-oci".to_string(),
+            source_path,
+            source_hash: None,
+        }),
     )
     .await
 }
@@ -153,6 +163,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     ephemeral_mount_sources: &HashSet<String>,
     reporter: &Arc<CliReporter>,
     provider: &P,
+    session_meta: Option<OciSessionMeta>,
 ) -> Result<i32> {
     // Gate: policy enforcement
     enforce_multi_service_policy_gate(policy_mode, egress_allow)?;
@@ -363,30 +374,126 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         return Err(err);
     }
 
+    // Determine main endpoint.
+    let main_endpoint = started
+        .iter()
+        .find(|r| {
+            orch_plan
+                .services
+                .iter()
+                .find(|s| s.name == r.service_name)
+                .map(|s| s.network.publish)
+                .unwrap_or(false)
+        })
+        .and_then(|r| r.host_port.map(|p| format!("http://127.0.0.1:{p}/")));
+
     // Report the main endpoint.
-    if let Some(main_record) = started.iter().find(|r| {
-        orch_plan
-            .services
-            .iter()
-            .find(|s| s.name == r.service_name)
-            .map(|s| s.network.publish)
-            .unwrap_or(false)
-    }) {
-        if let Some(host_port) = main_record.host_port {
-            reporter
-                .notify(format!(
-                    "🌐 OCI service '{}' available at http://127.0.0.1:{}/",
-                    main_record.service_name, host_port,
-                ))
-                .await?;
-        }
+    if let Some(ref endpoint) = main_endpoint {
+        reporter
+            .notify(format!("🌐 OCI service available at {endpoint}",))
+            .await?;
     }
+
+    // Write OCI session record so `ato ps` and `ato stop --all` can track it.
+    let session_store = OciSessionStore::new();
+    let oci_session_record = session_store.as_ref().ok().map(|store| {
+        let meta = session_meta.unwrap_or(OciSessionMeta {
+            import_kind: "explicit-oci".to_string(),
+            source_path: None,
+            source_hash: None,
+        });
+        let service_records: Vec<OciServiceRecord> = started
+            .iter()
+            .map(|sr| {
+                let image_info = oci_plan_image_for_service(orch_plan, &sr.service_name, images);
+                OciServiceRecord {
+                    name: sr.service_name.clone(),
+                    container_id: sr.container_id.clone(),
+                    container_name: sr.container_name.clone(),
+                    image_ref: image_info.0,
+                    image_digest: image_info.1,
+                    host_port: sr.host_port,
+                    persistent_volumes: oci_persistent_volumes_for_service(
+                        orch_plan,
+                        &sr.service_name,
+                    ),
+                }
+            })
+            .collect();
+        let record = OciSessionRecord {
+            session_id: session_id.clone(),
+            import_kind: meta.import_kind,
+            source_path: meta.source_path,
+            source_hash: meta.source_hash,
+            network_name: network_name.clone(),
+            services: service_records,
+            main_endpoint: main_endpoint.clone(),
+            created_at: now_iso8601(),
+            status: OciSessionStatus::Running,
+        };
+        let _ = store.write_session(&record);
+        (store, record.session_id.clone())
+    });
 
     // Stream logs for all services and wait for the main container to exit.
     let exit_code = wait_all_services(&started, orch_plan, reporter, provider).await;
 
     cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+
+    // Remove the session record after cleanup.
+    if let Some((store, sid)) = oci_session_record {
+        let _ = store.delete_session(&sid);
+    }
+
     Ok(exit_code)
+}
+
+/// Look up declared_ref and resolved_digest for a service's image.
+fn oci_plan_image_for_service(
+    orch_plan: &OrchestrationPlan,
+    service_name: &str,
+    images: &HashMap<String, OciImageResolution>,
+) -> (String, Option<String>) {
+    let target_label = orch_plan
+        .services
+        .iter()
+        .find(|s| s.name == service_name)
+        .and_then(|s| match &s.runtime {
+            ResolvedServiceRuntime::Oci(rt) => Some(rt.target.clone()),
+            _ => None,
+        });
+    match target_label.and_then(|t| images.get(&t)) {
+        Some(img) => (img.declared_ref.clone(), Some(img.resolved_digest.clone())),
+        None => (String::new(), None),
+    }
+}
+
+/// Collect named Podman volumes that back persistent state bindings for a service.
+fn oci_persistent_volumes_for_service(
+    orch_plan: &OrchestrationPlan,
+    service_name: &str,
+) -> Vec<String> {
+    orch_plan
+        .services
+        .iter()
+        .find(|s| s.name == service_name)
+        .map(|s| {
+            s.runtime
+                .runtime()
+                .mounts
+                .iter()
+                .filter_map(|m| {
+                    // Named volumes (no path separator) are Podman-managed persistent volumes.
+                    let src = m.source.trim_start_matches('/');
+                    if !src.contains('/') && !src.is_empty() {
+                        Some(src.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -826,6 +933,7 @@ mod tests {
             &HashSet::new(),
             &Arc::new(crate::reporters::CliReporter::new(false)),
             provider,
+            None,
         )
         .await
     }
@@ -1182,6 +1290,7 @@ mod tests {
             &ephemeral,
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1223,6 +1332,7 @@ mod tests {
             &ephemeral,
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -1321,6 +1431,7 @@ volumes:
                 &HashSet::new(),
                 &Arc::new(crate::reporters::CliReporter::new(false)),
                 &provider,
+                None,
             ))
             .unwrap();
         assert_eq!(exit_code, 0);

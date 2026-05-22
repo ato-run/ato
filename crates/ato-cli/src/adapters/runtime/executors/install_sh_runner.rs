@@ -42,6 +42,7 @@ use crate::adapters::runtime::oci_provider::{
     DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest, OciProvider,
     OciProviderError, OciProviderSelector,
 };
+use crate::adapters::runtime::oci_session_store::OciSessionMeta;
 use crate::application::preflight::{
     preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
 };
@@ -191,6 +192,11 @@ pub(crate) async fn execute_install_sh_run(
         project_name,
         &reporter,
         &provider,
+        Some(OciSessionMeta {
+            import_kind: "docker-run-script".to_string(),
+            source_path: Some(script_path.display().to_string()),
+            source_hash: Some(source_hash),
+        }),
     )
     .await
 }
@@ -324,6 +330,7 @@ pub(crate) async fn execute_install_sh_run_with_provider<P: OciProvider>(
     project_name: &str,
     reporter: &Arc<CliReporter>,
     provider: &P,
+    session_meta: Option<OciSessionMeta>,
 ) -> Result<i32> {
     let orch_plan = import_output
         .to_orchestration_plan()
@@ -340,6 +347,7 @@ pub(crate) async fn execute_install_sh_run_with_provider<P: OciProvider>(
         &ephemeral_mount_sources,
         reporter,
         provider,
+        session_meta,
     )
     .await
 }
@@ -541,6 +549,7 @@ docker run -d \
             "blinko",
             &reporter,
             &provider,
+            None,
         )
         .await
         .unwrap();
@@ -570,6 +579,7 @@ docker run -d \
             "test",
             &reporter,
             &provider,
+            None,
         )
         .await
         .unwrap();
@@ -828,6 +838,7 @@ echo "done"
             "smoke-test",
             &reporter,
             &provider,
+            None,
         )
         .await;
 

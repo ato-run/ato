@@ -1107,6 +1107,7 @@ dependencies = [
  "serde",
  "serde_jcs",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "shell-words",
  "tar",
