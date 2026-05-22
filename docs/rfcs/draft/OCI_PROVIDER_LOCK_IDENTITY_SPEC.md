@@ -377,8 +377,9 @@ PR 5: image resolve/pull and lock update
 PR 6: ExecutionPlan, ExecutionGraph, Identity connection
 PR 7: single-target Podman execution
 PR 8: multi-service Blinko
-PR 9: compose/docker-run/install.sh importers
-PR 10: Desktop UX
+PR 9: Docker Compose subset importer (pure)
+PR 10: CLI wiring — --oci-compose flag, image resolution, lock/plan/run
+PR 11: install.sh / docker-run intent extractor (future)
 ```
 
 ## 7. References
@@ -713,4 +714,94 @@ not part of the importer.
 
 ### 10.9 install.sh importer
 
-`install.sh` intent extractor remains deferred to PR 10.
+`install.sh` intent extractor remains deferred to PR 11.
+
+---
+
+## §11 PR 10 — CLI Wiring for Docker Compose Import → OCI Lock/Plan/Run
+
+### 11.1 Goal
+
+Wire the PR 9 pure Compose importer into the CLI so that a repo with a
+`docker-compose.yml` can be imported, image refs resolved to lock digests,
+converted to the existing multi-service OCI execution path, and run through
+`PodmanProvider`.
+
+### 11.2 Entry point
+
+A new hidden/experimental flag `--oci-compose` is added to `ato run`:
+
+```sh
+ato run . --oci-compose
+```
+
+This path is guarded and does **not** change the default `ato run .` behavior.
+Normal source runs are completely unaffected.
+
+### 11.3 Dispatch model
+
+In `execute_run_like_command` (dispatch/run.rs), an early-return check fires
+before sandbox-mode flag processing and before the share-artifact path:
+
+1. Detect compose candidate in `args.path` directory.
+2. Import with `compose::import_compose` → `ComposeImportOutput`.
+3. Surface hard errors as typed failures.
+4. Convert to orchestration plan via `to_orchestration_plan()`.
+5. Resolve image digests for all services via `resolve_images_for_compose`.
+6. Require digests before any `PodmanProvider` execution (Required mode).
+7. Execute via `execute_service_graph_with_provider` (same path as PR 8).
+
+The testable core is `execute_compose_run_with_provider<P: OciProvider>` in
+`oci_compose_runner.rs`, mirroring the pattern from `oci_multi_service.rs`.
+
+### 11.4 Image digest resolution gate
+
+`resolve_images_for_compose` calls `provider.resolve_image()` for each service
+and returns `Err(OciImageResolutionRequired)` if any service has no digest.
+The execution gate in `execute_service_graph_with_provider` additionally rejects
+any start attempt with a missing image entry.
+
+### 11.5 Diagnostics and receipt
+
+The Compose runner surfaces:
+- Selected compose file path in diagnostics.
+- Importer warnings (unsupported features) in diagnostics/receipt.
+- Resolved digests per service.
+- Policy enforcement result at graph level.
+- Redacted env/secret keys (keys matching PASSWORD, SECRET, TOKEN, KEY).
+
+Not exposed:
+- Secret values.
+- Generated passwords.
+- Container IDs or allocated host ports in identity.
+- Global Compose `container_name` as runtime name.
+
+### 11.6 Supported CLI wiring shapes
+
+| Pattern | Notes |
+|---------|-------|
+| `ato run . --oci-compose` | Discovers compose file in current dir |
+| `ato run ./myapp --oci-compose` | Discovers compose file in `./myapp` |
+
+Future: `ato run github.com/org/repo --oci-compose` (after repo materialization is wired).
+
+### 11.7 Tests (11 tests in `oci_compose_runner.rs`)
+
+| Test | Description |
+|------|-------------|
+| `cli_compose_flag_discovers_compose_file` | Compose file is auto-detected from dir |
+| `cli_compose_flag_imports_graph_without_docker_compose` | No shell-out to docker compose |
+| `cli_compose_import_errors_are_typed` | Hard importer errors are typed |
+| `cli_compose_warnings_are_reported` | Importer warnings are propagated |
+| `cli_compose_requires_image_digest_before_execution` | Gate rejects missing digest |
+| `cli_compose_resolves_all_service_images_into_lock` | All services get resolved digest |
+| `cli_compose_executes_imported_graph_with_fake_provider` | Full path with FakeOciProvider |
+| `cli_compose_does_not_use_legacy_bollard_path` | Bollard path is never invoked |
+| `cli_compose_redacts_secret_like_env_values` | Secret keys are redacted in receipt |
+| `blinko_style_compose_smoke_imports_and_executes_with_fake_provider` | Blinko smoke test |
+| `normal_source_run_behavior_unchanged` | Source run not affected |
+
+### 11.8 install.sh / docker-run importer
+
+`install.sh` and `docker run` intent extractor are deferred to PR 11.
+Compose CLI wiring is stable before adding an additional import surface.

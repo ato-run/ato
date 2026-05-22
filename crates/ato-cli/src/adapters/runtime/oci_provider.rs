@@ -1460,6 +1460,27 @@ impl OciProvider for FakeOciProvider {
         self.probe_result.clone()
     }
 
+    async fn resolve_image(
+        &self,
+        request: &OciImageResolutionRequest,
+    ) -> Result<OciResolvedImage, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("resolve:{}", request.declared_ref));
+        Ok(OciResolvedImage {
+            declared_ref: request.declared_ref.clone(),
+            resolved_digest: format!("sha256:{}", "b".repeat(64)),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            media_type: None,
+            provider_semantics: self.semantics.clone(),
+        })
+    }
+
     async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
         self.call_log
             .lock()
