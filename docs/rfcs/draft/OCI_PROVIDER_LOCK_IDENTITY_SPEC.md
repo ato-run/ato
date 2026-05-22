@@ -288,6 +288,59 @@ execution identity. However, the digest alone does not capture:
 Execution identity therefore includes the full OCI launch envelope, of which the
 resolved digest is one field.
 
+### 3.9 ExecutionPlan policy envelope
+
+When `compile_execution_plan` processes a manifest target with `runtime = "oci"`, it
+attaches an `OciPolicyEnvelope` to the `ExecutionPlan`. This envelope records the
+plan-time-known OCI policy facts required for consent hashing and provider readiness
+checks.
+
+**Shape:**
+
+```rust
+pub struct OciPolicyEnvelope {
+    pub declared_image_ref: String,
+    pub resolved_image: Option<OciImageResolution>, // from lock if resolved
+    pub port_exposure: Option<u16>,
+    pub egress_allow: Vec<String>,
+    pub policy_mode: OciPolicyMode,           // defaults to Strict
+}
+
+pub enum OciPolicyMode { Strict, Loose, Off }
+```
+
+**Population rules:**
+
+| Field | Source |
+|-------|--------|
+| `declared_image_ref` | `targets.<label>.image` in manifest |
+| `resolved_image` | `resolution.oci_images.<label>` in lock (absent if no lock) |
+| `port_exposure` | `targets.<label>.port` in manifest |
+| `egress_allow` | `[network].egress_allow` in manifest |
+| `policy_mode` | Always `Strict` at compile time (configurable in a later slice) |
+
+**What the envelope does not store:**
+
+- Container id, network id, volume id — live runtime state only
+- Host-allocated port — chosen at materialization time
+- Secret values — never in plan
+
+**Tier:**
+
+OCI targets compile to `ExecutionTier::Tier3` (containerized OCI). As a result,
+`lock_required = false` and `integrity_required = false` for this tier. These will
+be tightened in the image pull / materialization slice when lock presence becomes
+a pre-execution gate.
+
+**Consent hash inclusion:**
+
+The `OciPolicyEnvelope` is part of the `ExecutionPlan` serialization. It is
+included in the policy segment hash computed by `compute_policy_segment_hash`.
+Changes to `declared_image_ref`, `egress_allow`, `port_exposure`, or `policy_mode`
+all change the consent key. The `resolved_image` field also changes the consent key
+when a digest is resolved, ensuring that a tag-to-digest resolution event requires
+fresh consent.
+
 ## 4. Interfaces
 
 The first code surface is:
