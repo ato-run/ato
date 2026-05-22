@@ -20,13 +20,14 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::application::phase_materializer::BuildOutputLayerRecord;
 use crate::application::source_inventory::{
     collect_source_files, native_lockfiles, normalize_outputs,
 };
 
 /// Marker version for the digest layout. Bump if the digest composition
 /// changes so previously-recorded materializations invalidate naturally.
-const MATERIALIZATION_DIGEST_VERSION: &str = "ato-build-materialization-v1";
+const MATERIALIZATION_DIGEST_VERSION: &str = "ato-build-materialization-v2";
 
 /// User-controlled build policy. v0 supports three policies; default is
 /// `IfStale`, which skips the build executor when an existing materialization
@@ -192,13 +193,10 @@ fn derive_toolchain_fingerprint(
         .execution_driver()
         .unwrap_or_else(|| "unknown".to_string());
     let target = plan.selected_target_label();
-    let working = plan
-        .execution_working_dir()
-        .unwrap_or_else(|| ".".to_string());
     let os_arch = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
     format!(
-        "runtime:{}|driver:{}|target:{}|workdir:{}|os:{}|schema:{}",
-        runtime, driver, target, working, os_arch, MATERIALIZATION_DIGEST_VERSION
+        "runtime:{}|driver:{}|target:{}|os:{}|schema:{}",
+        runtime, driver, target, os_arch, MATERIALIZATION_DIGEST_VERSION
     )
 }
 
@@ -466,7 +464,10 @@ fn compute_input_digest(
     // lockfiles (delegated to existing source_inventory helper)
     update_text(&mut hasher, "lockfiles");
     for lockfile in native_lockfiles(working_dir_absolute) {
-        update_text(&mut hasher, &lockfile.display().to_string());
+        let lockfile_label = lockfile
+            .strip_prefix(working_dir_absolute)
+            .unwrap_or(lockfile.as_path());
+        update_text(&mut hasher, &lockfile_label.display().to_string());
         hash_file(&mut hasher, &lockfile)?;
     }
 
@@ -570,6 +571,8 @@ pub(crate) struct MaterializationRecord {
     pub(crate) env_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) env_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) output_layer: Option<BuildOutputLayerRecord>,
     pub(crate) created_at: String,
 }
 
@@ -702,6 +705,8 @@ pub(crate) enum DecisionAction {
     Skip,
     /// Run the build executor.
     Execute,
+    /// Restore the declared build outputs from the immutable local store.
+    Project(BuildOutputLayerRecord),
     /// `--no-build` policy refused materialization. Caller should fail with
     /// `ATO_ERR_MISSING_MATERIALIZATION`.
     Fail,
@@ -779,6 +784,12 @@ pub(crate) fn decide(
                         &observation.working_dir_relative,
                         &record.outputs,
                     ) {
+                        if let Some(layer) = record.output_layer.clone() {
+                            return BuildDecision {
+                                action: DecisionAction::Project(layer),
+                                result_kind: BuildResultKind::Materialized,
+                            };
+                        }
                         return BuildDecision {
                             action: if matches!(policy, BuildPolicy::NoBuild) {
                                 DecisionAction::Fail
@@ -851,6 +862,7 @@ pub(crate) fn record_for(
         toolchain_fingerprint: toolchain_fingerprint.to_string(),
         env_keys: Vec::new(),
         env_fingerprint: None,
+        output_layer: None,
         created_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -920,18 +932,61 @@ pub(crate) fn prepare_decision(
 /// record and emit a one-shot heuristic recommendation. Failures to persist
 /// are logged but never surfaced (the build itself succeeded; missing the
 /// record only hurts the next run, which will fall back to `Execute`).
+///
+/// `output_layer` is the pre-captured layer produced while the build output
+/// lock was still held. Callers must capture with
+/// [`phase_materializer::capture_build_outputs_locked`] before dropping the
+/// lock, then pass the result here so that capture and state-record write are
+/// covered by the same lock region as the build executor.
 pub(crate) fn persist_after_execute(
     plan: &capsule_core::router::ManifestData,
     workspace_root: &Path,
     observation: &BuildObservation,
     suppress_recommendation: bool,
+    output_layer: Option<BuildOutputLayerRecord>,
+) {
+    persist_materialization_record(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        output_layer,
+    );
+}
+
+/// After a successful remote build-output projection, upsert the
+/// materialization record without implying that the local build executor ran.
+pub(crate) fn persist_after_remote_project(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &Path,
+    observation: &BuildObservation,
+    suppress_recommendation: bool,
+    output_layer: BuildOutputLayerRecord,
+) {
+    persist_materialization_record(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        Some(output_layer),
+    );
+}
+
+fn persist_materialization_record(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &Path,
+    observation: &BuildObservation,
+    suppress_recommendation: bool,
+    output_layer: Option<BuildOutputLayerRecord>,
 ) {
     let toolchain_fp = toolchain_fingerprint_for_plan(plan);
     let mut file = match load_state(workspace_root) {
         LoadOutcome::Loaded(f) => f,
         LoadOutcome::Missing | LoadOutcome::Invalid(_) => MaterializationFile::default(),
     };
-    upsert_record(&mut file, record_for(observation, &toolchain_fp));
+    let mut record = record_for(observation, &toolchain_fp);
+    record.output_layer = output_layer;
+    upsert_record(&mut file, record);
 
     let heuristic_label = observation.source.heuristic_label();
     if heuristic_label.is_some() && !suppress_recommendation {
