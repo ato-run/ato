@@ -1,4 +1,5 @@
 pub mod deno;
+pub mod install_sh_runner;
 pub mod launch_context;
 pub mod node_compat;
 pub mod oci;

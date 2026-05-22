@@ -1058,3 +1058,252 @@ cargo test -p ato-cli oci_compose --lib
 cargo test -p capsule-core oci_compose_lock --lib
 cargo test -p capsule-core compose_import --lib
 ```
+
+---
+
+## §14 PR 11 — install.sh / docker run intent extractor
+
+### 14.1 Motivation
+
+Docker-only apps are typically distributed through:
+
+1. `docker-compose.yml` (handled by `--oci-compose`, PR 8–10.6)
+2. An `install.sh` / `setup.sh` that contains `docker run` commands
+3. A `README.md` with manual `docker run` instructions
+
+PR 11 covers case 2: extract `docker run` command **intent** from install
+scripts without executing the script.  The install script is treated as
+a static document; no shell evaluation occurs.
+
+### 14.2 Supported script subset
+
+Only the following patterns are extracted:
+
+```
+docker network create <name>
+docker run -d [flags] IMAGE [CMD]
+```
+
+Line continuations (`\` + newline) are joined before tokenisation.
+
+**Supported `docker run` flags:**
+
+| Flag | Handling |
+|------|----------|
+| `--name <name>` | Logical service label candidate (sanitised) |
+| `--network <name>` | Service association metadata only |
+| `-e KEY=VALUE` / `--env KEY=VALUE` | Env variable; secret-like keys are classified |
+| `-p HOST:CONTAINER` / `--publish HOST:CONTAINER` | Port mapping |
+| `-p CONTAINER` (no host) | Container-only port; host auto-assigned |
+| `-v SOURCE:TARGET` / `--volume SOURCE:TARGET` | Volume or bind mount (rules below) |
+| `--restart <policy>` | Parsed but **ignored** (see §14.5) |
+| `IMAGE` (final positional arg) | Declared image ref |
+
+**Unsupported — rejected with typed error or warning:**
+
+| Pattern | Outcome |
+|---------|---------|
+| `--privileged` | `PrivilegedRejected` error, extraction stops |
+| `--network host` | `HostNetworkRejected` error, extraction stops |
+| Absolute bind mounts (`-v /host/path:…`) | `AbsoluteBindMountRejected` error |
+| Relative bind mounts (`-v ./path:…`) | Allowed with warning; mapped to `ProjectRootBind` |
+| `--cap-add`, `--cap-drop` | Unsupported, logged as warning |
+| `--device`, `--userns`, `--pid`, `--ipc` | Unsupported, logged as warning |
+| `docker build` | Not extracted |
+| `docker compose` invocation | Not extracted |
+| Shell variable substitution (`$VAR`, `${VAR}`) in mount paths | Rejected |
+| Shell variable substitution in env values | `RequiredExternal` ref with warning |
+| Prompts / interactive `read` blocks | Not executed; static commands before/after extracted |
+| Command substitution (`$(…)`) | Not evaluated; surrounding docker run skipped |
+
+### 14.3 Mapping rules
+
+| Script pattern | Ato OCI model |
+|----------------|---------------|
+| `docker network create <name>` | Source metadata only; actual network is session-scoped |
+| `--name <name>` | Logical service label candidate; sanitised to `[a-z0-9-]`; NOT the runtime container name |
+| `--network <net>` | Service-to-service association clue; not preserved as fixed network name |
+| `-p HOST:CONTAINER` | `container_port`; host port is auto-assigned at runtime |
+| Named volume (`-v pgdata:/var/lib/…`) | `StateBindingKind::Named` |
+| Relative bind (`-v ./data:/app/…`) | `StateBindingKind::ProjectRootBind` + warning |
+| `DATABASE_URL` containing `@<service>:` | Service alias rewritten to logical label; infers `depends_on` |
+| `--restart always` | Ignored; Ato session owns lifecycle |
+
+### 14.4 Secret handling
+
+Env keys matching the following patterns are classified as secret-like:
+
+`PASSWORD`, `PASSWD`, `SECRET`, `TOKEN`, `KEY`, `CREDENTIAL`
+
+Rules:
+
+- **Secret values must not enter the lock file.**
+- **Secret values must not enter execution identity.**
+- Unsafe literal defaults (e.g. `mysecretpassword`, `my_ultra_secure_nextauth_secret`)
+  emit a warning and are converted to generated secret requirements.
+- `DATABASE_URL` values that embed a password are rewritten to use a service
+  alias + generated/redacted password reference when the service alias is
+  unambiguous.  If ambiguous, the env is marked as `RequiredExternal`.
+
+For Blinko-style install.sh:
+
+```
+POSTGRES_PASSWORD=mysecretpassword
+  → generated secret requirement (POSTGRES_PASSWORD)
+
+NEXTAUTH_SECRET=my_ultra_secure_nextauth_secret
+  → generated secret requirement (NEXTAUTH_SECRET)
+
+DATABASE_URL=postgresql://postgres:mysecretpassword@blinko-postgres:5432/blinko
+  → postgresql://postgres:<POSTGRES_PASSWORD>@db:5432/blinko  (alias rewritten)
+```
+
+### 14.5 Lifecycle ownership — `--restart` ignored
+
+`--restart always` (and any other restart policy) is deliberately ignored.
+
+**Reason**: Ato session owns container lifecycle. Containers are started and
+stopped as a unit with the session.  A persistent restart policy would create
+containers that outlive the Ato session, undermining the `--stop` / cleanup
+semantics established in PR 7.
+
+A warning is emitted when `--restart` is encountered so the user knows their
+script's intent was not translated.
+
+### 14.6 Lock persistence model (reuses PR 10.6)
+
+PR 11 reuses `OciComposeLock` from PR 10.6.  The only difference is
+`import.kind`:
+
+```json
+{
+  "oci": {
+    "images": {
+      "postgres": {
+        "declared_ref": "postgres:14",
+        "resolved_digest": "sha256:...",
+        "platform": "linux/arm64",
+        "provider_semantics": "podman-rootless-v1"
+      },
+      "app": {
+        "declared_ref": "blinkospace/blinko:latest",
+        "resolved_digest": "sha256:...",
+        "platform": "linux/arm64",
+        "provider_semantics": "podman-rootless-v1"
+      }
+    },
+    "import": {
+      "kind": "docker-run-script",
+      "source_path": "install.sh",
+      "source_hash": "sha256:..."
+    }
+  }
+}
+```
+
+**Lock replay rules (identical to §13.x):**
+
+| Condition | Action |
+|-----------|--------|
+| `source_hash + declared_ref + platform + provider_semantics` all match | Reuse lock digest |
+| `source_hash` changed | `OciLockComposeDrift` error — refresh required |
+| `declared_ref` changed | Re-resolve |
+| `platform` changed | Re-resolve |
+| `provider_semantics` changed | Re-resolve |
+| `declared_ref` is already `image@sha256:…` | Preserved as-is; no re-resolution needed |
+
+**Mutable tags**: must not proceed to pull/start without a persisted digest.
+If no lock entry exists, resolution runs and the lock is written before
+any pull or start.
+
+### 14.7 Why install.sh is not executed
+
+Executing arbitrary shell scripts is a significant security surface.  The
+subset of `docker run` commands that matter for Ato can be extracted purely
+statically.  Any script patterns that cannot be safely extracted statically
+(conditionals, command substitution, network calls) are simply not extracted
+— the user gets a warning listing unsupported patterns and can annotate their
+intent in a `capsule.toml` instead.
+
+### 14.8 CLI wiring
+
+```sh
+ato run . --oci-install-sh
+```
+
+This flag is hidden (not shown in `--help`).  It bypasses the normal capsule
+resolution pipeline and:
+
+1. Scans the project root for a candidate script:
+   `install.sh`, `setup.sh`, `start.sh`, `run.sh`, `deploy.sh`,
+   `docker-install.sh`, `docker-setup.sh`, `docker-run.sh`
+2. Parses with `DockerRunScriptImporter` (pure, no I/O)
+3. Emits warnings for ignored/unsupported patterns
+4. Resolves or replays OCI image digests via `OciComposeLock`
+5. Writes/updates `ato.oci.lock.json`
+6. Executes through the PR 8 multi-service Podman path
+
+No legacy Bollard route.  `--oci-compose` and `--oci-install-sh` are
+independent flags; using both is not tested and not recommended.
+
+### 14.9 Blinko install.sh mapping
+
+Blinko's install.sh produces two services:
+
+| Script `--name` | Logical label | Role |
+|-----------------|---------------|------|
+| `blinko-postgres` | `blinko-postgres` | Postgres database |
+| `blinko-website` | `blinko-website` | Blinko web app |
+
+Dependencies inferred from:
+
+- `DATABASE_URL` host `blinko-postgres` → `blinko-website` depends_on
+  `blinko-postgres`
+- Shared `--network blinko-network` links both services
+
+Main published port: `1111` (blinko-website).
+Postgres port remains internal.
+
+### 14.10 Tests added (PR 11)
+
+**`capsule-core` (18 tests in `docker_run_script.rs`):**
+
+- `parses_simple_docker_run_single_service`
+- `parses_blinko_install_sh_two_services`
+- `docker_network_name_is_source_metadata_only`
+- `docker_name_becomes_logical_label_not_runtime_name`
+- `restart_always_is_ignored_with_warning`
+- `absolute_bind_mount_is_rejected`
+- `prompt_control_flow_is_not_executed`
+- `unsupported_privileged_is_rejected`
+- `host_network_is_rejected`
+- `port_mapping_uses_container_port_with_auto_host_port`
+- `database_url_service_name_is_rewritten_to_alias`
+- `secret_like_env_values_are_redacted`
+- `unsafe_default_password_warns_or_generates_secret`
+- `install_sh_source_hash_written_to_oci_lock`
+- `rerun_reuses_install_sh_lock_entries`
+- `source_hash_drift_requires_refresh_or_reresolve`
+- `imported_install_sh_graph_executes_with_fake_provider`
+- `install_sh_path_does_not_use_legacy_bollard`
+
+**`ato-cli` (6 tests in `install_sh_runner.rs`):**
+
+- `rerun_reuses_install_sh_lock_entries`
+- `source_hash_drift_requires_refresh_or_reresolve`
+- `install_sh_source_hash_written_to_oci_lock`
+- `blinko_style_install_sh_executes_with_fake_provider`
+- `install_sh_path_does_not_use_legacy_bollard`
+- `secret_values_are_not_persisted_to_lock`
+
+### 14.11 Known limitations after PR 11
+
+- Real Podman smoke for install.sh path remains opt-in only
+  (`ATO_TEST_REAL_PODMAN=1`).
+- Scripts with complex conditional logic (e.g., `if [ -z "$POSTGRES_PASSWORD" ]`)
+  are parsed but the conditional branches are not evaluated; only the static
+  `docker run` commands are extracted.
+- `docker run` commands using `--env-file` are not yet supported.
+- Multiple compose files or mixed compose + install.sh in one project is not
+  tested.
+- PR 12 target: `docker run` single-command import from README-style snippets.

@@ -114,6 +114,7 @@ pub(super) fn execute_replay_command(
         deprecation_warning: None,
         plan_only: false,
         oci_compose: false,
+        oci_install_sh: false,
         reporter: Arc::new(reporters::CliReporter::new_run(json)),
     })
 }
