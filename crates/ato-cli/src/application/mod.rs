@@ -1,5 +1,6 @@
 pub(crate) mod agent;
 pub(crate) mod artifact_build_producer;
+pub(crate) mod artifact_build_worker_sim;
 pub(crate) mod attestation;
 pub(crate) mod auth;
 pub(crate) mod build_materialization;
