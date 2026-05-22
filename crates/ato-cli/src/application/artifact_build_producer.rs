@@ -230,7 +230,7 @@ fn artifact_build_id_for_observation(
     update_platform_profile(&mut hasher, platform_profile);
     update_text(&mut hasher, MATERIALIZER_SCHEMA_VERSION);
     update_text(&mut hasher, PROJECTION_ALGORITHM_VERSION);
-    format!("artifact-build:blake3:{}", hasher.finalize().to_hex())
+    format!("artifact-build-v1:{}", hasher.finalize().to_hex())
 }
 
 fn validate_source(source: &ArtifactBuildSourceRef) -> Result<()> {
@@ -462,7 +462,7 @@ mod tests {
     fn minimal_request() -> ArtifactBuildProducerRequest {
         ArtifactBuildProducerRequest {
             schema_version: PRODUCER_REQUEST_SCHEMA_VERSION.to_string(),
-            artifact_build_id: "artifact-build:blake3:artifact".to_string(),
+            artifact_build_id: "artifact-build-v1:abc123artifact".to_string(),
             materialization_key: "blake3:materialization".to_string(),
             source: github_source(),
             source_tree_hash: "blake3:source".to_string(),
