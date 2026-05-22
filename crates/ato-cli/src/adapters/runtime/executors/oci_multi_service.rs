@@ -36,8 +36,8 @@ use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::oci_provider::{
-    build_digest_pull_ref, DefaultOciProviderSelector, OciProvider, OciProviderError,
-    OciProviderSelector,
+    build_digest_pull_ref, DefaultOciProviderSelector, OciImageResolutionMode,
+    OciImageResolutionRequest, OciProvider, OciProviderError, OciProviderSelector,
 };
 use crate::adapters::runtime::oci_session_store::{
     now_iso8601, OciServiceRecord, OciSessionMeta, OciSessionRecord, OciSessionStatus,
@@ -49,8 +49,8 @@ use crate::application::preflight::{
 use crate::reporters::CliReporter;
 
 const OCI_MULTI_STOP_TIMEOUT_SECS: i64 = 10;
-const READINESS_TCP_ATTEMPTS: u32 = 30;
-const READINESS_HTTP_ATTEMPTS: u32 = 30;
+const READINESS_TCP_ATTEMPTS: u32 = 90;
+const READINESS_HTTP_ATTEMPTS: u32 = 90;
 const READINESS_INTERVAL_MS: u64 = 2000;
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -76,30 +76,6 @@ pub(crate) async fn execute_multi_service(
         .resolve_services()
         .context("failed to resolve OCI service graph from manifest")?;
 
-    // Build the image map from lock (one entry per target label).
-    let mut images: HashMap<String, OciImageResolution> = HashMap::new();
-    for service in &orch_plan.services {
-        let target_label = match &service.runtime {
-            ResolvedServiceRuntime::Oci(rt) => rt.target.clone(),
-            _ => continue,
-        };
-        match resolve_oci_image_for_target(&plan.lock, &target_label).context(format!(
-            "failed to resolve OCI image for target '{target_label}'"
-        ))? {
-            Some(image) => {
-                images.insert(target_label, image);
-            }
-            None => {
-                anyhow::bail!(
-                    "OCI image for target '{}' (service '{}') is not resolved in the lock file; \
-                     run `ato lock` first",
-                    target_label,
-                    service.name
-                );
-            }
-        }
-    }
-
     // Gather egress policy and mode from manifest.
     let (policy_mode, egress_allow) = match plan.typed_manifest() {
         Ok(m) => {
@@ -117,7 +93,8 @@ pub(crate) async fn execute_multi_service(
     // Compute which mount sources are ephemeral (safe to delete on failure).
     let ephemeral_mount_sources = collect_ephemeral_mount_sources(plan);
 
-    // Provider readiness check in Required mode.
+    // Provider readiness check in Required mode (before image resolution so
+    // we can use the provider to resolve digests for compat-path capsules).
     preflight_oci_provider_readiness(
         &DefaultOciProviderSelector,
         OciProviderReadinessMode::Required,
@@ -127,6 +104,68 @@ pub(crate) async fn execute_multi_service(
     .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))?;
 
     let provider = DefaultOciProviderSelector.select_provider();
+
+    // Build the image map. Prefer the lock-resolved digest when present; fall
+    // back to resolving the declared image ref via the OCI provider so that
+    // compat-path capsules (capsule.toml without ato.lock.json) work without
+    // a separate `ato lock` step.
+    let mut images: HashMap<String, OciImageResolution> = HashMap::new();
+    for service in &orch_plan.services {
+        let rt = match &service.runtime {
+            ResolvedServiceRuntime::Oci(rt) => rt,
+            _ => continue,
+        };
+        let target_label = rt.target.clone();
+
+        match resolve_oci_image_for_target(&plan.lock, &target_label).context(format!(
+            "failed to resolve OCI image for target '{target_label}'"
+        ))? {
+            Some(image) => {
+                images.insert(target_label, image);
+            }
+            None => {
+                // No lock entry — resolve from the declared image ref at run time.
+                let declared_ref = rt.image.as_deref().unwrap_or_default();
+                if declared_ref.is_empty() {
+                    anyhow::bail!(
+                        "OCI target '{}' (service '{}') has no image declared and no lock entry; \
+                         add `image = \"<registry/image:tag>\"` to [targets.{}] in capsule.toml",
+                        target_label,
+                        service.name,
+                        target_label,
+                    );
+                }
+                reporter
+                    .notify(format!(
+                        "🔍 Resolving image digest for target '{}': {}",
+                        target_label, declared_ref
+                    ))
+                    .await?;
+                let request = OciImageResolutionRequest {
+                    target_label: target_label.clone(),
+                    declared_ref: declared_ref.to_string(),
+                    requested_platform: None,
+                    resolution_mode: OciImageResolutionMode::Required,
+                    importer_input_hash: None,
+                };
+                let resolved = provider.resolve_image(&request).await.map_err(|e| {
+                    anyhow::anyhow!("{}: {}", e.code(), e).context(format!(
+                        "failed to resolve image '{}' for target '{}'",
+                        declared_ref, target_label
+                    ))
+                })?;
+                reporter
+                    .notify(format!(
+                        "✅ Resolved '{}': {}",
+                        target_label,
+                        &resolved.resolved_digest
+                            [..std::cmp::min(19, resolved.resolved_digest.len())]
+                    ))
+                    .await?;
+                images.insert(target_label, resolved.into_lock_resolution());
+            }
+        }
+    }
     let manifest_name = plan
         .manifest_name()
         .unwrap_or_else(|| "capsule".to_string());
