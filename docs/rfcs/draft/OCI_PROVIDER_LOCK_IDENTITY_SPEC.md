@@ -390,3 +390,81 @@ PR 10: Desktop UX
   implementation, to be isolated behind provider boundaries.
 - `crates/ato-session-core/src/record.rs` - session records already store OCI
   container ids and host port mappings.
+
+## 8. PR 7 — Single-target Podman OCI execution
+
+**Scope**: `oci_single_target.rs` executor, PodmanProvider lifecycle methods,
+FakeOciProvider, helper utilities.
+
+### 8.1 Execution gate invariant
+
+PR 6 moved the safety invariant from "ExecutionPlan rejects OCI" to "execution
+path cannot proceed without passing the explicit gate". The gate requires:
+
+1. `OciPolicyEnvelope` present in the compiled `ExecutionPlan`.
+2. `resolved_image.digest` present (lock must have been run before `ato run`).
+3. `PodmanProvider` readiness in `Required` mode.
+4. Policy mode acceptable: `Strict` fails if unenforced policies are declared.
+
+If any condition fails, a typed `OciProviderError` is returned. No fallback to
+Bollard/Docker-compatible execution occurs.
+
+### 8.2 Official vs legacy execution path
+
+| Path | Module | Status |
+|------|--------|--------|
+| `PodmanProvider` + `oci_single_target` | `executors/oci_single_target.rs` | Official |
+| Bollard/Docker-compatible | `executors/oci.rs` | Legacy — do not route new OCI execution here |
+
+The legacy path is retained for backward compatibility only. It has a `//! LEGACY:`
+doc comment at the top of the file. New OCI capsule execution must not route
+through it.
+
+### 8.3 Why resolved image digest is required before execution
+
+Resolved digest at the lock layer ensures:
+- **Reproducibility**: the same lock always pulls the same image bytes.
+- **Consent identity**: the digest is part of the consent hash, so UI consent
+  is anchored to a specific image, not a mutable tag.
+- **Receipt auditability**: the receipt can record exactly what was run.
+
+Without a resolved digest, `ato run` for an OCI target returns a typed error
+pointing the user to `ato lock`.
+
+### 8.4 Execution identity exclusions (PR 7)
+
+Live runtime state generated during PR 7 execution is recorded only in
+Session/Receipt, not in Execution Identity:
+
+- `container_id` — session record only
+- `allocated_host_port` — session record / URL display only
+- `network_id` — future multi-service slice
+- `volume_id` — future state-binding slice
+- `Podman machine id` — provider diagnostics / receipt only
+
+### 8.5 Policy behavior (PR 7)
+
+| `policy_mode` | `egress_allow` | Outcome |
+|---------------|----------------|---------|
+| `Strict` | non-empty | `OciExecutionGateFailed` — execution blocked |
+| `Strict` | empty | Gate passes |
+| `Loose` | non-empty | Warning to stderr; execution proceeds with gap |
+| `Loose` | empty | Gate passes |
+| `Off` | any | Gate always passes |
+
+`Strict` is the default for new manifests. The semantics of `Strict` in PR 7
+are: _provider must be able to enforce all declared policies_. Podman rootless
+cannot enforce network egress allowlists, so `Strict` + non-empty `egress_allow`
+always fails.
+
+### 8.6 Multi-service / Blinko
+
+Multi-service OCI (app + postgres, internal networks, named volumes, state
+bindings) is deferred to PR 8. PR 7 supports exactly one OCI target per
+invocation.
+
+### 8.7 Compose / install.sh importer
+
+Docker Compose subset importer and `install.sh` intent extractor are deferred
+to PR 9. The execution model (digest lock, provider gate, identity boundary,
+receipt) must be solid before adding importer-generated capsule manifests.

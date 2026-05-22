@@ -170,6 +170,26 @@ pub(crate) enum OciProviderError {
 
     #[error("OCI registry authentication required for '{declared_ref}'")]
     RegistryAuthRequired { declared_ref: String },
+
+    #[error("OCI policy envelope is missing from the execution plan")]
+    OciPolicyEnvelopeMissing,
+
+    #[error(
+        "OCI image resolution required before execution: '{declared_ref}' has no resolved digest"
+    )]
+    OciImageResolutionRequired { declared_ref: String },
+
+    #[error("OCI execution gate failed: {reason}")]
+    OciExecutionGateFailed { reason: String },
+
+    #[error("OCI container '{container_name}' failed to start: {message}")]
+    OciContainerStartFailed {
+        container_name: String,
+        message: String,
+    },
+
+    #[error("OCI cleanup operation '{operation}' failed: {message}")]
+    OciCleanupFailed { operation: String, message: String },
 }
 
 impl OciProviderError {
@@ -186,6 +206,11 @@ impl OciProviderError {
             Self::ImageResolveFailed { .. } => "oci_image_resolve_failed",
             Self::ImagePlatformUnsupported { .. } => "oci_image_platform_unsupported",
             Self::RegistryAuthRequired { .. } => "oci_registry_auth_required",
+            Self::OciPolicyEnvelopeMissing => "oci_policy_envelope_missing",
+            Self::OciImageResolutionRequired { .. } => "oci_image_resolution_required",
+            Self::OciExecutionGateFailed { .. } => "oci_execution_gate_failed",
+            Self::OciContainerStartFailed { .. } => "oci_container_start_failed",
+            Self::OciCleanupFailed { .. } => "oci_cleanup_failed",
         }
     }
 
@@ -549,65 +574,278 @@ where
         }
     }
 
-    async fn pull_image(&self, _image: &OciImageResolution) -> Result<(), OciProviderError> {
-        Err(OciProviderError::Unsupported("pull_image"))
+    async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
+        let pull_ref = build_digest_pull_ref(image);
+        let output = tokio::process::Command::new("podman")
+            .args(["pull", &pull_ref])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman pull", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            if is_registry_auth_error(&stderr) {
+                return Err(OciProviderError::RegistryAuthRequired {
+                    declared_ref: image.declared_ref.clone(),
+                });
+            }
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: format!("podman pull {pull_ref}"),
+                status: output.status.code(),
+                message: stderr,
+            });
+        }
+        Ok(())
     }
 
     async fn create_network(
         &self,
-        _request: &OciNetworkRequest,
+        request: &OciNetworkRequest,
     ) -> Result<String, OciProviderError> {
-        Err(OciProviderError::Unsupported("create_network"))
+        let mut args: Vec<String> = vec!["network".into(), "create".into()];
+        for (k, v) in &request.labels {
+            args.push("--label".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.push(request.name.clone());
+        let output = tokio::process::Command::new("podman")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman network create", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman network create".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    async fn remove_network(&self, _network_name: &str) -> Result<(), OciProviderError> {
-        Err(OciProviderError::Unsupported("remove_network"))
+    async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["network", "rm", network_name])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman network rm", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "remove_network".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn create_container(
         &self,
-        _request: &OciContainerRequest,
+        request: &OciContainerRequest,
     ) -> Result<String, OciProviderError> {
-        Err(OciProviderError::Unsupported("create_container"))
+        let mut args: Vec<String> = vec!["create".into(), "--name".into(), request.name.clone()];
+        for (k, v) in &request.labels {
+            args.push("--label".into());
+            args.push(format!("{k}={v}"));
+        }
+        for (k, v) in &request.env {
+            args.push("--env".into());
+            args.push(format!("{k}={v}"));
+        }
+        for port in &request.ports {
+            args.push("-p".into());
+            match port.host_port {
+                Some(hp) => args.push(format!("{}:{}", hp, port.container_port)),
+                None => args.push(format!(":{}", port.container_port)),
+            }
+        }
+        if let Some(wd) = &request.working_dir {
+            args.push("--workdir".into());
+            args.push(wd.clone());
+        }
+        for mount in &request.mounts {
+            args.push("-v".into());
+            let opts = if mount.readonly { ":ro" } else { "" };
+            args.push(format!("{}:{}{}", mount.source, mount.target, opts));
+        }
+        if let Some(net) = &request.network {
+            args.push("--network".into());
+            args.push(net.clone());
+        }
+        for alias in &request.aliases {
+            args.push("--network-alias".into());
+            args.push(alias.clone());
+        }
+        args.push(request.image.clone());
+        args.extend(request.cmd.iter().cloned());
+        let output = tokio::process::Command::new("podman")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman create", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman create".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    async fn start_container(&self, _container_id: &str) -> Result<(), OciProviderError> {
-        Err(OciProviderError::Unsupported("start_container"))
+    async fn start_container(&self, container_id: &str) -> Result<(), OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["start", container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman start", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciContainerStartFailed {
+                container_name: container_id.to_string(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn inspect_container(
         &self,
-        _container_id: &str,
+        container_id: &str,
     ) -> Result<OciContainerInspect, OciProviderError> {
-        Err(OciProviderError::Unsupported("inspect_container"))
+        let output = tokio::process::Command::new("podman")
+            .args(["inspect", "--format", "json", container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman inspect", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman inspect".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        parse_podman_inspect(&String::from_utf8_lossy(&output.stdout))
     }
 
     async fn logs(
         &self,
-        _container_id: &str,
-        _follow: bool,
+        container_id: &str,
+        follow: bool,
     ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
-        Err(OciProviderError::Unsupported("logs"))
+        use tokio::io::AsyncBufReadExt;
+        let mut args = vec!["logs".to_string()];
+        if follow {
+            args.push("--follow".into());
+        }
+        args.push(container_id.to_string());
+        let mut child = tokio::process::Command::new("podman")
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| podman_async_io_error("podman logs", e))?;
+        let (tx, rx) = mpsc::channel(64);
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let tx_err = tx.clone();
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stdout);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let chunk = OciLogChunk {
+                    stderr: false,
+                    message: (line + "\n").into_bytes(),
+                };
+                if tx.send(Ok(chunk)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let reader = tokio::io::BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let chunk = OciLogChunk {
+                    stderr: true,
+                    message: (line + "\n").into_bytes(),
+                };
+                if tx_err.send(Ok(chunk)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        // Drive child to completion so it doesn't become a zombie.
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        Ok(rx)
     }
 
-    async fn wait_container(&self, _container_id: &str) -> Result<i64, OciProviderError> {
-        Err(OciProviderError::Unsupported("wait_container"))
+    async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError> {
+        let output = tokio::process::Command::new("podman")
+            .args(["wait", container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman wait", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman wait".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        let code = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
+        Ok(code)
     }
 
     async fn stop_container(
         &self,
-        _container_id: &str,
-        _timeout_secs: i64,
+        container_id: &str,
+        timeout_secs: i64,
     ) -> Result<(), OciProviderError> {
-        Err(OciProviderError::Unsupported("stop_container"))
+        let timeout = timeout_secs.to_string();
+        let output = tokio::process::Command::new("podman")
+            .args(["stop", "--time", &timeout, container_id])
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman stop", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "stop_container".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn remove_container(
         &self,
-        _container_id: &str,
-        _force: bool,
+        container_id: &str,
+        force: bool,
     ) -> Result<(), OciProviderError> {
-        Err(OciProviderError::Unsupported("remove_container"))
+        let mut args = vec!["rm".to_string()];
+        if force {
+            args.push("--force".into());
+        }
+        args.push(container_id.to_string());
+        let output = tokio::process::Command::new("podman")
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| podman_async_io_error("podman rm", e))?;
+        if !output.status.success() {
+            return Err(OciProviderError::OciCleanupFailed {
+                operation: "remove_container".into(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -877,6 +1115,83 @@ fn is_registry_auth_error(text: &str) -> bool {
         || lower.contains("auth required")
 }
 
+/// Build a canonical pull reference that pins to the resolved digest.
+///
+/// `postgres:14` + `sha256:abc...` → `postgres@sha256:abc...`
+/// `myimage@sha256:abc...` → returned as-is (already a digest ref)
+pub(crate) fn build_digest_pull_ref(image: &OciImageResolution) -> String {
+    if image.declared_ref.contains('@') {
+        return image.declared_ref.clone();
+    }
+    let base = image
+        .declared_ref
+        .rsplit_once(':')
+        .filter(|(_, tag)| !tag.contains('/'))
+        .map(|(base, _)| base)
+        .unwrap_or(&image.declared_ref);
+    format!("{}@{}", base, image.resolved_digest)
+}
+
+fn podman_async_io_error(command: &'static str, err: std::io::Error) -> OciProviderError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        OciProviderError::Missing {
+            provider: "podman",
+            binary: "podman",
+        }
+    } else {
+        OciProviderError::CommandFailed {
+            provider: "podman",
+            command: command.to_string(),
+            status: None,
+            message: err.to_string(),
+        }
+    }
+}
+
+/// Parse `podman inspect --format json <id>` output into [`OciContainerInspect`].
+fn parse_podman_inspect(json: &str) -> Result<OciContainerInspect, OciProviderError> {
+    use std::collections::HashMap;
+    let value: serde_json::Value =
+        serde_json::from_str(json.trim()).map_err(|e| OciProviderError::ProbeFailed {
+            provider: "podman",
+            message: format!("failed to parse inspect output: {e}"),
+        })?;
+    let item = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let running = item["State"]["Status"]
+        .as_str()
+        .map(|s| s == "running")
+        .unwrap_or(false);
+    let exit_code = item["State"]["ExitCode"].as_i64();
+    let mut host_ports: HashMap<u16, u16> = HashMap::new();
+    if let Some(ports) = item["NetworkSettings"]["Ports"].as_object() {
+        for (key, bindings) in ports {
+            let Some((port_raw, _)) = key.split_once('/') else {
+                continue;
+            };
+            let Ok(container_port) = port_raw.parse::<u16>() else {
+                continue;
+            };
+            if let Some(binding) = bindings.as_array().and_then(|arr| arr.first()) {
+                if let Some(hp) = binding["HostPort"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u16>().ok())
+                {
+                    host_ports.insert(container_port, hp);
+                }
+            }
+        }
+    }
+    Ok(OciContainerInspect {
+        running,
+        exit_code,
+        host_ports,
+    })
+}
+
 pub(crate) struct DockerCompatibleOciProvider<C> {
     client: C,
     semantics: OciProviderSemantics,
@@ -1017,6 +1332,175 @@ where
             .remove_container(container_id, force)
             .await
             .map_err(|err| OciProviderError::operation("remove_container", err))
+    }
+}
+
+// ── FakeOciProvider ───────────────────────────────────────────────────────────
+// A fully-controllable in-process OCI provider for use in unit tests.
+// All lifecycle results are set up front; no real Podman is required.
+
+#[derive(Clone)]
+pub(crate) struct FakeOciProvider {
+    pub probe_result: Result<OciProviderProbe, OciProviderError>,
+    pub pull_result: Result<(), OciProviderError>,
+    pub create_container_result: Result<String, OciProviderError>,
+    pub start_result: Result<(), OciProviderError>,
+    pub inspect_result: Result<OciContainerInspect, OciProviderError>,
+    pub log_chunks: Vec<OciLogChunk>,
+    pub wait_result: Result<i64, OciProviderError>,
+    pub stop_result: Result<(), OciProviderError>,
+    pub remove_result: Result<(), OciProviderError>,
+    pub semantics: OciProviderSemantics,
+}
+
+impl FakeOciProvider {
+    pub(crate) fn ready() -> Self {
+        Self {
+            probe_result: Ok(fake_oci_probe_ready()),
+            pull_result: Ok(()),
+            create_container_result: Ok("fake-container-id".to_string()),
+            start_result: Ok(()),
+            inspect_result: Ok(OciContainerInspect {
+                running: true,
+                exit_code: None,
+                host_ports: std::collections::HashMap::from([(8080u16, 45678u16)]),
+            }),
+            log_chunks: vec![],
+            wait_result: Ok(0),
+            stop_result: Ok(()),
+            remove_result: Ok(()),
+            semantics: fake_oci_semantics(),
+        }
+    }
+
+    pub(crate) fn with_probe_missing() -> Self {
+        let mut f = Self::ready();
+        f.probe_result = Err(OciProviderError::Missing {
+            provider: "podman",
+            binary: "podman",
+        });
+        f
+    }
+
+    pub(crate) fn with_probe_not_ready() -> Self {
+        let mut f = Self::ready();
+        let sem = fake_oci_semantics();
+        f.probe_result = Ok(OciProviderProbe {
+            ready: false,
+            semantics: sem.clone(),
+            inventory: OciProviderInventory {
+                kind: OciProviderKind::Podman,
+                binary: OciProviderBinaryStatus::Found,
+                version: None,
+                mode: OciProviderMode::Unknown,
+                machine: OciProviderMachineStatus::MachineNotRunning,
+                semantics: sem,
+            },
+            detail: Some("podman machine is not running".to_string()),
+        });
+        f
+    }
+}
+
+pub(crate) fn fake_oci_semantics() -> OciProviderSemantics {
+    OciProviderSemantics {
+        kind: OciProviderKind::Podman,
+        mode: OciProviderMode::Rootless,
+        substrate: OciProviderSubstrate::NativeLinux,
+        policy_profile: PODMAN_POLICY_PROFILE_V1.to_string(),
+    }
+}
+
+pub(crate) fn fake_oci_probe_ready() -> OciProviderProbe {
+    let sem = fake_oci_semantics();
+    OciProviderProbe {
+        ready: true,
+        semantics: sem.clone(),
+        inventory: OciProviderInventory {
+            kind: OciProviderKind::Podman,
+            binary: OciProviderBinaryStatus::Found,
+            version: Some("4.0.0".to_string()),
+            mode: OciProviderMode::Rootless,
+            machine: OciProviderMachineStatus::NativeLinux,
+            semantics: sem,
+        },
+        detail: None,
+    }
+}
+
+#[async_trait]
+impl OciProvider for FakeOciProvider {
+    fn semantics(&self) -> &OciProviderSemantics {
+        &self.semantics
+    }
+
+    async fn probe(&self) -> Result<OciProviderProbe, OciProviderError> {
+        self.probe_result.clone()
+    }
+
+    async fn pull_image(&self, _image: &OciImageResolution) -> Result<(), OciProviderError> {
+        self.pull_result.clone()
+    }
+
+    async fn create_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        Ok(format!("fake-network-{}", request.name))
+    }
+
+    async fn remove_network(&self, _network_name: &str) -> Result<(), OciProviderError> {
+        Ok(())
+    }
+
+    async fn create_container(
+        &self,
+        _request: &OciContainerRequest,
+    ) -> Result<String, OciProviderError> {
+        self.create_container_result.clone()
+    }
+
+    async fn start_container(&self, _container_id: &str) -> Result<(), OciProviderError> {
+        self.start_result.clone()
+    }
+
+    async fn inspect_container(
+        &self,
+        _container_id: &str,
+    ) -> Result<OciContainerInspect, OciProviderError> {
+        self.inspect_result.clone()
+    }
+
+    async fn logs(
+        &self,
+        _container_id: &str,
+        _follow: bool,
+    ) -> Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>, OciProviderError> {
+        let (tx, rx) = mpsc::channel(64);
+        for chunk in &self.log_chunks {
+            let _ = tx.try_send(Ok(chunk.clone()));
+        }
+        Ok(rx)
+    }
+
+    async fn wait_container(&self, _container_id: &str) -> Result<i64, OciProviderError> {
+        self.wait_result.clone()
+    }
+
+    async fn stop_container(
+        &self,
+        _container_id: &str,
+        _timeout_secs: i64,
+    ) -> Result<(), OciProviderError> {
+        self.stop_result.clone()
+    }
+
+    async fn remove_container(
+        &self,
+        _container_id: &str,
+        _force: bool,
+    ) -> Result<(), OciProviderError> {
+        self.remove_result.clone()
     }
 }
 
