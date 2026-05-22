@@ -111,6 +111,23 @@ cache yet.
 - This MVP does not define production HTTP CAS, signing policy, trust registry,
   dependency layer materialization, or package-manager relocation.
 
+#### Remote CAS export, file-backed MVP
+
+- File-backed export writes the same remote layer layout consumed by read-only
+  remote lookup, so a later producer can reuse the artifact writer without
+  changing the mirror contract.
+- Export stages and verifies the blob before writing `layer.json`, then publishes
+  the completed directory with rename. Readers do not observe a complete
+  `layer.json` pointing at an incomplete payload from this writer.
+- Export is idempotent when the existing remote layer is valid and identical to
+  the requested local layer. An invalid or different existing remote layer is
+  reported and not overwritten.
+- Export is not trust or signing policy. It only proves the file-backed writer
+  uses the same metadata and hash verification boundaries as lookup.
+- Export is not remote build submit. It serializes an already captured local
+  build-output layer and does not widen scope to dependency layers or production
+  remote CAS transport.
+
 ## Alternatives Considered
 
 ### Option A: Start with deps and build layers together
