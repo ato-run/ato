@@ -1235,4 +1235,94 @@ mod tests {
         // tempdir guard released — the cleanup call already deleted it.
         std::mem::forget(dir);
     }
+
+    // ── Test 20: imported Compose graph can execute with fake provider ────────
+
+    #[test]
+    fn imported_graph_can_be_executed_with_fake_multi_service_provider() {
+        use capsule_core::routing::importer::compose::{import_compose, ComposeImportInput};
+        use std::path::PathBuf;
+
+        let compose_text = r#"
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: blinko
+      POSTGRES_DB: blinko
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  blinko:
+    image: blinkospace/blinko:latest
+    ports:
+      - "1111:1111"
+    environment:
+      DATABASE_URL: postgresql://blinko:secret@postgres:5432/blinko
+    volumes:
+      - blinko-data:/app/.blinko
+    depends_on:
+      - postgres
+
+volumes:
+  postgres-data: {}
+  blinko-data: {}
+"#;
+        let import_input = ComposeImportInput::new(
+            compose_text.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_out = import_compose(&import_input).unwrap();
+
+        // Verify topology: blinko depends on postgres.
+        let blinko = import_out
+            .services
+            .iter()
+            .find(|s| s.name == "blinko")
+            .unwrap();
+        assert_eq!(blinko.depends_on[0].service, "postgres");
+
+        // Convert to OrchestrationPlan.
+        let plan = import_out.to_orchestration_plan().unwrap();
+
+        // Startup order has postgres before blinko.
+        let pg_idx = plan
+            .startup_order
+            .iter()
+            .position(|s| s == "postgres")
+            .unwrap();
+        let blinko_idx = plan
+            .startup_order
+            .iter()
+            .position(|s| s == "blinko")
+            .unwrap();
+        assert!(
+            pg_idx < blinko_idx,
+            "postgres must appear before blinko in startup_order"
+        );
+
+        // Execute with FakeOciProvider.
+        let mut images = HashMap::new();
+        images.insert("postgres".to_string(), make_image("postgres:14"));
+        images.insert(
+            "blinko".to_string(),
+            make_image("blinkospace/blinko:latest"),
+        );
+
+        let provider = FakeOciProvider::ready();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let exit_code = rt
+            .block_on(execute_service_graph_with_provider(
+                &plan,
+                &images,
+                OciPolicyMode::Strict,
+                &[],
+                "blinko-compose",
+                &HashSet::new(),
+                &Arc::new(crate::reporters::CliReporter::new(false)),
+                &provider,
+            ))
+            .unwrap();
+        assert_eq!(exit_code, 0);
+    }
 }
