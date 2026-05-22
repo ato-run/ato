@@ -70,6 +70,7 @@ pub(super) fn synthesize_runtime_model_from_manifest(
         name: "main".to_string(),
         target_label: selected_target.to_string(),
         runtime: runtime.clone(),
+        oci_image: None,
         depends_on: Vec::new(),
         readiness_probe: named_target.readiness_probe,
     };
@@ -288,6 +289,7 @@ pub(super) fn synthesize_runtime_model_from_v03(
         name: "main".to_string(),
         target_label: selected_target.to_string(),
         runtime: resolved_runtime,
+        oci_image: None,
         depends_on: Vec::new(),
         readiness_probe,
     };

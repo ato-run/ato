@@ -1,6 +1,7 @@
 pub(crate) mod executors;
 pub(crate) mod external_capsule;
 pub(crate) mod manager;
+pub(crate) mod oci_provider;
 pub(crate) mod overrides;
 pub(crate) mod port_manager;
 pub(crate) mod process;
