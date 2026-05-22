@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "nocodb"
+version = "0.259.0"
+type = "app"
+description = "Open-source Airtable alternative — turn any database into a smart spreadsheet"
+homepage = "https://github.com/nocodb/nocodb"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "nocodb/nocodb:latest"
+port = 8080
+env = { PORT = "8080" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "project metadata, database"
+attach = "explicit"
+schema_id = "sha256:362f88632467fa0be6bf32e6564c08966f3149bd373153e1578978241a2d4db0"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/api/v1/health", port = "8080" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/usr/app/data"
