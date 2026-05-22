@@ -20,6 +20,7 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::application::phase_materializer::BuildOutputLayerRecord;
 use crate::application::source_inventory::{
     collect_source_files, native_lockfiles, normalize_outputs,
 };
@@ -570,6 +571,8 @@ pub(crate) struct MaterializationRecord {
     pub(crate) env_keys: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) env_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) output_layer: Option<BuildOutputLayerRecord>,
     pub(crate) created_at: String,
 }
 
@@ -702,6 +705,8 @@ pub(crate) enum DecisionAction {
     Skip,
     /// Run the build executor.
     Execute,
+    /// Restore the declared build outputs from the immutable local store.
+    Project(BuildOutputLayerRecord),
     /// `--no-build` policy refused materialization. Caller should fail with
     /// `ATO_ERR_MISSING_MATERIALIZATION`.
     Fail,
@@ -779,6 +784,12 @@ pub(crate) fn decide(
                         &observation.working_dir_relative,
                         &record.outputs,
                     ) {
+                        if let Some(layer) = record.output_layer.clone() {
+                            return BuildDecision {
+                                action: DecisionAction::Project(layer),
+                                result_kind: BuildResultKind::Materialized,
+                            };
+                        }
                         return BuildDecision {
                             action: if matches!(policy, BuildPolicy::NoBuild) {
                                 DecisionAction::Fail
@@ -851,6 +862,7 @@ pub(crate) fn record_for(
         toolchain_fingerprint: toolchain_fingerprint.to_string(),
         env_keys: Vec::new(),
         env_fingerprint: None,
+        output_layer: None,
         created_at: chrono::Utc::now().to_rfc3339(),
     }
 }
@@ -920,18 +932,27 @@ pub(crate) fn prepare_decision(
 /// record and emit a one-shot heuristic recommendation. Failures to persist
 /// are logged but never surfaced (the build itself succeeded; missing the
 /// record only hurts the next run, which will fall back to `Execute`).
+///
+/// `output_layer` is the pre-captured layer produced while the build output
+/// lock was still held. Callers must capture with
+/// [`phase_materializer::capture_build_outputs_locked`] before dropping the
+/// lock, then pass the result here so that capture and state-record write are
+/// covered by the same lock region as the build executor.
 pub(crate) fn persist_after_execute(
     plan: &capsule_core::router::ManifestData,
     workspace_root: &Path,
     observation: &BuildObservation,
     suppress_recommendation: bool,
+    output_layer: Option<BuildOutputLayerRecord>,
 ) {
     let toolchain_fp = toolchain_fingerprint_for_plan(plan);
     let mut file = match load_state(workspace_root) {
         LoadOutcome::Loaded(f) => f,
         LoadOutcome::Missing | LoadOutcome::Invalid(_) => MaterializationFile::default(),
     };
-    upsert_record(&mut file, record_for(observation, &toolchain_fp));
+    let mut record = record_for(observation, &toolchain_fp);
+    record.output_layer = output_layer;
+    upsert_record(&mut file, record);
 
     let heuristic_label = observation.source.heuristic_label();
     if heuristic_label.is_some() && !suppress_recommendation {
