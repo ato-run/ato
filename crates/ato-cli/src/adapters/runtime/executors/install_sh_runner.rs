@@ -271,10 +271,12 @@ pub(crate) async fn resolve_install_sh_images_with_lock_replay<P: OciProvider>(
                     );
                 }
                 Err(e) => {
-                    return Err(anyhow::anyhow!("{}: {}", e.code(), e).context(format!(
-                        "failed to resolve image '{}' for service '{}'",
-                        svc.image_ref, svc.name
-                    )));
+                    return Err(anyhow::anyhow!(
+                        "failed to resolve image '{}' for service '{}': {}",
+                        svc.image_ref,
+                        svc.name,
+                        e
+                    ));
                 }
             };
             reporter

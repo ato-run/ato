@@ -187,3 +187,41 @@ cargo test -p ato-cli podman_probe --lib
 # Optional: real Podman smoke (requires Podman + machine on macOS)
 ATO_TEST_REAL_PODMAN=1 cargo test -p ato-cli real_podman -- --ignored --nocapture
 ```
+
+---
+
+## PR 11.6 — Real Blinko AODD: passed
+
+Validated 2026-05-22, branch `feat/oci-provider-model`.
+Host: macOS arm64, Podman 5.4.0 (podman-machine-default, applehv).
+Source: `git clone https://github.com/blinkospace/blinko /tmp/blinko-aodd`.
+
+Receipts: `.tmp/aodd-receipts/`
+
+### Scenario A — install.sh import path: complete ✅
+
+Two blockers found and fixed before re-run:
+
+| Blocker | Cause | Fix |
+|---------|-------|-----|
+| `blinko-website → image: $volume_mount` | Shell variable token in flag position captured as image ref | Skip `$variable` tokens in `parse_docker_run` when more tokens follow |
+| `postgres:14` fails E999 "ambiguous: 16 platform(s)" | Multi-arch manifest with no `requested_platform` | `auto_select_platform()` maps host arch to OCI arch; falls back to `linux/amd64` |
+
+After fixes: both digests resolved (`linux/arm64`), app started, `http://127.0.0.1:37079/` returns HTTP 200.
+
+### Scenario B — lock replay: complete ✅
+
+Second run shows `♻️ Reusing lock` for both services. Source hash stable. New session suffix per run.
+
+### Scenario C — cleanup: degraded (follow-up)
+
+`ato ps` / `ato stop --all` do not track OCI sessions. Cleanup requires direct Podman commands.
+Classification: **follow-up** (containers carry `io.ato.managed=true` label for future `ato stop` wiring).
+
+### Scenario D — failure paths: complete ✅
+
+| Fixture | Outcome |
+|---------|---------|
+| Bad image ref (nonexistent registry) | Typed E999 with "no such host" cause surfaced |
+| Absolute bind mount `/etc/passwd` | Import rejected at parse time |
+| `--privileged` flag | Import rejected at parse time |

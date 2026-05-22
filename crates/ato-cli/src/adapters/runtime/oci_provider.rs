@@ -533,11 +533,32 @@ where
 
         if parsed.is_list {
             // Manifest list: select the platform entry and use its child digest.
-            let entry = select_platform_entry(
-                &parsed.entries,
-                request.requested_platform.as_ref(),
-                declared_ref,
-            )?;
+            // When no platform is requested, auto-select based on the host
+            // architecture so that `postgres:14` (16 platforms) just works
+            // without requiring an explicit `requested_platform`.
+            let auto_platform;
+            let (effective_requested, is_auto) = if request.requested_platform.is_some() {
+                (request.requested_platform.as_ref(), false)
+            } else {
+                auto_platform = auto_select_platform();
+                (Some(&auto_platform), true)
+            };
+            // Fallback to linux/amd64 only when the platform was auto-selected (not when
+            // the caller explicitly requested a specific platform that is not available).
+            let entry = if is_auto {
+                select_platform_entry(&parsed.entries, effective_requested, declared_ref).or_else(
+                    |_| {
+                        let fallback = OciPlatform {
+                            os: "linux".to_string(),
+                            architecture: "amd64".to_string(),
+                            variant: None,
+                        };
+                        select_platform_entry(&parsed.entries, Some(&fallback), declared_ref)
+                    },
+                )?
+            } else {
+                select_platform_entry(&parsed.entries, effective_requested, declared_ref)?
+            };
             Ok(OciResolvedImage {
                 declared_ref: declared_ref.clone(),
                 resolved_digest: entry.digest.clone(),
@@ -1089,6 +1110,23 @@ fn extract_digest_from_ref(declared_ref: &str) -> Option<String> {
     declared_ref
         .find("@sha256:")
         .map(|pos| declared_ref[pos + 1..].to_string())
+}
+
+/// Auto-select a platform for the current host when no `requested_platform`
+/// was specified.  Podman containers always run Linux, so OS is always
+/// `linux`; architecture is mapped from the Rust `ARCH` constant.
+fn auto_select_platform() -> OciPlatform {
+    let architecture = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        "arm" => "arm",
+        other => other,
+    };
+    OciPlatform {
+        os: "linux".to_string(),
+        architecture: architecture.to_string(),
+        variant: None,
+    }
 }
 
 /// Require `sha256:` prefix followed by exactly 64 lowercase hex characters.
@@ -2169,7 +2207,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_platform_returns_typed_error_when_ambiguous() {
+    async fn multi_arch_manifest_auto_selects_host_platform_when_no_platform_requested() {
+        // With no requested_platform, the provider should auto-select linux/<host_arch>
+        // (or fall back to linux/amd64) rather than failing with "ambiguous".
         let provider = PodmanProvider::with_runner(
             FakeRunner::default().with_output(
                 &["podman", "manifest", "inspect", "postgres:14"],
@@ -2181,19 +2221,21 @@ mod tests {
         let request = OciImageResolutionRequest {
             target_label: "db".to_string(),
             declared_ref: "postgres:14".to_string(),
-            requested_platform: None, // no platform → ambiguous
+            requested_platform: None, // auto-select host platform
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
         };
 
-        let err = provider
+        let resolved = provider
             .resolve_image(&request)
             .await
-            .expect_err("ambiguous platform must fail");
-        assert_eq!(err.code(), "oci_image_platform_unsupported");
+            .expect("auto-selection must succeed on multi-arch manifest");
+        // The resolved platform must be linux/amd64 or linux/arm64 (both are in the fixture).
+        assert_eq!(resolved.platform.os, "linux");
         assert!(
-            err.to_string().contains("ambiguous"),
-            "error should mention ambiguity: {err}"
+            resolved.platform.architecture == "amd64" || resolved.platform.architecture == "arm64",
+            "unexpected platform architecture: {}",
+            resolved.platform.architecture
         );
     }
 
