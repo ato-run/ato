@@ -894,3 +894,167 @@ cargo test -p capsule-core compose_import --lib
 
 `install.sh` and `docker run` intent extractor remain deferred to PR 11.
 The Compose CLI wiring is stable before adding an additional import surface.
+
+## §13 PR 10.6 — OCI Compose Lock Persistence (`ato.oci.lock.json`)
+
+### 13.1 Goal
+
+Persist OCI image digest resolutions for Compose-imported services to
+`ato.oci.lock.json` so that reruns can replay from the locked digest instead of
+re-resolving every time. This completes the lock persistence gap documented in
+§12.6.
+
+### 13.2 Lock file: `ato.oci.lock.json`
+
+A new, separate file at `<project_root>/ato.oci.lock.json`. It is distinct from
+`capsule.lock.json` (source capsule lock) and `ato.lock.json` (canonical
+workspace lock) to avoid polluting those pipelines.
+
+**Format**:
+
+```json
+{
+  "version": 1,
+  "import": {
+    "kind": "compose",
+    "source_path": "docker-compose.yml",
+    "source_hash": "sha256:<hex>"
+  },
+  "images": {
+    "<service-name>": {
+      "declared_ref": "postgres:14",
+      "resolved_digest": "sha256:<hex>",
+      "platform": "linux/amd64",
+      "provider_semantics": "podman-rootless-native-v1"
+    }
+  }
+}
+```
+
+**Fields that are intentionally absent** (never written to the lock):
+
+- `container_id`, `network_id`, `volume_id` — live state, belongs in session
+- `host_port` — allocated at runtime, not part of execution identity
+- secret values, `DATABASE_URL` contents
+
+### 13.3 Replay behavior
+
+On rerun (`ato run . --oci-compose`):
+
+1. `ato.oci.lock.json` is loaded (parse errors are non-fatal: re-resolve).
+2. For each service, `entry_is_fresh()` checks:
+   - `source_hash` matches
+   - `declared_ref` matches
+   - `provider_semantics` (coarse label) matches
+3. Fresh entries → reuse persisted digest without a provider round-trip (♻️).
+4. Any drift → re-resolve via provider (✅) and write a fresh entry.
+5. Updated lock is written before execution starts.
+6. Execution is blocked until all services have a persisted digest.
+
+### 13.4 Mutable tags
+
+Mutable tags (`latest`, branch tags) are allowed only after digest resolution
+has occurred. The resolved digest is written to the lock; subsequent reruns
+replay it unless source drift or provider semantics change.
+
+### 13.5 Digest-ref round-trips
+
+If `declared_ref` is already `image@sha256:<digest>`, the lock reuses it
+without unnecessary re-resolution when the source hash, ref, and provider
+semantics are all unchanged.
+
+### 13.6 Identity stability
+
+`OciComposeLock::execution_identity_hash()` computes a SHA-256 over:
+
+- `source_hash`
+- Per-service `(name, declared_ref, resolved_digest, platform, provider_semantics)` in sorted order
+
+Changes that **affect** identity: resolved digest change, platform change,
+provider semantics label change, compose source hash change.
+
+Changes that **do not affect** identity: allocated host port, container id,
+network id, volume id, secret values.
+
+### 13.7 Provider semantics label
+
+Produced by `OciProviderSemantics::coarse_label()` in the format
+`"<kind>-<mode>-<substrate>-v1"` (e.g. `"podman-rootless-native-v1"`).
+Only enum variants are used — minor version changes in Podman do not
+invalidate lock entries.
+
+A label change (e.g. rootless → rootful, or Podman → future
+`AtoNativeOciProvider`) changes execution identity. The caller may choose to
+re-resolve or mark drift; currently drift forces re-resolve.
+
+### 13.8 New module
+
+`crates/capsule-core/src/contract/oci_compose_lock.rs` — `OciComposeLock`,
+`OciImageLockEntry`, `OciImportMeta`, `OciLockError` (6 typed variants),
+`load_from_dir`, `write_to_dir`, `compute_compose_source_hash`,
+`parse_platform_str`, `OciComposeLock::execution_identity_hash`,
+`OciComposeLock::entry_is_fresh`.
+
+### 13.9 New function in runner
+
+`resolve_images_with_lock_replay` in `oci_compose_runner.rs` encapsulates the
+replay / re-resolve logic. `execute_compose_run` was updated to:
+
+1. Compute `source_hash` from compose file content.
+2. Load existing lock (`ato.oci.lock.json`).
+3. Call `resolve_images_with_lock_replay` (per-service reuse or fresh resolve).
+4. Write updated lock **before** delegating to the executor.
+
+`resolve_images_for_compose` is kept as-is for existing tests that do not
+require lock replay.
+
+### 13.10 Tests
+
+**`capsule-core` (18 tests in `oci_compose_lock.rs`)**:
+
+- `lock_serializes_and_deserializes`
+- `lock_roundtrips_via_dir`
+- `load_from_dir_returns_none_when_file_absent`
+- `lock_write_failure_returns_typed_error_from_write`
+- `lock_parse_failure_returns_typed_error_from_load`
+- `compute_compose_source_hash_is_deterministic`
+- `compute_compose_source_hash_differs_on_changed_content`
+- `parse_platform_str_roundtrips`
+- `parse_platform_str_roundtrips_with_variant`
+- `entry_is_fresh_matches_correct_inputs`
+- `entry_is_fresh_rejects_source_hash_drift`
+- `entry_is_fresh_rejects_declared_ref_drift`
+- `entry_is_fresh_rejects_provider_semantics_drift`
+- `resolved_digest_drift_changes_execution_identity`
+- `allocated_host_port_does_not_change_execution_identity`
+- `container_id_does_not_change_execution_identity`
+- `provider_semantics_drift_changes_execution_identity`
+- `secret_values_are_not_in_identity`
+
+**`ato-cli` (7 new tests in `oci_compose_runner.rs`, total 24)**:
+
+- `compose_run_writes_oci_image_resolutions_to_lock`
+- `compose_run_reuses_existing_lock_resolution`
+- `compose_source_hash_drift_triggers_fresh_resolution`
+- `mutable_tag_without_persisted_digest_triggers_resolution`
+- `digest_ref_round_trips_without_lock_churn`
+- `secret_values_are_not_persisted_to_lock`
+- `blinko_style_compose_lock_replay_with_fake_provider`
+
+### 13.11 Known limitations before PR 11
+
+- Real Podman smoke for lock persistence remains opt-in only
+  (`ATO_TEST_REAL_PODMAN=1`).
+- `install.sh` / `docker run` intent extractor remains PR 11.
+- Lock file is written only on the `--oci-compose` path; standard `ato run`
+  is unaffected.
+
+### 13.12 Known pre-existing blocker (unchanged)
+
+`cargo test --workspace` triggers an interactive consent prompt. Always run:
+
+```sh
+cargo test -p ato-cli oci_compose --lib
+cargo test -p capsule-core oci_compose_lock --lib
+cargo test -p capsule-core compose_import --lib
+```

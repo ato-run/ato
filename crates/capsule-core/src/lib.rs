@@ -44,6 +44,7 @@ pub use contract::ato_lock;
 pub use contract::lock_runtime;
 pub use contract::lockfile;
 pub use contract::manifest;
+pub use contract::oci_compose_lock;
 pub use contract::tools;
 
 // ── Layer 3: Routing ──────────────────────────────────────────────────────

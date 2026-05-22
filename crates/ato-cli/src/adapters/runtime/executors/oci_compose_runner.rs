@@ -20,12 +20,16 @@
 //! * This module does NOT shell out to `docker compose` or any shell.
 //! * The legacy Bollard path is never used by this module.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use capsule_core::execution_plan::model::OciPolicyMode;
+use capsule_core::oci_compose_lock::{
+    self, compute_compose_source_hash, OciComposeLock, OciImageLockEntry, OciImportMeta,
+    OciLockError,
+};
 use capsule_core::routing::importer::compose::{
     detect_compose_candidate, import_compose, ComposeImportInput, ComposeImportOutput,
 };
@@ -51,8 +55,9 @@ use crate::reporters::CliReporter;
 /// 2. Imports it with the pure `ComposeImporter` — no `docker compose` execution.
 /// 3. Reports importer warnings and unsupported features to the reporter.
 /// 4. Checks `OciProvider` readiness in Required mode.
-/// 5. Resolves image digests for every service via the provider.
-/// 6. Delegates to `execute_service_graph_with_provider`.
+/// 5. Resolves image digests, replaying from `ato.oci.lock.json` when fresh.
+/// 6. Persists resolved digests to `ato.oci.lock.json`.
+/// 7. Delegates to `execute_service_graph_with_provider`.
 pub(crate) async fn execute_compose_run(
     project_dir: &Path,
     reporter: Arc<CliReporter>,
@@ -70,6 +75,12 @@ pub(crate) async fn execute_compose_run(
     // 2. Import (pure — no Docker/Podman calls).
     let file_text = std::fs::read_to_string(&compose_path)
         .with_context(|| format!("failed to read {}", compose_path.display()))?;
+    let source_hash = compute_compose_source_hash(&file_text);
+    let compose_rel_path = compose_path
+        .strip_prefix(project_dir)
+        .unwrap_or(&compose_path)
+        .to_string_lossy()
+        .into_owned();
     let input = ComposeImportInput::new(file_text, compose_path.clone());
     let import_output =
         import_compose(&input).map_err(|e| anyhow::anyhow!("compose_import_failed: {e}"))?;
@@ -109,19 +120,39 @@ pub(crate) async fn execute_compose_run(
 
     let provider = DefaultOciProviderSelector.select_provider();
 
-    // 5. Resolve image digests.
-    let images = resolve_images_for_compose(&import_output, &provider, &reporter).await?;
-    for (svc_name, img) in &images {
-        reporter
-            .notify(format!(
-                "✅ [{}] Resolved: {}",
-                svc_name,
-                &img.resolved_digest[..std::cmp::min(19, img.resolved_digest.len())]
-            ))
-            .await?;
-    }
+    // 5. Load existing lock (parse errors are non-fatal: we re-resolve from scratch).
+    let existing_lock = match oci_compose_lock::load_from_dir(project_dir) {
+        Ok(lock) => lock,
+        Err(OciLockError::ParseFailed(msg)) => {
+            reporter
+                .notify(format!(
+                    "⚠️  ato.oci.lock.json parse error, re-resolving: {msg}"
+                ))
+                .await?;
+            None
+        }
+        Err(_) => None,
+    };
 
-    // 6. Execute.
+    // 6. Resolve image digests with lock replay.
+    let (images, new_lock) = resolve_images_with_lock_replay(
+        &import_output,
+        &compose_rel_path,
+        &source_hash,
+        existing_lock.as_ref(),
+        &provider,
+        &reporter,
+    )
+    .await?;
+
+    // 7. Persist lock (fail on write error — don't execute with unresolved digests).
+    oci_compose_lock::write_to_dir(project_dir, &new_lock)
+        .map_err(|e| anyhow::anyhow!("oci_lock_write_failed: {e}"))?;
+    reporter
+        .notify("🔒 Lock written: ato.oci.lock.json".to_string())
+        .await?;
+
+    // 8. Execute.
     let project_name = compose_path
         .parent()
         .and_then(|p| p.file_name())
@@ -140,13 +171,124 @@ pub(crate) async fn execute_compose_run(
     .await
 }
 
-// ── Image resolution ──────────────────────────────────────────────────────────
+// ── Image resolution + lock replay ────────────────────────────────────────────
 
-/// Resolve image digests for every service in the import output.
+/// Resolve image digests with lock replay for every service in the import output.
+///
+/// For each service:
+/// - If an existing lock entry is fresh (source hash + declared ref + provider semantics
+///   all match), the persisted digest is reused without a provider round-trip (♻️).
+/// - Otherwise the provider is called to resolve a fresh digest (✅).
+///
+/// Returns `(service_name → OciImageResolution, updated_OciComposeLock)`.
+/// The caller is responsible for persisting the returned lock to disk.
+pub(crate) async fn resolve_images_with_lock_replay<P: OciProvider>(
+    import_output: &ComposeImportOutput,
+    compose_source_path: &str,
+    source_hash: &str,
+    existing_lock: Option<&OciComposeLock>,
+    provider: &P,
+    reporter: &Arc<CliReporter>,
+) -> Result<(HashMap<String, OciImageResolution>, OciComposeLock)> {
+    let provider_semantics = provider.semantics().coarse_label();
+    let mut images: HashMap<String, OciImageResolution> = HashMap::new();
+    let mut lock_images: BTreeMap<String, OciImageLockEntry> = BTreeMap::new();
+
+    for svc in &import_output.services {
+        // Check if an existing lock entry covers this service.
+        let reuse = existing_lock.and_then(|lock| {
+            lock.entry_is_fresh(source_hash, &svc.name, &svc.image_ref, &provider_semantics)
+                .then(|| lock.images.get(&svc.name).cloned())
+                .flatten()
+        });
+
+        if let Some(entry) = reuse {
+            reporter
+                .notify(format!(
+                    "♻️  [{}] Reusing lock: {} → {}",
+                    svc.name,
+                    svc.image_ref,
+                    &entry.resolved_digest[..std::cmp::min(19, entry.resolved_digest.len())]
+                ))
+                .await?;
+            let platform = capsule_core::oci_compose_lock::parse_platform_str(&entry.platform);
+            images.insert(
+                svc.name.clone(),
+                OciImageResolution {
+                    declared_ref: svc.image_ref.clone(),
+                    resolved_digest: entry.resolved_digest.clone(),
+                    platform,
+                    importer_input_hash: None,
+                },
+            );
+            lock_images.insert(svc.name.clone(), entry);
+        } else {
+            reporter
+                .notify(format!(
+                    "🔍 [{}] Resolving image digest: {}",
+                    svc.name, svc.image_ref
+                ))
+                .await?;
+            let request = OciImageResolutionRequest {
+                target_label: svc.name.clone(),
+                declared_ref: svc.image_ref.clone(),
+                requested_platform: None,
+                resolution_mode: OciImageResolutionMode::Required,
+                importer_input_hash: None,
+            };
+            let resolved = match provider.resolve_image(&request).await {
+                Ok(r) => r,
+                Err(OciProviderError::Unsupported(_)) => {
+                    anyhow::bail!(
+                        "oci_image_resolution_required: provider does not support image digest \
+                         resolution; run `ato lock` first to resolve '{}' for service '{}'",
+                        svc.image_ref,
+                        svc.name
+                    );
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("{}: {}", e.code(), e).context(format!(
+                        "failed to resolve image '{}' for service '{}'",
+                        svc.image_ref, svc.name
+                    )));
+                }
+            };
+            reporter
+                .notify(format!(
+                    "✅ [{}] Resolved: {}",
+                    svc.name,
+                    &resolved.resolved_digest[..std::cmp::min(19, resolved.resolved_digest.len())]
+                ))
+                .await?;
+            let lock_entry = OciImageLockEntry {
+                declared_ref: svc.image_ref.clone(),
+                resolved_digest: resolved.resolved_digest.clone(),
+                platform: resolved.platform.os.clone() + "/" + &resolved.platform.architecture,
+                provider_semantics: provider_semantics.clone(),
+            };
+            lock_images.insert(svc.name.clone(), lock_entry);
+            images.insert(svc.name.clone(), resolved.into_lock_resolution());
+        }
+    }
+
+    let new_lock = OciComposeLock {
+        version: 1,
+        import: OciImportMeta {
+            kind: "compose".to_string(),
+            source_path: compose_source_path.to_string(),
+            source_hash: source_hash.to_string(),
+        },
+        images: lock_images,
+    };
+    Ok((images, new_lock))
+}
+
+/// Resolve image digests for every service in the import output (no lock replay).
 ///
 /// Returns `service_name → OciImageResolution`. On `Unsupported` (provider
 /// cannot resolve), returns a typed error asking the caller to run `ato lock`
 /// first. On any other provider error, propagates with context.
+/// Kept for use by existing tests that don't need lock replay.
 pub(crate) async fn resolve_images_for_compose<P: OciProvider>(
     import_output: &ComposeImportOutput,
     provider: &P,
@@ -189,8 +331,6 @@ pub(crate) async fn resolve_images_for_compose<P: OciProvider>(
     }
     Ok(images)
 }
-
-// ── Testable core ─────────────────────────────────────────────────────────────
 
 /// Execute the imported service graph with a caller-provided `OciProvider` and
 /// pre-built image resolution map.
@@ -860,5 +1000,396 @@ volumes: {}
                 }
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PR 10.6 Lock Persistence Tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Helper: build an OciComposeLock with a single entry from a given digest.
+    fn make_lock_with_entry(
+        source_hash: &str,
+        service: &str,
+        declared_ref: &str,
+        digest: &str,
+    ) -> OciComposeLock {
+        use capsule_core::oci_compose_lock::{OciImageLockEntry, OciImportMeta};
+        use std::collections::BTreeMap;
+        let mut images = BTreeMap::new();
+        images.insert(
+            service.to_string(),
+            OciImageLockEntry {
+                declared_ref: declared_ref.to_string(),
+                resolved_digest: digest.to_string(),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+            },
+        );
+        OciComposeLock {
+            version: 1,
+            import: OciImportMeta {
+                kind: "compose".to_string(),
+                source_path: "docker-compose.yml".to_string(),
+                source_hash: source_hash.to_string(),
+            },
+            images,
+        }
+    }
+
+    // ── Lock test 18: compose run writes lock to disk ─────────────────────────
+
+    #[test]
+    fn compose_run_writes_oci_image_resolutions_to_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let compose_yaml = SIMPLE_TWO_SERVICE_COMPOSE.as_bytes();
+        std::fs::write(tmp.path().join("docker-compose.yml"), compose_yaml).unwrap();
+
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            tmp.path().join("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (images, lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                None, // no existing lock
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // Persist to disk.
+        capsule_core::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
+
+        // Verify lock file was written.
+        let lock_path = tmp.path().join("ato.oci.lock.json");
+        assert!(lock_path.exists(), "ato.oci.lock.json should be created");
+
+        // Load back and verify entries.
+        let loaded = capsule_core::oci_compose_lock::load_from_dir(tmp.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.images.len(), 2);
+        assert!(loaded.images.contains_key("db"));
+        assert!(loaded.images.contains_key("app"));
+        for (_, entry) in &loaded.images {
+            assert!(!entry.resolved_digest.is_empty());
+        }
+        // images map also has 2 entries.
+        assert_eq!(images.len(), 2);
+    }
+
+    // ── Lock test 19: compose run reuses existing lock resolution ──────────────
+
+    #[test]
+    fn compose_run_reuses_existing_lock_resolution() {
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+        let persisted_digest = format!("sha256:{}", "b".repeat(64));
+
+        // Build an existing lock with a fresh "db" entry.
+        let existing_lock =
+            make_lock_with_entry(&source_hash, "db", "postgres:14", &persisted_digest);
+
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+
+        // Use a provider whose semantics match the lock entry.
+        // FakeOciProvider::ready() uses "podman-rootless-native-v1".
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (images, _lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                Some(&existing_lock),
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // "db" must use the persisted digest, not a freshly resolved one.
+        let db_img = images.get("db").unwrap();
+        assert_eq!(
+            db_img.resolved_digest, persisted_digest,
+            "db should reuse the persisted digest from lock"
+        );
+    }
+
+    // ── Lock test 20: source hash drift triggers fresh resolution ─────────────
+
+    #[test]
+    fn compose_source_hash_drift_triggers_fresh_resolution() {
+        let stale_hash = "sha256:000000000000000000000000000000000000000000000000000000000000dead";
+        let real_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+
+        // Lock was written with a different source hash (stale).
+        let stale_digest = format!("sha256:{}", "c".repeat(64));
+        let stale_lock = make_lock_with_entry(stale_hash, "db", "postgres:14", &stale_digest);
+
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (images, new_lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &real_hash, // current hash ≠ stale_hash
+                Some(&stale_lock),
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // db digest should be freshly resolved (not the stale one).
+        let db_img = images.get("db").unwrap();
+        assert_ne!(
+            db_img.resolved_digest, stale_digest,
+            "db must not reuse a stale lock entry"
+        );
+        // New lock source_hash must equal the real hash.
+        assert_eq!(new_lock.import.source_hash, real_hash);
+    }
+
+    // ── Lock test 21: mutable tag without lock → resolve required or error ────
+
+    #[test]
+    fn mutable_tag_without_persisted_digest_triggers_resolution() {
+        // A mutable tag like "latest" with no lock should trigger provider resolve.
+        // FakeOciProvider succeeds → we should get a resolved digest.
+        let yaml = r#"
+services:
+  app:
+    image: blinkospace/blinko:latest
+    ports:
+      - "1111:1111"
+"#;
+        let input = ComposeImportInput::new(yaml.to_string(), PathBuf::from("docker-compose.yml"));
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+        let source_hash = capsule_core::oci_compose_lock::compute_compose_source_hash(yaml);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (images, lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                None, // no lock
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // A fresh digest was produced.
+        let app_img = images.get("app").unwrap();
+        assert!(!app_img.resolved_digest.is_empty());
+        // The lock records the resolved digest.
+        assert!(lock.images.contains_key("app"));
+    }
+
+    // ── Lock test 22: digest-ref round-trips without churn ────────────────────
+
+    #[test]
+    fn digest_ref_round_trips_without_lock_churn() {
+        let digest_ref = format!("postgres@sha256:{}", "d".repeat(64));
+        let yaml = format!(
+            "services:\n  db:\n    image: {digest_ref}\n    volumes:\n      - db-data:/data\nvolumes:\n  db-data: {{}}\n"
+        );
+        let source_hash = capsule_core::oci_compose_lock::compute_compose_source_hash(&yaml);
+
+        // Build a lock where "db" has this exact digest already.
+        let existing_lock = make_lock_with_entry(
+            &source_hash,
+            "db",
+            &digest_ref,
+            &format!("sha256:{}", "d".repeat(64)),
+        );
+
+        let input = ComposeImportInput::new(yaml.clone(), PathBuf::from("docker-compose.yml"));
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (images, new_lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                Some(&existing_lock),
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // The persisted digest must be reused (no unnecessary re-resolve).
+        let db_img = images.get("db").unwrap();
+        assert_eq!(
+            db_img.resolved_digest,
+            format!("sha256:{}", "d".repeat(64)),
+            "digest-ref must round-trip without churn"
+        );
+        // The lock's source hash is unchanged.
+        assert_eq!(new_lock.import.source_hash, source_hash);
+    }
+
+    // ── Lock test 23: secret-like values are not persisted to lock ─────────────
+
+    #[test]
+    fn secret_values_are_not_persisted_to_lock() {
+        let input = ComposeImportInput::new(
+            BLINKO_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(BLINKO_COMPOSE);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_images, lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                None,
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // Serialize the lock to JSON and verify no secrets appear.
+        let lock_json = serde_json::to_string(&lock).unwrap();
+        assert!(
+            !lock_json.contains("mysecretpassword"),
+            "POSTGRES_PASSWORD must not appear in lock JSON"
+        );
+        assert!(
+            !lock_json.contains("supersecret"),
+            "NEXTAUTH_SECRET must not appear in lock JSON"
+        );
+        assert!(
+            !lock_json.contains("DATABASE_URL"),
+            "DATABASE_URL must not appear in lock JSON"
+        );
+    }
+
+    // ── Lock test 24: Blinko-style compose lock replay ────────────────────────
+
+    #[test]
+    fn blinko_style_compose_lock_replay_with_fake_provider() {
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(BLINKO_COMPOSE);
+        let pg_digest = format!("sha256:{}", "e".repeat(64));
+        let blinko_digest = format!("sha256:{}", "f".repeat(64));
+
+        // Build a pre-existing lock simulating a previous run.
+        use capsule_core::oci_compose_lock::{OciImageLockEntry, OciImportMeta};
+        use std::collections::BTreeMap;
+        let mut existing_images = BTreeMap::new();
+        existing_images.insert(
+            "postgres".to_string(),
+            OciImageLockEntry {
+                declared_ref: "postgres:14".to_string(),
+                resolved_digest: pg_digest.clone(),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+            },
+        );
+        existing_images.insert(
+            "blinko".to_string(),
+            OciImageLockEntry {
+                declared_ref: "blinkospace/blinko:latest".to_string(),
+                resolved_digest: blinko_digest.clone(),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+            },
+        );
+        let existing_lock = OciComposeLock {
+            version: 1,
+            import: OciImportMeta {
+                kind: "compose".to_string(),
+                source_path: "docker-compose.yml".to_string(),
+                source_hash: source_hash.clone(),
+            },
+            images: existing_images,
+        };
+
+        let input = ComposeImportInput::new(
+            BLINKO_COMPOSE.to_string(),
+            PathBuf::from("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (images, new_lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                Some(&existing_lock),
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // Both services must reuse their persisted digests.
+        assert_eq!(
+            images.get("postgres").unwrap().resolved_digest,
+            pg_digest,
+            "postgres must reuse lock digest"
+        );
+        assert_eq!(
+            images.get("blinko").unwrap().resolved_digest,
+            blinko_digest,
+            "blinko must reuse lock digest"
+        );
+
+        // Identity hash should be stable on re-run.
+        assert_eq!(
+            new_lock.execution_identity_hash(),
+            existing_lock.execution_identity_hash(),
+            "execution identity must be stable when lock is unchanged"
+        );
+
+        // Execute end-to-end with fake provider.
+        let exit_code = rt
+            .block_on(execute_compose_run_with_provider(
+                &import_output,
+                &images,
+                OciPolicyMode::Strict,
+                &[],
+                "blinko",
+                &reporter,
+                &provider,
+            ))
+            .unwrap();
+        assert_eq!(exit_code, 0, "Blinko compose replay must succeed");
     }
 }
