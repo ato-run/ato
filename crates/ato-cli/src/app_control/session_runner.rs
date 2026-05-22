@@ -618,9 +618,42 @@ impl SessionStartPhaseRunner {
         );
         self.build_observation = prepared.observation.clone();
         self.build_decision_kind = Some(prepared.decision.result_kind);
+        let build_output_lock = if matches!(
+            &prepared.decision.action,
+            bm::DecisionAction::Project(_) | bm::DecisionAction::Execute
+        ) {
+            prepared
+                .observation
+                .as_ref()
+                .map(
+                    crate::application::phase_materializer::acquire_build_output_lock_for_observation,
+                )
+                .transpose()?
+        } else {
+            None
+        };
 
         match prepared.decision.action {
             bm::DecisionAction::Skip => return Ok(()),
+            bm::DecisionAction::Project(layer) => {
+                let Some(observation) = prepared.observation.as_ref() else {
+                    anyhow::bail!("build output projection requires a build observation");
+                };
+                match crate::application::phase_materializer::project_build_outputs(
+                    &workspace_root,
+                    observation,
+                    &layer,
+                ) {
+                    Ok(()) => {
+                        drop(build_output_lock);
+                        return Ok(());
+                    }
+                    Err(error) => eprintln!(
+                        "ATO-WARN failed to project build output layer; build will execute: {}",
+                        error
+                    ),
+                }
+            }
             bm::DecisionAction::Fail => return Err(bm::no_build_error(&prepared.decision)),
             bm::DecisionAction::Execute => {}
         }
@@ -653,7 +686,29 @@ impl SessionStartPhaseRunner {
         lifecycle_result?;
 
         if let Some(observation) = self.build_observation.as_ref() {
-            bm::persist_after_execute(plan, &workspace_root, observation, self.json);
+            // Capture while the lock is still held so that workspace-output
+            // reading (capture) and state-record writing are inside the same
+            // lock region as the build executor.
+            // session_runner always uses BuildPolicy::IfStale; NoBuild is
+            // not reachable here, so no hard-fail branch is needed.
+            let output_layer = build_output_lock.as_ref().and_then(|lock| {
+                match crate::application::phase_materializer::capture_build_outputs_locked(
+                    lock,
+                    &workspace_root,
+                    observation,
+                ) {
+                    Ok(layer) => layer,
+                    Err(err) => {
+                        eprintln!(
+                            "ATO-WARN failed to capture build output layer for local \
+                             materialization: {err}"
+                        );
+                        None
+                    }
+                }
+            });
+            bm::persist_after_execute(plan, &workspace_root, observation, self.json, output_layer);
+            drop(build_output_lock);
         }
         self.build_decision_kind = Some(bm::BuildResultKind::Executed);
         Ok(())

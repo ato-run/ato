@@ -1,0 +1,7 @@
+{
+  "name": "vite-build-output-layer",
+  "private": true,
+  "scripts": {
+    "build": "sh ./build.sh"
+  }
+}

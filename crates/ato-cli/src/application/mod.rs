@@ -20,6 +20,7 @@ pub(crate) mod graph_views;
 pub(crate) mod launch_materialization;
 pub(crate) mod managed_service_receipt;
 pub(crate) mod orchestration_teardown;
+pub(crate) mod phase_materializer;
 pub(crate) mod pipeline;
 pub(crate) mod ports;
 pub(crate) mod preflight;
