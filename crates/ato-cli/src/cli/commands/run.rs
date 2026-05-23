@@ -63,6 +63,19 @@ const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEO
 
 type RunPipelineState = run_phase::RunPipelineState;
 
+/// Install lifecycle context carried from `ato launch` into the run pipeline.
+/// When present, these IDs are stamped onto the session record so receipts,
+/// dashboards, and replay tools can correlate sessions with installed app
+/// instances.
+#[derive(Debug, Clone)]
+pub struct InstallLifecycleContext {
+    pub installed_app_id: String,
+    pub install_profile_id: String,
+    pub install_profile_key: String,
+    pub install_revision_id: String,
+    pub capsule_instance_key: String,
+}
+
 pub struct RunArgs {
     pub target: PathBuf,
     pub target_label: Option<String>,
@@ -100,6 +113,9 @@ pub struct RunArgs {
     /// envelope without launching the capsule. Equivalent to
     /// `ato internal preflight <target> --json` but driven from `ato run`.
     pub plan_only: bool,
+    /// Install lifecycle context set by `ato launch`. When `Some`, the run
+    /// pipeline stamps these IDs onto the session record.
+    pub install_lifecycle_context: Option<InstallLifecycleContext>,
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
@@ -2007,6 +2023,7 @@ run = "node server.js""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            install_lifecycle_context: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2111,6 +2128,7 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            install_lifecycle_context: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2212,6 +2230,7 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            install_lifecycle_context: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2301,6 +2320,7 @@ run = "node index.js"
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: true,
+            install_lifecycle_context: None,
         };
 
         let err = super::execute_plan_only(args)

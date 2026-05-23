@@ -964,6 +964,11 @@ mod tests {
                 schema_version: None,
                 launch_digest: None,
                 process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
             }
         };
 
@@ -1062,6 +1067,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         // No ordering edges between db and cache → must reject.
@@ -1185,6 +1195,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         // Only uses-edges (service→provider); no service→service ordering.
@@ -1319,6 +1334,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         assert!(

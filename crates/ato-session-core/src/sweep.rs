@@ -791,6 +791,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
             orchestration_services: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-dead.json");
@@ -876,6 +881,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-orch.json");
         fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");
@@ -956,6 +966,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-dep.json");
         fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");

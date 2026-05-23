@@ -121,6 +121,32 @@ pub struct StoredSessionInfo {
     /// record without depending on per-process `session_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_key: Option<String>,
+
+    // Install lifecycle identifiers (set when launched via `ato launch <install_profile_key>`).
+    // All fields are `Option` for forward-compat with sessions not originating from an installed app.
+
+    /// Stable identity of the installed app instance (`app_<32hex>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_app_id: Option<String>,
+
+    /// Launch profile within the installed app (`default` or user-defined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_profile_id: Option<String>,
+
+    /// Stable shortcut/dashboard key for the profile (`ipk_<32hex>`).
+    /// Invariant across revision changes — safe for OS shortcuts and dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_profile_key: Option<String>,
+
+    /// Immutable revision that was executed (`rev_<32hex>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_revision_id: Option<String>,
+
+    /// Exact-replay key for this session (`cik_<32hex>`).
+    /// Encodes profile_key + revision_id + execution_id — uniquely identifies
+    /// the full execution closure (receipt / session / replay boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_instance_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -389,6 +415,11 @@ mod tests {
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("a".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_000_000),
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
@@ -475,6 +506,11 @@ mod tests {
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("b".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_001_000),
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
@@ -582,6 +618,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
@@ -634,6 +675,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
