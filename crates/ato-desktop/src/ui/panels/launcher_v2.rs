@@ -549,28 +549,7 @@ fn render_installed_apps_section_wrapper(
     theme: &Theme,
 ) -> gpui::AnyElement {
     match crate::install_lifecycle_dashboard::DashboardCache::get() {
-        Ok(items) => {
-            let on_launch = |ipk: String| {
-                let ato_bin = match crate::orchestrator::resolve_ato_binary() {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::error!("cannot resolve ato binary: {e}");
-                        return;
-                    }
-                };
-                crate::install_lifecycle_dashboard::launch_installed_app_background(
-                    ato_bin,
-                    ipk,
-                    |result| {
-                        if let Err(e) = result {
-                            tracing::error!("launch installed app: {e}");
-                        }
-                        crate::install_lifecycle_dashboard::DashboardCache::refresh();
-                    },
-                );
-            };
-            render_installed_apps_section(&items, on_launch, theme)
-        }
+        Ok(items) => render_installed_apps_section(&items, theme),
         Err(e) => {
             div()
                 .py(px(16.0))

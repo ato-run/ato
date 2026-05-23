@@ -1188,12 +1188,18 @@ pub fn run(skip_onboarding: bool) {
                         match crate::window::open_configured_startup_surface(cx, startup_surface) {
                             Ok(_) => {
                                 tracing::info!(?startup_surface, "Startup surface opened");
-                                crate::install_lifecycle_dashboard::DashboardCache::refresh();
                             }
                             Err(err) => {
                                 tracing::error!(error = %err, ?startup_surface, "Startup surface failed")
                             }
                         }
+                        // Background-refresh the installed-apps cache after the
+                        // surface is open so the launcher has data on first paint.
+                        cx.background_executor()
+                            .spawn(async move {
+                                crate::install_lifecycle_dashboard::DashboardCache::refresh();
+                            })
+                            .detach();
                     });
                 })
                 .detach();
