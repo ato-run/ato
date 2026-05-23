@@ -266,6 +266,9 @@ impl InstallInstanceStore {
             // On non-unix (Windows), write a plain text file with the revision id as fallback.
             atomic_write(&link, rev.as_str().as_bytes())?;
         }
+        // Track revision in per-profile log. Failure here is returned — callers that want
+        // best-effort behaviour should ignore the error explicitly.
+        self.append_revision_to_log(app, profile, rev)?;
         Ok(())
     }
 
@@ -315,6 +318,72 @@ impl InstallInstanceStore {
         }
         Ok(apps)
     }
+
+    // ── Revision log ──────────────────────────────────────────────────────
+
+    fn profile_revision_log_path(&self, app: &InstalledAppId, profile: &ProfileId) -> PathBuf {
+        self.profile_dir(app, profile).join("revision_log.json")
+    }
+
+    /// Append a revision entry to the profile's revision log.
+    /// Called automatically by `set_current_revision`.
+    fn append_revision_to_log(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+        rev: &InstallRevisionId,
+    ) -> Result<()> {
+        let log_path = self.profile_revision_log_path(app, profile);
+        let mut log: Vec<String> = if log_path.exists() {
+            let raw = fs::read(&log_path)
+                .with_context(|| format!("read revision log {}", log_path.display()))?;
+            serde_json::from_slice(&raw).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let rev_str = rev.as_str().to_owned();
+        if !log.contains(&rev_str) {
+            log.push(rev_str);
+        }
+        let json = serde_json::to_vec_pretty(&log)?;
+        atomic_write(&log_path, &json)?;
+        Ok(())
+    }
+
+    /// List all revision IDs ever set as current for a profile, in insertion order.
+    pub fn list_profile_revisions(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+    ) -> Result<Vec<InstallRevisionId>> {
+        let log_path = self.profile_revision_log_path(app, profile);
+        if !log_path.exists() {
+            return Ok(vec![]);
+        }
+        let raw = fs::read(&log_path)
+            .with_context(|| format!("read revision log {}", log_path.display()))?;
+        let entries: Vec<String> = serde_json::from_slice(&raw).unwrap_or_default();
+        Ok(entries.into_iter().map(InstallRevisionId::new).collect())
+    }
+
+    /// Read the raw `artifact_manifest.json` for a revision as a JSON value.
+    /// Returns `None` if the manifest does not exist yet.
+    pub fn read_revision_manifest(
+        &self,
+        rev: &InstallRevisionId,
+    ) -> Result<Option<serde_json::Value>> {
+        let path = self.revision_artifact_manifest_path(rev);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read(&path)
+            .with_context(|| format!("read artifact manifest {}", path.display()))?;
+        let val = serde_json::from_slice(&raw)
+            .with_context(|| format!("parse artifact manifest {}", path.display()))?;
+        Ok(Some(val))
+    }
+
+    // ── Profile list ──────────────────────────────────────────────────────
 
     /// List all profile IDs for an installed app.
     pub fn list_profiles(&self, app: &InstalledAppId) -> Result<Vec<ProfileId>> {
