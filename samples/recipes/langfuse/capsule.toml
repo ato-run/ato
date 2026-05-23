@@ -17,6 +17,7 @@ env = { POSTGRES_DB = "langfuse", POSTGRES_USER = "langfuse", POSTGRES_PASSWORD 
 runtime = "oci"
 image = "langfuse/langfuse:2.32.0"
 port = 3000
+allow_emulation = true
 env = { DATABASE_URL = "postgresql://langfuse:langfuse-secret@db:5432/langfuse", NEXTAUTH_URL = "http://localhost:3000", NEXTAUTH_SECRET = "changeme-demo-secret", SALT = "changeme-salt" }
 depends_on = ["db"]
 
