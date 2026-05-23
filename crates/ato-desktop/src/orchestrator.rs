@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
+use crate::state::session::{OciImportKind, OciSessionSnapshot, OciSessionStatus};
 use crate::state::{LocalManifestRoute, ManifestSource};
 use crate::surface_timing::{ClickOrigin, SurfaceStageTimer};
 use crate::terminal::{TerminalCore, TryRecvOutput};
@@ -1545,7 +1546,7 @@ where
 {
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), args = %args.join(" "), "spawning ato helper");
-    let output = Command::new(&ato_bin)
+    let output = ato_helper_command(&ato_bin)
         .args(args)
         .output()
         .with_context(|| {
@@ -1573,6 +1574,107 @@ where
             args.join(" ")
         )
     })
+}
+
+/// Read OCI sessions from the CLI session projection instead of Desktop walking
+/// OCI state files directly.
+pub fn list_oci_sessions() -> Result<Vec<OciSessionSnapshot>> {
+    let entries: Vec<PsJsonEntry> = run_ato_json(&["ps", "--all", "--json"])?;
+    Ok(oci_sessions_from_ps_entries(entries))
+}
+
+pub fn stop_oci_session(session_id: &str) -> Result<()> {
+    let ato_bin = resolve_ato_binary()?;
+    let args = oci_stop_args(session_id);
+    debug!(bin = %ato_bin.display(), session_id, "stopping OCI session through ato");
+    let output = ato_helper_command(&ato_bin)
+        .args(args)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run ato helper '{}' with args {}",
+                ato_bin.display(),
+                args.join(" ")
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = extract_json_error_message(&stdout)
+            .or_else(|| (!stderr.is_empty()).then(|| stderr.clone()))
+            .or_else(|| (!stdout.is_empty()).then(|| stdout.clone()))
+            .unwrap_or_else(|| format!("exit status {}", output.status));
+        bail!("ato stop OCI session failed: {detail}");
+    }
+    Ok(())
+}
+
+fn oci_stop_args(session_id: &str) -> [&str; 3] {
+    ["stop", "--id", session_id]
+}
+
+fn ato_helper_command(ato_bin: &Path) -> Command {
+    let mut command = Command::new(ato_bin);
+    apply_desktop_ato_home(&mut command, std::env::var_os("ATO_HOME"));
+    command
+}
+
+fn apply_desktop_ato_home(command: &mut Command, ato_home: Option<std::ffi::OsString>) {
+    if let Some(ato_home) = ato_home {
+        command.env("ATO_HOME", ato_home);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PsJsonEntry {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    import_kind: Option<OciImportKind>,
+    #[serde(default)]
+    service_count: Option<usize>,
+    #[serde(default)]
+    main_endpoint: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    source_hash: Option<String>,
+}
+
+fn oci_sessions_from_ps_entries(entries: Vec<PsJsonEntry>) -> Vec<OciSessionSnapshot> {
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.kind.as_deref() != Some("oci") {
+                return None;
+            }
+            Some(OciSessionSnapshot {
+                id: entry.session_id.or(entry.id)?,
+                import_kind: entry.import_kind?,
+                status: oci_status_from_ps(entry.status.as_deref())?,
+                endpoint_url: entry.main_endpoint,
+                service_count: entry.service_count?,
+                source_path: entry.source_path,
+                source_hash: entry.source_hash,
+            })
+        })
+        .collect()
+}
+
+fn oci_status_from_ps(status: Option<&str>) -> Option<OciSessionStatus> {
+    match status? {
+        "running" => Some(OciSessionStatus::Running),
+        "stopped" => Some(OciSessionStatus::Stopped),
+        "stop_failed" => Some(OciSessionStatus::StopFailed),
+        _ => None,
+    }
 }
 
 fn extract_json_error_message(stdout: &str) -> Option<String> {
@@ -5261,5 +5363,89 @@ mod fast_path_tests {
         assert_eq!(input.source_handle(), "github.com/owner/repo");
         assert_eq!(input.boundary_arg(), "github.com/owner/repo");
         assert!(input.manifest_path_for_log().is_none());
+    }
+
+    #[test]
+    fn parses_oci_sessions_from_ps_json() {
+        let entries: Vec<PsJsonEntry> = serde_json::from_str(
+            r#"[
+                {"id":"native-session","status":"ready","runtime":"source/node"},
+                {
+                    "kind":"oci",
+                    "id":"fallback-id",
+                    "session_id":"oci-session-1",
+                    "import_kind":"docker-run-script",
+                    "service_count":2,
+                    "main_endpoint":"http://127.0.0.1:43123/",
+                    "status":"running",
+                    "source_path":"/work/blinko/install.sh",
+                    "source_hash":"blake3:abc"
+                }
+            ]"#,
+        )
+        .expect("ps json fixture");
+
+        let sessions = oci_sessions_from_ps_entries(entries);
+
+        assert_eq!(
+            sessions,
+            vec![OciSessionSnapshot {
+                id: "oci-session-1".to_string(),
+                import_kind: OciImportKind::DockerRunScript,
+                status: OciSessionStatus::Running,
+                endpoint_url: Some("http://127.0.0.1:43123/".to_string()),
+                service_count: 2,
+                source_path: Some("/work/blinko/install.sh".to_string()),
+                source_hash: Some("blake3:abc".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn desktop_stop_oci_session_invokes_cli_stop_id() {
+        assert_eq!(
+            oci_stop_args("oci-session-42"),
+            ["stop", "--id", "oci-session-42"]
+        );
+    }
+
+    #[test]
+    fn desktop_uses_ato_home_for_cli_env() {
+        let mut command = Command::new("ato");
+        apply_desktop_ato_home(
+            &mut command,
+            Some(std::ffi::OsString::from("/desktop/test-home")),
+        );
+
+        let ato_home = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("ATO_HOME"))
+            .and_then(|(_, value)| value);
+        assert_eq!(ato_home, Some(std::ffi::OsStr::new("/desktop/test-home")));
+    }
+
+    #[test]
+    fn desktop_does_not_display_secret_values() {
+        let entries: Vec<PsJsonEntry> = serde_json::from_str(
+            r#"[
+                {
+                    "kind":"oci",
+                    "session_id":"oci-session-1",
+                    "import_kind":"compose",
+                    "service_count":1,
+                    "status":"running",
+                    "DATABASE_URL":"postgres://private-value",
+                    "generated_password":"do-not-render"
+                }
+            ]"#,
+        )
+        .expect("ps json fixture");
+        let mut registry = crate::state::session::SessionRegistry::default();
+        registry.sync_oci_sessions(oci_sessions_from_ps_entries(entries));
+
+        let rendered = serde_json::to_string(&registry.view_entries()).expect("session json");
+
+        assert!(!rendered.contains("private-value"));
+        assert!(!rendered.contains("do-not-render"));
     }
 }
