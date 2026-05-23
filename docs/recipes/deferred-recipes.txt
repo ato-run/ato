@@ -1,0 +1,21 @@
+# Deferred recipes — not yet AODD-confirmed or intentionally deferred
+# Reasons: blocked, rejected, partial, or out of scope
+
+# Blocked (needs runtime or upstream changes)
+samples/recipes/twenty            # private image (403)
+samples/recipes/logto             # multi-step DB init
+samples/recipes/librechat         # MongoDB sidecar
+# ToolJet, Budibase, Appsmith, Penpot, Standard Notes, Redash — recipes in samples/
+
+# Partial (needs additional work)
+samples/recipes/open-webui        # HF model downloads on first run
+samples/recipes/vikunja           # readiness timeout >300s
+samples/recipes/promptfoo         # needs eval data CLI args
+samples/recipes/photoprism        # >3 GB cold pull
+samples/recipes/mindsdb           # >5 GB cold pull
+samples/recipes/dify              # partial-pass; 6-service heavy stack
+
+# Rejected (unsafe / out of scope)
+# OpenHands, coolify, dokploy, portainer, dozzle — Docker socket required
+# AUTOMATIC1111, ComfyUI, InvokeAI, h2oGPT — GPU required
+# Supabase, PostHog, Immich — too heavy for initial catalog
