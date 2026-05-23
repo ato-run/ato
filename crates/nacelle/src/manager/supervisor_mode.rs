@@ -838,7 +838,7 @@ mod tests {
             http_get: None,
             tcp_connect: Some("127.0.0.1".to_string()),
             exec: None,
-            port: port.to_string(),
+            port: Some(port.to_string()),
             initial_delay_seconds: 0,
             timeout_seconds: 180,
             interval_seconds: 2,

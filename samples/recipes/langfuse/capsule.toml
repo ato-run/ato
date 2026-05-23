@@ -30,11 +30,11 @@ schema_id = "sha256:langfuse-pgdata-v1"
 
 [services.db]
 target = "db"
-readiness_probe = { exec = ["pg_isready", "-U", "langfuse"], port = "5432" }
+readiness_probe = { exec = ["pg_isready", "-U", "langfuse"] }
 
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/api/public/health", port = "3000", timeout_seconds = 240 }
+readiness_probe = { http_get = "/api/public/health", timeout_seconds = 240 }
 
 [[services.main.state_bindings]]
 state = "db-data"

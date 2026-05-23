@@ -31,11 +31,11 @@ schema_id = "sha256:logto-pgdata-v1"
 
 [services.db]
 target = "db"
-readiness_probe = { exec = ["pg_isready", "-U", "logto"], port = "5432" }
+readiness_probe = { exec = ["pg_isready", "-U", "logto"] }
 
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/api/status", port = "3001", timeout_seconds = 120 }
+readiness_probe = { http_get = "/api/status", timeout_seconds = 120 }
 
 [[services.main.state_bindings]]
 state = "db-data"

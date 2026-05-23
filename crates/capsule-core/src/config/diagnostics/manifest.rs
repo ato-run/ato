@@ -429,19 +429,11 @@ fn validate_web_services_mode(
                     format!("services.{name}.readiness_probe must be a table"),
                 )
             })?;
-            let port = probe
-                .get("port")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    manifest_err(
-                        manifest_path,
-                        format!("services.{name}.readiness_probe.port must be a non-empty string"),
-                    )
-                })?;
-            let _ = port;
-
+            let has_exec = probe
+                .get("exec")
+                .and_then(|v| v.as_array())
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
             let has_http_get = probe
                 .get("http_get")
                 .and_then(|v| v.as_str())
@@ -454,14 +446,22 @@ fn validate_web_services_mode(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .is_some();
-            if !has_http_get
-                && !has_tcp_connect
-                && !probe
-                    .get("exec")
-                    .and_then(|v| v.as_array())
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false)
-            {
+            // port is required for HTTP/TCP probes; exec probes do not need it.
+            if (has_http_get || has_tcp_connect) && !has_exec {
+                let port = probe
+                    .get("port")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        manifest_err(
+                            manifest_path,
+                            format!("services.{name}.readiness_probe.port must be a non-empty string for http_get/tcp_connect probes"),
+                        )
+                    })?;
+                let _ = port;
+            }
+            if !has_http_get && !has_tcp_connect && !has_exec {
                 return Err(manifest_err(
                     manifest_path,
                     format!("services.{name}.readiness_probe must define http_get, tcp_connect, or exec"),
