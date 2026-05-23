@@ -507,9 +507,10 @@ impl CapsuleManifest {
                     .as_ref()
                     .map(|v| !v.trim().is_empty())
                     .unwrap_or(false);
-                if !has_http_get && !has_tcp_connect {
+                let has_exec = probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                if !has_http_get && !has_tcp_connect && !has_exec {
                     errors.push(ValidationError::InvalidTarget(format!(
-                        "target '{}': readiness_probe must define http_get or tcp_connect",
+                        "target '{}': readiness_probe must define http_get, tcp_connect, or exec",
                         label
                     )));
                 }
@@ -715,10 +716,13 @@ impl CapsuleManifest {
                             .as_ref()
                             .map(|v| !v.trim().is_empty())
                             .unwrap_or(false);
-                        if !has_http_get && !has_tcp_connect {
+                        let has_exec_svc =
+                            probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                        if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
-                                "readiness_probe must define http_get or tcp_connect".to_string(),
+                                "readiness_probe must define http_get, tcp_connect, or exec"
+                                    .to_string(),
                             ));
                         }
                     }
@@ -842,10 +846,13 @@ impl CapsuleManifest {
                             .as_ref()
                             .map(|v| !v.trim().is_empty())
                             .unwrap_or(false);
-                        if !has_http_get && !has_tcp_connect {
+                        let has_exec_svc =
+                            probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                        if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
-                                "readiness_probe must define http_get or tcp_connect".to_string(),
+                                "readiness_probe must define http_get, tcp_connect, or exec"
+                                    .to_string(),
                             ));
                         }
                     }
