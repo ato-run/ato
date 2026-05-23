@@ -9,8 +9,8 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-# Pin note: `:latest` used for initial AODD run
-# Follow-up: pin to axllent/mailpit:<version>
+# Pin note: proposed pin to axllent/mailpit:1.22.0 — not yet AODD-confirmed
+# AODD digest (2026-05-23): sha256:60d1dbefeabf...
 image = "axllent/mailpit:latest"
 port = 8025
 env = {}

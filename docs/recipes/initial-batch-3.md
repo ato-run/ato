@@ -7,6 +7,9 @@ Ato version: v0.5.2
 
 ## Summary
 
+> **Note:** For consolidated catalog status, see [initial-catalog-status.md](./initial-catalog-status.md).
+> For secret cleanup plan, see [secret-cleanup-plan.md](./secret-cleanup-plan.md).
+
 All 5 Batch 3 recipe targets achieved clean AODD pass. Batch 3 covers the
 "easy-win catalog" tier: stateless utilities (Stirling-PDF, pgweb), lightweight
 single-container apps (shiori), AI showcase (lobe-chat), and mid-complexity

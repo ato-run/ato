@@ -9,8 +9,8 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-# Pin note: `:latest` used for initial AODD run
-# Follow-up: pin to ghcr.io/gethomepage/homepage:<version>
+# Pin note: proposed pin to ghcr.io/gethomepage/homepage:v1.2.1 — not yet AODD-confirmed
+# AODD digest (2026-05-23): sha256:8e5f595273f0...
 image = "ghcr.io/gethomepage/homepage:latest"
 port = 3000
 env = {}
