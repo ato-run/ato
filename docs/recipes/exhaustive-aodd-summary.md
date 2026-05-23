@@ -113,3 +113,27 @@ Single-container easy wins (no runtime blocker):
 - vikunja (task manager — just needs readiness fix)
 - photoprism (photo manager — just needs pull budget)
 - mindsdb (AI SQL — just needs slim image)
+
+---
+
+## Retry after depends_on + readiness timing
+
+After merging `feat/runtime-depends_on`, `feat/runtime-readiness-timing`:
+
+| App | Previous status | New status | What changed | Startup | Endpoint | Remaining blocker |
+|---|---|---|---|---:|---|---|
+| umami | blocked | **pass** | `depends_on`, exec probes, `timeout_seconds=300` | ~90s | HTTP 200 | none |
+| paperless-ngx | blocked | **pass** | New recipe: exec probes, `depends_on=[db,redis]`, `timeout_seconds=300` | ~90s | HTTP 302→200 | none |
+| outline | blocked | **pass** | New recipe: v0.82.0, exec probes, `FILE_STORAGE=local`, `timeout_seconds=300` | ~90s | HTTP 200 | none |
+| langfuse | blocked | **blocked** | Recipe fixed but image is amd64-only; Ato resolver fails on arm64 host | — | — | Ato runtime: single-arch image on mismatched arch |
+| twenty | blocked | **blocked** | New recipe valid but image is private (403) | — | — | Upstream: private Docker image |
+| dify | blocked | **not-attempted** | Multi-arch confirmed; 10-service stack deferred | — | — | Separate spike needed |
+
+### Unblocked by this work: 3 of 5 primary targets
+
+### Open issues surfaced
+
+1. **Ato single-arch image resolver** — Ato rejects amd64-only images on arm64 host even though Podman/Docker can run them via emulation. Should emit clear error and expose `--allow-emulation` or automatic fallback.
+2. **exec probe requires port field** — Schema mandates `port` on all probe types even when exec ignores it. Consider making `port` optional for exec probes.
+3. **tcp_connect probes for internal services** — TCP probes always use `127.0.0.1:<port>` (host), so internal services not port-mapped to host will always fail. Documented; use exec probes for internal postgres/redis.
+4. **ato auto-overwrites invalid capsule.toml with --yes** — When recipe validation fails in auto-mode, Ato replaces the file. Recipe authors must validate manually before running with `--yes`.
