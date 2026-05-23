@@ -1,0 +1,31 @@
+schema_version = "0.3"
+name = "mailpit"
+version = "1.0.0"
+type = "app"
+description = "Local SMTP capture and web UI for email testing — zero config, no external dependencies"
+homepage = "https://github.com/axllent/mailpit"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Pin note: `:latest` used for initial AODD run
+# Follow-up: pin to axllent/mailpit:<version>
+image = "axllent/mailpit:latest"
+port = 8025
+env = {}
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Mailpit data directory (SQLite message store)"
+attach = "explicit"
+schema_id = "sha256:5c2fe4f3fb876a8a2c8537c99a192d1a6c447699acc416e76a9824cf6d9f0b5c"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8025" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
