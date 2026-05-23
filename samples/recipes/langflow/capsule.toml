@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "langflow"
+version = "1.1.4"
+type = "app"
+description = "Visual AI workflow builder powered by LangChain"
+homepage = "https://github.com/langflow-ai/langflow"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "langflowai/langflow:1.1.4"
+port = 7860
+env = { LANGFLOW_PORT = "7860", LANGFLOW_HOST = "0.0.0.0", LANGFLOW_DATABASE_URL = "sqlite:///./langflow.db" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "langflow flows and database"
+attach = "explicit"
+schema_id = "sha256:langflow-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/health", port = "7860", timeout_seconds = 420 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/app/langflow"
