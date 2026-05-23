@@ -57,6 +57,9 @@ use super::resolve::resolve_local_plan;
 /// - Multiple sequential launches in the same process work correctly (daemon / Desktop)
 /// - Test isolation: each test thread gets its own slot; no cross-test leakage
 /// - The context is automatically cleared when the thread terminates
+///
+/// Always use [`ScopedInstallLifecycleGuard`] to set/clear the context so it is
+/// guaranteed to be cleaned up on return, even if the run pipeline panics.
 thread_local! {
     static INSTALL_LIFECYCLE_CONTEXT: std::cell::RefCell<
         Option<crate::cli::commands::run::InstallLifecycleContext>,
@@ -69,6 +72,38 @@ pub(crate) fn set_install_lifecycle_context(
     INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
         *slot.borrow_mut() = Some(ctx);
     });
+}
+
+pub(crate) fn clear_install_lifecycle_context() {
+    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+/// RAII guard that sets the thread-local install lifecycle context on construction
+/// and clears it on `Drop`. Use this instead of calling `set_install_lifecycle_context`
+/// directly to guarantee cleanup on all return paths (including early returns and panics).
+///
+/// # Example
+///
+/// ```rust
+/// let _guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
+/// execute_run_command(...)?;
+/// // Context is cleared here automatically.
+/// ```
+pub(crate) struct ScopedInstallLifecycleGuard;
+
+impl ScopedInstallLifecycleGuard {
+    pub(crate) fn set(ctx: crate::cli::commands::run::InstallLifecycleContext) -> Self {
+        set_install_lifecycle_context(ctx);
+        ScopedInstallLifecycleGuard
+    }
+}
+
+impl Drop for ScopedInstallLifecycleGuard {
+    fn drop(&mut self) {
+        clear_install_lifecycle_context();
+    }
 }
 
 fn with_install_lifecycle_context<F, R>(f: F) -> R
@@ -4711,4 +4746,122 @@ mod tests {
             "wrapper (pid {wrapper_pid}) and/or its child listener on port {port} were not reaped within 1s of pgroup stop"
         );
     }
+    // ── CIK backfill tests ──────────────────────────────────────────────────
+
+    fn minimal_session_record_with_exec(exec_id: Option<&str>) -> StoredSessionInfo {
+        // Build the minimal required JSON and deserialize — avoids constructing
+        // StoredSessionInfo via struct literal when the schema has many required fields.
+        let exec_field = match exec_id {
+            Some(id) => format!(r#","execution_id":"{id}""#),
+            None => String::new(),
+        };
+        let json = format!(r#"{{
+            "session_id":"test_session",
+            "handle":"test/handle",
+            "normalized_handle":"test/handle",
+            "trust_state":"trusted",
+            "restricted":false,
+            "runtime":{{"target_label":"main","runtime":null,"driver":null,"language":null,"port":null}},
+            "display_strategy":"guest_webview",
+            "pid":0,
+            "log_path":"",
+            "manifest_path":"",
+            "target_label":"",
+            "notes":[],
+            "guest":null,"web":null,"terminal":null,"service":null
+            {exec_field}
+        }}"#);
+        serde_json::from_str(&json).expect("failed to build minimal session record")
+    }
+
+    /// `apply_install_lifecycle` should stamp all 5 lifecycle fields and derive
+    /// `capsule_instance_key` from the session's `execution_id` when the
+    /// thread-local context is active.
+    #[test]
+    fn apply_install_lifecycle_stamps_all_fields_and_derives_cik() {
+        use capsule_core::foundation::install_lifecycle::{
+            derive_capsule_instance_key, ExecutionId, InstallProfileKey, InstallRevisionId,
+        };
+
+        let ipk_str = "ipk_aabbccdd1122334455667788aabbccdd";
+        let rev_str = "rev_aabbccdd1122334455667788aabbccdd";
+        let exec_id_str = "exec_deadbeef1234567890abcdef0123456789ab";
+
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_aabbccdd1122334455667788aabbccdd".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: ipk_str.to_string(),
+            install_revision_id: rev_str.to_string(),
+        };
+
+        // Build a session record that already has execution_id set (simulating
+        // the case where the receipt assigned it before write_session_record).
+        let mut record = minimal_session_record_with_exec(Some(exec_id_str));
+
+        // Apply under scoped guard.
+        let _guard = ScopedInstallLifecycleGuard::set(ctx.clone());
+        apply_install_lifecycle(&mut record);
+
+        // All 4 identity fields must be stamped.
+        assert_eq!(record.installed_app_id.as_deref(), Some(ctx.installed_app_id.as_str()));
+        assert_eq!(record.install_profile_id.as_deref(), Some(ctx.install_profile_id.as_str()));
+        assert_eq!(record.install_profile_key.as_deref(), Some(ctx.install_profile_key.as_str()));
+        assert_eq!(record.install_revision_id.as_deref(), Some(ctx.install_revision_id.as_str()));
+
+        // CIK must be derived from (profile_key, revision_id, execution_id).
+        let expected_cik = derive_capsule_instance_key(
+            &InstallProfileKey::new(ipk_str.to_string()),
+            &InstallRevisionId::new(rev_str.to_string()),
+            &ExecutionId::new(exec_id_str.to_string()),
+        );
+        assert_eq!(
+            record.capsule_instance_key.as_deref(),
+            Some(expected_cik.as_str()),
+            "capsule_instance_key must be derived from the session execution_id"
+        );
+    }
+
+    /// When `execution_id` is absent at write time, `capsule_instance_key` stays
+    /// `None` (it will be back-filled when the receipt assigns the execution_id).
+    #[test]
+    fn apply_install_lifecycle_leaves_cik_none_when_no_execution_id() {
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_001".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_001".to_string(),
+            install_revision_id: "rev_001".to_string(),
+        };
+
+        let mut record = minimal_session_record_with_exec(None);
+
+        let _guard = ScopedInstallLifecycleGuard::set(ctx);
+        apply_install_lifecycle(&mut record);
+
+        assert!(
+            record.capsule_instance_key.is_none(),
+            "CIK should be None when execution_id has not been assigned yet"
+        );
+    }
+
+    /// Verify `ScopedInstallLifecycleGuard` clears the context after it is dropped.
+    #[test]
+    fn scoped_guard_clears_context_on_drop() {
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_002".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_002".to_string(),
+            install_revision_id: "rev_002".to_string(),
+        };
+
+        {
+            let _guard = ScopedInstallLifecycleGuard::set(ctx);
+            // Context is active inside this block.
+            let has_ctx = with_install_lifecycle_context(|c| c.is_some());
+            assert!(has_ctx, "context should be active after set");
+        }
+        // After drop, context must be cleared.
+        let has_ctx = with_install_lifecycle_context(|c| c.is_some());
+        assert!(!has_ctx, "ScopedInstallLifecycleGuard must clear context on drop");
+    }
+
 }

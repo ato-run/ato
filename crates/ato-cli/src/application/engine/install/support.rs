@@ -2343,6 +2343,7 @@ pub(crate) fn execute_run_command(
     cache_strategy_arg: crate::cli::shared::CacheStrategyArg,
     plan_only: bool,
     install_lifecycle_context: Option<crate::cli::commands::run::InstallLifecycleContext>,
+    pinned_revision_output_dir: Option<std::path::PathBuf>,
     reporter: std::sync::Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -2394,6 +2395,7 @@ pub(crate) fn execute_run_command(
         preview_mode: false,
         plan_only,
         install_lifecycle_context,
+        pinned_revision_output_dir,
     }))
 }
 
