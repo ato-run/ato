@@ -9,6 +9,8 @@ use super::super::theme::Theme;
 use crate::app::{NavigateToUrl, OpenCloudDock, OpenLocalRegistry, ShowSettings, SignInToAtoRun};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
 
+use super::installed_apps::render_installed_apps_section;
+
 pub(in crate::ui) fn render_launcher_panel_v2(
     state: &AppState,
     theme: &Theme,
@@ -51,7 +53,8 @@ pub(in crate::ui) fn render_launcher_panel_v2(
                         .child(render_search_bar(launcher_search))
                         .child(render_primary_actions(state))
                         .child(render_status_card(state))
-                        .child(render_app_grid()),
+                        .child(render_app_grid())
+                        .child(render_installed_apps_section_wrapper(state, theme)),
                 )
                 .child(render_bottom_bar()),
         )
@@ -539,6 +542,41 @@ fn bottom_action(label: &'static str) -> AnyElement {
         .text_color(hsla(0.0, 0.0, 0.333, 1.0))
         .child(label)
         .into_any_element()
+}
+
+fn render_installed_apps_section_wrapper(
+    _state: &AppState,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    match crate::install_lifecycle_dashboard::list_installed_apps_dashboard() {
+        Ok(mut items) => {
+            let _ = crate::install_lifecycle_dashboard::attach_running_sessions(&mut items);
+            let on_launch = |ipk: String| {
+                let ato_bin = match crate::orchestrator::resolve_ato_binary() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!("cannot resolve ato binary: {e}");
+                        return;
+                    }
+                };
+                if let Err(e) = crate::install_lifecycle_dashboard::launch_installed_app(
+                    &ato_bin,
+                    &ipk,
+                ) {
+                    tracing::error!("launch installed app {ipk}: {e}");
+                }
+            };
+            render_installed_apps_section(&items, on_launch, theme)
+        }
+        Err(e) => {
+            div()
+                .py(px(16.0))
+                .text_size(px(12.0))
+                .text_color(theme.text_tertiary)
+                .child(format!("Unable to read installed apps: {e}"))
+                .into_any_element()
+        }
+    }
 }
 
 #[cfg(test)]
