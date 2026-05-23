@@ -1,0 +1,41 @@
+schema_version = "0.3"
+name = "oci-run-once-smoke"
+version = "0.1.0"
+type = "app"
+description = "Synthetic AODD recipe for the OCI run_once lifecycle (db -> init -> app)."
+homepage = "https://github.com/ato-run/ato"
+
+default_target = "app"
+
+# Long-running dependency.
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_PASSWORD = "smoke", POSTGRES_DB = "smoke" }
+
+# One-shot init container.  Exits 0 on success → app may start.
+# Uses busybox (small + fast) so this recipe is suitable for CI smoke runs.
+[targets.init]
+runtime = "oci"
+image = "busybox:1.36"
+cmd = ["sh", "-c", "echo run_once-smoke: init step completed && exit 0"]
+run_once = true
+depends_on = ["db"]
+
+# Long-running app.  Depends on the run_once init step.
+# nginx:alpine is multi-arch (amd64/arm64) and serves `/` over HTTP — no
+# emulation needed on Apple Silicon hosts.
+[targets.app]
+runtime = "oci"
+image = "nginx:alpine"
+port = 80
+depends_on = ["init"]
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"], port = "5432" }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "80" }
