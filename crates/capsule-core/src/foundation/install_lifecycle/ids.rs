@@ -2,15 +2,24 @@
 //!
 //! # Key stability contracts
 //!
-//! | Type | Stability |
-//! |------|-----------|
-//! | [`InstalledAppId`] | Stable for the lifetime of the installed app. Generated once at first install. |
-//! | [`ProfileId`] | Stable for the lifetime of the profile (`"default"`, `"staging"`, …). |
-//! | [`InstallProfileKey`] | Derived from `installed_app_id + profile_id`. Never changes even when the revision updates. Used for shortcuts / dashboard links. |
-//! | [`InstallRevisionId`] | Changes with each new artifact push / update. Immutable revision root identifier. |
-//! | [`CapsuleInstanceKey`] | Derived from `install_profile_key + install_revision_id`. Changes when the revision changes. Used for exact session / receipt replay. |
-//! | [`ArtifactBuildId`] | Opaque build identifier produced by the artifact producer. Must NOT look like an [`ExecutionId`]. |
-//! | [`ExecutionId`] | Assigned at launch time. Has an `exec_` prefix to distinguish it from build IDs. |
+//! | Type | Shape | Stability |
+//! |------|-------|-----------|
+//! | [`InstalledAppId`] | any string | Stable for the lifetime of the installed app. Generated once at first install. |
+//! | [`ProfileId`] | any string | Stable for the lifetime of the profile (`"default"`, `"staging"`, …). |
+//! | [`InstallProfileKey`] | `ipk_<32 hex>` | Derived from `installed_app_id + profile_id`. Never changes. Used for shortcuts / dashboard links. |
+//! | [`InstallRevisionId`] | `rev_<32 hex>` | Content-addressed from `artifact_build_id`. Immutable revision root identifier. |
+//! | [`CapsuleInstanceKey`] | `cik_<32 hex>` | Derived from `install_profile_key + install_revision_id + execution_id`. Unique per launch. Used for session / receipt / exact replay. |
+//! | [`ArtifactBuildId`] | `build_<64 hex>` | Content-addressed build identifier. Must NOT look like an [`ExecutionId`]. |
+//! | [`ExecutionId`] | `exec_<32+ hex>` | Assigned at launch time. |
+//!
+//! # Separation of concerns
+//!
+//! - [`InstallProfileKey`] — stable shortcut / dashboard link; never changes across revisions.
+//! - [`InstallRevisionId`] — identifies an immutable frozen artifact revision.
+//! - [`CapsuleInstanceKey`] — identifies one specific launch invocation for receipt / replay.
+//!   Only minted at launch time when [`ExecutionId`] is known.
+//!   The [`crate::foundation::install_lifecycle::finalizer::InstallRevisionFinalizer`]
+//!   does **not** produce a [`CapsuleInstanceKey`].
 
 use std::fmt;
 
@@ -117,23 +126,42 @@ typed_id!(
 
 /// Derive the [`InstallProfileKey`] from an installed-app id and profile id.
 ///
-/// The key is the first 16 hex characters of `SHA256("ipk:" || installed_app_id || ":" || profile_id)`.
+/// Shape: `ipk_<32 hex>` = first 32 hex chars of `SHA256("ipk:<app>:<profile>")`.
 pub fn derive_install_profile_key(app: &InstalledAppId, profile: &ProfileId) -> InstallProfileKey {
     let input = format!("ipk:{}:{}", app.as_str(), profile.as_str());
-    let hash = hex_prefix(&input, 16);
-    InstallProfileKey::new(hash)
+    InstallProfileKey::new(format!("ipk_{}", hex_prefix(&input, 32)))
 }
 
-/// Derive the [`CapsuleInstanceKey`] from the profile key and a revision id.
+/// Derive the [`CapsuleInstanceKey`] from the profile key, revision, and execution id.
 ///
-/// The key is the first 16 hex characters of `SHA256("cik:" || install_profile_key || ":" || install_revision_id)`.
+/// Shape: `cik_<32 hex>` = first 32 hex chars of `SHA256("cik:<ipk>:<rev>:<exec>")`.
+///
+/// All three components are required: the same revision can be launched multiple times
+/// with different env closures / argv / policies, each producing a different `execution_id`.
+/// The `CapsuleInstanceKey` must capture that distinction for receipt / replay isolation.
 pub fn derive_capsule_instance_key(
     profile_key: &InstallProfileKey,
     revision: &InstallRevisionId,
+    execution_id: &ExecutionId,
 ) -> CapsuleInstanceKey {
-    let input = format!("cik:{}:{}", profile_key.as_str(), revision.as_str());
-    let hash = hex_prefix(&input, 16);
-    CapsuleInstanceKey::new(hash)
+    let input = format!(
+        "cik:{}:{}:{}",
+        profile_key.as_str(),
+        revision.as_str(),
+        execution_id.as_str()
+    );
+    CapsuleInstanceKey::new(format!("cik_{}", hex_prefix(&input, 32)))
+}
+
+/// Mint a deterministic [`InstallRevisionId`] from an artifact build id.
+///
+/// Shape: `rev_<32 hex>` = first 32 hex chars of `SHA256("rev:<artifact_build_id>")`.
+///
+/// Deterministic: the same `artifact_build_id` always produces the same revision id,
+/// so re-finalizing the same build is idempotent.
+pub fn revision_id_for_build(build_id: &ArtifactBuildId) -> InstallRevisionId {
+    let input = format!("rev:{}", build_id.as_str());
+    InstallRevisionId::new(format!("rev_{}", hex_prefix(&input, 32)))
 }
 
 fn hex_prefix(input: &str, chars: usize) -> String {
@@ -149,16 +177,45 @@ fn hex_encode(bytes: &[u8]) -> String {
 // ── Validation ─────────────────────────────────────────────────────────────
 
 impl ArtifactBuildId {
-    /// Returns `true` if the id has the required `build_` prefix.
+    /// Returns `Ok(())` if the id has the required shape: `build_` + exactly 64 lowercase hex chars.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_prefixed_hex(&self.0, "build_", 64)
+    }
+
+    /// Returns `true` if the id is well-formed.
     pub fn is_valid(&self) -> bool {
-        self.0.starts_with("build_")
+        self.validate().is_ok()
     }
 }
 
 impl ExecutionId {
-    /// Returns `true` if the id has the required `exec_` prefix.
+    /// Returns `Ok(())` if the id has the required shape: `exec_` + at least 32 lowercase hex chars.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.0.starts_with("exec_") {
+            return Err(format!(
+                "ExecutionId must start with 'exec_', got: {}",
+                self.0
+            ));
+        }
+        let hex_part = &self.0["exec_".len()..];
+        if hex_part.len() < 32 {
+            return Err(format!(
+                "ExecutionId hex part must be ≥32 chars, got {} chars",
+                hex_part.len()
+            ));
+        }
+        if !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "ExecutionId hex part must be lowercase hex, got: {}",
+                hex_part
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if the id is well-formed.
     pub fn is_valid(&self) -> bool {
-        self.0.starts_with("exec_")
+        self.validate().is_ok()
     }
 
     /// Returns `true` if the string looks like an execution id
@@ -168,9 +225,32 @@ impl ExecutionId {
     }
 }
 
+/// Validate shape: `<prefix>` + exactly `hex_len` lowercase hex chars.
+fn validate_prefixed_hex(s: &str, prefix: &str, hex_len: usize) -> Result<(), String> {
+    let hex_part = s
+        .strip_prefix(prefix)
+        .ok_or_else(|| format!("must start with '{}', got: {}", prefix, s))?;
+    if hex_part.len() != hex_len {
+        return Err(format!(
+            "hex part must be exactly {} chars, got {} chars in: {}",
+            hex_len,
+            hex_part.len(),
+            s
+        ));
+    }
+    if !hex_part.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+        return Err(format!("hex part must be lowercase hex, got: {}", s));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_exec_id() -> ExecutionId {
+        ExecutionId::new(format!("exec_{}", "a".repeat(32)))
+    }
 
     // ── install_profile_key stability ──────────────────────────────────────
 
@@ -178,18 +258,25 @@ mod tests {
     fn install_profile_key_stable_across_revisions() {
         let app = InstalledAppId::new("app_abc123");
         let profile = ProfileId::new("default");
+        let exec_a = ExecutionId::new(format!("exec_{}", "a".repeat(32)));
+        let exec_b = ExecutionId::new(format!("exec_{}", "b".repeat(32)));
 
         let rev_a = InstallRevisionId::new("rev_001");
         let rev_b = InstallRevisionId::new("rev_002");
 
         let key = derive_install_profile_key(&app, &profile);
+        assert!(
+            key.as_str().starts_with("ipk_"),
+            "profile key must have ipk_ prefix"
+        );
+        assert_eq!(key.as_str().len(), 4 + 32, "ipk_ + 32 hex chars expected");
 
         // The profile key itself is revision-independent.
         assert_eq!(key, derive_install_profile_key(&app, &profile));
 
         // Deriving capsule_instance_key with different revisions gives different keys.
-        let ck_a = derive_capsule_instance_key(&key, &rev_a);
-        let ck_b = derive_capsule_instance_key(&key, &rev_b);
+        let ck_a = derive_capsule_instance_key(&key, &rev_a, &exec_a);
+        let ck_b = derive_capsule_instance_key(&key, &rev_b, &exec_b);
         assert_ne!(ck_a, ck_b, "instance key must change when revision changes");
     }
 
@@ -203,17 +290,64 @@ mod tests {
         assert_eq!(key1, key2, "profile key must not change between calls");
     }
 
-    // ── capsule_instance_key changes with revision ─────────────────────────
+    // ── capsule_instance_key requires all 3 components ─────────────────────
 
     #[test]
     fn capsule_instance_key_changes_with_revision() {
         let app = InstalledAppId::new("app_xyz");
         let profile = ProfileId::new("default");
         let key = derive_install_profile_key(&app, &profile);
+        let exec = make_exec_id();
 
-        let ck1 = derive_capsule_instance_key(&key, &InstallRevisionId::new("rev_1"));
-        let ck2 = derive_capsule_instance_key(&key, &InstallRevisionId::new("rev_2"));
-        assert_ne!(ck1, ck2);
+        let ck1 = derive_capsule_instance_key(&key, &InstallRevisionId::new("rev_1"), &exec);
+        let ck2 = derive_capsule_instance_key(&key, &InstallRevisionId::new("rev_2"), &exec);
+        assert_ne!(
+            ck1, ck2,
+            "different revisions must produce different instance keys"
+        );
+    }
+
+    #[test]
+    fn capsule_instance_key_changes_with_execution_id() {
+        let app = InstalledAppId::new("app_xyz");
+        let profile = ProfileId::new("default");
+        let key = derive_install_profile_key(&app, &profile);
+        let rev = InstallRevisionId::new("rev_42");
+
+        let exec1 = ExecutionId::new(format!("exec_{}", "1".repeat(32)));
+        let exec2 = ExecutionId::new(format!("exec_{}", "2".repeat(32)));
+
+        let ck1 = derive_capsule_instance_key(&key, &rev, &exec1);
+        let ck2 = derive_capsule_instance_key(&key, &rev, &exec2);
+        assert_ne!(
+            ck1, ck2,
+            "same revision but different execution ids must produce different instance keys"
+        );
+    }
+
+    #[test]
+    fn capsule_instance_key_stable_for_same_triple() {
+        let app = InstalledAppId::new("app_stable");
+        let profile = ProfileId::new("default");
+        let key = derive_install_profile_key(&app, &profile);
+        let rev = InstallRevisionId::new("rev_42");
+        let exec = make_exec_id();
+
+        let ck1 = derive_capsule_instance_key(&key, &rev, &exec);
+        let ck2 = derive_capsule_instance_key(&key, &rev, &exec);
+        assert_eq!(ck1, ck2, "same triple must produce stable instance key");
+    }
+
+    #[test]
+    fn capsule_instance_key_has_cik_prefix() {
+        let app = InstalledAppId::new("app_prefix");
+        let profile = ProfileId::new("default");
+        let key = derive_install_profile_key(&app, &profile);
+        let rev = InstallRevisionId::new("rev_1");
+        let exec = make_exec_id();
+        let ck = derive_capsule_instance_key(&key, &rev, &exec);
+        assert!(ck.as_str().starts_with("cik_"), "must have cik_ prefix");
+        assert_eq!(ck.as_str().len(), 4 + 32, "cik_ + 32 hex expected");
     }
 
     // ── shortcut / dashboard uses install_profile_key ─────────────────────
@@ -225,8 +359,6 @@ mod tests {
         let app = InstalledAppId::new("app_shortcut");
         let profile = ProfileId::new("default");
         let key_at_install = derive_install_profile_key(&app, &profile);
-
-        // After update to rev_2 the profile key is unchanged.
         let key_after_update = derive_install_profile_key(&app, &profile);
         assert_eq!(key_at_install, key_after_update);
     }
@@ -239,35 +371,73 @@ mod tests {
         let profile = ProfileId::new("default");
         let key = derive_install_profile_key(&app, &profile);
         let rev = InstallRevisionId::new("rev_42");
-        let instance_key = derive_capsule_instance_key(&key, &rev);
-
-        // The instance key encodes both profile and revision.
+        let exec = make_exec_id();
+        let instance_key = derive_capsule_instance_key(&key, &rev, &exec);
         assert!(!instance_key.as_str().is_empty());
     }
 
-    // ── artifact_build_id rejects execution_id prefix ─────────────────────
+    // ── revision_id_for_build ──────────────────────────────────────────────
+
+    #[test]
+    fn revision_id_deterministic() {
+        let build_id = ArtifactBuildId::new(format!("build_{}", "a".repeat(64)));
+        let r1 = revision_id_for_build(&build_id);
+        let r2 = revision_id_for_build(&build_id);
+        assert_eq!(r1, r2, "same build id must always produce same revision id");
+        assert!(r1.as_str().starts_with("rev_"), "must have rev_ prefix");
+        assert_eq!(r1.as_str().len(), 4 + 32, "rev_ + 32 hex expected");
+    }
+
+    #[test]
+    fn revision_id_different_for_different_builds() {
+        let b1 = ArtifactBuildId::new(format!("build_{}", "a".repeat(64)));
+        let b2 = ArtifactBuildId::new(format!("build_{}", "b".repeat(64)));
+        assert_ne!(revision_id_for_build(&b1), revision_id_for_build(&b2));
+    }
+
+    // ── artifact_build_id validation ───────────────────────────────────────
 
     #[test]
     fn artifact_build_id_valid() {
-        let id = ArtifactBuildId::new("build_abc");
+        let id = ArtifactBuildId::new(format!("build_{}", "a".repeat(64)));
         assert!(id.is_valid());
     }
 
     #[test]
     fn artifact_build_id_invalid_when_exec_prefix() {
-        let id = ArtifactBuildId::new("exec_abc");
+        let id = ArtifactBuildId::new(format!("exec_{}", "a".repeat(64)));
         assert!(!id.is_valid(), "build id must not have exec_ prefix");
     }
 
     #[test]
+    fn artifact_build_id_invalid_when_hex_too_short() {
+        let id = ArtifactBuildId::new("build_abc");
+        assert!(!id.is_valid(), "build id hex part must be 64 chars");
+    }
+
+    #[test]
+    fn artifact_build_id_invalid_when_uppercase_hex() {
+        let id = ArtifactBuildId::new(format!("build_{}", "A".repeat(64)));
+        assert!(!id.is_valid(), "build id hex must be lowercase");
+    }
+
+    // ── execution_id validation ────────────────────────────────────────────
+
+    #[test]
     fn execution_id_valid() {
-        let id = ExecutionId::new("exec_abc");
+        let id = ExecutionId::new(format!("exec_{}", "a".repeat(32)));
         assert!(id.is_valid());
     }
 
     #[test]
     fn execution_id_invalid_when_build_prefix() {
-        let id = ExecutionId::new("build_abc");
+        let id = ExecutionId::new(format!("build_{}", "a".repeat(32)));
+        assert!(!id.is_valid());
+    }
+
+    #[test]
+    fn execution_id_invalid_when_hex_too_short() {
+        let id = ExecutionId::new("exec_abc");
         assert!(!id.is_valid());
     }
 

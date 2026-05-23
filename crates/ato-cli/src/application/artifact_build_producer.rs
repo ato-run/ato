@@ -136,6 +136,12 @@ pub(crate) fn validate_artifact_build_producer_request(
     if looks_like_execution_id(&request.artifact_build_id) {
         anyhow::bail!("artifact_build_id must not carry an execution_id identity");
     }
+    if !request.artifact_build_id.starts_with("build_") {
+        anyhow::bail!(
+            "artifact_build_id must start with 'build_', got: {}",
+            &request.artifact_build_id
+        );
+    }
     ensure_not_empty("source_tree_hash", &request.source_tree_hash)?;
     ensure_not_empty("recipe_digest", &request.recipe_digest)?;
     ensure_not_empty("target_label", &request.target_label)?;
@@ -230,7 +236,7 @@ fn artifact_build_id_for_observation(
     update_platform_profile(&mut hasher, platform_profile);
     update_text(&mut hasher, MATERIALIZER_SCHEMA_VERSION);
     update_text(&mut hasher, PROJECTION_ALGORITHM_VERSION);
-    format!("artifact-build-v1:{}", hasher.finalize().to_hex())
+    format!("build_{}", hasher.finalize().to_hex())
 }
 
 fn validate_source(source: &ArtifactBuildSourceRef) -> Result<()> {
@@ -314,9 +320,15 @@ fn ensure_not_empty(field: &str, value: &str) -> Result<()> {
 
 fn looks_like_execution_id(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
-    ["execution:", "execution-id:", "execution_id:", "exec:"]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix))
+    [
+        "execution:",
+        "execution-id:",
+        "execution_id:",
+        "exec:",
+        "exec_",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
 }
 
 fn is_full_git_commit_hash(value: &str) -> bool {
@@ -462,7 +474,8 @@ mod tests {
     fn minimal_request() -> ArtifactBuildProducerRequest {
         ArtifactBuildProducerRequest {
             schema_version: PRODUCER_REQUEST_SCHEMA_VERSION.to_string(),
-            artifact_build_id: "artifact-build-v1:abc123artifact".to_string(),
+            artifact_build_id: "build_abc123artifactabc123artifactabc123artifactabc123artifactabc1"
+                .to_string(),
             materialization_key: "blake3:materialization".to_string(),
             source: github_source(),
             source_tree_hash: "blake3:source".to_string(),

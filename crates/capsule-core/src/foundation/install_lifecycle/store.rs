@@ -331,10 +331,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::foundation::install_lifecycle::ids::{
-        derive_capsule_instance_key, derive_install_profile_key, InstallRevisionId, InstalledAppId,
-        ProfileId,
-    };
+    use crate::foundation::install_lifecycle::ids::{InstalledAppId, ProfileId};
 
     fn temp_store() -> (tempfile::TempDir, InstallInstanceStore) {
         let dir = tempfile::tempdir().unwrap();
