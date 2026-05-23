@@ -1186,7 +1186,10 @@ pub fn run(skip_onboarding: bool) {
                             return;
                         }
                         match crate::window::open_configured_startup_surface(cx, startup_surface) {
-                            Ok(_) => tracing::info!(?startup_surface, "Startup surface opened"),
+                            Ok(_) => {
+                                tracing::info!(?startup_surface, "Startup surface opened");
+                                crate::install_lifecycle_dashboard::DashboardCache::refresh();
+                            }
                             Err(err) => {
                                 tracing::error!(error = %err, ?startup_surface, "Startup surface failed")
                             }
