@@ -633,4 +633,69 @@ run_command = "main.py"
         assert_eq!(spec.command, "main.py");
         assert_eq!(spec.required_lockfile, Some(tmp.path().join("uv.lock")));
     }
+
+    // ── OCI-specific launch spec tests ───────────────────────────────────────
+
+    #[test]
+    fn oci_without_entrypoint_returns_stub_spec() {
+        // OCI images with a built-in CMD/ENTRYPOINT must succeed even when
+        // the recipe declares no explicit entrypoint or run_command.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "oci"
+image = "nginx:latest"
+port = 80
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("OCI without entrypoint must succeed");
+        assert_eq!(spec.runtime.as_deref(), Some("oci"));
+        assert!(
+            spec.required_lockfile.is_none(),
+            "OCI stub must not require a lockfile"
+        );
+    }
+
+    #[test]
+    fn oci_explicit_entrypoint_overrides_builtin_cmd() {
+        // When a recipe declares an explicit entrypoint for an OCI target,
+        // that value must be used as the launch command.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "oci"
+image = "nginx:latest"
+entrypoint = "/custom/start.sh"
+"#,
+        );
+        let spec = derive_launch_spec(&plan).expect("OCI with entrypoint must succeed");
+        assert_eq!(spec.command, "/custom/start.sh");
+        assert_eq!(spec.source, LaunchSpecSource::Entrypoint);
+        assert_eq!(spec.runtime.as_deref(), Some("oci"));
+    }
+
+    #[test]
+    fn non_oci_source_without_entrypoint_or_run_command_fails() {
+        // Native/source targets that omit both entrypoint and run_command must
+        // be rejected — the OCI stub path must not be taken for non-OCI runtimes.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plan = plan_from_manifest(
+            &tmp,
+            r#"
+[targets.app]
+runtime = "source"
+driver = "node"
+"#,
+        );
+        let err = derive_launch_spec(&plan).expect_err("source without command must fail");
+        assert!(
+            err.to_string()
+                .contains("requires entrypoint or run_command"),
+            "unexpected error: {err}"
+        );
+    }
 }
