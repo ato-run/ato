@@ -572,7 +572,7 @@ fn readiness_probe_ok(probe: &capsule_core::types::ReadinessProbe, port: u16) ->
         return Ok(tcp_probe(target, port));
     }
     Err(AtoExecutionError::execution_contract_invalid(
-        "readiness_probe must define http_get or tcp_connect",
+        "readiness_probe must define http_get, tcp_connect, or exec",
         Some("readiness_probe"),
         None,
     )

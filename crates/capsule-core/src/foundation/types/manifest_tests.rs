@@ -1704,7 +1704,7 @@ readiness_probe = { port = "API_PORT" }
     assert!(errors.iter().any(|e| matches!(
         e,
         ValidationError::InvalidService(name, msg)
-            if name == "api" && msg.contains("http_get or tcp_connect")
+            if name == "api" && (msg.contains("http_get or tcp_connect") || msg.contains("http_get, tcp_connect, or exec"))
     )));
 }
 
