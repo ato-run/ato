@@ -548,9 +548,8 @@ fn render_installed_apps_section_wrapper(
     _state: &AppState,
     theme: &Theme,
 ) -> gpui::AnyElement {
-    match crate::install_lifecycle_dashboard::list_installed_apps_dashboard() {
-        Ok(mut items) => {
-            let _ = crate::install_lifecycle_dashboard::attach_running_sessions(&mut items);
+    match crate::install_lifecycle_dashboard::DashboardCache::get() {
+        Ok(items) => {
             let on_launch = |ipk: String| {
                 let ato_bin = match crate::orchestrator::resolve_ato_binary() {
                     Ok(p) => p,
@@ -559,12 +558,16 @@ fn render_installed_apps_section_wrapper(
                         return;
                     }
                 };
-                if let Err(e) = crate::install_lifecycle_dashboard::launch_installed_app(
-                    &ato_bin,
-                    &ipk,
-                ) {
-                    tracing::error!("launch installed app {ipk}: {e}");
-                }
+                crate::install_lifecycle_dashboard::launch_installed_app_background(
+                    ato_bin,
+                    ipk,
+                    |result| {
+                        if let Err(e) = result {
+                            tracing::error!("launch installed app: {e}");
+                        }
+                        crate::install_lifecycle_dashboard::DashboardCache::refresh();
+                    },
+                );
             };
             render_installed_apps_section(&items, on_launch, theme)
         }
