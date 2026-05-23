@@ -178,7 +178,35 @@ fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleE
             let Some(target_table) = target_value.as_table() else {
                 continue;
             };
+            let is_oci_target = target_table
+                .get("runtime")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .is_some_and(|r| r == "oci" || r.starts_with("oci/"));
             for field in ["entrypoint", "cmd"] {
+                // OCI targets may use `cmd` to override the container CMD;
+                // only source/native targets must use `run` instead.
+                if field == "cmd" && is_oci_target {
+                    // Validate that cmd is a non-empty array, not a shell string.
+                    if let Some(cmd_value) = target_table.get("cmd") {
+                        match cmd_value {
+                            toml::Value::Array(arr) if arr.is_empty() => {
+                                return Err(CapsuleError::ParseError(format!(
+                                    "schema_version=0.3 target '{}': 'cmd' must not be empty",
+                                    target_name
+                                )));
+                            }
+                            toml::Value::String(_) => {
+                                return Err(CapsuleError::ParseError(format!(
+                                    "schema_version=0.3 target '{}': 'cmd' must be an array, not a shell string",
+                                    target_name
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 if target_table
                     .get(field)
                     .is_some_and(is_non_empty_legacy_value)

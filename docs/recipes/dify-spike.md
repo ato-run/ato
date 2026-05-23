@@ -59,7 +59,7 @@ main/web (langgenius/dify-web:1.14.2, amd64, emulated)
 | `SECRET_KEY` | `sk-demo-changeme-...` | **Demo placeholder; must be replaced for production** |
 | `DB_PASSWORD` | `difyai123456` | Demo value from upstream compose |
 | `WEAVIATE_API_KEY` | `WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih` | Upstream default demo key |
-| `REDIS_PASSWORD` | `""` (empty) | Redis runs without requirepass (see v0.3 cmd override limitation) |
+| `REDIS_PASSWORD` | `difyai123456` | Redis started with `requirepass` via cmd override |
 | `CONSOLE_API_URL` | `""` (empty) | Relative URL fallback; see limitation below |
 
 ---
@@ -88,7 +88,7 @@ ato run samples/recipes/dify \
 | Service | Probe | Notes |
 |---|---|---|
 | `db` | `exec ["pg_isready", "-U", "postgres"]` | Exec, no port required |
-| `redis` | `exec ["redis-cli", "ping"]` | Exec; no password since requirepass not configured |
+| `redis` | `exec ["redis-cli", "-a", "difyai123456", "ping"]` | Exec with password; requirepass configured via cmd override |
 | `weaviate` | `http_get /v1/.well-known/ready` | HTTP |
 | `api` | `http_get /health`, timeout 300s | HTTP; slow first start due to migrations + emulation |
 | `main` | `http_get /`, timeout 180s | HTTP; Next.js SSR page |
@@ -97,9 +97,9 @@ ato run samples/recipes/dify \
 
 ## AODD Result
 
-**Run date:** 2026-05-23  
-**Host:** macOS arm64 (Apple Silicon)  
-**Platform:** `linux/amd64` via `allow_emulation = true`  
+**Run date:** 2026-05-23
+**Host:** macOS arm64 (Apple Silicon)
+**Platform:** `linux/amd64` via `allow_emulation = true`
 
 ### Startup sequence
 
@@ -164,29 +164,27 @@ Warm restart (images cached): ~3 min.
 
 Without nginx, the Dify web's browser-side `fetch` calls to `/console/api/*` resolve relative to the web container's origin. SSR pages render correctly but client-side interactions that call the API directly may fail because the Next.js app expects `CONSOLE_API_URL` to be set to an absolute URL.
 
-**Classification:** Ato architecture — no ingress/proxy layer in v0.3.  
-**Workaround:** Set `CONSOLE_API_URL=http://host-ip:PORT` with a pinned host port (requires static port mapping, not yet in Ato).  
+**Classification:** Ato architecture — no ingress/proxy layer in v0.3.
+**Workaround:** Set `CONSOLE_API_URL=http://host-ip:PORT` with a pinned host port (requires static port mapping, not yet in Ato).
 **Follow-up:** Ingress/proxy layer, or static port assignment in recipe.
 
 ### B2: `init_permissions` one-shot service (Ato missing feature)
 
 Dify's upstream compose runs `init_permissions` as a one-shot container: `chown -R 1001:1001 /app/api/storage`. Without it, the `api-storage` volume (initially owned by root) may reject writes from the api process (uid 1001). File uploads are not tested in this spike.
 
-**Classification:** Ato missing feature — no `run_once`/one-shot service support.  
+**Classification:** Ato missing feature — no `run_once`/one-shot service support.
 **Follow-up:** Add `lifecycle = "run_once"` or `one_shot = true` to named targets.
 
-### B3: v0.3 cannot override Docker CMD (Ato missing feature)
+### B3: ~~v0.3 cannot override Docker CMD~~ ✅ Resolved
 
-The v0.3 schema rejects `cmd` in named OCI targets. This means Redis cannot be started with `redis-server --requirepass <password>`. As a result, Redis runs without authentication, and `REDIS_PASSWORD` must be set to `""` on api/worker.
-
-**Classification:** Ato missing feature — cmd override in v0.3 OCI named targets.  
-**Follow-up:** Add `cmd = [...]` support to v0.3 named OCI targets, or a `command` array field.
+**Resolved in `feat/runtime-oci-command-override`.**
+v0.3 now allows `cmd = [...]` on OCI-typed named targets. Redis is now started with `redis-server --requirepass difyai123456`, and `REDIS_PASSWORD` on api/worker is set to match. The readiness probe now uses `redis-cli -a difyai123456 ping`.
 
 ### B4: Shared mutable state (Ato design constraint)
 
 Dify's `api` and `worker` containers share the same named volume for `/app/api/storage` in upstream compose. Ato does not support shared mutable state across services — only `api` (mapped via `services.main`) gets the `api-storage` binding. Worker file operations that write to this path will not be persisted.
 
-**Classification:** Ato design constraint.  
+**Classification:** Ato design constraint.
 **Follow-up:** Consider a `shared_state` or `state_group` concept for read-write volumes shared across services.
 
 ---
@@ -198,7 +196,7 @@ These are new findings from this spike:
 | Finding | Impact |
 |---|---|
 | `tcp_connect` probe requires placeholder name, not port number | Minor — use exec probe for Redis instead |
-| v0.3 rejects `cmd` in named OCI targets | Blocks Redis password config, any CMD override |
+| ~~v0.3 rejects `cmd` in named OCI targets~~ | ✅ Resolved — `cmd` now allowed for OCI targets |
 | No `run_once`/one-shot service | Blocks `init_permissions` pattern (common in multi-service apps) |
 | Shared mutable state not supported | Worker/api storage sharing is impossible |
 | `allow_emulation = true` required for amd64-only images | Works but adds ~30% overhead on arm64 |
