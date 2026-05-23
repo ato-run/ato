@@ -9,6 +9,8 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
+# Pin note: `:latest` is used for now; AODD digest sha256:10bb1df216...4a556
+# Follow-up: pin to a stable version tag (e.g. n8nio/n8n:1.93.0)
 image = "n8nio/n8n:latest"
 port = 5678
 env = { N8N_PORT = "5678", N8N_HOST = "0.0.0.0", N8N_PROTOCOL = "http", GENERIC_TIMEZONE = "UTC", TZ = "UTC" }

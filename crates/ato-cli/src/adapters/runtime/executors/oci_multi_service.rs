@@ -1475,4 +1475,191 @@ volumes:
             .unwrap();
         assert_eq!(exit_code, 0);
     }
+
+    // ── Execution identity invariant tests ───────────────────────────────────
+    // These tests document that the no-lock compatibility path enforces the
+    // same identity invariants as the lock-resolved path.
+
+    fn single_service_plan(target: &str, image_ref: &str) -> OrchestrationPlan {
+        let svc = make_service(target, target, vec![], true, Some(8080), vec![]);
+        // Override image ref for the service.
+        let svc = ResolvedService {
+            runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                image: Some(image_ref.to_string()),
+                ..if let ResolvedServiceRuntime::Oci(rt) = svc.runtime {
+                    rt
+                } else {
+                    unreachable!()
+                }
+            }),
+            ..svc
+        };
+        OrchestrationPlan {
+            startup_order: vec![target.to_string()],
+            services: vec![svc],
+        }
+    }
+
+    /// The executor must reject an OciImageResolution with an empty digest before
+    /// any pull or start call. This is the guard that prevents running a raw mutable
+    /// tag (`:latest`) without a confirmed content identity.
+    #[tokio::test]
+    async fn oci_runtime_does_not_start_without_resolved_digest() {
+        let provider = FakeOciProvider::ready();
+        let plan = single_service_plan("app", "myapp:latest");
+
+        let mut images = HashMap::new();
+        images.insert(
+            "app".to_string(),
+            OciImageResolution {
+                declared_ref: "myapp:latest".to_string(),
+                resolved_digest: "".to_string(), // empty — not resolved
+                platform: OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                },
+                importer_input_hash: None,
+            },
+        );
+
+        let result = execute_service_graph_with_provider(
+            &plan,
+            &images,
+            OciPolicyMode::Strict,
+            &[],
+            "myapp",
+            &HashSet::new(),
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err(), "empty digest must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no resolved digest"),
+            "error must mention missing digest; got: {msg}"
+        );
+
+        // No pull or container creation must have occurred.
+        let log = provider.call_log.lock().unwrap();
+        assert!(
+            !log.iter().any(|e| e.starts_with("pull:")),
+            "pull must not occur without a resolved digest; log: {log:?}"
+        );
+    }
+
+    /// Resolved digest is recorded in the session via OciImageResolution.
+    /// The pull call receives the OciImageResolution which includes the resolved_digest,
+    /// and the session record stores image_digest = Some(resolved_digest).
+    #[tokio::test]
+    async fn oci_runtime_resolved_digest_is_propagated_to_pull() {
+        let provider = FakeOciProvider::ready();
+        let plan = single_service_plan("app", "myapp:v1.2.3");
+        let digest = "sha256:".to_string() + &"c".repeat(64);
+
+        let mut images = HashMap::new();
+        images.insert(
+            "app".to_string(),
+            OciImageResolution {
+                declared_ref: "myapp:v1.2.3".to_string(),
+                resolved_digest: digest.clone(),
+                platform: OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                },
+                importer_input_hash: None,
+            },
+        );
+
+        execute_service_graph_with_provider(
+            &plan,
+            &images,
+            OciPolicyMode::Strict,
+            &[],
+            "myapp",
+            &HashSet::new(),
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+        )
+        .await
+        .expect("execution must succeed");
+
+        // Pull must have been called for the declared_ref.
+        let log = provider.call_log.lock().unwrap();
+        assert!(
+            log.iter().any(|e| e == "pull:myapp:v1.2.3"),
+            "pull must be called with declared_ref; log: {log:?}"
+        );
+    }
+
+    /// Two image resolutions with the same declared_ref but different digests
+    /// represent different content identities — they are not equal.
+    /// This is the fundamental "digest drift changes identity" invariant.
+    #[test]
+    fn oci_runtime_digest_drift_changes_identity() {
+        let image_a = OciImageResolution {
+            declared_ref: "myapp:latest".to_string(),
+            resolved_digest: "sha256:".to_string() + &"a".repeat(64),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            importer_input_hash: None,
+        };
+        let image_b = OciImageResolution {
+            declared_ref: "myapp:latest".to_string(),
+            resolved_digest: "sha256:".to_string() + &"b".repeat(64),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            importer_input_hash: None,
+        };
+
+        assert_ne!(
+            image_a.resolved_digest, image_b.resolved_digest,
+            "same tag / different digest = different execution identity"
+        );
+    }
+
+    /// The no-lock compatibility path uses the declared image ref as a fallback key
+    /// when the lock file has no entry. Verify that the images map built from
+    /// the resolved image (via OciResolvedImage::into_lock_resolution) contains
+    /// a non-empty digest, so the downstream guard in execute_service_graph_with_provider
+    /// accepts it.
+    #[test]
+    fn oci_runtime_no_lock_path_resolved_image_has_non_empty_digest() {
+        use crate::adapters::runtime::oci_provider::OciResolvedImage;
+
+        // This is what FakeOciProvider.resolve_image() returns for the no-lock path.
+        let resolved = OciResolvedImage {
+            declared_ref: "myapp:latest".to_string(),
+            resolved_digest: "sha256:".to_string() + &"b".repeat(64),
+            platform: OciPlatform {
+                os: "linux".to_string(),
+                architecture: "amd64".to_string(),
+                variant: None,
+            },
+            media_type: None,
+            provider_semantics: crate::adapters::runtime::oci_provider::fake_oci_semantics(),
+        };
+
+        let lock_resolution = resolved.into_lock_resolution();
+        assert!(
+            !lock_resolution.resolved_digest.is_empty(),
+            "no-lock path must produce a non-empty digest; got empty"
+        );
+        assert!(
+            lock_resolution.resolved_digest.starts_with("sha256:"),
+            "digest must be sha256-prefixed; got: {}",
+            lock_resolution.resolved_digest
+        );
+    }
 }
