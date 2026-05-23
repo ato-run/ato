@@ -456,10 +456,6 @@ pub(crate) enum Commands {
         /// Install profile key (`ipk_<32hex>`) from `ato install` output
         install_profile_key: String,
 
-        /// Load environment variables from a .env-style file
-        #[arg(long = "env-file", value_name = "PATH")]
-        env_file: Option<PathBuf>,
-
         /// Skip interactive prompts and assume yes
         #[arg(short = 'y', long = "yes", default_value_t = false)]
         yes: bool,
