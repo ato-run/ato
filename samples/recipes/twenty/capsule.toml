@@ -41,7 +41,7 @@ schema_id = "sha256:twenty-storage-v1"
 
 [services.db]
 target = "db"
-readiness_probe = { exec = ["pg_isready", "-U", "twenty"], port = "5432" }
+readiness_probe = { exec = ["pg_isready", "-U", "twenty"] }
 
 [services.redis]
 target = "redis"
@@ -50,7 +50,7 @@ readiness_probe = { exec = ["redis-cli", "ping"], initial_delay_seconds = 2 }
 # twenty-server runs DB migrations on first boot then starts API + worker.
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/healthz", port = "3000", timeout_seconds = 180 }
+readiness_probe = { http_get = "/healthz", timeout_seconds = 180 }
 
 [[services.main.state_bindings]]
 state = "db-data"
