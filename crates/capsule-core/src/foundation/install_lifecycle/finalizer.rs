@@ -108,9 +108,9 @@ impl<'s> InstallRevisionFinalizer<'s> {
         // 3. Scaffold the immutable revision root.
         self.store.scaffold_revision(&install_revision_id)?;
 
-        // 4. Copy (or hard-link) build output into the frozen revision output dir.
+        // 4. Copy build output into the frozen revision output dir (safe copy).
         let rev_output = self.store.revision_output_dir(&install_revision_id);
-        copy_dir_all(&input.output_dir, &rev_output).with_context(|| {
+        safe_copy_output_tree(&input.output_dir, &rev_output).with_context(|| {
             format!(
                 "copy build output {} → {}",
                 input.output_dir.display(),
@@ -191,17 +191,78 @@ fn iso8601_now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Recursively copy `src` into `dst`.
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
+/// Safely copy the build output tree into a frozen revision directory.
+///
+/// Safety rules:
+/// - Symlinks are rejected (could point outside the revision root).
+/// - Special files (block devices, char devices, FIFOs, sockets) are rejected.
+/// - On Unix, hard-linked files (`nlink > 1`) are rejected to avoid aliasing.
+/// - Path traversal components (`..`) are rejected.
+/// - If destination already exists it is overwritten (idempotent re-finalization).
+fn safe_copy_output_tree(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    // Reject path traversal in source root itself.
+    for comp in src.components() {
+        if comp == std::path::Component::ParentDir {
+            anyhow::bail!("path traversal in source path: {}", src.display());
+        }
+    }
+    safe_copy_output_tree_inner(src, dst, src)
+}
+
+fn safe_copy_output_tree_inner(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    root: &std::path::Path,
+) -> Result<()> {
+    fs::create_dir_all(dst).with_context(|| format!("create output dir {}", dst.display()))?;
+
+    for entry in fs::read_dir(src).with_context(|| format!("read dir {}", src.display()))? {
         let entry = entry?;
-        let target = dst.join(entry.file_name());
-        let ft = entry.file_type()?;
+        let name = entry.file_name();
+
+        // Reject path traversal component names.
+        if name == ".." || name == "." {
+            anyhow::bail!("rejected path traversal entry: {:?}", name);
+        }
+
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+
+        // Use symlink_metadata so we see the symlink itself, not its target.
+        let meta = fs::symlink_metadata(&src_path)
+            .with_context(|| format!("stat {}", src_path.display()))?;
+        let ft = meta.file_type();
+
+        if ft.is_symlink() {
+            anyhow::bail!(
+                "symlink rejected in build output ({}); only regular files and directories are allowed",
+                src_path.strip_prefix(root).unwrap_or(&src_path).display()
+            );
+        }
+        if !ft.is_file() && !ft.is_dir() {
+            anyhow::bail!(
+                "special file rejected in build output ({}); only regular files and directories are allowed",
+                src_path.strip_prefix(root).unwrap_or(&src_path).display()
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if ft.is_file() && meta.nlink() > 1 {
+                anyhow::bail!(
+                    "hard-linked file rejected in build output ({}); nlink={}",
+                    src_path.strip_prefix(root).unwrap_or(&src_path).display(),
+                    meta.nlink()
+                );
+            }
+        }
+
         if ft.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
+            safe_copy_output_tree_inner(&src_path, &dst_path, root)?;
         } else {
-            fs::copy(entry.path(), &target)?;
+            fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("copy {} → {}", src_path.display(), dst_path.display()))?;
         }
     }
     Ok(())
@@ -407,5 +468,54 @@ mod tests {
             .join("source_provenance")
             .join("provenance.json")
             .exists());
+    }
+
+    // ── safe_copy_output_tree ─────────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_copy_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        // Create a symlink inside the source tree.
+        symlink("/etc/passwd", src.join("evil_link")).unwrap();
+        let dst = dir.path().join("dst");
+        let err = safe_copy_output_tree(&src, &dst);
+        assert!(err.is_err(), "symlink should be rejected");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("symlink"), "error must mention symlink");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn safe_copy_rejects_hardlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        let real_file = dir.path().join("real.txt");
+        fs::write(&real_file, b"hello").unwrap();
+        // Create a hard link inside the source tree (nlink == 2).
+        fs::hard_link(&real_file, src.join("hardlink.txt")).unwrap();
+        let dst = dir.path().join("dst");
+        let err = safe_copy_output_tree(&src, &dst);
+        assert!(err.is_err(), "hard link should be rejected");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(msg.contains("hard-link"), "error must mention hard-link");
+    }
+
+    #[test]
+    fn safe_copy_copies_regular_files_and_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let sub = src.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(src.join("a.txt"), b"aaa").unwrap();
+        fs::write(sub.join("b.txt"), b"bbb").unwrap();
+        let dst = dir.path().join("dst");
+        safe_copy_output_tree(&src, &dst).unwrap();
+        assert!(dst.join("a.txt").exists());
+        assert!(dst.join("sub").join("b.txt").exists());
     }
 }
