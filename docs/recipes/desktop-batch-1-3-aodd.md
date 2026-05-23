@@ -4,7 +4,7 @@ Validation of `ato-desktop`'s OCI session surface (PR #214) against the
 already-merged Batch 1–3 recipes (PRs #213 / #215 / #216).
 
 **Branch:** `feat/desktop-recipe-batch-aodd` (in worktree `feat/recipe-exhaustive-aodd`)
-**Base:** `origin/dev` at `cbbb5d00` (post merges of #207 + #214 + #213 + #215 + #216)
+**Validation baseline:** `origin/dev` at `cbbb5d00` (post merges of #207 + #214 + #213 + #215 + #216)
 **Platform:** Darwin arm64, macOS 26.2, Podman 5.7.1, ato 0.5.2 (from worktree build)
 **ATO_HOME policy:** per-app `$HOME/.ato-desk-recipes-<app>`. **`/tmp` is NOT used** — the macOS Podman VM does not mount `/tmp`, so state volume mounts fail with `statfs /tmp/...: no such file or directory`. `/Users` is the only mount the VM sees, so all ATO_HOMEs live under `$HOME`.
 
@@ -70,23 +70,25 @@ podman network ls --format '{{.Name}}' | grep ^ato-$APP- || true
 
 <!-- _AUTO_GENERATED_TABLE_START -->
 
-| App | Batch | Desktop visible (ps shape) | Endpoint open | Desktop stop | Cleanup | Status | Notes |
-|---|---:|---|---|---|---|---|---|
-| memos | 1 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| uptime-kuma | 1 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass | Desktop GUI (e2e: pass) |
-| mailpit | 2 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| pgweb | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| pocketbase | 2 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| actual | 2 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| filebrowser | 2 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| homepage | 2 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| shiori | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| n8n | 1 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| stirling-pdf | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| nocodb | 1 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| lobe-chat | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass |  |
-| linkwarden | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ | pass | Desktop GUI (e2e: pass) |
-| open-webui | 1 | ✅ ps shape OK | ⚠️ | ✅ | ✅ | partial | HTTP probe failed; expected for first-run model download |
+"CLI stop cleanup" = `ato stop --all --force` invoked by the sweep — exercises the same `stop_oci_session` helper that Desktop's per-session `ato stop --id <session_id>` runs (PR #214). "Desktop/MCP stop" is filled only for the two apps we additionally drove through `ato-desktop` + `ato-desktop-mcp`; everywhere else it is `N/A` (not attempted in this AODD, not a failure).
+
+| App | Batch | Desktop visible (ps shape) | Endpoint open | CLI stop cleanup | Desktop/MCP stop | Cleanup | Status | Notes |
+|---|---:|---|---|---|---|---|---|---|
+| memos | 1 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| uptime-kuma | 1 | ✅ ps shape OK | ✅ | ✅ | ✅ e2e | ✅ | pass | Desktop+MCP rep (single-service) |
+| mailpit | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| pgweb | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| pocketbase | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| actual | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| filebrowser | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| homepage | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| shiori | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| n8n | 1 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| stirling-pdf | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| nocodb | 1 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| lobe-chat | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
+| linkwarden | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ e2e | ✅ | pass | Desktop+MCP rep (multi-service: postgres + meilisearch + app) |
+| open-webui | 1 | ✅ ps shape OK | ⚠️ | ✅ | N/A | ✅ | partial | HTTP probe failed; expected for first-run model download |
 
 <!-- _AUTO_GENERATED_TABLE_END -->
 
