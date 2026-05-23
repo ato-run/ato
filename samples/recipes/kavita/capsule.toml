@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "kavita"
+version = "0.8.5"
+type = "app"
+description = "Fast, feature-rich self-hosted manga, comics, and ebook server"
+homepage = "https://github.com/Kareadita/Kavita"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "lscr.io/linuxserver/kavita:latest"
+port = 5000
+
+[state.config]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Kavita config, SQLite database"
+attach = "explicit"
+schema_id = "sha256:kavita-config-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "5000" }
+
+[[services.main.state_bindings]]
+state = "config"
+target = "/kavita/config"
