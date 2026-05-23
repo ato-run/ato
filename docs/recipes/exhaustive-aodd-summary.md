@@ -210,7 +210,7 @@ db (postgres) → redis → weaviate → api + worker → web (main)
 ### New runtime limitations discovered
 
 1. **`tcp_connect` probe requires placeholder name, not port number** — use exec probe for Redis instead.
-2. **v0.3 rejects `cmd` in named OCI targets** — Redis requirepass and any CMD override impossible. Follow-up needed.
+2. ~~**v0.3 rejects `cmd` in named OCI targets**~~ ✅ Resolved in `feat/runtime-oci-command-override` — `cmd = [...]` now allowed for OCI named targets.
 3. **No `run_once`/one-shot service** — `init_permissions` pattern (chown volume for uid change) is blocked. Common in multi-service apps. Follow-up needed.
 4. **Shared mutable state** — Worker and api share a volume in upstream; not expressible in Ato v0.3.
 
