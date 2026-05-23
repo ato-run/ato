@@ -24,10 +24,11 @@ run_once = true
 depends_on = ["db"]
 
 # Long-running app.  Depends on the run_once init step.
-# httpbin gives us a quick, deterministic /get endpoint to probe.
+# nginx:alpine is multi-arch (amd64/arm64) and serves `/` over HTTP — no
+# emulation needed on Apple Silicon hosts.
 [targets.app]
 runtime = "oci"
-image = "kennethreitz/httpbin:latest"
+image = "nginx:alpine"
 port = 80
 depends_on = ["init"]
 
@@ -37,4 +38,4 @@ readiness_probe = { exec = ["pg_isready", "-U", "postgres"], port = "5432" }
 
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/get", port = "80" }
+readiness_probe = { http_get = "/", port = "80" }
