@@ -2,6 +2,7 @@ mod auth_handoff;
 mod capsule_runtime;
 mod devtools;
 mod inspector;
+mod installed_apps;
 mod launcher_v2;
 mod settings;
 
