@@ -1,4 +1,5 @@
 mod app;
+mod app_update;
 mod attest;
 mod binding;
 mod cache;
@@ -20,6 +21,8 @@ pub(crate) mod publish;
 mod reconstruct;
 pub(crate) mod registry;
 mod replay;
+mod revisions;
+mod rollback;
 mod run;
 mod scaffold;
 mod secrets;
@@ -319,7 +322,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             Ok(())
         }
 
-        Commands::Update => {
+        Commands::SelfUpdate => {
             commands::update::update()?;
             Ok(())
         }
@@ -446,6 +449,32 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             },
             reporter,
         ),
+
+        Commands::Revisions {
+            install_profile_key,
+            json: command_json,
+        } => revisions::execute_revisions_command(revisions::RevisionsArgs {
+            install_profile_key,
+            json: json || command_json,
+        }),
+
+        Commands::Rollback {
+            install_profile_key,
+            revision_id,
+        } => rollback::execute_rollback_command(rollback::RollbackArgs {
+            install_profile_key,
+            revision_id,
+        }),
+
+        Commands::AppUpdate {
+            install_profile_key,
+            yes,
+            json: command_json,
+        } => app_update::execute_app_update_command(app_update::AppUpdateArgs {
+            install_profile_key,
+            yes,
+            json: json || command_json,
+        }),
 
         Commands::Search {
             query,
