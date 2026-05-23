@@ -836,7 +836,7 @@ entrypoint = "server.js"
 }
 
 #[test]
-fn test_from_toml_rejects_v03_target_legacy_cmd() {
+fn test_from_toml_rejects_v03_source_target_legacy_cmd() {
     let toml = r#"
 schema_version = "0.3"
 name = "legacy-v03"
@@ -845,15 +845,126 @@ type = "app"
 default_target = "app"
 
 [targets.app]
-runtime = "oci"
-image = "ghcr.io/example/app:latest"
-cmd = ["python", "app.py"]
+runtime = "source/node"
+run = "node server.js"
+cmd = ["node", "server.js"]
 "#;
 
-    let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 cmd must fail");
+    let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 cmd on source target must fail");
     assert!(error
         .to_string()
         .contains("must not use legacy field 'cmd'"));
+}
+
+#[test]
+fn test_from_toml_allows_v03_oci_target_cmd_override() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["python", "worker.py"]
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("OCI target with cmd should parse");
+    let targets = manifest.targets.expect("targets");
+    let target = targets.named_target("app").expect("target app");
+    assert_eq!(target.cmd, vec!["python", "worker.py"]);
+}
+
+#[test]
+fn test_from_toml_rejects_v03_oci_target_empty_cmd() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = []
+"#;
+
+    let error = CapsuleManifest::from_toml(toml).expect_err("empty cmd array should be rejected");
+    assert!(error.to_string().contains("'cmd' must not be empty"));
+}
+
+#[test]
+fn test_from_toml_rejects_v03_oci_target_cmd_shell_string() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = "celery -A app.celery worker"
+"#;
+
+    let error = CapsuleManifest::from_toml(toml).expect_err("shell string cmd should be rejected");
+    assert!(error.to_string().contains("must be an array"));
+}
+
+#[test]
+fn test_from_toml_rejects_v03_oci_target_entrypoint() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+entrypoint = "/bin/sh"
+"#;
+
+    let error =
+        CapsuleManifest::from_toml(toml).expect_err("entrypoint still rejected for OCI targets");
+    assert!(error
+        .to_string()
+        .contains("must not use legacy field 'entrypoint'"));
+}
+
+#[test]
+fn test_from_toml_oci_multi_target_cmd_independence() {
+    // Same image with different cmd overrides — the recipe pattern for api/worker splits
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "api"
+
+[targets.api]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["gunicorn", "app:create_app()"]
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["celery", "-A", "app.celery", "worker"]
+"#;
+
+    let manifest =
+        CapsuleManifest::from_toml(toml).expect("multi-target same-image with different cmd");
+    let targets = manifest.targets.expect("targets");
+    let api = targets.named_target("api").expect("api target");
+    let worker = targets.named_target("worker").expect("worker target");
+    assert_eq!(api.cmd, vec!["gunicorn", "app:create_app()"]);
+    assert_eq!(worker.cmd, vec!["celery", "-A", "app.celery", "worker"]);
 }
 
 #[test]
