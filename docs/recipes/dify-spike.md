@@ -44,7 +44,7 @@ main/web (langgenius/dify-web:1.14.2, amd64, emulated)
 
 | Service | Reason |
 |---|---|
-| `init_permissions` | No `run_once`/one-shot service support in Ato v0.3 |
+| `init_permissions` | `run_once` lifecycle now lands in `feat/runtime-oci-run-once`; full Dify wire-up still gated by shared-mutable-state (B4) so the chown step is omitted in this spike |
 | `sandbox` | Requires `cap_add: SYS_ADMIN` / privileged-adjacent config |
 | `ssrf_proxy` | Requires bind-mounting a repo config file |
 | `plugin_daemon` | Optional for minimal local use |
@@ -168,12 +168,19 @@ Without nginx, the Dify web's browser-side `fetch` calls to `/console/api/*` res
 **Workaround:** Set `CONSOLE_API_URL=http://host-ip:PORT` with a pinned host port (requires static port mapping, not yet in Ato).
 **Follow-up:** Ingress/proxy layer, or static port assignment in recipe.
 
-### B2: `init_permissions` one-shot service (Ato missing feature)
+### B2: ~~`init_permissions` one-shot service~~ ✅ Resolved (lifecycle only)
 
-Dify's upstream compose runs `init_permissions` as a one-shot container: `chown -R 1001:1001 /app/api/storage`. Without it, the `api-storage` volume (initially owned by root) may reject writes from the api process (uid 1001). File uploads are not tested in this spike.
+**Resolved in `feat/runtime-oci-run-once`.**
+Ato OCI targets now accept `run_once = true` on a named target. The runtime
+starts the container, waits for it to exit, treats exit-0 as the readiness
+condition for dependents, and treats non-zero / timeout / wait error as a typed
+`oci_run_once_failed` / `oci_run_once_timeout`.
 
-**Classification:** Ato missing feature — no `run_once`/one-shot service support.
-**Follow-up:** Add `lifecycle = "run_once"` or `one_shot = true` to named targets.
+The Dify `init_permissions` step itself is still partially blocked by **B4**
+(shared mutable state): even with `run_once`, the chowned volume cannot be
+shared read-write with both `api` and `worker`. Modelling `init_permissions`
+end-to-end therefore needs B4 too. The blocker is now *shared-state*, not
+*lifecycle*.
 
 ### B3: ~~v0.3 cannot override Docker CMD~~ ✅ Resolved
 
@@ -197,7 +204,7 @@ These are new findings from this spike:
 |---|---|
 | `tcp_connect` probe requires placeholder name, not port number | Minor — use exec probe for Redis instead |
 | ~~v0.3 rejects `cmd` in named OCI targets~~ | ✅ Resolved — `cmd` now allowed for OCI targets |
-| No `run_once`/one-shot service | Blocks `init_permissions` pattern (common in multi-service apps) |
+| ~~No `run_once`/one-shot service~~ | ✅ Resolved — `run_once = true` on OCI targets gates dependents on exit-0 |
 | Shared mutable state not supported | Worker/api storage sharing is impossible |
 | `allow_emulation = true` required for amd64-only images | Works but adds ~30% overhead on arm64 |
 

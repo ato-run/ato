@@ -50,6 +50,19 @@ use crate::application::preflight::{
 use crate::reporters::CliReporter;
 
 const OCI_MULTI_STOP_TIMEOUT_SECS: i64 = 10;
+/// Default timeout (seconds) for run_once containers to complete.
+///
+/// Override at runtime with `ATO_OCI_RUN_ONCE_TIMEOUT_SECS` (e.g. for CI or
+/// fast unit tests).  Kept as a process-wide knob rather than a per-target
+/// field so the v0.3 schema surface stays minimal in this PR.
+const OCI_RUN_ONCE_TIMEOUT_SECS_DEFAULT: u64 = 300;
+
+fn oci_run_once_timeout_secs() -> u64 {
+    std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(OCI_RUN_ONCE_TIMEOUT_SECS_DEFAULT)
+}
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -382,6 +395,72 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                 "failed to start container for service '{service_name}'"
             )));
             break 'start_loop;
+        }
+
+        // ── run_once: wait for exit, do not push to `started` ───────────────
+        // run_once containers are one-shot lifecycles (e.g. DB migrations,
+        // permission init).  Exit code 0 = success → dependents may start.
+        // Non-zero / timeout / wait error = typed failure → dependents blocked
+        // and previously-started long-running services are cleaned up by the
+        // existing `cleanup_services` path (run_once is never in `started`).
+        if service.run_once {
+            reporter
+                .notify(format!(
+                    "⏳ [{}] Waiting for init container to complete",
+                    service_name
+                ))
+                .await?;
+            let timeout_secs = oci_run_once_timeout_secs();
+            let timed = tokio::time::timeout(
+                Duration::from_secs(timeout_secs),
+                provider.wait_container(&container_id),
+            )
+            .await;
+            match timed {
+                Ok(Ok(0)) => {
+                    let _ = provider.remove_container(&container_id, true).await;
+                    reporter
+                        .notify(format!(
+                            "✅ [{}] Init container completed successfully",
+                            service_name
+                        ))
+                        .await?;
+                }
+                Ok(Ok(code)) => {
+                    let _ = provider.remove_container(&container_id, true).await;
+                    graph_error = Some(anyhow::anyhow!(
+                        "oci_run_once_failed: init container '{}' exited with non-zero status {}",
+                        service_name,
+                        code,
+                    ));
+                    break 'start_loop;
+                }
+                Ok(Err(e)) => {
+                    let _ = provider
+                        .stop_container(&container_id, OCI_MULTI_STOP_TIMEOUT_SECS)
+                        .await;
+                    let _ = provider.remove_container(&container_id, true).await;
+                    graph_error = Some(anyhow::anyhow!(
+                        "oci_run_once_failed: init container '{}' wait error: {}",
+                        service_name,
+                        e,
+                    ));
+                    break 'start_loop;
+                }
+                Err(_elapsed) => {
+                    let _ = provider
+                        .stop_container(&container_id, OCI_MULTI_STOP_TIMEOUT_SECS)
+                        .await;
+                    let _ = provider.remove_container(&container_id, true).await;
+                    graph_error = Some(anyhow::anyhow!(
+                        "oci_run_once_timeout: init container '{}' did not complete within {}s",
+                        service_name,
+                        timeout_secs,
+                    ));
+                    break 'start_loop;
+                }
+            }
+            continue;
         }
 
         // Inspect to get the auto-allocated host port.
@@ -952,6 +1031,7 @@ mod tests {
                 publish,
                 allow_from: vec![],
             },
+            run_once: false,
             runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
                 target: target.to_string(),
                 runtime: "oci".to_string(),
@@ -1720,5 +1800,307 @@ volumes:
             "digest must be sha256-prefixed; got: {}",
             lock_resolution.resolved_digest
         );
+    }
+
+    // ── run_once tests ────────────────────────────────────────────────────────
+
+    fn make_run_once_service(name: &str, target: &str, depends_on: Vec<String>) -> ResolvedService {
+        let mut svc = make_service(name, target, depends_on, false, None, vec![]);
+        svc.run_once = true;
+        // run_once requires a cmd
+        if let ResolvedServiceRuntime::Oci(ref mut rt) = svc.runtime {
+            rt.cmd = vec!["sh".to_string(), "-c".to_string(), "echo ok".to_string()];
+        }
+        svc
+    }
+
+    /// Build a synthetic plan: db + init (run_once, depends_on db) + app (depends_on init).
+    fn synthetic_run_once_plan() -> OrchestrationPlan {
+        let db = make_service("db", "postgres", vec![], false, Some(5432), vec![]);
+        let init = make_run_once_service("init", "init-image", vec!["db".to_string()]);
+        let app = make_service(
+            "app",
+            "myapp",
+            vec!["init".to_string()],
+            true,
+            Some(8080),
+            vec![],
+        );
+        OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "init".to_string(), "app".to_string()],
+            services: vec![db, init, app],
+        }
+    }
+
+    fn images_for_run_once_plan() -> HashMap<String, OciImageResolution> {
+        let mut m = HashMap::new();
+        m.insert("postgres".to_string(), make_image("postgres:14"));
+        m.insert("init-image".to_string(), make_image("init-image:latest"));
+        m.insert("myapp".to_string(), make_image("myapp:latest"));
+        m
+    }
+
+    async fn run_run_once_plan(provider: &FakeOciProvider) -> Result<i32> {
+        execute_service_graph_with_provider(
+            &synthetic_run_once_plan(),
+            &images_for_run_once_plan(),
+            OciPolicyMode::Strict,
+            &[],
+            "smoke",
+            &HashSet::new(),
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            provider,
+            None,
+        )
+        .await
+    }
+
+    /// run_once exits 0 → dependents start; init container is removed without
+    /// being added to the long-running `started` list.
+    #[tokio::test]
+    async fn dependent_starts_after_run_once_exit_zero() {
+        let provider = FakeOciProvider::ready();
+        // First wait_container call is init's run_once wait; second is the
+        // long-running app's wait_all_services wait.  Both Ok(0).
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+
+        let result = run_run_once_plan(&provider).await;
+        assert!(
+            result.is_ok(),
+            "run_once exit-0 plan must succeed: {:?}",
+            result
+        );
+
+        let log = provider.call_log.lock().unwrap();
+        // Creation order is a robust proxy for start order (each create is
+        // followed by start in the same loop iteration; container ids in
+        // FakeOciProvider are not unique by default so we key off the
+        // service-name embedded in the container name).
+        let create_db = log
+            .iter()
+            .position(|e| e.contains("-db-"))
+            .expect("db create must happen");
+        let create_init = log
+            .iter()
+            .position(|e| e.contains("-init-"))
+            .expect("init create must happen");
+        let create_app = log
+            .iter()
+            .position(|e| e.contains("-app-"))
+            .expect("app create must happen");
+        assert!(
+            create_db < create_init && create_init < create_app,
+            "creation order must be db → init → app; log: {log:?}"
+        );
+
+        // Init container must be removed after exit-0.
+        assert!(
+            log.iter().any(|e| e.starts_with("remove:")),
+            "init removal must be logged after exit-0; log: {log:?}"
+        );
+    }
+
+    /// run_once exits non-zero → dependents do NOT start, graph returns typed error.
+    #[tokio::test]
+    async fn dependent_not_started_when_run_once_fails() {
+        let provider = FakeOciProvider::ready();
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(1));
+
+        let result = run_run_once_plan(&provider).await;
+        assert!(
+            result.is_err(),
+            "non-zero run_once exit must return an error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("oci_run_once_failed"),
+            "error must contain oci_run_once_failed; got: {msg}"
+        );
+
+        // app container must NOT have been created (init failure blocks it).
+        let log = provider.call_log.lock().unwrap();
+        assert!(
+            !log.iter().any(|e| e.contains("-app-")),
+            "app must not be created when init fails; log: {log:?}"
+        );
+    }
+
+    /// On run_once failure, previously-started long-running services must be
+    /// stopped and removed (cleanup walks `started` in reverse).
+    #[tokio::test]
+    async fn run_once_failure_cleans_up_started_services() {
+        let provider = FakeOciProvider::ready();
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(2));
+
+        let result = run_run_once_plan(&provider).await;
+        assert!(result.is_err());
+
+        let log = provider.call_log.lock().unwrap();
+        // db was started → must be stopped and removed during cleanup.
+        // FakeOciProvider returns the same container_id ("fake-container-id")
+        // for every create call by default, so we assert by op kind.
+        assert!(
+            log.iter().any(|e| e.starts_with("stop:")),
+            "started service must be stopped on run_once failure; log: {log:?}"
+        );
+        assert!(
+            log.iter().any(|e| e.starts_with("remove:")),
+            "started service must be removed on run_once failure; log: {log:?}"
+        );
+        assert!(
+            log.iter().any(|e| e.starts_with("remove_network:")),
+            "network must be removed on run_once failure; log: {log:?}"
+        );
+    }
+
+    /// Wait-side provider error is reported as a typed `oci_run_once_failed`.
+    #[tokio::test]
+    async fn run_once_provider_error_returns_typed_error() {
+        let provider = FakeOciProvider::ready();
+        provider.wait_result_queue.lock().unwrap().push_back(Err(
+            OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "wait".to_string(),
+                status: Some(1),
+                message: "simulated wait error".to_string(),
+            },
+        ));
+
+        let result = run_run_once_plan(&provider).await;
+        assert!(result.is_err());
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("oci_run_once_failed"),
+            "error must contain oci_run_once_failed; got: {msg}"
+        );
+    }
+
+    /// run_once that doesn't complete within the configured timeout returns
+    /// `oci_run_once_timeout`.  Uses `ATO_OCI_RUN_ONCE_TIMEOUT_SECS=1` and a
+    /// 3s FakeOciProvider block to keep the wall-clock under 2 seconds.
+    ///
+    /// Marked `serial` via lock: the env var is process-global, and other
+    /// tests may run concurrently.  We restore the prior value at the end.
+    #[tokio::test]
+    async fn run_once_timeout_returns_typed_error() {
+        // Acquire a single lock so timeout-affecting env tweaks don't race
+        // with other run_once tests.  The lock is process-static.
+        let _guard = run_once_test_env_lock().lock().unwrap();
+        let prev = std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS").ok();
+        // SAFETY: tests sharing this env var hold _guard for their duration.
+        unsafe {
+            std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", "1");
+        }
+
+        let provider = FakeOciProvider::ready();
+        // Block wait_container for 3 seconds (> 1s timeout).
+        *provider.wait_block_ms.lock().unwrap() = Some(3_000);
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+
+        let result = run_run_once_plan(&provider).await;
+
+        // Restore env var ASAP so a later test panic on the assertion below
+        // doesn't leave the variable set.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS", v),
+                None => std::env::remove_var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS"),
+            }
+        }
+
+        assert!(result.is_err(), "timeout must surface as Err");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("oci_run_once_timeout"),
+            "error must contain oci_run_once_timeout; got: {msg}"
+        );
+    }
+
+    /// `ato stop --all` must not crash when the run_once container was already
+    /// removed.  We exercise this at the executor level: after a successful
+    /// run_once, the init container is removed and is *not* in the session
+    /// record, so a subsequent cleanup pass over the long-running services
+    /// completes without touching the missing init container.
+    #[tokio::test]
+    async fn run_once_removed_container_does_not_break_stop_all() {
+        let provider = FakeOciProvider::ready();
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+
+        let result = run_run_once_plan(&provider).await;
+        assert!(
+            result.is_ok(),
+            "happy-path run_once must complete: {:?}",
+            result
+        );
+
+        let log = provider.call_log.lock().unwrap();
+        // Init was removed exactly once during the run_once branch (success
+        // path removes the container immediately after exit-0).  The later
+        // cleanup_services loop walks `started` only — which never contained
+        // init — so it does NOT issue a second remove for the init container.
+        // We assert that `stop:*` was issued only for long-running services
+        // (db + app), not for the init container.  FakeOciProvider returns
+        // the same fake id for every create_container call by default, so we
+        // assert on call counts instead of per-id tracking: 2 stops (db+app),
+        // not 3.
+        let stop_count = log.iter().filter(|e| e.starts_with("stop:")).count();
+        assert_eq!(
+            stop_count, 2,
+            "cleanup must stop only long-running services (db + app), got {stop_count}; log: {log:?}"
+        );
+    }
+
+    /// run_once result is recorded with at minimum: the success notification
+    /// emitted via the reporter.  Because the executor returns `Result<i32>`,
+    /// receipt-level capture is left to higher layers; this test pins the
+    /// observable signal (the success message and the removal call sequence).
+    #[tokio::test]
+    async fn run_once_result_recorded_in_call_sequence() {
+        let provider = FakeOciProvider::ready();
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+        provider.wait_result_queue.lock().unwrap().push_back(Ok(0));
+
+        let _ = run_run_once_plan(&provider).await.expect("ok");
+        let log = provider.call_log.lock().unwrap();
+        // The init container's wait+remove sequence is the recorded result.
+        let wait_idx = log
+            .iter()
+            .position(|e| e.starts_with("wait_container:"))
+            .expect("wait_container must be logged for init");
+        let remove_idx = log
+            .iter()
+            .skip(wait_idx)
+            .position(|e| e.starts_with("remove:"))
+            .expect("remove must follow init wait");
+        let _ = remove_idx;
+    }
+
+    /// Long-running services unaffected when no run_once targets present.
+    #[tokio::test]
+    async fn existing_long_running_services_unaffected_by_run_once() {
+        let provider = FakeOciProvider::ready();
+        let result = run_blinko(&provider).await;
+        assert!(
+            result.is_ok(),
+            "blinko plan (no run_once) must still succeed: {:?}",
+            result
+        );
+        // No `wait_container` calls would have happened with a run_once branch;
+        // verify the legacy flow is intact by checking creation count = 2
+        // (db + main).
+        let log = provider.call_log.lock().unwrap();
+        let creates = log.iter().filter(|e| e.starts_with("create:")).count();
+        assert_eq!(
+            creates, 2,
+            "blinko must create exactly db + main; log: {log:?}"
+        );
+    }
+
+    /// Process-wide mutex for the timeout test (env-var-dependent).
+    fn run_once_test_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }

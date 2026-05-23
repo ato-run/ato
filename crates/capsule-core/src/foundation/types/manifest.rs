@@ -1515,6 +1515,18 @@ pub struct NamedTarget {
     /// Example: set to `true` for images that are only published as linux/amd64.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_emulation: bool,
+
+    /// One-shot lifecycle: run this OCI container to completion before
+    /// starting dependent services.  Exit code 0 = success (dependents
+    /// may start).  Non-zero or timeout = typed error, dependents blocked.
+    ///
+    /// Only supported for OCI targets.  `readiness_probe` and `port` must
+    /// not be set together with `run_once`.  `cmd` is required.
+    ///
+    /// Typical uses: DB migrations, permission init, bucket creation,
+    /// bootstrap seed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_once: bool,
 }
 
 impl NamedTarget {

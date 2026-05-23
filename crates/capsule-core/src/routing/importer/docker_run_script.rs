@@ -364,6 +364,7 @@ impl DockerRunScriptImportOutput {
                 connections: vec![],
                 readiness_probe: None,
                 network,
+                run_once: false,
                 runtime: ResolvedServiceRuntime::Oci(runtime),
             });
         }

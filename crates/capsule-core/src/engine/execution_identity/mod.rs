@@ -1777,6 +1777,7 @@ pub(in crate::engine::execution_identity) mod tests {
                 }],
                 network_aliases: vec!["main".to_string()],
                 readiness_probe: Some("http-get:/health".to_string()),
+                run_once: false,
             }],
             OciPolicyEnvelope {
                 enforcement_mode: OciPolicyEnforcementMode::Strict,
@@ -2138,6 +2139,69 @@ pub(in crate::engine::execution_identity) mod tests {
         assert!(!serialized.contains("host_port"));
         assert!(!serialized.contains("network_id"));
         assert!(!serialized.contains("volume_id"));
+    }
+
+    /// Flipping a service from long-running to `run_once` changes the start-
+    /// order contract (dependents now wait for exit-0 instead of readiness)
+    /// and the success/failure semantics — so the execution identity MUST
+    /// change.
+    #[test]
+    fn run_once_lifecycle_changes_execution_identity() {
+        let before = sample_input_v2()
+            .with_oci_launch_envelope(Some(sample_oci_envelope()))
+            .compute_id()
+            .expect("before")
+            .execution_id;
+        let mut envelope = sample_oci_envelope();
+        envelope.services[0].run_once = true;
+        let after = sample_input_v2()
+            .with_oci_launch_envelope(Some(envelope))
+            .compute_id()
+            .expect("after")
+            .execution_id;
+        assert_ne!(
+            before, after,
+            "run_once flip on a service must change execution_id"
+        );
+    }
+
+    /// The `run_once` envelope shape carries the lifecycle bit, but never the
+    /// exit timestamp — that is a live-runtime fact, not an identity input.
+    /// Pinned as a structural check: serialized envelope must not contain
+    /// any of the run-time fields below.
+    #[test]
+    fn run_once_exit_timestamp_not_in_identity() {
+        let mut envelope = sample_oci_envelope();
+        envelope.services[0].run_once = true;
+        let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+        for forbidden in [
+            "exit_timestamp",
+            "completed_at",
+            "exit_code",
+            "elapsed_ms",
+            "elapsed_time",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "run_once envelope must not contain '{forbidden}'; got: {serialized}"
+            );
+        }
+    }
+
+    /// Container ids are runtime-allocated and must not feed identity.  The
+    /// existing `v2_oci_envelope_excludes_live_runtime_state` test covers
+    /// container_id for the long-running shape; this pins the same invariant
+    /// when run_once is set so the property does not silently regress as the
+    /// envelope evolves.
+    #[test]
+    fn run_once_container_id_not_in_identity() {
+        let mut envelope = sample_oci_envelope();
+        envelope.services[0].run_once = true;
+        let serialized = serde_json::to_string(&envelope).expect("serialize envelope");
+        assert!(
+            !serialized.contains("container_id"),
+            "run_once envelope must not contain container_id; got: {serialized}"
+        );
     }
 
     #[test]
