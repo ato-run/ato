@@ -38,8 +38,8 @@ use capsule_core::CapsuleReporter;
 
 use super::oci_multi_service::execute_service_graph_with_provider;
 use crate::adapters::runtime::oci_provider::{
-    DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest, OciProvider,
-    OciProviderError, OciProviderSelector,
+    DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest,
+    OciPlatformPolicy, OciProvider, OciProviderError, OciProviderSelector,
 };
 use crate::adapters::runtime::oci_session_store::OciSessionMeta;
 use crate::application::preflight::{
@@ -241,6 +241,7 @@ pub(crate) async fn resolve_images_with_lock_replay<P: OciProvider>(
                 requested_platform: None,
                 resolution_mode: OciImageResolutionMode::Required,
                 importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
             };
             let resolved = match provider.resolve_image(&request).await {
                 Ok(r) => r,
@@ -314,6 +315,7 @@ pub(crate) async fn resolve_images_for_compose<P: OciProvider>(
             requested_platform: None,
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
         match provider.resolve_image(&request).await {
             Ok(resolved) => {

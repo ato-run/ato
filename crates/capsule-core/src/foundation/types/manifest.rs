@@ -1502,6 +1502,16 @@ pub struct NamedTarget {
     /// `EnvironmentMode::Closed`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_allowlist: Vec<String>,
+
+    /// Opt-in to OCI platform emulation for this target.
+    ///
+    /// When `true`, the runtime is allowed to pull and run images whose platform
+    /// does not match the host (e.g., linux/amd64 on an arm64 macOS host).
+    /// Emulation may be slower. Default is `false` (native-only).
+    ///
+    /// Example: set to `true` for images that are only published as linux/amd64.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_emulation: bool,
 }
 
 impl NamedTarget {
