@@ -31,11 +31,11 @@ schema_id = "sha256:umami-pgdata-v1"
 # TCP probe alone fires too early (postgres binds port before accepting queries).
 [services.db]
 target = "db"
-readiness_probe = { exec = ["pg_isready", "-U", "umami"], port = "5432" }
+readiness_probe = { exec = ["pg_isready", "-U", "umami"] }
 
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/api/heartbeat", port = "3000", timeout_seconds = 300, initial_delay_seconds = 10 }
+readiness_probe = { http_get = "/api/heartbeat", timeout_seconds = 300, initial_delay_seconds = 10 }
 
 [[services.main.state_bindings]]
 state = "db-data"

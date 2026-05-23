@@ -518,8 +518,13 @@ fn resolve_probe_port(
     env: &HashMap<String, String>,
     probe: &capsule_core::types::ReadinessProbe,
     service_name: &str,
-) -> Result<u16> {
-    let key = probe.port.trim();
+) -> Result<Option<u16>> {
+    // Exec probes do not use a port; only HTTP/TCP probes require one.
+    let has_exec = probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    if has_exec {
+        return Ok(None);
+    }
+    let key = probe.port.as_deref().unwrap_or("").trim();
     if key.is_empty() {
         return Err(AtoExecutionError::execution_contract_invalid(
             format!(
@@ -541,7 +546,7 @@ fn resolve_probe_port(
             Some(service_name),
         )
     })?;
-    value.parse::<u16>().map_err(|_| {
+    let port = value.parse::<u16>().map_err(|_| {
         AtoExecutionError::execution_contract_invalid(
             format!(
                 "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
@@ -550,18 +555,29 @@ fn resolve_probe_port(
             Some("services.<name>.readiness_probe.port"),
             Some(service_name),
         )
-        .into()
-    })
+    })?;
+    Ok(Some(port))
 }
 
-fn readiness_probe_ok(probe: &capsule_core::types::ReadinessProbe, port: u16) -> Result<bool> {
+fn readiness_probe_ok(
+    probe: &capsule_core::types::ReadinessProbe,
+    port: Option<u16>,
+) -> Result<bool> {
     if let Some(path) = probe
         .http_get
         .as_ref()
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
     {
-        return Ok(http_probe(path, port));
+        let p = port.ok_or_else(|| -> anyhow::Error {
+            AtoExecutionError::execution_contract_invalid(
+                "readiness_probe.http_get requires a port",
+                Some("readiness_probe.port"),
+                None,
+            )
+            .into()
+        })?;
+        return Ok(http_probe(path, p));
     }
     if let Some(target) = probe
         .tcp_connect
@@ -569,7 +585,15 @@ fn readiness_probe_ok(probe: &capsule_core::types::ReadinessProbe, port: u16) ->
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
     {
-        return Ok(tcp_probe(target, port));
+        let p = port.ok_or_else(|| -> anyhow::Error {
+            AtoExecutionError::execution_contract_invalid(
+                "readiness_probe.tcp_connect requires a port",
+                Some("readiness_probe.port"),
+                None,
+            )
+            .into()
+        })?;
+        return Ok(tcp_probe(target, p));
     }
     Err(AtoExecutionError::execution_contract_invalid(
         "readiness_probe must define http_get, tcp_connect, or exec",

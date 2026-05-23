@@ -59,7 +59,8 @@ pub struct HealthCheck {
     pub http_get: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_connect: Option<String>,
-    pub port: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interval_secs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
