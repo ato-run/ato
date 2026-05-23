@@ -266,8 +266,9 @@ impl InstallInstanceStore {
             // On non-unix (Windows), write a plain text file with the revision id as fallback.
             atomic_write(&link, rev.as_str().as_bytes())?;
         }
-        // Track revision in per-profile log (best-effort).
-        let _ = self.append_revision_to_log(app, profile, rev);
+        // Track revision in per-profile log. Failure here is returned — callers that want
+        // best-effort behaviour should ignore the error explicitly.
+        self.append_revision_to_log(app, profile, rev)?;
         Ok(())
     }
 
