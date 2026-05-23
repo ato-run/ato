@@ -211,7 +211,8 @@ pub fn list_app_revisions(
 // ── Launch (called from GPUI background executor — Blocker 2 fix) ───────────
 
 /// Run `ato launch <ipk> -y` synchronously.  Intended to be called from a
-/// GPUI background-executor spawn, not from the render thread.
+/// GPUI background-executor spawn (not from the render thread or a raw
+/// `std::thread::spawn`).
 pub fn spawn_launch(ato_bin: &std::path::Path, install_profile_key: &str) -> Result<String> {
     let output = std::process::Command::new(ato_bin)
         .arg("launch")
