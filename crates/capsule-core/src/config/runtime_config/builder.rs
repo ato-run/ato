@@ -51,7 +51,8 @@ struct ManifestReadinessProbe {
     http_get: Option<String>,
     #[serde(default)]
     tcp_connect: Option<String>,
-    port: String,
+    #[serde(default)]
+    port: Option<String>,
 }
 
 pub(super) fn build_config_json(
@@ -944,7 +945,7 @@ fn read_health_check(manifest: &toml::Value) -> Option<HealthCheck> {
     Some(HealthCheck {
         http_get,
         tcp_connect: None,
-        port: port?,
+        port,
         interval_secs: None,
         timeout_secs: None,
     })

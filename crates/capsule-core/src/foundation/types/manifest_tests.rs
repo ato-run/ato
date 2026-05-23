@@ -306,7 +306,7 @@ readiness_probe = { http_get = "/healthz", port = "PORT" }
         target
             .readiness_probe
             .as_ref()
-            .map(|probe| probe.port.as_str()),
+            .and_then(|probe| probe.port.as_deref()),
         Some("PORT")
     );
 }
@@ -2690,4 +2690,144 @@ ref = "capsule://ato.run/tools/postgresql-binaries@16.4.0"
         ValidationError::ToolDependencyInvalidEnvVar { alias, env_name, .. }
             if alias == "postgres" && env_name == "1BAD_NAME"
     )));
+}
+
+// ── Exec readiness probe portless tests ──────────────────────────────────────
+
+#[test]
+fn exec_readiness_probe_parses_without_port() {
+    let toml = r#"
+schema_version = "0.3"
+name = "pg-probe-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+
+[services.main]
+entrypoint = "node server.js"
+
+[services.db]
+entrypoint = "postgres"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"] }
+"#;
+    let manifest =
+        CapsuleManifest::from_toml(toml).expect("parse manifest with portless exec probe");
+    assert!(
+        manifest.validate().is_ok(),
+        "portless exec probe should be valid"
+    );
+
+    let svc = manifest
+        .services
+        .as_ref()
+        .unwrap()
+        .get("db")
+        .expect("db service");
+    let probe = svc.readiness_probe.as_ref().expect("readiness_probe");
+    assert!(probe.exec.is_some(), "exec field must be present");
+    assert!(probe.port.is_none(), "port must be absent");
+}
+
+#[test]
+fn exec_readiness_probe_rejects_empty_argv() {
+    let toml = r#"
+schema_version = "0.3"
+name = "empty-exec-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+
+[services.main]
+entrypoint = "node server.js"
+
+[services.db]
+entrypoint = "postgres"
+readiness_probe = { exec = [] }
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse manifest");
+    let errors = manifest.validate().expect_err("empty exec argv must fail");
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{e:?}");
+            msg.contains("exec") || msg.contains("empty")
+        }),
+        "expected exec-empty error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn exec_probe_with_legacy_port_still_parses() {
+    let toml = r#"
+schema_version = "0.3"
+name = "legacy-exec-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+
+[services.main]
+entrypoint = "node server.js"
+
+[services.db]
+entrypoint = "postgres"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"], port = "5432" }
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse manifest with legacy exec+port");
+    assert!(
+        manifest.validate().is_ok(),
+        "legacy exec+port should still be valid"
+    );
+
+    let svc = manifest
+        .services
+        .as_ref()
+        .unwrap()
+        .get("db")
+        .expect("db service");
+    let probe = svc.readiness_probe.as_ref().expect("readiness_probe");
+    // Port is preserved but behaviorally ignored for exec probes.
+    assert_eq!(probe.port.as_deref(), Some("5432"));
+}
+
+#[test]
+fn http_readiness_probe_still_requires_port() {
+    let toml = r#"
+schema_version = "0.3"
+name = "http-probe-no-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run = "npm start"
+port = 3000
+readiness_probe = { http_get = "/healthz" }
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("http_get without port must fail");
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{e:?}");
+            msg.contains("port")
+        }),
+        "expected port-required error, got: {errors:?}"
+    );
 }

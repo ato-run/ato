@@ -245,7 +245,7 @@ pub(super) fn synthesize_runtime_model_from_v03(
                 http_get: Some(s.to_string()),
                 tcp_connect: None,
                 exec: None,
-                port: "PORT".to_string(),
+                port: Some("PORT".to_string()),
                 initial_delay_seconds: 0,
                 timeout_seconds: 180,
                 interval_seconds: 2,
@@ -286,8 +286,7 @@ pub(super) fn synthesize_runtime_model_from_v03(
                         port: table
                             .get("port")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("PORT")
-                            .to_string(),
+                            .map(str::to_string),
                         initial_delay_seconds,
                         timeout_seconds,
                         interval_seconds,
