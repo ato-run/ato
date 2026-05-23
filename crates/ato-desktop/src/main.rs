@@ -8,6 +8,7 @@ mod config;
 mod egress_policy;
 mod egress_proxy;
 mod github_manifest_draft;
+mod install_lifecycle_dashboard;
 mod localization;
 mod logging;
 mod orchestrator;
