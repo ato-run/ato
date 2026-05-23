@@ -33,6 +33,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::orchestrator::resolve_ato_binary;
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
@@ -203,7 +204,7 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
         let queue_for_ipc = queue.clone();
         let webview = WebViewBuilder::new()
             .with_html(IDENTITY_HTML)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoIdentity, queue_for_ipc))
             .with_initialization_script(init_script.clone())
             .with_bounds(webview_rect)
             .build_as_child(window)
@@ -217,6 +218,8 @@ pub fn open_identity_window(cx: &mut App) -> Result<()> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoIdentity, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     Ok(())
 }

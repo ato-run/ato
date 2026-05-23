@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod bridge;
+mod ipc;
 mod cli_envelope;
 mod cli_install;
 mod config;

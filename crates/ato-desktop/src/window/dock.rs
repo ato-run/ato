@@ -38,6 +38,7 @@ use crate::orchestrator::resolve_ato_binary;
 use crate::source_import_session::normalize_github_import_input;
 use crate::state::GuestRoute;
 use crate::system_capsule::ato_dock::DockSourceKind;
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::system_capsule::manifest::system_capsule_url;
 use crate::system_capsule::static_resolver::resolve_system_capsule_asset;
@@ -729,7 +730,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                     }
                 }
             })
-            .with_ipc_handler(system_ipc::make_ipc_handler(bridge_queue.clone()))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoDock, bridge_queue.clone()))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Dock WebView");
@@ -778,6 +779,8 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             last_focused_at: std::time::Instant::now(),
         },
     );
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoDock, *handle);
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
     spawn_dock_event_loop(cx, queue, *handle);
     Ok(*handle)

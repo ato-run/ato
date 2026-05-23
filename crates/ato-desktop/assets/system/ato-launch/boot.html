@@ -317,7 +317,7 @@
   const POST = (window.ipc && window.ipc.postMessage)
     ? (m) => window.ipc.postMessage(JSON.stringify(m))
     : (m) => console.log('[no bridge]', m);
-  const BRIDGE = (command) => POST({ capsule: 'ato-launch', command });
+  const BRIDGE = (command) => POST({ capsule: 'launch', command });
 
   const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   const detailEntries = [];
