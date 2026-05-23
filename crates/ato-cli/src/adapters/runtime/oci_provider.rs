@@ -1511,6 +1511,14 @@ pub(crate) struct FakeOciProvider {
     pub create_container_requests: std::sync::Arc<std::sync::Mutex<Vec<OciContainerRequest>>>,
     pub start_result_queue:
         std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Result<(), OciProviderError>>>>,
+    /// Per-call wait results.  When the queue is non-empty the front entry is
+    /// consumed on each `wait_container` call; when empty `wait_result` is used.
+    pub wait_result_queue:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Result<i64, OciProviderError>>>>,
+    /// Optional artificial delay (in milliseconds) before `wait_container`
+    /// returns.  Used by run_once timeout tests to simulate a container that
+    /// runs longer than the configured timeout without burning real wall-clock.
+    pub wait_block_ms: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl FakeOciProvider {
@@ -1539,6 +1547,10 @@ impl FakeOciProvider {
             start_result_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            wait_result_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            wait_block_ms: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1728,7 +1740,19 @@ impl OciProvider for FakeOciProvider {
         Ok(rx)
     }
 
-    async fn wait_container(&self, _container_id: &str) -> Result<i64, OciProviderError> {
+    async fn wait_container(&self, container_id: &str) -> Result<i64, OciProviderError> {
+        // Optional artificial block (used by run_once timeout tests).
+        let block_ms = *self.wait_block_ms.lock().unwrap();
+        if let Some(ms) = block_ms {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("wait_container:{container_id}"));
+        if let Some(result) = self.wait_result_queue.lock().unwrap().pop_front() {
+            return result;
+        }
         self.wait_result.clone()
     }
 
