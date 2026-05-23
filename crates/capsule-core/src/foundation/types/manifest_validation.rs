@@ -1166,6 +1166,10 @@ impl CapsuleManifest {
             }
         }
 
+        if let Some(ingress) = &self.ingress {
+            validate_ingress(self, ingress, &mut errors);
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1293,6 +1297,218 @@ impl CapsuleManifest {
                 (!name.is_empty()).then(|| name.to_string())
             })
     }
+}
+
+fn validate_ingress(
+    manifest: &CapsuleManifest,
+    ingress: &IngressConfig,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Err(err) = ingress.mode.validate_v1() {
+        errors.push(ValidationError::InvalidTarget(err.to_string()));
+    }
+
+    let service_names: std::collections::HashSet<&str> = manifest
+        .services
+        .as_ref()
+        .map(|s| s.keys().map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut seen_aliases: HashMap<&str, &str> = HashMap::new();
+    let mut root_route: Option<&str> = None;
+
+    for (route_name, route) in &ingress.routes {
+        if route.root && route.alias.is_some() {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::RootWithAlias {
+                    route: route_name.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
+        if route.root {
+            if let Some(previous) = root_route {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::MultipleRootRoutes {
+                        route_a: previous.to_string(),
+                        route_b: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            root_route = Some(route_name);
+        }
+
+        if !route.root {
+            let effective_alias = route
+                .alias
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty());
+            if effective_alias.is_none() && route.alias.is_some() {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::NonRootWithoutAlias {
+                        route: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+
+        if let Some(alias) = route.alias.as_deref() {
+            if !is_valid_ingress_alias(alias) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidAlias {
+                        alias: alias.to_string(),
+                        reason: "alias must be a URL-safe path segment (lowercase alphanumeric, hyphens, underscores; no '/', '..', '%2f', '%5c', or percent-encoded characters)"
+                            .to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
+            if let Some(previous) = seen_aliases.get(alias) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::DuplicateAlias {
+                        alias: alias.to_string(),
+                        route_a: previous.to_string(),
+                        route_b: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            seen_aliases.insert(alias, route_name);
+        } else if !route.root {
+            if let Some(previous) = seen_aliases.get(route_name.as_str()) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::DuplicateAlias {
+                        alias: route_name.clone(),
+                        route_a: previous.to_string(),
+                        route_b: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            seen_aliases.insert(route_name.as_str(), route_name);
+        }
+
+        if !service_names.contains(route.target.as_str()) {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::MissingService {
+                    route: route_name.clone(),
+                    target: route.target.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
+        if route.port == 0 {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::InvalidPort {
+                    route: route_name.clone(),
+                    port: route.port,
+                }
+                .to_string(),
+            ));
+        }
+
+        if let Some(prefix) = route.upstream_path_prefix.as_deref() {
+            if !route.strip_prefix {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::UpstreamPrefixWithoutStrip {
+                        route: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            if !prefix.starts_with('/') {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::UpstreamPrefixMissingSlash {
+                        route: route_name.clone(),
+                        prefix: prefix.to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+    }
+
+    for (target, env_vars) in &ingress.env_inject {
+        if !service_names.contains(target.as_str()) {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::EnvInjectTargetMissing {
+                    target: target.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
+        for (env_name, template) in env_vars {
+            if !is_valid_env_var_name(env_name) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidEnvVarName {
+                        name: env_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+
+            for route_ref in extract_ingress_route_refs(template) {
+                if !ingress.routes.contains_key(&route_ref) {
+                    errors.push(ValidationError::InvalidTarget(
+                        IngressError::EnvInjectMissingRoute {
+                            target: target.clone(),
+                            env_name: env_name.clone(),
+                            route_name: route_ref,
+                            template: template.clone(),
+                        }
+                        .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn is_valid_ingress_alias(alias: &str) -> bool {
+    if alias.is_empty() {
+        return false;
+    }
+    if alias.contains('/') || alias.contains("..") {
+        return false;
+    }
+    let lower = alias.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return false;
+    }
+    if alias.as_bytes().iter().any(|b| *b == b'%') {
+        return false;
+    }
+    alias
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+fn extract_ingress_route_refs(template: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut search_from = 0;
+    let prefix = "{{ingress.routes.";
+    while let Some(start) = template[search_from..].find(prefix) {
+        let abs_start = search_from + start;
+        let rest = &template[abs_start + prefix.len()..];
+        if let Some(end) = rest.find("}}") {
+            let route_name = rest[..end].trim();
+            if let Some(dot_pos) = route_name.find('.') {
+                refs.push(route_name[..dot_pos].to_string());
+            } else {
+                refs.push(route_name.to_string());
+            }
+            search_from = abs_start + prefix.len() + end + 2;
+        } else {
+            break;
+        }
+    }
+    refs
 }
 
 fn validate_dependency_contracts(
