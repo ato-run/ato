@@ -454,10 +454,17 @@ fn validate_web_services_mode(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .is_some();
-            if !has_http_get && !has_tcp_connect {
+            if !has_http_get
+                && !has_tcp_connect
+                && !probe
+                    .get("exec")
+                    .and_then(|v| v.as_array())
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            {
                 return Err(manifest_err(
                     manifest_path,
-                    format!("services.{name}.readiness_probe must define http_get or tcp_connect"),
+                    format!("services.{name}.readiness_probe must define http_get, tcp_connect, or exec"),
                 ));
             }
         }

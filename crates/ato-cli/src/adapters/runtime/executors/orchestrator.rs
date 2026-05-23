@@ -1276,7 +1276,7 @@ fn readiness_probe_ok(probe: &ReadinessProbe, port: u16) -> Result<bool> {
     {
         return Ok(tcp_probe(target, port));
     }
-    anyhow::bail!("readiness_probe must define http_get or tcp_connect");
+    anyhow::bail!("readiness_probe must define http_get, tcp_connect, or exec");
 }
 
 fn http_probe(path: &str, port: u16) -> bool {

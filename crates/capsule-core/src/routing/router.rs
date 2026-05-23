@@ -1323,6 +1323,21 @@ impl ExecutionDescriptor {
         })
     }
 
+    /// Returns all named targets as a map from label → `NamedTarget`.
+    fn all_targets(&self) -> HashMap<String, NamedTarget> {
+        self.compat_table(&["targets"])
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(|(name, raw)| {
+                        let target: NamedTarget = raw.clone().try_into().ok()?;
+                        Some((name.to_string(), target))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn compat_value(&self, path: &[&str]) -> Option<toml::Value> {
         let mut current = self.compat_manifest.as_ref()?.raw_value().ok()?;
         for key in path {
@@ -1966,6 +1981,282 @@ port = 8000
         assert_eq!(
             super::manifest_routing::split_v03_runtime("source/go"),
             ("source".to_string(), Some("native".to_string()))
+        );
+    }
+
+    // ── depends_on tests ─────────────────────────────────────────────────────
+
+    fn make_multi_service_manifest(extra: &str) -> String {
+        format!(
+            r#"schema_version = "0.3"
+name = "multi-svc"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+{extra}
+[services.main]
+target = "app"
+readiness_probe = {{ http_get = "/health", port = "3000" }}
+"#
+        )
+    }
+
+    #[test]
+    fn recipe_depends_on_parses_list_form_on_target() {
+        let manifest_str = make_multi_service_manifest(r#"depends_on = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let main = plan.services.iter().find(|s| s.name == "main").unwrap();
+        assert!(
+            main.depends_on.contains(&"db".to_string()),
+            "main service should depend on db via target-level depends_on"
+        );
+    }
+
+    #[test]
+    fn recipe_depends_on_also_accepts_needs_alias() {
+        let manifest_str = make_multi_service_manifest(r#"needs = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let main = plan.services.iter().find(|s| s.name == "main").unwrap();
+        assert!(
+            main.depends_on.contains(&"db".to_string()),
+            "main service should depend on db via target-level needs alias"
+        );
+    }
+
+    #[test]
+    fn recipe_target_depends_on_creates_implicit_service() {
+        let manifest_str = make_multi_service_manifest(r#"depends_on = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        assert!(
+            plan.services.iter().any(|s| s.name == "db"),
+            "implicit db service should be created from target depends_on"
+        );
+    }
+
+    #[test]
+    fn service_graph_topological_order_puts_dependencies_before_dependents() {
+        let manifest_str = make_multi_service_manifest(r#"depends_on = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let db_pos = plan
+            .startup_order
+            .iter()
+            .position(|s| s == "db")
+            .expect("db in startup order");
+        let main_pos = plan
+            .startup_order
+            .iter()
+            .position(|s| s == "main")
+            .expect("main in startup order");
+        assert!(
+            db_pos < main_pos,
+            "db must start before main (db_pos={db_pos}, main_pos={main_pos})"
+        );
+    }
+
+    #[test]
+    fn recipe_depends_on_cycle_rejected() {
+        // app → db → app is a cycle
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "cyclic"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+
+[services.db]
+target = "db"
+depends_on = ["main"]
+
+[services.main]
+target = "app"
+depends_on = ["db"]
+"#,
+        );
+        // Cyclic dependency should be rejected either at route_manifest or resolve_services.
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        let is_rejected = result.is_err()
+            || result
+                .as_ref()
+                .map(|d| d.plan.resolve_services().is_err())
+                .unwrap_or(false);
+        assert!(is_rejected, "cyclic depends_on should be rejected");
+    }
+
+    #[test]
+    fn recipe_depends_on_unknown_target_rejected() {
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "unknown-dep"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+
+[services.main]
+target = "app"
+depends_on = ["nonexistent"]
+"#,
+        );
+        // Unknown dependency should be rejected either at route_manifest or resolve_services.
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        let is_rejected = result.is_err()
+            || result
+                .as_ref()
+                .map(|d| d.plan.resolve_services().is_err())
+                .unwrap_or(false);
+        assert!(is_rejected, "unknown dependency should be rejected");
+    }
+
+    #[test]
+    fn existing_single_service_recipes_unaffected_by_depends_on_change() {
+        // A plain single-service recipe with no depends_on should still work.
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "simple"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3000" }
+"#,
+        );
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        assert_eq!(plan.services.len(), 1);
+        assert!(plan.startup_order.contains(&"main".to_string()));
+    }
+
+    #[test]
+    fn state_binding_service_target_routes_mount_to_correct_service() {
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "mnt-routing"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+depends_on = ["db"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
+"#,
+        );
+        let decision = route_manifest_with_state_overrides(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+            [(
+                "db-data".to_string(),
+                "/var/lib/ato/persistent/mnt-routing/db-data".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        // db service should have the mount, main service should not.
+        let db_svc = plan.services.iter().find(|s| s.name == "db").unwrap();
+        let main_svc = plan.services.iter().find(|s| s.name == "main").unwrap();
+        assert!(
+            !db_svc.runtime.runtime().mounts.is_empty(),
+            "db service should receive the mount routed via service_target"
+        );
+        assert!(
+            main_svc.runtime.runtime().mounts.is_empty(),
+            "main service should NOT receive the mount"
         );
     }
 }
