@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::runtime::oci_provider::{
-    OciImageResolutionMode, OciImageResolutionRequest, OciProvider, OciProviderError,
-    OciProviderProbe, OciProviderSelector, OciResolvedImage,
+    OciImageResolutionMode, OciImageResolutionRequest, OciPlatformPolicy, OciProvider,
+    OciProviderError, OciProviderProbe, OciProviderSelector, OciResolvedImage,
 };
 use capsule_core::execution_plan::derive::compile_execution_plan;
 use capsule_core::execution_plan::error::AtoExecutionError;
@@ -1099,6 +1099,7 @@ egress_allow = ["smtp.gmail.com"]
                 requested_platform: None,
                 resolution_mode: OciImageResolutionMode::Required,
                 importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
             },
             OciImageResolutionRequest {
                 target_label: "app".to_string(),
@@ -1110,6 +1111,7 @@ egress_allow = ["smtp.gmail.com"]
                 }),
                 resolution_mode: OciImageResolutionMode::Required,
                 importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
             },
         ];
 
@@ -1137,6 +1139,7 @@ egress_allow = ["smtp.gmail.com"]
                 requested_platform: None,
                 resolution_mode: OciImageResolutionMode::BestEffort,
                 importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
             },
             OciImageResolutionRequest {
                 target_label: "app".to_string(),
@@ -1148,6 +1151,7 @@ egress_allow = ["smtp.gmail.com"]
                 }),
                 resolution_mode: OciImageResolutionMode::BestEffort,
                 importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
             },
         ];
 

@@ -51,6 +51,19 @@ pub(crate) struct OciImageResolutionRequest {
     pub requested_platform: Option<OciPlatform>,
     pub resolution_mode: OciImageResolutionMode,
     pub importer_input_hash: Option<String>,
+    /// Platform emulation policy for this target.
+    /// NativeOnly (default): reject images whose platform does not match the host.
+    /// AllowEmulation: allow pulling and running non-native images (e.g., amd64 on arm64).
+    pub platform_policy: OciPlatformPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OciPlatformPolicy {
+    /// Only accept images matching the host platform. Default.
+    #[default]
+    NativeOnly,
+    /// Accept images for a non-native platform; provider must pass `--platform` to pull/create.
+    AllowEmulation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,12 +597,85 @@ where
                     provider_semantics: self.semantics.clone(),
                 })
             } else {
-                // Mutable tag + single-arch: cannot get digest without pulling.
-                Err(OciProviderError::ImageResolveFailed {
+                // Mutable tag + single-arch: we must pull to resolve the digest.
+                // Under NativeOnly policy this fails with an actionable diagnostic.
+                // Under AllowEmulation we pull with --platform linux/amd64 and inspect
+                // for the digest so the lock entry is stable.
+                if request.platform_policy == OciPlatformPolicy::NativeOnly {
+                    return Err(OciProviderError::ImagePlatformUnsupported {
+                        declared_ref: declared_ref.clone(),
+                        platform: format!(
+                            "single-platform image '{declared_ref}' has a mutable tag and no \
+                             multi-arch manifest list; cannot determine image platform without \
+                             pulling. If this image is linux/amd64-only on an arm64 host, add \
+                             `allow_emulation = true` to the recipe target in capsule.toml."
+                        ),
+                    });
+                }
+                // AllowEmulation: pull with --platform linux/amd64 then inspect for digest.
+                let pull_output = run_provider_command(
+                    &self.runner,
+                    "podman",
+                    &["pull", "--platform", "linux/amd64", declared_ref],
+                )?;
+                if !pull_output.success() {
+                    let combined = format!("{} {}", pull_output.stdout, pull_output.stderr);
+                    if is_registry_auth_error(&combined) {
+                        return Err(OciProviderError::RegistryAuthRequired {
+                            declared_ref: declared_ref.clone(),
+                        });
+                    }
+                    let reason = if pull_output.stderr.trim().is_empty() {
+                        pull_output.stdout.trim().to_string()
+                    } else {
+                        pull_output.stderr.trim().to_string()
+                    };
+                    return Err(OciProviderError::ImageResolveFailed {
+                        declared_ref: declared_ref.clone(),
+                        reason,
+                    });
+                }
+                // Get the digest of the pulled image.
+                let inspect_output = run_provider_command(
+                    &self.runner,
+                    "podman",
+                    &[
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{index .RepoDigests 0}}",
+                        declared_ref,
+                    ],
+                )?;
+                let raw_digest = inspect_output.stdout.trim().to_string();
+                let digest =
+                    extract_digest_from_ref(&raw_digest).unwrap_or_else(|| raw_digest.clone());
+                if digest.is_empty() || !digest.starts_with("sha256:") {
+                    return Err(OciProviderError::ImageResolveFailed {
+                        declared_ref: declared_ref.clone(),
+                        reason: format!(
+                            "could not resolve digest for '{declared_ref}' after pull; \
+                             inspect returned: {raw_digest}"
+                        ),
+                    });
+                }
+                let emulated_platform = OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                };
+                tracing::warn!(
+                    target: "oci_provider",
+                    "Emulating linux/amd64 image '{}' on non-native host (allow_emulation=true). \
+                     Performance may be reduced.",
+                    declared_ref
+                );
+                Ok(OciResolvedImage {
                     declared_ref: declared_ref.clone(),
-                    reason: "single-platform manifest requires image pull for digest resolution; \
-                        use a digest reference or ensure the image has a manifest list"
-                        .to_string(),
+                    resolved_digest: digest,
+                    platform: emulated_platform,
+                    media_type: parsed.media_type,
+                    provider_semantics: self.semantics.clone(),
                 })
             }
         }
@@ -597,8 +683,16 @@ where
 
     async fn pull_image(&self, image: &OciImageResolution) -> Result<(), OciProviderError> {
         let pull_ref = build_digest_pull_ref(image);
+        let host = auto_select_platform();
+        let mut args = vec!["pull".to_string()];
+        if image.platform.architecture != host.architecture {
+            // Emulated platform: pass --platform so Podman fetches the right arch.
+            args.push("--platform".to_string());
+            args.push(format!("linux/{}", image.platform.architecture));
+        }
+        args.push(pull_ref.clone());
         let output = tokio::process::Command::new("podman")
-            .args(["pull", &pull_ref])
+            .args(&args)
             .output()
             .await
             .map_err(|e| podman_async_io_error("podman pull", e))?;
@@ -665,6 +759,14 @@ where
         request: &OciContainerRequest,
     ) -> Result<String, OciProviderError> {
         let mut args: Vec<String> = vec!["create".into(), "--name".into(), request.name.clone()];
+        // Pass --platform when creating an emulated (non-native) container.
+        if let Some(ref platform) = request.platform {
+            let host = auto_select_platform();
+            if platform.architecture != host.architecture {
+                args.push("--platform".into());
+                args.push(format!("linux/{}", platform.architecture));
+            }
+        }
         for (k, v) in &request.labels {
             args.push("--label".into());
             args.push(format!("{k}={v}"));
@@ -2036,6 +2138,7 @@ mod tests {
                 }],
                 network: None,
                 aliases: Vec::new(),
+                platform: None,
             })
             .await
             .expect("create");
@@ -2112,6 +2215,7 @@ mod tests {
             }),
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
 
         let resolved = provider.resolve_image(&request).await.expect("resolve");
@@ -2146,6 +2250,7 @@ mod tests {
             }),
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
 
         let resolved = provider.resolve_image(&request).await.expect("resolve");
@@ -2173,16 +2278,16 @@ mod tests {
             }),
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
 
-        let err = provider
-            .resolve_image(&request)
-            .await
-            .expect_err("should fail for mutable tag on single-arch manifest");
-        assert_eq!(err.code(), "oci_image_resolve_failed");
+        let err = provider.resolve_image(&request).await.expect_err(
+            "should fail for mutable tag on single-arch manifest with NativeOnly policy",
+        );
+        assert_eq!(err.code(), "oci_image_platform_unsupported");
         assert!(
-            err.to_string().contains("requires image pull"),
-            "error should explain pull is needed: {err}"
+            err.to_string().contains("allow_emulation"),
+            "error should mention allow_emulation: {err}"
         );
     }
 
@@ -2197,6 +2302,7 @@ mod tests {
             requested_platform: None,
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
 
         let err = provider
@@ -2224,6 +2330,7 @@ mod tests {
             requested_platform: None, // auto-select host platform
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
 
         let resolved = provider
@@ -2259,6 +2366,7 @@ mod tests {
             }),
             resolution_mode: OciImageResolutionMode::Required,
             importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::NativeOnly,
         };
 
         let err = provider
