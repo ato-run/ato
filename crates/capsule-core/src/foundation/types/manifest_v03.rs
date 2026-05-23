@@ -217,6 +217,43 @@ fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleE
                     )));
                 }
             }
+
+            // run_once validation
+            if target_table
+                .get("run_once")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+            {
+                if !is_oci_target {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' is only supported for OCI targets (runtime = \"oci\")",
+                        target_name
+                    )));
+                }
+                if target_table.get("readiness_probe").is_some() {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' targets must not define 'readiness_probe' (exit code 0 is the readiness condition)",
+                        target_name
+                    )));
+                }
+                if target_table.get("port").is_some() {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' targets must not define 'port' (one-shot services are not user-facing)",
+                        target_name
+                    )));
+                }
+                let has_cmd = target_table
+                    .get("cmd")
+                    .and_then(toml::Value::as_array)
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if !has_cmd {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' requires 'cmd' to be set (prevents accidental long-running server behavior)",
+                        target_name
+                    )));
+                }
+            }
         }
     }
 

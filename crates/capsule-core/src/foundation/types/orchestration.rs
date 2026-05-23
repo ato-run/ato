@@ -95,6 +95,9 @@ pub struct ResolvedService {
     pub readiness_probe: Option<ReadinessProbe>,
     #[serde(default)]
     pub network: ResolvedServiceNetwork,
+    /// One-shot lifecycle: run to completion before starting dependents.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_once: bool,
     #[serde(flatten)]
     pub runtime: ResolvedServiceRuntime,
 }
