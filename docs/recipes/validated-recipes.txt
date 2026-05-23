@@ -1,0 +1,38 @@
+# Validated recipes — one recipe path per line
+# Status: pass (34 total)
+# Use with: scripts/aodd-recipes.sh --list docs/recipes/validated-recipes.txt
+
+samples/recipes/memos
+samples/recipes/uptime-kuma
+samples/recipes/n8n
+samples/recipes/nocodb
+samples/recipes/mailpit
+samples/recipes/pocketbase
+samples/recipes/filebrowser
+samples/recipes/actual
+samples/recipes/homepage
+samples/recipes/stirling-pdf
+samples/recipes/pgweb
+samples/recipes/shiori
+samples/recipes/lobe-chat
+samples/recipes/linkwarden
+samples/recipes/adminer
+samples/recipes/changedetection
+samples/recipes/bytebase
+samples/recipes/dbgate
+samples/recipes/excalidraw
+samples/recipes/pingvin-share
+samples/recipes/kavita
+samples/recipes/searxng
+samples/recipes/grist
+samples/recipes/wallabag
+samples/recipes/flowise
+samples/recipes/litellm
+samples/recipes/directus
+samples/recipes/anything-llm
+samples/recipes/superset
+samples/recipes/langflow
+samples/recipes/langfuse
+samples/recipes/umami
+samples/recipes/paperless-ngx
+samples/recipes/outline

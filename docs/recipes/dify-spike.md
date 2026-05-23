@@ -2,6 +2,10 @@
 
 ## Overview
 
+> **Note:** See [initial-catalog-status.md](./initial-catalog-status.md) for
+> consolidated catalog status. See [secret-cleanup-plan.md](./secret-cleanup-plan.md)
+> for dify secret handling.
+
 This document records the spike AODD for [langgenius/dify](https://github.com/langgenius/dify) v1.14.2 — an open-source LLM app development platform with RAG, AI workflows, and multi-model support.
 
 **Final status: partial-pass**

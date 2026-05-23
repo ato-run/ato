@@ -1,0 +1,13 @@
+# AI / LLM showcase recipes
+# These are ready for demo with ato run
+# Start with flowise or memos for fastest demo
+
+samples/recipes/flowise
+samples/recipes/langflow
+samples/recipes/anything-llm
+samples/recipes/n8n
+samples/recipes/lobe-chat
+samples/recipes/litellm
+samples/recipes/langfuse
+samples/recipes/open-webui
+samples/recipes/memos
