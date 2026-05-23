@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "shiori"
+version = "1.8.0"
+type = "app"
+description = "Simple, self-hosted bookmark manager with reading mode and full-text search"
+homepage = "https://github.com/go-shiori/shiori"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/go-shiori/shiori:v1.8.0"
+port = 8080
+env = { SHIORI_DIR = "/shiori" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "bookmark database and assets"
+attach = "explicit"
+schema_id = "sha256:3a1f8c2e5b9d4a7f1e6c0b8d2f4a9e3c7b5d1f8e2a6c4b0d9f7e5a3c1b8d6f4"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8080" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/shiori"
