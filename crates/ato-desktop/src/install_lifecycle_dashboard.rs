@@ -121,6 +121,14 @@ impl DashboardCache {
             Err(e) => Err(format!("{:#}", e)),
         };
     }
+
+    /// Reset the cache to empty.  Call between tests to avoid
+    /// state leaking across `serial_test`-serialized runs.
+    #[cfg(test)]
+    pub fn reset_for_test() {
+        let mut guard = CACHE.lock().unwrap();
+        guard.items = Ok(Vec::new());
+    }
 }
 
 static CACHE: std::sync::LazyLock<Mutex<DashboardCache>> =
@@ -200,34 +208,22 @@ pub fn list_app_revisions(
         .collect()
 }
 
-// ── Launch (background, non-blocking — Blocker 2 fix) ───────────────────────
+// ── Launch (called from GPUI background executor — Blocker 2 fix) ───────────
 
-/// Spawn `ato launch <ipk> -y` in a background thread.
-///
-/// `ato_bin` must be resolved via `orchestrator::resolve_ato_binary()`.
-/// `on_done` is called exactly once with the Result; callers should route
-/// errors to the UI state (e.g. an error toast).
-pub fn launch_installed_app_background(
-    ato_bin: std::path::PathBuf,
-    install_profile_key: String,
-    on_done: impl FnOnce(Result<String>) + Send + 'static,
-) {
-    std::thread::spawn(move || {
-        let result = (|| -> Result<String> {
-            let output = std::process::Command::new(&ato_bin)
-                .arg("launch")
-                .arg(&install_profile_key)
-                .arg("-y")
-                .output()
-                .with_context(|| format!("spawn ato launch '{}'", install_profile_key))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("ato launch failed: {stderr}");
-            }
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        })();
-        on_done(result);
-    });
+/// Run `ato launch <ipk> -y` synchronously.  Intended to be called from a
+/// GPUI background-executor spawn, not from the render thread.
+pub fn spawn_launch(ato_bin: &std::path::Path, install_profile_key: &str) -> Result<String> {
+    let output = std::process::Command::new(ato_bin)
+        .arg("launch")
+        .arg(install_profile_key)
+        .arg("-y")
+        .output()
+        .with_context(|| format!("spawn ato launch '{}'", install_profile_key))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ato launch failed: {stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 // ── Session attachment (Blocker 4 fix: only alive sessions) ─────────────────
@@ -329,6 +325,26 @@ fn nix_pid(raw: i32) -> Option<u32> {
 
 // ── Internal builders (Blocker 3 fix: no silent .ok().flatten()) ────────────
 
+/// Read `finalized_at` from a single revision's artifact manifest.
+/// Returns `Ok(None)` when the manifest does not contain the field
+/// (unfinalized revision).  Returns `Err` when the manifest file is
+/// missing, unreadable, or not valid JSON.
+fn revision_finalized_at(
+    store: &InstallInstanceStore,
+    rev: &InstallRevisionId,
+) -> Result<Option<String>> {
+    store
+        .read_revision_manifest(rev)
+        .with_context(|| format!("read manifest for revision {}", rev.as_str()))
+        .map(|v| {
+            v.and_then(|v| {
+                v.get("finalized_at")
+                    .and_then(|s| s.as_str())
+                    .map(String::from)
+            })
+        })
+}
+
 fn build_app_item(
     store: &InstallInstanceStore,
     app_id: &InstalledAppId,
@@ -375,17 +391,22 @@ fn build_profile_item(
 
     let current_rev = {
         let link = store.current_revision_link(app_id, profile_id);
-        if link.exists() {
-            let rev = store.current_revision(app_id, profile_id).with_context(|| {
-                format!(
-                    "read current_revision for {}/{}",
-                    app_id.as_str(),
-                    profile_id.as_str()
-                )
-            })?;
-            Some(rev.as_str().to_owned())
-        } else {
-            None
+        match std::fs::symlink_metadata(&link) {
+            Ok(_) => {
+                let rev = store.current_revision(app_id, profile_id).with_context(|| {
+                    format!(
+                        "read current_revision for {}/{}",
+                        app_id.as_str(),
+                        profile_id.as_str()
+                    )
+                })?;
+                Some(rev.as_str().to_owned())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("read current_revision link {}", link.display()));
+            }
         }
     };
 
@@ -400,13 +421,18 @@ fn build_profile_item(
         })?;
     let revisions_count = revisions.len();
 
-    let latest_finalized_at = revisions.iter().rev().find_map(|rev| {
-        store
-            .read_revision_manifest(rev)
-            .ok()
-            .flatten()
-            .and_then(|v| v.get("finalized_at").and_then(|s| s.as_str()).map(String::from))
-    });
+    let latest_finalized_at = revisions
+        .iter()
+        .rev()
+        .find_map(|rev| revision_finalized_at(store, rev).transpose())
+        .transpose()
+        .with_context(|| {
+            format!(
+                "read revision manifests for {}/{}",
+                app_id.as_str(),
+                profile_id.as_str()
+            )
+        })?;
 
     let current_output_dir = current_rev.as_ref().map(|rev_id_str| {
         let rev = InstallRevisionId::new(rev_id_str.as_str());
@@ -611,40 +637,48 @@ mod tests {
         let (app_id, profile_id, _ipk) = scaffold_one(&dir, 1);
         let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
 
-        // Make the current_revision link unreadable by replacing it with a
-        // dangling symlink pointing to a non-existent directory whose name
-        // cannot be parsed as a revision ID.
         #[cfg(unix)]
         {
+            // Replace current_revision symlink → target="/".
+            // `Path::new("/").file_name()` returns `None` on Unix,
+            // which causes `current_revision()` to fail with
+            // "extract revision id from symlink target".
             let link = store.current_revision_link(&app_id, &profile_id);
             std::fs::remove_file(&link).unwrap();
-            // Dangling symlink: target doesn't exist. current_revision()
-            // will read the link and try to parse the basename — the
-            // path "/nonexistent/deadbeef" has basename "deadbeef" which
-            // IS a valid string, so it won't fail.
-            // A true failure would be a symlink pointing to a directory
-            // whose basename cannot be extracted (perms, etc).
-            // For this test we just verify that the error propagates
-            // when the symlink exists but current_revision fails.
-            let _ = link;
+            std::os::unix::fs::symlink(std::path::Path::new("/"), &link).unwrap();
         }
 
-        // The key invariant: the symlink exists but current_revision() returns
-        // Err → dashboard should propagate, not swallow.
-        // This is hard to trigger without OS-level corruption.
-        // We test the contract indirectly: the build_profile_item fn
-        // uses current_revision() with .with_context() error wrapping
-        // when the link exists. Verified via code review.
+        std::env::set_var("ATO_HOME", dir.path());
+        let result = list_installed_apps_dashboard();
+        std::env::remove_var("ATO_HOME");
+
+        #[cfg(unix)]
+        {
+            assert!(
+                result.is_err(),
+                "current_revision symlink to / must produce Err, got Ok"
+            );
+            let msg = format!("{:#}", result.unwrap_err());
+            assert!(
+                msg.contains("revision id from symlink")
+                    || msg.contains("current_revision"),
+                "expected 'revision id' or 'current_revision' context in error: {msg}"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(result.is_ok());
+        }
     }
 
     #[test]
     #[serial]
     fn cache_refresh_populates_items() {
+        DashboardCache::reset_for_test();
         let dir = tempfile::tempdir().unwrap();
-        let (app_id, _profile_id, _ipk) = scaffold_one(&dir, 2);
+        let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 2);
         std::env::set_var("ATO_HOME", dir.path());
 
-        // Initial cache should be empty.
         let initial = DashboardCache::get().unwrap();
         assert!(initial.is_empty());
 
@@ -652,12 +686,14 @@ mod tests {
         let after = DashboardCache::get().unwrap();
         assert_eq!(after.len(), 1);
 
+        DashboardCache::reset_for_test();
         std::env::remove_var("ATO_HOME");
     }
 
     #[test]
     #[serial]
     fn running_badge_only_for_alive_sessions() {
+        DashboardCache::reset_for_test();
         let dir = tempfile::tempdir().unwrap();
         let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
         std::env::set_var("ATO_HOME", dir.path());
@@ -666,12 +702,9 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].running_sessions_hint.is_empty());
 
-        // If there's a session with a dead PID (unlikely in unit test),
-        // attach_running_sessions should not add it.
-        // We can't easily create a real live session in unit tests,
-        // but we verify the contract: empty sessions_hint = no running badge.
         let _ = attach_running_sessions(&mut items);
 
+        DashboardCache::reset_for_test();
         std::env::remove_var("ATO_HOME");
     }
 }
