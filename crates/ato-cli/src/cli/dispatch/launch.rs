@@ -13,6 +13,7 @@ use capsule_core::foundation::install_lifecycle::{
     derive_install_profile_key, InstallInstanceStore, InstalledAppId, ProfileId,
 };
 
+use crate::app_control::session::ScopedInstallLifecycleGuard;
 use crate::cli::commands::run::InstallLifecycleContext;
 use crate::install::support::execute_run_command;
 use crate::reporters;
@@ -87,7 +88,8 @@ pub(crate) fn execute_launch_command(
         capsule_handle,
     );
 
-    // The lifecycle context is passed through RunArgs → session writer.
+    // The lifecycle context is set via ScopedInstallLifecycleGuard so it is
+    // always cleared after execute_run_command returns, even on early return or panic.
     // The session writer derives CapsuleInstanceKey from the pipeline's execution_id
     // at write time (see apply_install_lifecycle in session.rs).
     let lifecycle_ctx = InstallLifecycleContext {
@@ -97,12 +99,18 @@ pub(crate) fn execute_launch_command(
         install_revision_id: rev_id.as_str().to_string(),
     };
 
-    // Bridge into the run pipeline. Use the capsule handle (e.g. "publisher/slug")
-    // as the run target — the standard resolution layer finds the installed runtime
-    // tree the same way `ato run publisher/slug` does.
+    // Compute the frozen revision output dir — the run pipeline will bypass the
+    // ~/.ato path guard and run directly from this immutable directory, ensuring
+    // the pinned current_revision is executed even after a rollback.
+    let revision_output_dir = store.revision_output_dir(&rev_id);
+
+    // Set the thread-local lifecycle context via a scoped guard so it is
+    // always cleared when this function returns (or panics).
+    let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx.clone());
+
     execute_run_command(
-        PathBuf::from(&capsule_handle),
-        /* target */ None,
+        revision_output_dir.clone(),
+        /* target */ Some(capsule_handle.clone()),
         /* args */ profile_args,
         /* watch */ false,
         /* background */ false,
@@ -131,6 +139,7 @@ pub(crate) fn execute_launch_command(
         /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
         /* plan_only */ false,
         Some(lifecycle_ctx),
+        /* pinned_revision_output_dir */ Some(revision_output_dir),
         reporter,
     )
 }

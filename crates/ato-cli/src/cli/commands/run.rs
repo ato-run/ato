@@ -119,6 +119,12 @@ pub struct RunArgs {
     /// Install lifecycle context set by `ato launch`. When `Some`, the run
     /// pipeline stamps these IDs onto the session record.
     pub install_lifecycle_context: Option<InstallLifecycleContext>,
+    /// When set by `ato launch`, the run-install phase bypasses the normal
+    /// `resolve_run_target_or_install` (and the `~/.ato` path guard) and runs
+    /// the capsule directly from this frozen revision output directory. This
+    /// ensures `ato launch <ipk>` always executes the pinned `current_revision`,
+    /// not the latest installed version.
+    pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
@@ -527,6 +533,7 @@ fn build_consumer_run_request(
         cache_strategy: args.cache_strategy,
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
+        pinned_revision_output_dir: args.pinned_revision_output_dir.clone(),
     }
 }
 
@@ -2027,6 +2034,7 @@ run = "node server.js""#,
             preview_mode: false,
             plan_only: false,
             install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2132,6 +2140,7 @@ run = "main.py""#,
             preview_mode: false,
             plan_only: false,
             install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2234,6 +2243,7 @@ run = "main.py""#,
             preview_mode: false,
             plan_only: false,
             install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2324,6 +2334,7 @@ run = "node index.js"
             preview_mode: false,
             plan_only: true,
             install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let err = super::execute_plan_only(args)
