@@ -2,7 +2,8 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::adapters::runtime::oci_session_store::{
-    apply_stop_result, stop_oci_session, OciSessionStatus, OciSessionStore,
+    apply_stop_result, stop_oci_session, stop_oci_session_by_id, OciSessionStatus, OciSessionStore,
+    StopByIdAttempt,
 };
 use crate::reporters::CliReporter;
 use crate::runtime::process::ProcessManager;
@@ -89,9 +90,13 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 )?;
             }
             Ok(false) => {
-                futures::executor::block_on(
-                    reporter.warn(format!("⚠️  Capsule {} is not running", id)),
-                )?;
+                if let Some(attempt) = stop_oci_by_id(id, args.force)? {
+                    report_oci_stop_attempt(&attempt, &reporter)?;
+                } else {
+                    futures::executor::block_on(
+                        reporter.warn(format!("⚠️  Capsule {} is not running", id)),
+                    )?;
+                }
             }
             Err(err) => {
                 anyhow::bail!("Failed to stop capsule {}: {}", id, err);
@@ -178,26 +183,47 @@ fn stop_all_oci_sessions(args: &CloseArgs, reporter: &Arc<CliReporter>) -> Resul
         )))?;
 
         let result = stop_oci_session(session, args.force);
-
-        for name in &result.stopped_containers {
-            futures::executor::block_on(
-                reporter.notify(format!("  ✅ Stopped container: {name}")),
-            )?;
-        }
-        for name in &result.errors {
-            futures::executor::block_on(reporter.warn(format!("  ⚠️  {name}")))?;
-        }
-        if result.network_removed {
-            futures::executor::block_on(
-                reporter.notify(format!("  🔗 Removed network: {}", session.network_name)),
-            )?;
-        }
+        report_oci_stop_result(&result, &session.network_name, reporter)?;
 
         // Delete on full success; keep the record (as StopFailed) on partial
         // failure so a later `ato stop --all` can retry.
         apply_stop_result(&store, &session.session_id, &result);
     }
 
+    Ok(())
+}
+
+fn stop_oci_by_id(session_id: &str, force: bool) -> Result<Option<StopByIdAttempt>> {
+    let store = OciSessionStore::new()?;
+    stop_oci_session_by_id(&store, session_id, force)
+}
+
+fn report_oci_stop_attempt(attempt: &StopByIdAttempt, reporter: &Arc<CliReporter>) -> Result<()> {
+    futures::executor::block_on(reporter.notify(format!(
+        "🐳 Stopping OCI session {} ({}, {} service(s))...",
+        attempt.record.session_id,
+        attempt.record.import_kind,
+        attempt.record.services.len()
+    )))?;
+    report_oci_stop_result(&attempt.result, &attempt.record.network_name, reporter)
+}
+
+fn report_oci_stop_result(
+    result: &crate::adapters::runtime::oci_session_store::StopResult,
+    network_name: &str,
+    reporter: &Arc<CliReporter>,
+) -> Result<()> {
+    for name in &result.stopped_containers {
+        futures::executor::block_on(reporter.notify(format!("  ✅ Stopped container: {name}")))?;
+    }
+    for name in &result.errors {
+        futures::executor::block_on(reporter.warn(format!("  ⚠️  {name}")))?;
+    }
+    if result.network_removed {
+        futures::executor::block_on(
+            reporter.notify(format!("  🔗 Removed network: {network_name}")),
+        )?;
+    }
     Ok(())
 }
 
