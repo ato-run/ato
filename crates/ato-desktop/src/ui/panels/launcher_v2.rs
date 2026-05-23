@@ -9,6 +9,8 @@ use super::super::theme::Theme;
 use crate::app::{NavigateToUrl, OpenCloudDock, OpenLocalRegistry, ShowSettings, SignInToAtoRun};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
 
+use super::installed_apps::render_installed_apps_section;
+
 pub(in crate::ui) fn render_launcher_panel_v2(
     state: &AppState,
     theme: &Theme,
@@ -51,7 +53,8 @@ pub(in crate::ui) fn render_launcher_panel_v2(
                         .child(render_search_bar(launcher_search))
                         .child(render_primary_actions(state))
                         .child(render_status_card(state))
-                        .child(render_app_grid()),
+                        .child(render_app_grid())
+                        .child(render_installed_apps_section_wrapper(state, theme)),
                 )
                 .child(render_bottom_bar()),
         )
@@ -539,6 +542,23 @@ fn bottom_action(label: &'static str) -> AnyElement {
         .text_color(hsla(0.0, 0.0, 0.333, 1.0))
         .child(label)
         .into_any_element()
+}
+
+fn render_installed_apps_section_wrapper(
+    _state: &AppState,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    match crate::install_lifecycle_dashboard::DashboardCache::get() {
+        Ok(items) => render_installed_apps_section(&items, theme),
+        Err(e) => {
+            div()
+                .py(px(16.0))
+                .text_size(px(12.0))
+                .text_color(theme.text_tertiary)
+                .child(format!("Unable to read installed apps: {e}"))
+                .into_any_element()
+        }
+    }
 }
 
 #[cfg(test)]
