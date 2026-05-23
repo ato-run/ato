@@ -3,6 +3,7 @@ mod app_update;
 mod attest;
 mod binding;
 mod cache;
+mod gc;
 mod config;
 mod engine;
 mod explain_hash;
@@ -473,6 +474,18 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         } => app_update::execute_app_update_command(app_update::AppUpdateArgs {
             install_profile_key,
             yes,
+            json: json || command_json,
+        }),
+
+        Commands::Gc {
+            dry_run,
+            keep_last,
+            retention_days,
+            json: command_json,
+        } => gc::execute_gc_command(gc::GcArgs {
+            dry_run,
+            keep_last,
+            retention_days,
             json: json || command_json,
         }),
 

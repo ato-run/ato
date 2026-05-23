@@ -388,6 +388,151 @@ impl InstallInstanceStore {
     // ── Profile list ──────────────────────────────────────────────────────
 
     /// List all profile IDs for an installed app.
+    // ── GC helpers ─────────────────────────────────────────────────────────
+
+    /// Path of the per-revision pin marker file.
+    pub fn revision_pin_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join(".pinned")
+    }
+
+    /// Mark a revision as user-pinned (prevents GC from deleting it).
+    pub fn pin_revision(&self, rev: &InstallRevisionId) -> Result<()> {
+        let rev_dir = self.revision_dir(rev);
+        if !rev_dir.exists() {
+            anyhow::bail!("revision '{}' does not exist", rev.as_str());
+        }
+        let pin = self.revision_pin_path(rev);
+        fs::write(&pin, b"pinned").with_context(|| format!("write pin {}", pin.display()))?;
+        Ok(())
+    }
+
+    /// Remove a user pin from a revision.
+    pub fn unpin_revision(&self, rev: &InstallRevisionId) -> Result<()> {
+        let pin = self.revision_pin_path(rev);
+        if pin.exists() {
+            fs::remove_file(&pin).with_context(|| format!("remove pin {}", pin.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if the revision has a user pin.
+    pub fn is_pinned(&self, rev: &InstallRevisionId) -> bool {
+        self.revision_pin_path(rev).exists()
+    }
+
+    /// List every revision directory present in `revisions/`.
+    pub fn list_all_revisions(&self) -> Result<Vec<InstallRevisionId>> {
+        let revs_dir = self.root.join("revisions");
+        if !revs_dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut revisions = Vec::new();
+        for entry in
+            fs::read_dir(&revs_dir).with_context(|| format!("read {}", revs_dir.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    revisions.push(InstallRevisionId::new(name));
+                }
+            }
+        }
+        Ok(revisions)
+    }
+
+    /// Delete a single revision directory.
+    ///
+    /// Returns `Err` if the revision is still current for any profile —
+    /// callers must verify protection before calling this.
+    pub fn delete_revision(&self, rev: &InstallRevisionId) -> Result<()> {
+        let rev_dir = self.revision_dir(rev);
+        if !rev_dir.exists() {
+            return Ok(());
+        }
+        fs::remove_dir_all(&rev_dir)
+            .with_context(|| format!("delete revision dir {}", rev_dir.display()))?;
+        Ok(())
+    }
+
+    /// Determine which revisions can be safely deleted.
+    ///
+    /// A revision is **protected** (kept) if any of these hold:
+    /// - It appears in `protected_rev_ids` (current + active-session + user-pinned)
+    /// - It is user-pinned on disk
+    /// - It falls within the last `keep_last_n` revisions in the log of any profile
+    /// - Its `finalized_at` in the artifact manifest is within `retention_days` of now
+    ///
+    /// Everything else is reclaimable.
+    ///
+    /// `all_revisions` is the full list from [`list_all_revisions`].
+    /// `profile_logs` maps each profile's ordered log so recency can be checked.
+    pub fn collect_reclaimable_revisions(
+        &self,
+        protected_rev_ids: &std::collections::HashSet<String>,
+        all_revisions: &[InstallRevisionId],
+        keep_last_n: usize,
+        retention_days: u64,
+    ) -> Vec<InstallRevisionId> {
+        // Build set of revisions protected by recency within any profile log.
+        let mut recency_protected: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        if let Ok(apps) = self.list_installed_apps() {
+            for app in &apps {
+                if let Ok(profiles) = self.list_profiles(app) {
+                    for profile in &profiles {
+                        if let Ok(log) = self.list_profile_revisions(app, profile) {
+                            for rev in log.iter().rev().take(keep_last_n) {
+                                recency_protected.insert(rev.as_str().to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let retention_secs = retention_days * 86400;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        all_revisions
+            .iter()
+            .filter(|rev| {
+                let id = rev.as_str();
+                // Explicit protection (current_revision, active session, user pin arg).
+                if protected_rev_ids.contains(id) {
+                    return false;
+                }
+                // Disk pin marker.
+                if self.is_pinned(rev) {
+                    return false;
+                }
+                // Recency within profile log (keep_last_n).
+                if recency_protected.contains(id) {
+                    return false;
+                }
+                // Retention window: keep if finalized_at is recent enough.
+                if let Ok(Some(manifest)) = self.read_revision_manifest(rev) {
+                    if let Some(ts) = manifest
+                        .get("finalized_at")
+                        .and_then(|v| v.as_str())
+                    {
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                            let age_secs =
+                                now.saturating_sub(dt.timestamp().max(0) as u64);
+                            if age_secs < retention_secs {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn list_profiles(&self, app: &InstalledAppId) -> Result<Vec<ProfileId>> {
         let profiles_dir = self.instance_dir(app).join("profiles");
         if !profiles_dir.exists() {
