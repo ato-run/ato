@@ -918,9 +918,10 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
             }
 
             if !uses_event_driven_readiness(&service) {
-                let port = resolve_probe_port(&service, &probe)?;
-                if readiness_probe_ok(&probe, port)? {
-                    return Ok(());
+                if let Some(port) = resolve_probe_port(&service, &probe)? {
+                    if readiness_probe_ok(&probe, port)? {
+                        return Ok(());
+                    }
                 }
             }
 
@@ -1150,14 +1151,22 @@ async fn try_wait<C: OciRuntimeClient>(
     }
 }
 
-fn resolve_probe_port(service: &RunningService, probe: &ReadinessProbe) -> Result<u16> {
-    let key = probe.port.trim();
-    if key.is_empty() {
-        anyhow::bail!(
-            "services.{}.readiness_probe.port must be a non-empty env placeholder",
-            service.service.name
-        );
+fn resolve_probe_port(service: &RunningService, probe: &ReadinessProbe) -> Result<Option<u16>> {
+    // Exec probes do not use a port.
+    if probe.exec.is_some() {
+        return Ok(None);
     }
+    let key = probe
+        .port
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "services.{}.readiness_probe.port must be a non-empty env placeholder",
+                service.service.name
+            )
+        })?;
 
     let value = service.env.get(key).ok_or_else(|| {
         anyhow::anyhow!(
@@ -1175,14 +1184,15 @@ fn resolve_probe_port(service: &RunningService, probe: &ReadinessProbe) -> Resul
         )
     })?;
 
-    match &service.handle {
-        RunningHandle::Local(_) => Ok(container_port),
-        RunningHandle::Oci(oci) => Ok(oci
+    let host_port = match &service.handle {
+        RunningHandle::Local(_) => container_port,
+        RunningHandle::Oci(oci) => oci
             .host_ports
             .get(&container_port)
             .copied()
-            .unwrap_or(container_port)),
-    }
+            .unwrap_or(container_port),
+    };
+    Ok(Some(host_port))
 }
 
 fn resolve_host_port(service: &RunningService, container_port: u16) -> Result<u16> {

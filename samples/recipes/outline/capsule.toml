@@ -41,15 +41,15 @@ schema_id = "sha256:outline-storage-v1"
 
 [services.db]
 target = "db"
-readiness_probe = { exec = ["pg_isready", "-U", "outline"], port = "5432" }
+readiness_probe = { exec = ["pg_isready", "-U", "outline"] }
 
 [services.redis]
 target = "redis"
-readiness_probe = { exec = ["redis-cli", "ping"], port = "6379", initial_delay_seconds = 2 }
+readiness_probe = { exec = ["redis-cli", "ping"], initial_delay_seconds = 2 }
 
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/", port = "3000", timeout_seconds = 180, initial_delay_seconds = 10 }
+readiness_probe = { http_get = "/", timeout_seconds = 180, initial_delay_seconds = 10 }
 
 [[services.main.state_bindings]]
 state = "db-data"

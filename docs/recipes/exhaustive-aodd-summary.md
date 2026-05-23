@@ -136,7 +136,7 @@ After merging `feat/runtime-depends_on`, `feat/runtime-readiness-timing`:
 ### Open issues surfaced
 
 1. **Ato single-arch image resolver** — Ato rejects amd64-only images on arm64 host even though Podman/Docker can run them via emulation. Should emit clear error and expose `--allow-emulation` or automatic fallback. **→ Fixed in PR #223**
-2. **exec probe requires port field** — Schema mandates `port` on all probe types even when exec ignores it. Consider making `port` optional for exec probes.
+2. **exec probe requires port field** — Schema mandates `port` on all probe types even when exec ignores it. Consider making `port` optional for exec probes. **→ Fixed in `feat/runtime-exec-probe-schema-cleanup`**
 3. **tcp_connect probes for internal services** — TCP probes always use `127.0.0.1:<port>` (host), so internal services not port-mapped to host will always fail. Documented; use exec probes for internal postgres/redis.
 4. **ato auto-overwrites invalid capsule.toml with --yes** — When recipe validation fails in auto-mode, Ato replaces the file. Recipe authors must validate manually before running with `--yes`.
 5. **macOS /tmp symlink rejected by Podman** — Podman on macOS does not resolve `/tmp` → `/private/tmp` for volume mounts. Any state path under `/tmp` fails with `statfs` error. **→ Fixed in PR #224**
@@ -166,4 +166,4 @@ After merging:
 
 - **twenty** — private Docker image (upstream). No fix until twenty publishes a public image.
 - **dify** — 10-service stack, deferred as separate spike.
-- **exec probe port field** — minor schema friction; `port` required even for exec probes.
+- **exec probe port field** — minor schema friction; `port` required even for exec probes. **→ Fixed**: `port` is now optional for exec probes; legacy recipes with `port` still parse.

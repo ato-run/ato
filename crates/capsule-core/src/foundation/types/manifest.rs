@@ -430,7 +430,10 @@ pub struct ReadinessProbe {
     pub exec: Option<Vec<String>>,
 
     /// Placeholder name that resolves to a concrete port (e.g., "PORT").
-    pub port: String,
+    /// Required for `http_get` and `tcp_connect` probes; ignored for `exec` probes.
+    /// Legacy exec recipes that include `port` are accepted but the value is not used.
+    #[serde(default)]
+    pub port: Option<String>,
 
     /// Seconds to wait before the first probe attempt (default: 0).
     #[serde(default)]
