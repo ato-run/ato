@@ -234,6 +234,10 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) cache_strategy: CacheStrategy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
+    /// Revision-pinned output directory set by `ato launch`. When `Some`,
+    /// `run_install_phase` bypasses `resolve_run_target_or_install` and uses
+    /// this frozen revision output dir directly as the run target.
+    pub(crate) pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
 impl ConsumerRunRequest {
@@ -1454,18 +1458,32 @@ where
 {
     progress.start(HourglassPhase::Install);
 
-    let resolved_target = crate::install::support::resolve_run_target_or_install(
-        request.target.clone(),
-        request.assume_yes,
-        request.provider_toolchain_requested,
-        request.explicit_commit.clone(),
-        request.keep_failed_artifacts,
-        request.auto_fix_mode,
-        request.allow_unverified,
-        request.registry.as_deref(),
-        request.reporter.clone(),
-    )
-    .await?;
+    let resolved_target = if let Some(pinned) = &request.pinned_revision_output_dir {
+        // Revision-pinned launch from `ato launch`: bypass `resolve_run_target_or_install`
+        // and the ~/.ato path guard. The output directory is a frozen, trusted revision
+        // root written by `InstallRevisionFinalizer`.
+        crate::install::support::ResolvedRunTarget {
+            path: pinned.clone(),
+            agent_local_root: None,
+            desktop_open_path: None,
+            export_request: request.export_request.clone(),
+            provider_workspace: None,
+            transient_workspace_root: None,
+        }
+    } else {
+        crate::install::support::resolve_run_target_or_install(
+            request.target.clone(),
+            request.assume_yes,
+            request.provider_toolchain_requested,
+            request.explicit_commit.clone(),
+            request.keep_failed_artifacts,
+            request.auto_fix_mode,
+            request.allow_unverified,
+            request.registry.as_deref(),
+            request.reporter.clone(),
+        )
+        .await?
+    };
     let manifest_outcome = crate::install::support::ensure_local_manifest_ready_for_run(
         &resolved_target,
         request.assume_yes,
@@ -4822,6 +4840,7 @@ url = "http://127.0.0.1:8787/health"
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
+            pinned_revision_output_dir: None,
         }
     }
 

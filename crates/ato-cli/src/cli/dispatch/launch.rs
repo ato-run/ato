@@ -1,0 +1,233 @@
+//! `ato launch <install_profile_key>` — launch an installed app by its stable profile key.
+//!
+//! Unlike `ato run` (source/session execution), `ato launch` targets the installed-app
+//! lifecycle layer: it resolves the profile key → app + profile → current revision →
+//! capsule handle, then bridges into the existing run pipeline with profile args applied.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule_core::foundation::install_lifecycle::{
+    derive_install_profile_key, InstallInstanceStore, InstalledAppId, ProfileId,
+};
+
+use crate::app_control::session::ScopedInstallLifecycleGuard;
+use crate::cli::commands::run::InstallLifecycleContext;
+use crate::install::support::execute_run_command;
+use crate::reporters;
+use crate::{EnforcementMode, ProviderToolchain, RunAgentMode};
+
+pub(crate) struct LaunchArgs {
+    pub(crate) install_profile_key: String,
+    pub(crate) yes: bool,
+    pub(crate) verbose: bool,
+    pub(crate) json: bool,
+    pub(crate) nacelle: Option<PathBuf>,
+}
+
+pub(crate) fn execute_launch_command(
+    args: LaunchArgs,
+    reporter: Arc<reporters::CliReporter>,
+) -> Result<()> {
+    let instances_root = ato_path_or_workspace_tmp("instances");
+    let store = InstallInstanceStore::new(&instances_root)
+        .context("open install instance store")?;
+
+    // Resolve profile key → (installed_app_id, profile_id, capsule_handle, rev_id).
+    let (app_id, profile_id, capsule_handle, rev_id) =
+        find_profile_by_key(&store, &args.install_profile_key).with_context(|| {
+            format!(
+                "install profile key '{}' not found — run `ato install` first",
+                args.install_profile_key
+            )
+        })?;
+
+    // Compute the stable profile key for the session record.
+    let ipk = derive_install_profile_key(&app_id, &profile_id);
+
+    // CapsuleInstanceKey is NOT derived here — the run pipeline assigns the real
+    // execution_id from its receipt, and the session writer derives CIK from
+    // (install_profile_key + install_revision_id + session execution_id) when it
+    // writes the record. Deriving it from a random id here would break the
+    // receipt/session/CIK identity contract.
+
+    // Read LaunchProfile to apply args and warn about unsupported fields.
+    let (profile_args, profile_env_refs_warning) =
+        read_profile_launch_config(&store, &app_id, &profile_id);
+
+    if args.verbose || args.json {
+        let info = serde_json::json!({
+            "installed_app_id": app_id.as_str(),
+            "profile_id": profile_id.as_str(),
+            "install_profile_key": ipk.as_str(),
+            "install_revision_id": rev_id.as_str(),
+            "capsule_handle": capsule_handle,
+        });
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        } else {
+            eprintln!("[ato launch] resolved: {}", serde_json::to_string(&info)?);
+        }
+    }
+
+    if let Some(warn) = profile_env_refs_warning {
+        tracing::warn!("ato launch: {warn}");
+        if args.verbose {
+            eprintln!("ATO-WARN {warn}");
+        }
+    }
+
+    tracing::debug!(
+        "launch: app={} profile={} rev={} handle={}",
+        app_id.as_str(),
+        profile_id.as_str(),
+        rev_id.as_str(),
+        capsule_handle,
+    );
+
+    // The lifecycle context is set via ScopedInstallLifecycleGuard so it is
+    // always cleared after execute_run_command returns, even on early return or panic.
+    // The session writer derives CapsuleInstanceKey from the pipeline's execution_id
+    // at write time (see apply_install_lifecycle in session.rs).
+    let lifecycle_ctx = InstallLifecycleContext {
+        installed_app_id: app_id.as_str().to_string(),
+        install_profile_id: profile_id.as_str().to_string(),
+        install_profile_key: ipk.as_str().to_string(),
+        install_revision_id: rev_id.as_str().to_string(),
+    };
+
+    // Compute the frozen revision output dir — the run pipeline will bypass the
+    // ~/.ato path guard and run directly from this immutable directory, ensuring
+    // the pinned current_revision is executed even after a rollback.
+    let revision_output_dir = store.revision_output_dir(&rev_id);
+
+    // Set the thread-local lifecycle context via a scoped guard so it is
+    // always cleared when this function returns (or panics).
+    let _lifecycle_guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx.clone());
+
+    execute_run_command(
+        revision_output_dir.clone(),
+        /* target */ None,
+        /* args */ profile_args,
+        /* watch */ false,
+        /* background */ false,
+        args.nacelle,
+        /* registry */ None,
+        /* enforcement */ EnforcementMode::Strict,
+        /* sandbox_mode */ false,
+        /* dangerously_skip_permissions */ false,
+        /* compatibility_fallback */ None,
+        /* provider_toolchain */ ProviderToolchain::Auto,
+        /* explicit_commit */ None,
+        /* assume_yes */ args.yes,
+        /* verbose */ args.verbose,
+        /* agent_mode */ RunAgentMode::Auto,
+        /* agent_local_root */ None,
+        /* keep_failed_artifacts */ false,
+        /* auto_fix_mode */ None,
+        /* allow_unverified */ false,
+        /* read */ vec![],
+        /* write */ vec![],
+        /* read_write */ vec![],
+        /* cwd */ None,
+        /* state */ vec![],
+        /* inject */ vec![],
+        /* build_policy */ crate::application::build_materialization::BuildPolicy::IfStale,
+        /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
+        /* plan_only */ false,
+        Some(lifecycle_ctx),
+        /* pinned_revision_output_dir */ Some(revision_output_dir),
+        reporter,
+    )
+}
+
+/// Scan all installed apps and profiles to find the one matching `profile_key`.
+/// Returns `(installed_app_id, profile_id, capsule_handle, install_revision_id)`.
+fn find_profile_by_key(
+    store: &InstallInstanceStore,
+    profile_key: &str,
+) -> Option<(
+    InstalledAppId,
+    ProfileId,
+    String,
+    capsule_core::foundation::install_lifecycle::InstallRevisionId,
+)> {
+    let apps = store.list_installed_apps().ok()?;
+    for app_id in &apps {
+        let profiles = store.list_profiles(app_id).unwrap_or_default();
+        for profile_id in &profiles {
+            let candidate_key = derive_install_profile_key(app_id, profile_id);
+            if candidate_key.as_str() == profile_key {
+                let rev_id = store.current_revision(app_id, profile_id).ok()?;
+                // Read the app record to get the capsule handle.
+                let capsule_handle = store
+                    .read_app_record(app_id)
+                    .ok()
+                    .and_then(|r| {
+                        if r.capsule_handle.is_empty() {
+                            // Fallback: reconstruct from publisher/slug.
+                            if r.publisher.is_empty() {
+                                None
+                            } else {
+                                Some(format!("{}/{}", r.publisher, r.slug))
+                            }
+                        } else {
+                            Some(r.capsule_handle)
+                        }
+                    })?;
+                return Some((app_id.clone(), profile_id.clone(), capsule_handle, rev_id));
+            }
+        }
+    }
+    None
+}
+
+/// Read the `LaunchProfile` and extract launch-time config supported by the run pipeline.
+///
+/// Returns `(profile_args, warning_msg)` where `warning_msg` is `Some(...)` if unsupported
+/// profile fields (env_refs, secret_refs, port_policy, concurrency_policy, isolation) are
+/// non-default — indicating the caller should warn the user.
+fn read_profile_launch_config(
+    store: &InstallInstanceStore,
+    app_id: &InstalledAppId,
+    profile_id: &ProfileId,
+) -> (Vec<String>, Option<String>) {
+    let profile = match store.read_profile(app_id, profile_id) {
+        Ok(p) => p,
+        Err(_) => return (vec![], None),
+    };
+
+    let args = profile.args.clone();
+
+    // Warn if unsupported profile fields are set.
+    let mut unsupported = vec![];
+    if !profile.env_refs.is_empty() {
+        unsupported.push("env_refs");
+    }
+    if !profile.secret_refs.is_empty() {
+        unsupported.push("secret_refs");
+    }
+    if profile.port_policy != "auto" {
+        unsupported.push("port_policy");
+    }
+    if profile.concurrency_policy != "single" {
+        unsupported.push("concurrency_policy");
+    }
+    if profile.isolation != "default" {
+        unsupported.push("isolation");
+    }
+
+    let warning = if unsupported.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "launch profile has fields not yet supported by `ato launch`: [{}] — they will be ignored",
+            unsupported.join(", ")
+        ))
+    };
+
+    (args, warning)
+}
+

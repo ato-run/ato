@@ -450,6 +450,31 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
+        about = "Launch an installed app by its stable install profile key"
+    )]
+    Launch {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` output
+        install_profile_key: String,
+
+        /// Skip interactive prompts and assume yes
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Print verbose output including resolved lifecycle IDs
+        #[arg(short = 'v', long = "verbose", default_value_t = false)]
+        verbose: bool,
+
+        /// Emit machine-readable JSON with resolved lifecycle IDs before launch
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Override the nacelle runtime binary path
+        #[arg(long, hide = true)]
+        nacelle: Option<PathBuf>,
+    },
+
+    #[command(
+        hide = true,
         about = "Fetch declared development dependencies for a local project"
     )]
     Setup {

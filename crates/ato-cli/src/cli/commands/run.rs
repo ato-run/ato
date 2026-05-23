@@ -63,6 +63,22 @@ const BACKGROUND_READY_WAIT_TIMEOUT_ENV: &str = "ATO_BACKGROUND_READY_WAIT_TIMEO
 
 type RunPipelineState = run_phase::RunPipelineState;
 
+/// Install lifecycle context carried from `ato launch` into the run pipeline.
+/// When present, these IDs are stamped onto the session record so receipts,
+/// dashboards, and replay tools can correlate sessions with installed app
+/// instances.
+///
+/// Note: `capsule_instance_key` is NOT stored here. The session writer derives
+/// it from `(install_profile_key + install_revision_id + session execution_id)`
+/// at record-write time so the CIK reflects the real receipt execution identity.
+#[derive(Debug, Clone)]
+pub struct InstallLifecycleContext {
+    pub installed_app_id: String,
+    pub install_profile_id: String,
+    pub install_profile_key: String,
+    pub install_revision_id: String,
+}
+
 pub struct RunArgs {
     pub target: PathBuf,
     pub target_label: Option<String>,
@@ -100,6 +116,15 @@ pub struct RunArgs {
     /// envelope without launching the capsule. Equivalent to
     /// `ato internal preflight <target> --json` but driven from `ato run`.
     pub plan_only: bool,
+    /// Install lifecycle context set by `ato launch`. When `Some`, the run
+    /// pipeline stamps these IDs onto the session record.
+    pub install_lifecycle_context: Option<InstallLifecycleContext>,
+    /// When set by `ato launch`, the run-install phase bypasses the normal
+    /// `resolve_run_target_or_install` (and the `~/.ato` path guard) and runs
+    /// the capsule directly from this frozen revision output directory. This
+    /// ensures `ato launch <ipk>` always executes the pinned `current_revision`,
+    /// not the latest installed version.
+    pub pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
 pub async fn execute(args: RunArgs) -> Result<()> {
@@ -508,6 +533,7 @@ fn build_consumer_run_request(
         cache_strategy: args.cache_strategy,
         reporter: args.reporter.clone(),
         preview_mode: args.preview_mode,
+        pinned_revision_output_dir: args.pinned_revision_output_dir.clone(),
     }
 }
 
@@ -2007,6 +2033,8 @@ run = "node server.js""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2111,6 +2139,8 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2212,6 +2242,8 @@ run = "main.py""#,
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: false,
+            install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let resolved = crate::install::support::ResolvedRunTarget {
@@ -2301,6 +2333,8 @@ run = "node index.js"
             reporter: Arc::new(CliReporter::new(true)),
             preview_mode: false,
             plan_only: true,
+            install_lifecycle_context: None,
+            pinned_revision_output_dir: None,
         };
 
         let err = super::execute_plan_only(args)
