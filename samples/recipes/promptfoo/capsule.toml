@@ -1,0 +1,19 @@
+schema_version = "0.3"
+name = "promptfoo"
+version = "0.105.0"
+type = "app"
+description = "LLM prompt evaluation and testing framework with web viewer"
+homepage = "https://github.com/promptfoo/promptfoo"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/promptfoo/promptfoo:latest"
+port = 15500
+env = { PROMPTFOO_DISABLE_TELEMETRY = "1" }
+command = ["promptfoo", "view", "--yes", "--port", "15500"]
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "15500", timeout_seconds = 60 }

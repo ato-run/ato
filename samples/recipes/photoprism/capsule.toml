@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "photoprism"
+version = "0.231128.0"
+type = "app"
+description = "AI-powered photo manager — self-hosted Google Photos alternative"
+homepage = "https://github.com/photoprism/photoprism"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "photoprism/photoprism:231128-ce"
+port = 2342
+env = { PHOTOPRISM_ADMIN_USER = "admin", PHOTOPRISM_ADMIN_PASSWORD = "insecure", PHOTOPRISM_AUTH_MODE = "password", PHOTOPRISM_SITE_URL = "http://localhost:2342/", PHOTOPRISM_DISABLE_TLS = "true", PHOTOPRISM_DEFAULT_TLS = "false", PHOTOPRISM_ORIGINALS_LIMIT = "5000", PHOTOPRISM_HTTP_COMPRESSION = "gzip", PHOTOPRISM_LOG_LEVEL = "info", PHOTOPRISM_READONLY = "false", PHOTOPRISM_EXPERIMENTAL = "false", PHOTOPRISM_DISABLE_CHOWN = "false", PHOTOPRISM_DISABLE_WEBDAV = "false", PHOTOPRISM_DISABLE_SETTINGS = "false", PHOTOPRISM_DISABLE_TENSORFLOW = "true", PHOTOPRISM_DISABLE_FACES = "true", PHOTOPRISM_DISABLE_CLASSIFICATION = "true", PHOTOPRISM_DISABLE_VECTORS = "false", PHOTOPRISM_DISABLE_RAW = "false" }
+
+[state.storage]
+kind = "filesystem"
+durability = "persistent"
+purpose = "photoprism storage, database, originals"
+attach = "explicit"
+schema_id = "sha256:photoprism-storage-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/api/v1/status", port = "2342", timeout_seconds = 120 }
+
+[[services.main.state_bindings]]
+state = "storage"
+target = "/photoprism/storage"

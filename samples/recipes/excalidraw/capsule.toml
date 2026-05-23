@@ -1,0 +1,17 @@
+schema_version = "0.3"
+name = "excalidraw"
+version = "0.17.6"
+type = "app"
+description = "Virtual collaborative whiteboard for sketching hand-drawn diagrams"
+homepage = "https://github.com/excalidraw/excalidraw"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "excalidraw/excalidraw:latest"
+port = 80
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "80" }

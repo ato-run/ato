@@ -1,0 +1,37 @@
+schema_version = "0.3"
+name = "langfuse"
+version = "3.36.2"
+type = "app"
+description = "Open-source LLM observability and analytics platform"
+homepage = "https://github.com/langfuse/langfuse"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "langfuse", POSTGRES_USER = "langfuse", POSTGRES_PASSWORD = "langfuse-secret" }
+
+[targets.app]
+runtime = "oci"
+image = "langfuse/langfuse:3.36.2"
+port = 3000
+env = { DATABASE_URL = "postgresql://langfuse:langfuse-secret@localhost:5432/langfuse", NEXTAUTH_URL = "http://localhost:3000", NEXTAUTH_SECRET = "changeme-demo-secret", SALT = "changeme-salt" }
+depends_on = ["db"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Langfuse PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:langfuse-pgdata-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/api/public/health", port = "3000", timeout_seconds = 180 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"

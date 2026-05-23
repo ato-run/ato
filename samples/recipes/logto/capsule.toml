@@ -1,0 +1,37 @@
+schema_version = "0.3"
+name = "logto"
+version = "1.26.0"
+type = "app"
+description = "Open-source identity platform — auth, OIDC, SSO, MFA"
+homepage = "https://github.com/logto-io/logto"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "logto", POSTGRES_USER = "logto", POSTGRES_PASSWORD = "logto-secret" }
+
+[targets.app]
+runtime = "oci"
+image = "svhd/logto:1.26.0"
+port = 3001
+env = { DB_URL = "postgresql://logto:logto-secret@localhost:5432/logto", TRUST_PROXY_HEADER = "1" }
+depends_on = ["db"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Logto PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:logto-pgdata-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/api/status", port = "3001", timeout_seconds = 120 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
