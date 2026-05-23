@@ -127,3 +127,27 @@ All researched self-hosted app repositories tested against Ato OCI recipe infras
 | Continue Dev | continuedev/continue | static-safety-review | IDE extension; no standalone web UI | Not a web catalog app |
 | Bruno | usebruno/bruno | static-safety-review | Desktop-native app; no web server | Not a web catalog app |
 | FlareSolverr | FlareSolverr/FlareSolverr | static-safety-review | Helper proxy service; no standalone user UI | Not useful as standalone catalog entry |
+
+---
+
+## Retry — After depends_on + exec readiness + per-target timing
+
+Retry set after merging: `feat/runtime-depends_on`, `feat/runtime-readiness-timing`.
+
+| App | Previous status | New status | What changed | Startup | Endpoint | Remaining blocker |
+|---|---|---|---|---:|---|---|
+| umami | blocked (no depends_on) | **pass** | Recipe: `depends_on=[db,redis]`, exec probes, `timeout_seconds=300` | ~90s | HTTP 200 | none |
+| paperless-ngx | blocked (no depends_on) | **pass** | New recipe: 3 services, exec probes (`pg_isready`, `redis-cli ping`), `timeout_seconds=300` | ~90s | HTTP 302→200 | none |
+| outline | blocked (no depends_on) | **pass** | New recipe: v0.82.0 (auto-migrates), `FILE_STORAGE=local`, exec probes, `timeout_seconds=300` | ~60–90s | HTTP 200 | none |
+| langfuse | blocked (no depends_on) | **blocked** | Recipe fixed (localhost→db, exec probe, version 2.32.0) but image is amd64-only — Ato resolver fails on arm64 | — | — | Ato runtime: single-arch image resolver on arm64 host |
+| twenty | blocked (no depends_on) | **blocked** | New recipe created (exec probes, depends_on correct) but image is private (403 Forbidden) | — | — | Upstream: private Docker image |
+| dify | blocked (no depends_on) | **not-attempted** | Multi-arch confirmed (arm64+amd64); 10+ services including sandbox/plugin_daemon exceeds scope | — | — | Deferred: separate spike needed for 10-service stack |
+
+### Key findings
+
+- `depends_on` + exec readiness unblocked 3 of 5 primary targets (umami, paperless-ngx, outline)
+- `tcp_connect` probes for internal (non-published) services always fail: internal ports aren't mapped to host. Use `exec` probes for postgres/redis.
+- `exec` probe still requires the `port` field in the current schema (field is accepted but unused by exec path).
+- Langfuse blocked by single-arch image — separate Ato issue: resolver should emit clear error and optionally allow emulation fallback.
+- Twenty blocked by upstream private image — not an Ato issue.
+- Dify is multi-arch capable but 10-service topology warrants its own spike.
