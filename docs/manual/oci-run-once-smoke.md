@@ -15,7 +15,7 @@ db (postgres:16-alpine)  ──readiness── pg_isready
 init (busybox:1.36)      ── exit 0 ─── completion = readiness
         │
         ▼
-app (kennethreitz/httpbin) ─────────── GET /get returns 200
+app (nginx:alpine)       ───────────── GET / returns 200
 ```
 
 The init container runs `sh -c "echo run_once-smoke: init step completed
@@ -53,7 +53,7 @@ cargo run -p ato-cli --bin ato -- run samples/recipes/oci-run-once-smoke
 ▶  [init] Starting container
 ⏳ [init] Waiting for init container to complete
 ✅ [init] Init container completed successfully
-⬇  [app] Pulling OCI image: kennethreitz/httpbin:latest
+⬇  [app] Pulling OCI image: nginx:alpine
 📦 [app] Creating container: ato-oci-run-once-smoke-app-<sfx>
 ▶  [app] Starting container
 ⏳ [app] Waiting for readiness
@@ -65,7 +65,7 @@ cargo run -p ato-cli --bin ato -- run samples/recipes/oci-run-once-smoke
 - [ ] `db` reaches readiness (Postgres `pg_isready` returns 0).
 - [ ] `init` runs to completion and is removed before `app` is created
       (verify by `podman ps -a` showing no init container after the run).
-- [ ] `app` becomes ready and `GET http://127.0.0.1:<port>/get` returns 200.
+- [ ] `app` becomes ready and `GET http://127.0.0.1:<port>/` returns 200.
 - [ ] `ato ps` lists only `db` and `app` (never `init`).
 - [ ] `ato stop --all` shuts the session down cleanly with no errors
       about a missing init container.
