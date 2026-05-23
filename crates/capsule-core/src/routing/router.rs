@@ -2259,4 +2259,188 @@ service_target = "db"
             "main service should NOT receive the mount"
         );
     }
+
+    // ── Readiness timing tests ─────────────────────────────────────────────────
+
+    fn readiness_timing_manifest(probe_extra: &str) -> String {
+        format!(
+            r#"schema_version = "0.3"
+name = "test-app"
+version = "1.0.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "oci"
+image = "example/app:1.0"
+port = 8080
+{probe_extra}
+[services.main]
+target = "main"
+"#
+        )
+    }
+
+    fn readiness_timing_probe(fields: &str) -> String {
+        readiness_timing_manifest(&format!(
+            "[targets.main.readiness_probe]\nhttp_get = \"/\"\nport = \"8080\"\n{fields}\n"
+        ))
+    }
+
+    #[test]
+    fn readiness_probe_parses_initial_delay_timeout_interval() {
+        let toml = readiness_timing_probe(
+            "initial_delay_seconds = 10\ntimeout_seconds = 300\ninterval_seconds = 5",
+        );
+        let dir = write_manifest(&toml);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let svc = plan.services.first().expect("service");
+        let probe = svc.readiness_probe.as_ref().expect("probe");
+        assert_eq!(probe.initial_delay_seconds, 10);
+        assert_eq!(probe.timeout_seconds, 300);
+        assert_eq!(probe.interval_seconds, 5);
+    }
+
+    #[test]
+    fn readiness_probe_defaults_are_conservative() {
+        let toml = readiness_timing_probe("");
+        let dir = write_manifest(&toml);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let svc = plan.services.first().expect("service");
+        let probe = svc.readiness_probe.as_ref().expect("probe");
+        assert_eq!(
+            probe.initial_delay_seconds, 0,
+            "default initial_delay must be 0"
+        );
+        assert_eq!(probe.timeout_seconds, 180, "default timeout must be 180s");
+        assert_eq!(probe.interval_seconds, 2, "default interval must be 2s");
+    }
+
+    #[test]
+    fn readiness_probe_rejects_zero_timeout() {
+        let toml = readiness_timing_probe("timeout_seconds = 0");
+        let dir = write_manifest(&toml);
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        assert!(result.is_err(), "zero timeout_seconds should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("timeout_seconds"),
+            "error should mention timeout_seconds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_rejects_zero_interval() {
+        let toml = readiness_timing_probe("interval_seconds = 0");
+        let dir = write_manifest(&toml);
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        assert!(result.is_err(), "zero interval_seconds should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("interval_seconds"),
+            "error should mention interval_seconds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_rejects_initial_delay_ge_timeout() {
+        let toml = readiness_timing_probe("initial_delay_seconds = 200\ntimeout_seconds = 100");
+        let dir = write_manifest(&toml);
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "initial_delay >= timeout should be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("initial_delay_seconds"),
+            "error should mention initial_delay_seconds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_timing_changes_execution_identity() {
+        let toml_a = readiness_timing_probe("timeout_seconds = 180");
+        let toml_b = readiness_timing_probe("timeout_seconds = 420");
+        let dir_a = write_manifest(&toml_a);
+        let dir_b = write_manifest(&toml_b);
+        let dec_a = route_manifest(
+            &dir_a.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route a");
+        let dec_b = route_manifest(
+            &dir_b.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route b");
+        let svc_a = dec_a
+            .plan
+            .resolve_services()
+            .unwrap()
+            .services
+            .into_iter()
+            .next()
+            .unwrap();
+        let svc_b = dec_b
+            .plan
+            .resolve_services()
+            .unwrap()
+            .services
+            .into_iter()
+            .next()
+            .unwrap();
+        let probe_a = svc_a.readiness_probe.as_ref().unwrap();
+        let probe_b = svc_b.readiness_probe.as_ref().unwrap();
+        assert_ne!(
+            probe_a.timeout_seconds, probe_b.timeout_seconds,
+            "different timeout must produce different probe repr"
+        );
+    }
+
+    #[test]
+    fn fast_default_readiness_no_regression() {
+        let toml = readiness_timing_probe("");
+        let dir = write_manifest(&toml);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let svc = plan.services.first().expect("service");
+        let probe = svc.readiness_probe.as_ref().expect("probe");
+        assert_eq!(
+            probe.timeout_seconds, 180,
+            "default timeout must be 180s, not higher"
+        );
+        assert_eq!(probe.interval_seconds, 2, "default interval must be 2s");
+    }
 }
