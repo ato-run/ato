@@ -38,14 +38,19 @@ interval_seconds = 2
 
 ### Exec probe
 
+Exec probes run a command inside the container. **`port` is not required** for
+exec probes and should be omitted.
+
 ```toml
 [services.db.readiness_probe]
 exec = ["pg_isready", "-U", "postgres"]
-port = "5432"
 initial_delay_seconds = 5
 timeout_seconds = 120
 interval_seconds = 2
 ```
+
+Legacy recipes that include a `port` field on exec probes remain valid; the
+value is accepted but has no effect on exec readiness.
 
 ## When to use `initial_delay_seconds` vs `timeout_seconds`
 
