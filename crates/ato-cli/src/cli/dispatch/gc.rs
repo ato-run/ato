@@ -85,8 +85,11 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
     //    Sessions that have a live PID and an `install_revision_id` are
     //    protected. Non-Unix targets fall back to protecting every record
     //    that has an `install_revision_id` (fail-safe) since we cannot
-    //    reliably probe process liveness.
-    collect_active_session_revisions(&mut protected);
+    //    reliably probe process liveness. Read failures on an *existing*
+    //    session root abort GC: we cannot prove an unreadable record does
+    //    not reference one of the revisions we are about to delete.
+    collect_active_session_revisions(&mut protected)
+        .context("collect active session revisions")?;
 
     // ── All known revisions ─────────────────────────────────────────────────
     let all_revs = store.list_all_revisions().context("list all revisions")?;
@@ -147,28 +150,61 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
 }
 
 /// Collect `install_revision_id` values from session records that may still
-/// be live. Missing or unreadable session roots are silently ignored — the
-/// session store legitimately may not exist yet (fresh install, no session
-/// ever started). Any record we *can* read but cannot prove dead is
-/// treated as live and its revision is protected.
-fn collect_active_session_revisions(protected: &mut std::collections::HashSet<String>) {
+/// be live, and merge them into `protected`.
+///
+/// Fail-closed for GC:
+/// - Returns `Ok(())` if the session root path cannot be computed (no
+///   `ATO_HOME` / no `HOME`) or if the root simply does not exist — these
+///   are environmental "no sessions known" cases, not corruption.
+/// - Returns `Err` for any IO error walking an *existing* session root or
+///   any malformed JSON record under it. We cannot prove a record we
+///   cannot read does not reference a revision GC is about to delete, so
+///   the destructive operation must stop.
+///
+/// We deliberately do **not** delegate to
+/// `ato_session_core::store::read_session_records`: that function is
+/// tuned for the Desktop fast path, which tolerates a single corrupt
+/// record (warn-level log) so the rest of the session list can still
+/// render. GC has the opposite trade-off — a single unreadable record
+/// must abort the whole operation.
+fn collect_active_session_revisions(
+    protected: &mut std::collections::HashSet<String>,
+) -> Result<()> {
     let session_root = match ato_session_core::store::session_root() {
         Ok(p) => p,
-        Err(_) => return,
+        // Cannot resolve a path at all (no HOME, etc.). There is nothing
+        // to read; treat as "no active sessions known to this host".
+        Err(_) => return Ok(()),
     };
-    let records = match ato_session_core::store::read_session_records(&session_root) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    for record in &records {
+    if !session_root.exists() {
+        // Fresh install or Desktop never ran — no records to consider.
+        return Ok(());
+    }
+
+    let entries = std::fs::read_dir(&session_root)
+        .with_context(|| format!("read session root {}", session_root.display()))?;
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("iterate session root {}", session_root.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("read session record {}", path.display()))?;
+        let record: ato_session_core::record::StoredSessionInfo =
+            serde_json::from_str(&raw).with_context(|| {
+                format!("parse session record {}", path.display())
+            })?;
         let rev_id = match &record.install_revision_id {
             Some(id) if !id.is_empty() => id,
             _ => continue,
         };
-        if session_record_is_alive(record) {
+        if session_record_is_alive(&record) {
             protected.insert(rev_id.clone());
         }
     }
+    Ok(())
 }
 
 /// Live-process check for an `ato gc` session record.
@@ -479,6 +515,51 @@ mod tests {
             "session-referenced revision {} should survive GC, survivors = {:?}",
             revs[0].as_str(),
             surviving
+        );
+    }
+
+    /// A corrupt JSON file under the session root aborts GC. We cannot
+    /// prove an unreadable session record does not reference one of the
+    /// revisions about to be deleted, so the destructive operation must
+    /// stop and leave every revision on disk.
+    #[test]
+    #[serial]
+    fn gc_errs_on_corrupt_session_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _app_id, _profile_id, _revs) = make_store_with_revs(&dir, 4);
+
+        let session_root = dir.path().join("desktop_sessions");
+        std::fs::create_dir_all(&session_root).unwrap();
+        std::fs::write(session_root.join("broken.json"), b"{ not valid json").unwrap();
+
+        std::env::set_var("ATO_HOME", dir.path());
+        std::env::set_var("ATO_DESKTOP_SESSION_ROOT", &session_root);
+        let result = execute_gc_command(GcArgs {
+            dry_run: false,
+            keep_last: 2,
+            retention_days: 0,
+            json: false,
+        });
+        std::env::remove_var("ATO_HOME");
+        std::env::remove_var("ATO_DESKTOP_SESSION_ROOT");
+
+        assert!(
+            result.is_err(),
+            "expected Err for corrupt session record, got Ok"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("parse session record") || msg.contains("session record"),
+            "expected session-record context in error: {msg}"
+        );
+
+        // GC must not have deleted anything when it aborted.
+        let all_revs = store.list_all_revisions().unwrap();
+        assert_eq!(
+            all_revs.len(),
+            4,
+            "no revisions should be deleted when GC aborts; survivors = {:?}",
+            all_revs.iter().map(|r| r.as_str()).collect::<Vec<_>>()
         );
     }
 
