@@ -467,6 +467,40 @@ fn validate_web_services_mode(
                     format!("services.{name}.readiness_probe must define http_get, tcp_connect, or exec"),
                 ));
             }
+
+            // Validate timing fields if present.
+            if let Some(timeout) = probe.get("timeout_seconds").and_then(|v| v.as_integer()) {
+                if timeout <= 0 {
+                    return Err(manifest_err(
+                        manifest_path,
+                        format!("services.{name}.readiness_probe.timeout_seconds must be > 0"),
+                    ));
+                }
+            }
+            if let Some(interval) = probe.get("interval_seconds").and_then(|v| v.as_integer()) {
+                if interval <= 0 {
+                    return Err(manifest_err(
+                        manifest_path,
+                        format!("services.{name}.readiness_probe.interval_seconds must be > 0"),
+                    ));
+                }
+            }
+            let initial_delay = probe
+                .get("initial_delay_seconds")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0);
+            let timeout = probe
+                .get("timeout_seconds")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(180);
+            if timeout > 0 && initial_delay >= timeout {
+                return Err(manifest_err(
+                    manifest_path,
+                    format!(
+                        "services.{name}.readiness_probe.initial_delay_seconds ({initial_delay}) must be less than timeout_seconds ({timeout})"
+                    ),
+                ));
+            }
         }
 
         let depends_on = if let Some(depends_on) = service.get("depends_on") {

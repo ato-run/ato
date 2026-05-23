@@ -90,7 +90,7 @@ Wave B/C: anything-llm, superset, langflow (3)
 - **`feat(runtime): multi-service depends_on support`** — Start dependent targets in declaration order before the primary target. Enables: umami, langfuse, logto, librechat, ToolJet, Budibase, Appsmith, Twenty, Paperless-ngx, Penpot, Outline, Dify, Zep, Ragflow, Redash, and more.
 
 ### P1 — Quality of life
-- **`feat(recipes): add per-target readiness timing controls`** — `initial_delay_seconds`, `timeout_seconds`, `interval_seconds` per `[services.X]`. Enables langflow and similar AI stacks without bumping global default.
+- **`feat(runtime): per-target readiness timing controls`** ✅ DONE — `initial_delay_seconds`, `timeout_seconds`, `interval_seconds` per readiness probe. Enables langflow and similar AI stacks without bumping global default.
 - **`fix(recipes): vikunja readiness path`** — change probe to `/api/v1/info` or increase `timeout_seconds` to 360s.
 
 ### P2 — Recipe completions

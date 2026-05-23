@@ -49,9 +49,6 @@ use crate::application::preflight::{
 use crate::reporters::CliReporter;
 
 const OCI_MULTI_STOP_TIMEOUT_SECS: i64 = 10;
-const READINESS_TCP_ATTEMPTS: u32 = 90;
-const READINESS_HTTP_ATTEMPTS: u32 = 90;
-const READINESS_INTERVAL_MS: u64 = 2000;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -397,11 +394,12 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                 .notify(format!("⏳ [{}] Waiting for readiness", service_name))
                 .await?;
             let cname = started.last().map(|r| r.container_name.as_str());
-            let ready = run_readiness_probe(probe, host_port, cname).await;
+            let ready = run_readiness_probe(probe, host_port, cname, service_name).await;
             if !ready {
                 graph_error = Some(anyhow::anyhow!(
-                    "oci_healthcheck_timeout: service '{}' did not become ready",
-                    service_name
+                    "oci_healthcheck_timeout: service '{}' did not become ready within {}s",
+                    service_name,
+                    probe.timeout_seconds,
                 ));
                 break 'start_loop;
             }
@@ -735,13 +733,23 @@ async fn run_readiness_probe(
     probe: &capsule_core::types::ReadinessProbe,
     host_port: Option<u16>,
     container_name: Option<&str>,
+    service_label: &str,
 ) -> bool {
-    let interval = Duration::from_millis(READINESS_INTERVAL_MS);
+    // Honor per-probe initial_delay before the first attempt.
+    if probe.initial_delay_seconds > 0 {
+        tokio::time::sleep(Duration::from_secs(probe.initial_delay_seconds as u64)).await;
+    }
+
+    // Derive attempts from timeout / interval, clamping to at least 1.
+    let interval = Duration::from_secs(probe.interval_seconds.max(1) as u64);
+    let attempts = (probe.timeout_seconds / probe.interval_seconds.max(1)).max(1);
+
+    let _ = service_label; // reserved for future structured logging
 
     // Exec probe: run command inside the container; exit 0 means ready.
     if let Some(cmd) = &probe.exec {
         if let Some(cname) = container_name {
-            return wait_exec_ready(cname, cmd, READINESS_HTTP_ATTEMPTS, interval).await;
+            return wait_exec_ready(cname, cmd, attempts, interval).await;
         }
     }
 
@@ -749,7 +757,7 @@ async fn run_readiness_probe(
     if let Some(path) = &probe.http_get {
         if let Some(port) = host_port {
             let url = format!("http://127.0.0.1:{port}{path}");
-            return wait_http_ready(&url, READINESS_HTTP_ATTEMPTS, interval).await;
+            return wait_http_ready(&url, attempts, interval).await;
         }
     }
 
@@ -762,13 +770,12 @@ async fn run_readiness_probe(
                 parts.first().copied(),
                 parts.get(1).and_then(|s| s.parse::<u16>().ok()),
             ) {
-                return wait_tcp_ready(h, p, READINESS_TCP_ATTEMPTS, interval).await;
+                return wait_tcp_ready(h, p, attempts, interval).await;
             }
         } else if let Ok(p) = addr.parse::<u16>() {
             // Port only — use localhost on the host-side port.
             let target_port = host_port.unwrap_or(p);
-            return wait_tcp_ready("127.0.0.1", target_port, READINESS_TCP_ATTEMPTS, interval)
-                .await;
+            return wait_tcp_ready("127.0.0.1", target_port, attempts, interval).await;
         }
     }
 

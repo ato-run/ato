@@ -514,6 +514,25 @@ impl CapsuleManifest {
                         label
                     )));
                 }
+                if probe.timeout_seconds == 0 {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.timeout_seconds must be > 0",
+                        label
+                    )));
+                }
+                if probe.interval_seconds == 0 {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.interval_seconds must be > 0",
+                        label
+                    )));
+                }
+                if probe.initial_delay_seconds >= probe.timeout_seconds && probe.timeout_seconds > 0
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.initial_delay_seconds ({}) must be less than timeout_seconds ({})",
+                        label, probe.initial_delay_seconds, probe.timeout_seconds
+                    )));
+                }
             }
 
             for (key, contract) in &target.external_injection {
@@ -725,6 +744,29 @@ impl CapsuleManifest {
                                     .to_string(),
                             ));
                         }
+                        if probe.timeout_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.timeout_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.interval_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.interval_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.initial_delay_seconds >= probe.timeout_seconds
+                            && probe.timeout_seconds > 0
+                        {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                format!(
+                                    "readiness_probe.initial_delay_seconds ({}) must be less than timeout_seconds ({})",
+                                    probe.initial_delay_seconds, probe.timeout_seconds
+                                ),
+                            ));
+                        }
                     }
 
                     let deps = service.depends_on.clone().unwrap_or_default();
@@ -853,6 +895,29 @@ impl CapsuleManifest {
                                 name.to_string(),
                                 "readiness_probe must define http_get, tcp_connect, or exec"
                                     .to_string(),
+                            ));
+                        }
+                        if probe.timeout_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.timeout_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.interval_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.interval_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.initial_delay_seconds >= probe.timeout_seconds
+                            && probe.timeout_seconds > 0
+                        {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                format!(
+                                    "readiness_probe.initial_delay_seconds ({}) must be less than timeout_seconds ({})",
+                                    probe.initial_delay_seconds, probe.timeout_seconds
+                                ),
                             ));
                         }
                     }
