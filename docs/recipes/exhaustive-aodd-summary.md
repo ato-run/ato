@@ -167,3 +167,51 @@ After merging:
 - **twenty** — private Docker image (upstream). No fix until twenty publishes a public image.
 - **dify** — 10-service stack, deferred as separate spike.
 - **exec probe port field** — minor schema friction; `port` required even for exec probes. **→ Fixed**: `port` is now optional for exec probes; legacy recipes with `port` still parse.
+
+---
+
+## Dify separate spike (feat/recipe-dify-spike)
+
+After merging exec probe portless schema cleanup (PR #225), Dify was spiked as a dedicated high-friction AI showcase.
+
+**Target:** langgenius/dify v1.14.2
+**Host:** macOS arm64
+**Platform:** linux/amd64 emulated via `allow_emulation = true`
+
+### Minimal service graph (6 services)
+
+db (postgres) → redis → weaviate → api + worker → web (main)
+
+### AODD result
+
+| App | Status | Endpoint | Startup (cold) | Notes |
+|---|---|---|---:|---|
+| dify | **partial-pass** | HTTP 307→200 (web UI) | ~15 min | DB migrations complete, web UI renders |
+
+### What worked
+
+- All 6 image digests resolved including amd64-only langgenius images
+- `depends_on` edges respected: db/redis/weaviate before api/worker, api before web
+- 50+ DB migrations (alembic) ran to completion under emulation
+- Dify web UI returned HTTP 200 (`/apps` page) after startup
+- `ato ps` showed session with correct URL
+- `ato stop --all` removed all 6 containers and network cleanly
+- No secrets leaked into recipe, lock, or docs
+
+### Blockers
+
+| Blocker | Classification | Severity |
+|---|---|---|
+| `CONSOLE_API_URL` dynamic port (no ingress) | Ato architecture | medium — SSR works, browser API calls limited |
+| `init_permissions` one-shot service missing | Ato missing feature | medium — file uploads unverified |
+| v0.3 cannot override Docker CMD | Ato missing feature | low for spike — affects Redis password config |
+| Shared mutable state (worker/api storage) | Ato design constraint | low for spike |
+
+### New runtime limitations discovered
+
+1. **`tcp_connect` probe requires placeholder name, not port number** — use exec probe for Redis instead.
+2. **v0.3 rejects `cmd` in named OCI targets** — Redis requirepass and any CMD override impossible. Follow-up needed.
+3. **No `run_once`/one-shot service** — `init_permissions` pattern (chown volume for uid change) is blocked. Common in multi-service apps. Follow-up needed.
+4. **Shared mutable state** — Worker and api share a volume in upstream; not expressible in Ato v0.3.
+
+Full report: [docs/recipes/dify-spike.md](./dify-spike.md)

@@ -1,0 +1,133 @@
+schema_version = "0.3"
+name = "dify"
+version = "1.14.2"
+type = "app"
+description = "Open-source LLM app development platform with RAG, AI workflows, and multi-model support"
+homepage = "https://github.com/langgenius/dify"
+
+# Spike notes:
+# - Minimal service graph: db, redis, weaviate, api, worker, web(main)
+# - Omitted: init_permissions (no one-shot/run_once support in Ato), sandbox, ssrf_proxy,
+#   plugin_daemon, nginx (require repo config file bind mounts not supported in recipes)
+# - Images are linux/amd64 only; allow_emulation = true required on arm64 hosts
+# - CONSOLE_API_URL is left empty; web app falls back to relative-URL routing (see docs)
+# - SECRET_KEY is a hardcoded demo value; MUST be replaced for production use
+# - v0.3 schema does not support cmd override; Redis runs without requirepass
+#   (api/worker use REDIS_PASSWORD = "" to match)
+
+default_target = "web"
+
+# ── Postgres ─────────────────────────────────────────────────────────────────
+[targets.db]
+runtime = "oci"
+image = "postgres:15-alpine"
+port = 5432
+env = { POSTGRES_DB = "dify", POSTGRES_USER = "postgres", POSTGRES_PASSWORD = "difyai123456" }
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
+# v0.3 does not support cmd override; Redis runs without requirepass.
+# api/worker must connect without password (REDIS_PASSWORD = "").
+[targets.redis]
+runtime = "oci"
+image = "redis:6-alpine"
+port = 6379
+
+# ── Weaviate vector store ─────────────────────────────────────────────────────
+[targets.weaviate]
+runtime = "oci"
+image = "semitechnologies/weaviate:1.27.0"
+port = 8080
+env = { PERSISTENCE_DATA_PATH = "/var/lib/weaviate", QUERY_DEFAULTS_LIMIT = "25", AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED = "false", DEFAULT_VECTORIZER_MODULE = "none", CLUSTER_HOSTNAME = "node1", AUTHENTICATION_APIKEY_ENABLED = "true", AUTHENTICATION_APIKEY_ALLOWED_KEYS = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", AUTHENTICATION_APIKEY_USERS = "hello@dify.ai", AUTHORIZATION_ADMINLIST_ENABLED = "true", AUTHORIZATION_ADMINLIST_USERS = "hello@dify.ai" }
+
+# ── Dify API ──────────────────────────────────────────────────────────────────
+[targets.api]
+runtime = "oci"
+image = "langgenius/dify-api:1.14.2"
+port = 5001
+allow_emulation = true
+depends_on = ["db", "redis", "weaviate"]
+env = { MODE = "api", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", MIGRATION_ENABLED = "true", DEPLOY_ENV = "PRODUCTION", LOG_LEVEL = "INFO", DIFY_PORT = "5001", CONSOLE_WEB_URL = "", CONSOLE_API_URL = "", APP_API_URL = "", FILES_URL = "" }
+
+# ── Dify Worker (Celery) ──────────────────────────────────────────────────────
+[targets.worker]
+runtime = "oci"
+image = "langgenius/dify-api:1.14.2"
+port = 5001
+allow_emulation = true
+depends_on = ["db", "redis"]
+env = { MODE = "worker", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", DEPLOY_ENV = "PRODUCTION" }
+
+# ── Dify Web (Next.js) ────────────────────────────────────────────────────────
+# CONSOLE_API_URL limitation: Without nginx, the API port is dynamic/unknown
+# at startup. Leaving it empty lets Next.js use relative paths (SSR works,
+# browser client-side calls to /console/api will reach the wrong port).
+[targets.web]
+runtime = "oci"
+image = "langgenius/dify-web:1.14.2"
+port = 3000
+allow_emulation = true
+depends_on = ["api"]
+env = { CONSOLE_API_URL = "", APP_API_URL = "", NEXT_TELEMETRY_DISABLED = "1" }
+
+# ── State ─────────────────────────────────────────────────────────────────────
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Dify PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:dify-pgdata-v1"
+
+[state.weaviate-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Weaviate vector store data"
+attach = "explicit"
+schema_id = "sha256:dify-weaviate-v1"
+
+[state.api-storage]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Dify file uploads and storage"
+attach = "explicit"
+schema_id = "sha256:dify-api-storage-v1"
+
+# ── Services ──────────────────────────────────────────────────────────────────
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"], initial_delay_seconds = 3, timeout_seconds = 60 }
+
+[services.redis]
+target = "redis"
+readiness_probe = { exec = ["redis-cli", "ping"], initial_delay_seconds = 2, timeout_seconds = 30 }
+
+[services.weaviate]
+target = "weaviate"
+readiness_probe = { http_get = "/v1/.well-known/ready", port = "8080", timeout_seconds = 60, initial_delay_seconds = 5 }
+
+[services.api]
+target = "api"
+readiness_probe = { http_get = "/health", port = "5001", timeout_seconds = 300, initial_delay_seconds = 15 }
+
+[services.worker]
+target = "worker"
+
+[services.main]
+target = "web"
+readiness_probe = { http_get = "/", port = "3000", timeout_seconds = 300, initial_delay_seconds = 20 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
+
+[[services.main.state_bindings]]
+state = "weaviate-data"
+target = "/var/lib/weaviate"
+service_target = "weaviate"
+
+[[services.main.state_bindings]]
+state = "api-storage"
+target = "/app/api/storage"
+service_target = "api"
