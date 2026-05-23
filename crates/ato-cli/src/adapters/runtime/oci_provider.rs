@@ -789,7 +789,11 @@ where
         for mount in &request.mounts {
             args.push("-v".into());
             let opts = if mount.readonly { ":ro" } else { "" };
-            args.push(format!("{}:{}{}", mount.source, mount.target, opts));
+            // Canonicalize the source path to resolve symlinks (e.g. /tmp → /private/tmp on macOS).
+            let source = std::fs::canonicalize(&mount.source)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| mount.source.clone());
+            args.push(format!("{}:{}{}", source, mount.target, opts));
         }
         if let Some(net) = &request.network {
             args.push("--network".into());
