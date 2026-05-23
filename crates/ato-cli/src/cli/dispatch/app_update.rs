@@ -91,3 +91,77 @@ fn find_app_handle(
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capsule_core::foundation::install_lifecycle::{
+        derive_install_profile_key, AppRecord, InstallInstanceStore, LaunchProfile,
+    };
+    use serial_test::serial;
+
+    /// `ato update <non-default-ipk>` must return an error, not silently update default.
+    #[test]
+    #[serial]
+    fn update_non_default_profile_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let app_id = capsule_core::foundation::install_lifecycle::InstalledAppId::new(
+            "app_test_upd_nd",
+        );
+        let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("staging");
+        store.write_app_record(&AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "acme".into(),
+            slug: "upd".into(),
+            capsule_handle: "acme/upd".into(),
+            version: "1.0.0".into(),
+            installed_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }).unwrap();
+        store.write_profile(&app_id, &LaunchProfile {
+            profile_id: profile_id.clone(),
+            port_policy: "auto".into(),
+            concurrency_policy: "single".into(),
+            isolation: "default".into(),
+            ..Default::default()
+        }).unwrap();
+        let ipk = derive_install_profile_key(&app_id, &profile_id);
+
+        std::env::set_var("ATO_HOME", dir.path());
+        let result = execute_app_update_command(AppUpdateArgs {
+            install_profile_key: ipk.as_str().to_owned(),
+            yes: true,
+            json: false,
+        });
+        std::env::remove_var("ATO_HOME");
+
+        assert!(result.is_err(), "expected error for non-default profile, got Ok");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("only supports the default profile"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// `ato update <unknown-ipk>` must return an error mentioning "not found".
+    #[test]
+    #[serial]
+    fn update_unknown_ipk_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ATO_HOME", dir.path());
+        let result = execute_app_update_command(AppUpdateArgs {
+            install_profile_key: "ipk_00000000000000000000000000000000".to_owned(),
+            yes: true,
+            json: false,
+        });
+        std::env::remove_var("ATO_HOME");
+
+        assert!(result.is_err(), "expected error for unknown ipk, got Ok");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("not found"),
+            "unexpected error: {msg}"
+        );
+    }
+}

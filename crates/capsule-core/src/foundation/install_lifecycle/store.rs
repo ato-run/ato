@@ -337,7 +337,8 @@ impl InstallInstanceStore {
         let mut log: Vec<String> = if log_path.exists() {
             let raw = fs::read(&log_path)
                 .with_context(|| format!("read revision log {}", log_path.display()))?;
-            serde_json::from_slice(&raw).unwrap_or_default()
+            serde_json::from_slice(&raw)
+                .with_context(|| format!("parse revision log {}", log_path.display()))?
         } else {
             Vec::new()
         };
@@ -362,7 +363,8 @@ impl InstallInstanceStore {
         }
         let raw = fs::read(&log_path)
             .with_context(|| format!("read revision log {}", log_path.display()))?;
-        let entries: Vec<String> = serde_json::from_slice(&raw).unwrap_or_default();
+        let entries: Vec<String> = serde_json::from_slice(&raw)
+            .with_context(|| format!("parse revision log {}", log_path.display()))?;
         Ok(entries.into_iter().map(InstallRevisionId::new).collect())
     }
 

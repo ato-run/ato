@@ -35,7 +35,12 @@ pub(crate) fn execute_revisions_command(args: RevisionsArgs) -> Result<()> {
 
     let revisions = store
         .list_profile_revisions(&app_id, &profile_id)
-        .unwrap_or_default();
+        .with_context(|| {
+            format!(
+                "read revision log for profile '{}'",
+                args.install_profile_key
+            )
+        })?;
 
     if revisions.is_empty() {
         if args.json {
@@ -109,7 +114,10 @@ fn find_profile_revisions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{AppRecord, LaunchProfile};
+    use capsule_core::foundation::install_lifecycle::{
+        derive_install_profile_key, AppRecord, LaunchProfile,
+    };
+    use serial_test::serial;
 
     fn make_store() -> (tempfile::TempDir, InstallInstanceStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -120,10 +128,9 @@ mod tests {
     fn write_app_and_profile(
         store: &InstallInstanceStore,
     ) -> (InstalledAppId, ProfileId, capsule_core::foundation::install_lifecycle::InstallProfileKey) {
-        use capsule_core::foundation::install_lifecycle::derive_install_profile_key;
         let app_id = InstalledAppId::new("app_test_rev001");
         let profile_id = ProfileId::new("default");
-        let record = AppRecord {
+        store.write_app_record(&AppRecord {
             installed_app_id: app_id.clone(),
             publisher: "acme".into(),
             slug: "hello".into(),
@@ -131,16 +138,14 @@ mod tests {
             version: "1.0.0".into(),
             installed_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
-        };
-        store.write_app_record(&record).unwrap();
-        let profile = LaunchProfile {
+        }).unwrap();
+        store.write_profile(&app_id, &LaunchProfile {
             profile_id: profile_id.clone(),
             port_policy: "auto".into(),
             concurrency_policy: "single".into(),
             isolation: "default".into(),
             ..Default::default()
-        };
-        store.write_profile(&app_id, &profile).unwrap();
+        }).unwrap();
         let ipk = derive_install_profile_key(&app_id, &profile_id);
         (app_id, profile_id, ipk)
     }
@@ -150,7 +155,6 @@ mod tests {
         let (_dir, store) = make_store();
         let (app_id, profile_id, _ipk) = write_app_and_profile(&store);
 
-        // Scaffold and set two revisions to populate the log.
         let rev1 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_0000000000000000000000000000000a",
         );
@@ -185,5 +189,76 @@ mod tests {
         assert_eq!(found_app.as_str(), app_id.as_str());
         assert_eq!(found_profile.as_str(), profile_id.as_str());
         assert_eq!(found_rev.as_str(), rev.as_str());
+    }
+
+    /// `execute_revisions_command` succeeds for a valid profile with two revisions.
+    #[test]
+    #[serial]
+    fn revisions_command_succeeds_for_valid_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
+        let app_id = InstalledAppId::new("app_test_rvcmd");
+        let profile_id = ProfileId::new("default");
+        store.write_app_record(&AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "acme".into(),
+            slug: "rvcmd".into(),
+            capsule_handle: "acme/rvcmd".into(),
+            version: "1.0.0".into(),
+            installed_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        }).unwrap();
+        store.write_profile(&app_id, &LaunchProfile {
+            profile_id: profile_id.clone(),
+            port_policy: "auto".into(),
+            concurrency_policy: "single".into(),
+            isolation: "default".into(),
+            ..Default::default()
+        }).unwrap();
+        let rev1 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+            "rev_cc00000000000000000000000000001a",
+        );
+        let rev2 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+            "rev_cc00000000000000000000000000001b",
+        );
+        store.scaffold_revision(&rev1).unwrap();
+        store.set_current_revision(&app_id, &profile_id, &rev1).unwrap();
+        store.scaffold_revision(&rev2).unwrap();
+        store.set_current_revision(&app_id, &profile_id, &rev2).unwrap();
+
+        let ipk = derive_install_profile_key(&app_id, &profile_id);
+        std::env::set_var("ATO_HOME", dir.path());
+        let result = execute_revisions_command(RevisionsArgs {
+            install_profile_key: ipk.as_str().to_owned(),
+            json: false,
+        });
+        std::env::remove_var("ATO_HOME");
+        assert!(result.is_ok(), "revisions command failed: {:?}", result);
+    }
+
+    /// `list_profile_revisions` returns `Err` (not empty list) when the log JSON is corrupt.
+    #[test]
+    fn corrupt_revision_log_returns_err_not_empty() {
+        let (_dir, store) = make_store();
+        let (app_id, profile_id, _ipk) = write_app_and_profile(&store);
+
+        // Scaffold one revision so the profile directory is created.
+        let rev = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
+            "rev_dd00000000000000000000000000001a",
+        );
+        store.scaffold_revision(&rev).unwrap();
+        store.set_current_revision(&app_id, &profile_id, &rev).unwrap();
+
+        // Overwrite the log with corrupt JSON using the public profile_dir API.
+        let log_path = store.profile_dir(&app_id, &profile_id).join("revision_log.json");
+        std::fs::write(&log_path, b"not valid json {{{{").unwrap();
+
+        let result = store.list_profile_revisions(&app_id, &profile_id);
+        assert!(result.is_err(), "expected Err for corrupt log, got Ok");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("parse revision log"),
+            "expected 'parse revision log' context in error: {msg}"
+        );
     }
 }
