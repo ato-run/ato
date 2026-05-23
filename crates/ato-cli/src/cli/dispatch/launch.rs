@@ -231,3 +231,166 @@ fn read_profile_launch_config(
     (args, warning)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capsule_core::foundation::install_lifecycle::{
+        AppRecord, InstallInstanceStore, InstallRevisionId, InstalledAppId, LaunchProfile,
+        ProfileId,
+    };
+
+    fn make_store() -> (tempfile::TempDir, InstallInstanceStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = InstallInstanceStore::new(dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn scaffold_app_with_profile(
+        store: &InstallInstanceStore,
+        app_id: &InstalledAppId,
+        profile_id: &ProfileId,
+        rev_id: &InstallRevisionId,
+    ) {
+        let record = AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "acme".into(),
+            slug: "hello".into(),
+            capsule_handle: "acme/hello".into(),
+            version: "1.0.0".into(),
+            installed_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        };
+        store.write_app_record(&record).unwrap();
+        store
+            .write_profile(
+                app_id,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    port_policy: "auto".into(),
+                    concurrency_policy: "single".into(),
+                    isolation: "default".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.scaffold_revision(rev_id).unwrap();
+        store.set_current_revision(app_id, profile_id, rev_id).unwrap();
+    }
+
+    /// `find_profile_by_key` returns None for an unknown key.
+    #[test]
+    fn find_profile_by_key_returns_none_for_unknown_key() {
+        let (_dir, store) = make_store();
+        assert!(find_profile_by_key(&store, "ipk_unknown_key").is_none());
+    }
+
+    /// `find_profile_by_key` resolves the correct (app, profile, handle, rev).
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_key_resolves_correct_profile() {
+        let (_dir, store) = make_store();
+        let app_id = InstalledAppId::new("app_abc123def456789012345678901234");
+        let profile_id = ProfileId::new("default");
+        let rev_id = InstallRevisionId::new("rev_aabbccdd");
+        scaffold_app_with_profile(&store, &app_id, &profile_id, &rev_id);
+
+        let ipk = derive_install_profile_key(&app_id, &profile_id);
+        let result = find_profile_by_key(&store, ipk.as_str());
+        assert!(result.is_some(), "should find the installed profile");
+        let (found_app, found_profile, _handle, found_rev) = result.unwrap();
+        assert_eq!(found_app, app_id);
+        assert_eq!(found_profile, profile_id);
+        assert_eq!(found_rev, rev_id);
+    }
+
+    /// After rollback (current_revision swapped back to rev1), `find_profile_by_key`
+    /// must return the old revision, not the latest one.
+    #[cfg(unix)]
+    #[test]
+    fn find_profile_by_key_uses_current_revision_after_rollback() {
+        let (_dir, store) = make_store();
+        let app_id = InstalledAppId::new("app_rollback12345678901234567890ab");
+        let profile_id = ProfileId::new("default");
+        let rev1 = InstallRevisionId::new("rev_old000");
+        let rev2 = InstallRevisionId::new("rev_new000");
+
+        scaffold_app_with_profile(&store, &app_id, &profile_id, &rev1);
+        // Install rev2 (simulates update).
+        store.scaffold_revision(&rev2).unwrap();
+        store.set_current_revision(&app_id, &profile_id, &rev2).unwrap();
+
+        let ipk = derive_install_profile_key(&app_id, &profile_id);
+
+        // Verify rev2 is current.
+        let (_, _, _, rev) = find_profile_by_key(&store, ipk.as_str()).unwrap();
+        assert_eq!(rev, rev2, "before rollback, current revision should be rev_new");
+
+        // Rollback to rev1.
+        store.set_current_revision(&app_id, &profile_id, &rev1).unwrap();
+
+        let (_, _, _, rev_after_rollback) =
+            find_profile_by_key(&store, ipk.as_str()).unwrap();
+        assert_eq!(
+            rev_after_rollback, rev1,
+            "after rollback, ato launch must use rev_old, not rev_new"
+        );
+    }
+
+    /// `read_profile_launch_config` returns empty args and no warning for a default profile.
+    #[cfg(unix)]
+    #[test]
+    fn read_profile_launch_config_no_warning_for_default_profile() {
+        let (_dir, store) = make_store();
+        let app_id = InstalledAppId::new("app_default_profile_test_1234567");
+        let profile_id = ProfileId::new("default");
+        let rev_id = InstallRevisionId::new("rev_default");
+        scaffold_app_with_profile(&store, &app_id, &profile_id, &rev_id);
+
+        let (args, warning) = read_profile_launch_config(&store, &app_id, &profile_id);
+        assert!(args.is_empty(), "default profile has no args");
+        assert!(warning.is_none(), "default profile should produce no warning");
+    }
+
+    /// `read_profile_launch_config` warns when unsupported profile fields are set.
+    #[cfg(unix)]
+    #[test]
+    fn read_profile_launch_config_warns_for_env_refs() {
+        use capsule_core::foundation::install_lifecycle::LaunchProfile;
+        let (_dir, store) = make_store();
+        let app_id = InstalledAppId::new("app_envref_warning_test_12345678");
+        let profile_id = ProfileId::new("default");
+        let rev_id = InstallRevisionId::new("rev_envref");
+
+        let record = AppRecord {
+            installed_app_id: app_id.clone(),
+            publisher: "acme".into(),
+            slug: "envref".into(),
+            capsule_handle: "acme/envref".into(),
+            version: "1.0.0".into(),
+            installed_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        };
+        store.write_app_record(&record).unwrap();
+        store.scaffold_revision(&rev_id).unwrap();
+
+        let profile = LaunchProfile {
+            profile_id: profile_id.clone(),
+            env_refs: [("MY_KEY".into(), "${secret:my_key}".into())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        store.write_profile(&app_id, &profile).unwrap();
+
+        let (_, warning) = read_profile_launch_config(&store, &app_id, &profile_id);
+        assert!(
+            warning.is_some(),
+            "should warn when env_refs are present but unsupported"
+        );
+        assert!(
+            warning.unwrap().contains("env_refs"),
+            "warning must mention env_refs"
+        );
+    }
+}
+
