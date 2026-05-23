@@ -12,8 +12,7 @@ homepage = "https://github.com/langgenius/dify"
 # - Images are linux/amd64 only; allow_emulation = true required on arm64 hosts
 # - CONSOLE_API_URL is left empty; web app falls back to relative-URL routing (see docs)
 # - SECRET_KEY is a hardcoded demo value; MUST be replaced for production use
-# - v0.3 schema does not support cmd override; Redis runs without requirepass
-#   (api/worker use REDIS_PASSWORD = "" to match)
+# - Redis uses cmd override to enable requirepass; api/worker use REDIS_PASSWORD to match
 
 default_target = "web"
 
@@ -25,12 +24,11 @@ port = 5432
 env = { POSTGRES_DB = "dify", POSTGRES_USER = "postgres", POSTGRES_PASSWORD = "difyai123456" }
 
 # ── Redis ─────────────────────────────────────────────────────────────────────
-# v0.3 does not support cmd override; Redis runs without requirepass.
-# api/worker must connect without password (REDIS_PASSWORD = "").
 [targets.redis]
 runtime = "oci"
 image = "redis:6-alpine"
 port = 6379
+cmd = ["redis-server", "--requirepass", "difyai123456"]
 
 # ── Weaviate vector store ─────────────────────────────────────────────────────
 [targets.weaviate]
@@ -46,7 +44,7 @@ image = "langgenius/dify-api:1.14.2"
 port = 5001
 allow_emulation = true
 depends_on = ["db", "redis", "weaviate"]
-env = { MODE = "api", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", MIGRATION_ENABLED = "true", DEPLOY_ENV = "PRODUCTION", LOG_LEVEL = "INFO", DIFY_PORT = "5001", CONSOLE_WEB_URL = "", CONSOLE_API_URL = "", APP_API_URL = "", FILES_URL = "" }
+env = { MODE = "api", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "difyai123456", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", MIGRATION_ENABLED = "true", DEPLOY_ENV = "PRODUCTION", LOG_LEVEL = "INFO", DIFY_PORT = "5001", CONSOLE_WEB_URL = "", CONSOLE_API_URL = "", APP_API_URL = "", FILES_URL = "" }
 
 # ── Dify Worker (Celery) ──────────────────────────────────────────────────────
 [targets.worker]
@@ -55,7 +53,7 @@ image = "langgenius/dify-api:1.14.2"
 port = 5001
 allow_emulation = true
 depends_on = ["db", "redis"]
-env = { MODE = "worker", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", DEPLOY_ENV = "PRODUCTION" }
+env = { MODE = "worker", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "difyai123456", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", DEPLOY_ENV = "PRODUCTION" }
 
 # ── Dify Web (Next.js) ────────────────────────────────────────────────────────
 # CONSOLE_API_URL limitation: Without nginx, the API port is dynamic/unknown
@@ -100,7 +98,7 @@ readiness_probe = { exec = ["pg_isready", "-U", "postgres"], initial_delay_secon
 
 [services.redis]
 target = "redis"
-readiness_probe = { exec = ["redis-cli", "ping"], initial_delay_seconds = 2, timeout_seconds = 30 }
+readiness_probe = { exec = ["redis-cli", "-a", "difyai123456", "ping"], initial_delay_seconds = 2, timeout_seconds = 30 }
 
 [services.weaviate]
 target = "weaviate"
