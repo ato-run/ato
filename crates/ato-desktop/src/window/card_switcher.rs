@@ -90,6 +90,15 @@ impl CardSwitcherShell {
         }
     }
 
+    fn push_session_snapshot(&self, sessions_json: &str) {
+        let script = format!(
+            "window.__ATO_SESSIONS_REFRESH__ && window.__ATO_SESSIONS_REFRESH__({sessions_json});"
+        );
+        if let Err(error) = self._webview.evaluate_script(&script) {
+            tracing::debug!(?error, "switcher: session snapshot push failed");
+        }
+    }
+
     fn sync_webview_bounds(&mut self, window: &mut gpui::Window) {
         let current = window.bounds().size;
         if current == self.window_size {
@@ -244,6 +253,13 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
             }
         })
         .collect();
+    if let Err(error) = cx
+        .global_mut::<SessionRegistry>()
+        .refresh_oci_sessions_from_cli()
+    {
+        tracing::warn!(?error, "switcher: failed to refresh CLI OCI sessions");
+    }
+
     let cards_json = serde_json::to_string(&cards).unwrap_or_else(|_| "[]".to_string());
     let windows_script = format!("window.__ATO_WINDOWS = {};", cards_json);
     let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
@@ -370,6 +386,17 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
 
     tracing::info!("switcher: open complete");
     Ok(())
+}
+
+pub fn refresh_session_snapshot(cx: &mut App) {
+    let sessions_json = serde_json::to_string(&cx.global::<SessionRegistry>().view_entries())
+        .unwrap_or_else(|_| "[]".to_string());
+    if let Some(entity) = cx
+        .try_global::<CardSwitcherEntitySlot>()
+        .and_then(|slot| slot.0.clone())
+    {
+        let _ = entity.update(cx, |shell, _cx| shell.push_session_snapshot(&sessions_json));
+    }
 }
 
 // Stage B note: the per-window `dispatch` translator from Stage A is
