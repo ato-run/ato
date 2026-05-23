@@ -37,7 +37,8 @@ use capsule_core::CapsuleReporter;
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::oci_provider::{
     build_digest_pull_ref, DefaultOciProviderSelector, OciImageResolutionMode,
-    OciImageResolutionRequest, OciProvider, OciProviderError, OciProviderSelector,
+    OciImageResolutionRequest, OciPlatformPolicy, OciProvider, OciProviderError,
+    OciProviderSelector,
 };
 use crate::adapters::runtime::oci_session_store::{
     now_iso8601, OciServiceRecord, OciSessionMeta, OciSessionRecord, OciSessionStatus,
@@ -138,12 +139,26 @@ pub(crate) async fn execute_multi_service(
                         target_label, declared_ref
                     ))
                     .await?;
+                let platform_policy = plan
+                    .typed_manifest()
+                    .ok()
+                    .and_then(|m| m.targets)
+                    .and_then(|t| t.named.get(&target_label).cloned())
+                    .map(|t| {
+                        if t.allow_emulation {
+                            OciPlatformPolicy::AllowEmulation
+                        } else {
+                            OciPlatformPolicy::NativeOnly
+                        }
+                    })
+                    .unwrap_or(OciPlatformPolicy::NativeOnly);
                 let request = OciImageResolutionRequest {
                     target_label: target_label.clone(),
                     declared_ref: declared_ref.to_string(),
                     requested_platform: None,
                     resolution_mode: OciImageResolutionMode::Required,
                     importer_input_hash: None,
+                    platform_policy,
                 };
                 let resolved = provider.resolve_image(&request).await.map_err(|e| {
                     anyhow::anyhow!("{}: {}", e.code(), e).context(format!(
@@ -343,6 +358,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
                 ports,
                 network: Some(network_name.clone()),
                 aliases: service.network.aliases.clone(),
+                platform: Some(image.platform.clone()),
             })
             .await
         {
