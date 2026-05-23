@@ -145,6 +145,14 @@ pub struct OciServiceLaunchShape {
     pub network_aliases: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness_probe: Option<String>,
+    /// One-shot lifecycle: flips a service from "long-running" to
+    /// "run-to-completion".  Part of execution identity because it changes
+    /// the start-order contract (dependents wait for exit-0 instead of
+    /// readiness) and the success/failure semantics.  Skipped from
+    /// serialization when `false` so existing identity hashes for
+    /// long-running-only envelopes are unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_once: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

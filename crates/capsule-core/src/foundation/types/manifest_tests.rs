@@ -2942,3 +2942,186 @@ readiness_probe = { http_get = "/healthz" }
         "expected port-required error, got: {errors:?}"
     );
 }
+
+// ── run_once (OCI one-shot lifecycle) ────────────────────────────────────────
+
+const RUN_ONCE_RECIPE: &str = r#"
+schema_version = "0.3"
+name = "run-once-smoke"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init-permissions]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["sh", "-c", "chown -R 1000:1000 /app/storage"]
+run_once = true
+depends_on = ["db"]
+
+[targets.db]
+runtime = "oci"
+image = "postgres:14"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+depends_on = ["init-permissions"]
+"#;
+
+#[test]
+fn run_once_target_parses() {
+    let manifest = CapsuleManifest::from_toml(RUN_ONCE_RECIPE).expect("parse manifest");
+    let targets = manifest.targets.expect("targets");
+    let init = targets
+        .named_target("init-permissions")
+        .expect("init-permissions target");
+    assert!(
+        init.run_once,
+        "run_once must round-trip to NamedTarget.run_once = true"
+    );
+    assert_eq!(
+        init.cmd,
+        vec!["sh", "-c", "chown -R 1000:1000 /app/storage"],
+        "cmd must be preserved on a run_once target"
+    );
+    let db = targets.named_target("db").expect("db target");
+    assert!(!db.run_once, "non-run_once targets default to false");
+}
+
+#[test]
+fn run_once_requires_cmd_or_rejects_missing_cmd() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-missing-cmd"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+run_once = true
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+"#;
+    let err = CapsuleManifest::from_toml(toml)
+        .expect_err("run_once without cmd must be rejected at parse time");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("cmd"),
+        "error must explain the missing cmd; got: {msg}"
+    );
+}
+
+#[test]
+fn run_once_rejects_readiness_probe_if_unsupported() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-with-probe"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["sh", "-c", "echo ok"]
+run_once = true
+readiness_probe = { http_get = "/healthz" }
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+"#;
+    let err =
+        CapsuleManifest::from_toml(toml).expect_err("run_once + readiness_probe must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("readiness_probe"),
+        "error must mention both run_once and readiness_probe; got: {msg}"
+    );
+}
+
+#[test]
+fn run_once_rejects_port() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-with-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["sh", "-c", "echo ok"]
+run_once = true
+port = 8080
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 9090
+"#;
+    let err = CapsuleManifest::from_toml(toml).expect_err("run_once + port must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("port"),
+        "error must mention both run_once and port; got: {msg}"
+    );
+}
+
+#[test]
+fn run_once_smoke_recipe_parses() {
+    // Pin the synthetic AODD recipe (db → init run_once → app) at the parser
+    // boundary so the docs and the runtime can never silently diverge.
+    let toml = include_str!("../../../../../samples/recipes/oci-run-once-smoke/capsule.toml");
+    let manifest = CapsuleManifest::from_toml(toml).expect("smoke recipe must parse");
+    let targets = manifest.targets.expect("targets");
+    let init = targets.named_target("init").expect("init target");
+    assert!(init.run_once, "init target must be run_once");
+    assert!(
+        init.needs.iter().any(|d| d == "db"),
+        "init must depend on db; got: {:?}",
+        init.needs
+    );
+    let app = targets.named_target("app").expect("app target");
+    assert!(
+        app.needs.iter().any(|d| d == "init"),
+        "app must depend on init (so init runs before app); got: {:?}",
+        app.needs
+    );
+    let db = targets.named_target("db").expect("db target");
+    assert!(!db.run_once, "db must NOT be run_once");
+}
+
+#[test]
+fn run_once_rejects_non_oci_runtime() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-non-oci"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "source"
+driver = "node"
+run = "node init.js"
+run_once = true
+"#;
+    let err = CapsuleManifest::from_toml(toml)
+        .expect_err("run_once is OCI-only and must be rejected on a source target");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("OCI"),
+        "error must mention OCI-only constraint; got: {msg}"
+    );
+}

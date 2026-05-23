@@ -231,6 +231,7 @@ impl ManifestData {
                     .clone()
                     .or_else(|| target.readiness_probe.clone()),
                 network,
+                run_once: target.run_once,
                 runtime,
             });
         }
