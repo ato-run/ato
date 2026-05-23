@@ -92,7 +92,7 @@ impl Default for ProfileId {
 }
 
 typed_id!(
-    /// Stable composite key: `SHA256(installed_app_id || ":" || profile_id)[:16]`.
+    /// Stable composite key: `SHA256("ipk:<installed_app_id>:<profile_id>")[:32]`.
     /// Used for shortcuts and dashboard links; unchanged across revisions.
     InstallProfileKey
 );
@@ -104,9 +104,9 @@ typed_id!(
 );
 
 typed_id!(
-    /// Per-revision-per-profile instance key.
-    /// Derived from `install_profile_key + install_revision_id`.
-    /// Changes when the revision changes; used for exact session / receipt replay.
+    /// Per-revision-per-profile-per-execution instance key.
+    /// Derived from `install_profile_key + install_revision_id + execution_id`.
+    /// Changes when the revision *or* execution_id changes; used for session / receipt / exact replay.
     CapsuleInstanceKey
 );
 
@@ -130,6 +130,18 @@ typed_id!(
 pub fn derive_install_profile_key(app: &InstalledAppId, profile: &ProfileId) -> InstallProfileKey {
     let input = format!("ipk:{}:{}", app.as_str(), profile.as_str());
     InstallProfileKey::new(format!("ipk_{}", hex_prefix(&input, 32)))
+}
+
+/// Derive a path-safe [`InstalledAppId`] from an arbitrary scoped capsule id (e.g. `publisher/slug`).
+///
+/// The raw scoped id may contain `/` which would be interpreted as a path separator
+/// by the store's directory layout. This function hashes it to a single-component id:
+/// `app_<32 hex>` = first 32 hex chars of `SHA256("app:<scoped_id>")`.
+///
+/// The `publisher`, `slug`, and `scoped_id` should be preserved in [`crate::foundation::install_lifecycle::store::AppRecord`].
+pub fn path_safe_app_id(scoped_id: &str) -> InstalledAppId {
+    let input = format!("app:{scoped_id}");
+    InstalledAppId::new(format!("app_{}", hex_prefix(&input, 32)))
 }
 
 /// Derive the [`CapsuleInstanceKey`] from the profile key, revision, and execution id.
@@ -204,7 +216,7 @@ impl ExecutionId {
                 hex_part.len()
             ));
         }
-        if !hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !hex_part.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
             return Err(format!(
                 "ExecutionId hex part must be lowercase hex, got: {}",
                 hex_part
@@ -446,6 +458,44 @@ mod tests {
         assert!(ExecutionId::looks_like("exec_123"));
         assert!(!ExecutionId::looks_like("build_123"));
         assert!(!ExecutionId::looks_like("rev_123"));
+    }
+
+    #[test]
+    fn execution_id_invalid_when_uppercase_hex() {
+        let id = ExecutionId::new(format!("exec_{}", "A".repeat(32)));
+        assert!(!id.is_valid(), "execution id hex must be lowercase");
+    }
+
+    // ── path_safe_app_id ───────────────────────────────────────────────────
+
+    #[test]
+    fn path_safe_app_id_has_app_prefix() {
+        let id = path_safe_app_id("koh0920/my-app");
+        assert!(id.as_str().starts_with("app_"), "must have app_ prefix");
+        assert_eq!(id.as_str().len(), 4 + 32, "app_ + 32 hex expected");
+    }
+
+    #[test]
+    fn path_safe_app_id_is_deterministic() {
+        let a = path_safe_app_id("koh0920/my-app");
+        let b = path_safe_app_id("koh0920/my-app");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn path_safe_app_id_differs_for_different_scopes() {
+        let a = path_safe_app_id("koh0920/foo");
+        let b = path_safe_app_id("koh0920/bar");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn path_safe_app_id_no_slash() {
+        let id = path_safe_app_id("publisher/slug");
+        assert!(
+            !id.as_str().contains('/'),
+            "path-safe id must not contain '/'"
+        );
     }
 
     // ── serde round-trip ───────────────────────────────────────────────────

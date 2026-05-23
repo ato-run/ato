@@ -21,8 +21,9 @@ use tracing::debug;
 
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use capsule_core::foundation::install_lifecycle::{
-    ArtifactBuildId, FinalizerInput, InstallInstanceStore, InstallProfileKey,
-    InstallRevisionFinalizer, InstallRevisionId, InstalledAppId, ProfileId,
+    path_safe_app_id, AppRecord, ArtifactBuildId, FinalizerInput, InstallInstanceStore,
+    InstallProfileKey, InstallRevisionFinalizer, InstallRevisionId, InstalledAppId, LaunchProfile,
+    ProfileId,
 };
 
 use capsule_core::packers::payload as manifest_payload;
@@ -2260,13 +2261,43 @@ fn try_register_lifecycle(
         }
     };
 
-    let installed_app_id = InstalledAppId::new(scoped_id);
+    // Use a path-safe, deterministic app id derived from the scoped_id
+    // (e.g. "publisher/slug" contains '/' which would break directory layout).
+    let installed_app_id = path_safe_app_id(scoped_id);
     let profile_id = ProfileId::default();
+
+    // 1. Ensure app record exists.
+    let (publisher, slug) = scoped_id.split_once('/').unwrap_or(("", scoped_id));
+    let now = chrono::Utc::now().to_rfc3339();
+    let app_record = AppRecord {
+        installed_app_id: installed_app_id.clone(),
+        publisher: publisher.to_owned(),
+        slug: slug.to_owned(),
+        version: String::new(),
+        installed_at: now.clone(),
+        updated_at: now,
+    };
+    if let Err(e) = store.write_app_record(&app_record) {
+        tracing::debug!("install_lifecycle: write_app_record failed: {e}");
+        return None;
+    }
+
+    // 2. Ensure default launch profile exists.
+    let launch_profile = LaunchProfile {
+        profile_id: profile_id.clone(),
+        ..Default::default()
+    };
+    if let Err(e) = store.write_profile(&installed_app_id, &launch_profile) {
+        tracing::debug!("install_lifecycle: write_profile failed: {e}");
+        return None;
+    }
+
     let output_dir = installed_path
         .parent()
         .unwrap_or(installed_path)
         .to_path_buf();
 
+    // 3. Finalize: copy build output → immutable revision, swap current_revision.
     let finalizer = InstallRevisionFinalizer::new(&store);
     let output = match finalizer.finalize(FinalizerInput {
         installed_app_id: installed_app_id.clone(),

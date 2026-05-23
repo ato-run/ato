@@ -12,8 +12,8 @@ pub mod store;
 
 pub use finalizer::{FinalizerInput, FinalizerOutput, InstallRevisionFinalizer};
 pub use ids::{
-    derive_capsule_instance_key, derive_install_profile_key, revision_id_for_build,
-    ArtifactBuildId, CapsuleInstanceKey, ExecutionId, InstallProfileKey, InstallRevisionId,
-    InstalledAppId, ProfileId,
+    derive_capsule_instance_key, derive_install_profile_key, path_safe_app_id,
+    revision_id_for_build, ArtifactBuildId, CapsuleInstanceKey, ExecutionId, InstallProfileKey,
+    InstallRevisionId, InstalledAppId, ProfileId,
 };
 pub use store::{AppRecord, InstallInstanceStore, LaunchProfile};
