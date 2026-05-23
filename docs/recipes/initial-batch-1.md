@@ -106,7 +106,7 @@ The no-lock compat path resolves the mutable tag to this digest before pull/star
 
 **Follow-up:**
 - Add `N8N_ENCRYPTION_KEY` as a generated secret for production security
-- Pin to specific version tag
+- Pin to specific version tag (see [image-tag-pinning-audit.md](./image-tag-pinning-audit.md))
 
 ---
 
@@ -277,7 +277,7 @@ Multi-service recipes (Flowise, Dify, Langfuse) should wait for `oci_compose` pa
 
 **Follow-up:**
 - Add `N8N_ENCRYPTION_KEY` as a generated secret for production security
-- Pin to specific version tag
+- Pin to specific version tag (see [image-tag-pinning-audit.md](./image-tag-pinning-audit.md))
 
 ---
 

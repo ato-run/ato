@@ -9,8 +9,8 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-# Pin note: `:latest` used for initial AODD run
-# Follow-up: pin to filebrowser/filebrowser:<version>
+# Pin note: proposed pin to filebrowser/filebrowser:v2.32.0 — not yet AODD-confirmed
+# AODD digest (2026-05-23): sha256:9ffebe23dc98...
 image = "filebrowser/filebrowser:latest"
 port = 8080
 env = { FB_PORT = "8080", FB_ADDRESS = "0.0.0.0" }
