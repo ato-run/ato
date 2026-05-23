@@ -1459,7 +1459,7 @@ fn complete_native_install_from_bytes(
     )?;
 
     let install_lifecycle =
-        try_register_lifecycle(&scoped_ref.scoped_id, computed_blake3, &output_path);
+        try_register_lifecycle(&scoped_ref.scoped_id, version.as_str(), computed_blake3, &output_path);
 
     Ok(InstallResult {
         capsule_id,
@@ -1520,7 +1520,7 @@ fn complete_standard_install_from_bytes(
     )?;
 
     let install_lifecycle =
-        try_register_lifecycle(&scoped_ref.scoped_id, computed_blake3, &output_path);
+        try_register_lifecycle(&scoped_ref.scoped_id, version.as_str(), computed_blake3, &output_path);
 
     Ok(InstallResult {
         capsule_id,
@@ -2238,6 +2238,7 @@ mod tests;
 /// (non-fatal — lifecycle registration is best-effort for now).
 fn try_register_lifecycle(
     scoped_id: &str,
+    version: &str,
     content_hash: &str,
     installed_path: &Path,
 ) -> Option<InstallLifecycleInfo> {
@@ -2266,30 +2267,45 @@ fn try_register_lifecycle(
     let installed_app_id = path_safe_app_id(scoped_id);
     let profile_id = ProfileId::default();
 
-    // 1. Ensure app record exists.
+    // 1. Ensure app record exists. If one already exists, preserve `installed_at`
+    //    and only update `version` / `updated_at`.
     let (publisher, slug) = scoped_id.split_once('/').unwrap_or(("", scoped_id));
     let now = chrono::Utc::now().to_rfc3339();
-    let app_record = AppRecord {
-        installed_app_id: installed_app_id.clone(),
-        publisher: publisher.to_owned(),
-        slug: slug.to_owned(),
-        version: String::new(),
-        installed_at: now.clone(),
-        updated_at: now,
+    let app_record = match store.read_app_record(&installed_app_id) {
+        Ok(existing) => AppRecord {
+            installed_app_id: installed_app_id.clone(),
+            publisher: publisher.to_owned(),
+            slug: slug.to_owned(),
+            capsule_handle: scoped_id.to_owned(),
+            version: version.to_owned(),
+            installed_at: existing.installed_at, // preserve original install time
+            updated_at: now,
+        },
+        Err(_) => AppRecord {
+            installed_app_id: installed_app_id.clone(),
+            publisher: publisher.to_owned(),
+            slug: slug.to_owned(),
+            capsule_handle: scoped_id.to_owned(),
+            version: version.to_owned(),
+            installed_at: now.clone(),
+            updated_at: now,
+        },
     };
     if let Err(e) = store.write_app_record(&app_record) {
         tracing::debug!("install_lifecycle: write_app_record failed: {e}");
         return None;
     }
 
-    // 2. Ensure default launch profile exists.
-    let launch_profile = LaunchProfile {
-        profile_id: profile_id.clone(),
-        ..Default::default()
-    };
-    if let Err(e) = store.write_profile(&installed_app_id, &launch_profile) {
-        tracing::debug!("install_lifecycle: write_profile failed: {e}");
-        return None;
+    // 2. Ensure default launch profile exists (do not overwrite if present).
+    if store.read_profile(&installed_app_id, &profile_id).is_err() {
+        let launch_profile = LaunchProfile {
+            profile_id: profile_id.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = store.write_profile(&installed_app_id, &launch_profile) {
+            tracing::debug!("install_lifecycle: write_profile failed: {e}");
+            return None;
+        }
     }
 
     let output_dir = installed_path

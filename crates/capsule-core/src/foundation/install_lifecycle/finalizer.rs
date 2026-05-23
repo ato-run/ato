@@ -289,6 +289,7 @@ mod tests {
                 installed_app_id: app.clone(),
                 publisher: "test".into(),
                 slug: "finalizer".into(),
+                capsule_handle: "test/finalizer".into(),
                 version: "1.0.0".into(),
                 installed_at: "2025-01-01T00:00:00Z".into(),
                 updated_at: "2025-01-01T00:00:00Z".into(),
