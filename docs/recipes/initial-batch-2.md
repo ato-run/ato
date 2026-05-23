@@ -8,6 +8,10 @@
 
 ## Summary
 
+> **Note:** For consolidated catalog status, see [initial-catalog-status.md](./initial-catalog-status.md).
+> For image tag pinning audit, see [image-tag-pinning-audit.md](./image-tag-pinning-audit.md).
+> For secret cleanup plan, see [secret-cleanup-plan.md](./secret-cleanup-plan.md).
+
 All 5 Batch 2 targets passed clean ATO_HOME AODD on first attempt.
 
 | App | Status | Recipe path | Startup | Endpoint | State | Cleanup | Notes |

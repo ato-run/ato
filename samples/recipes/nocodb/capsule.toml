@@ -9,9 +9,8 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-# Pin note: `:latest` is used for now; AODD digest sha256:c62f33e8a28b4...c467
-# Follow-up: pin to a stable version tag (e.g. nocodb/nocodb:0.259.0)
-image = "nocodb/nocodb:latest"
+image = "nocodb/nocodb:0.259.0"
+# AODD digest (2026-05-22): sha256:c62f33e8a28b4c0b18e5e0311c3ce84caab54fd6c3434513f0f476f12d14c467
 port = 8080
 env = { PORT = "8080" }
 

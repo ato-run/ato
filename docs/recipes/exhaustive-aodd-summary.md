@@ -1,5 +1,64 @@
 # Exhaustive AODD Summary
 
+**Branch:** `feat/catalog-productization` (evolved from `feat/recipe-exhaustive-aodd`)
+**Base:** Batches 1–3 + depends_on + readiness timing + platform emulation + exec probe cleanup
+
+## Current Catalog Status
+
+Consolidated report: [docs/recipes/initial-catalog-status.md](./initial-catalog-status.md)
+
+| Status | Count |
+|---|---:|
+| **pass** | **34** |
+| **partial** | **7** |
+| **blocked** | **12** |
+| **rejected** | **15** |
+| **deferred** | **5** |
+| **Total evaluated** | **73** |
+
+### What is ready to demo
+
+- 34 pass-status recipes can be demoed with `ato run samples/recipes/<app>`
+- AI showcase: flowise, langflow, anything-llm, n8n, lobe-chat, litellm
+- Multi-service: linkwarden, langfuse, umami, paperless-ngx, outline
+- All single-service apps start within 5 minutes (most < 60s)
+
+### What is experimental
+
+- dify — partial-pass; 15-min cold startup, 6-service heavyweight
+- open-webui — partial; first-run HuggingFace model downloads 3-4 min
+- langflow — pass but 360s startup; needs 420s readiness timeout
+- vikunja — partial; first-run DB migration may timeout
+
+### What is unsafe/deferred
+
+- Docker socket apps (OpenHands, coolify, portainer, dozzle, dokploy) — rejected
+- GPU-only tools (AUTOMATIC1111, ComfyUI, InvokeAI, h2oGPT) — rejected
+- Heavy stacks (Supabase, PostHog, Immich) — deferred
+- Private images (twenty) — blocked
+- Very large images (photoprism, mindsdb) — partial
+
+### Key runtime capabilities proven
+
+- OCI single/multi-service with `depends_on`: topological start/stop
+- Platform emulation (`allow_emulation = true`): linux/amd64 on arm64
+- Readiness probe timing: `initial_delay_seconds`, `timeout_seconds`
+- Exec probes: `pg_isready`, `redis-cli ping` for internal services
+- State persistence across stop/restart
+- Clean teardown: `ato stop --all` removes containers, network, sessions
+
+### Top remaining blockers
+
+1. Private upstream images (twenty)
+2. No `run_once`/one-shot service (blocks init containers)
+3. Multi-service shared mutable state
+4. No ingress/proxy layer
+5. Large image cold pull without per-target pull timeout
+
+---
+
+**Original report below (preserved for reference):**
+
 **Branch:** `feat/recipe-exhaustive-aodd`  
 **Base:** Batches 1–3 (PRs #213, #215, #216)
 

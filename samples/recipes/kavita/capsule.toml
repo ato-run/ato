@@ -9,7 +9,7 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-image = "lscr.io/linuxserver/kavita:latest"
+image = "lscr.io/linuxserver/kavita:0.8.5"
 port = 5000
 
 [state.config]
