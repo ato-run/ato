@@ -9,11 +9,11 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-# Pin note: `:latest` is used for now; AODD digest sha256:10bb1df216...4a556
-# Follow-up: pin to a stable version tag (e.g. n8nio/n8n:1.93.0)
+# Pin note: proposed pin to n8nio/n8n:1.93.0 — not yet AODD-confirmed
+# AODD digest (2026-05-22): sha256:10bb1df216497fed1671c8c4c725bba913b99d32075dcdf3f0ec6ffb1df4a556
 image = "n8nio/n8n:latest"
 port = 5678
-env = { N8N_PORT = "5678", N8N_HOST = "0.0.0.0", N8N_PROTOCOL = "http", GENERIC_TIMEZONE = "UTC", TZ = "UTC" }
+env = { N8N_PORT = "5678", N8N_HOST = "0.0.0.0", N8N_PROTOCOL = "http", GENERIC_TIMEZONE = "UTC", TZ = "UTC", N8N_ENCRYPTION_KEY = "changeme-demo-encryption-key" }
 
 [state.data]
 kind = "filesystem"

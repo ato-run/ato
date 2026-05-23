@@ -9,8 +9,8 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-# Pin note: `:latest` used for initial AODD run
-# Follow-up: pin to ghcr.io/muchobien/pocketbase:<version>
+# Pin note: proposed pin to ghcr.io/muchobien/pocketbase:0.26.0 — not yet AODD-confirmed
+# AODD digest (2026-05-23): sha256:2d41181ceeca...
 image = "ghcr.io/muchobien/pocketbase:latest"
 port = 8090
 env = {}

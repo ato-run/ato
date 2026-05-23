@@ -1,5 +1,9 @@
 # Exhaustive AODD Matrix
 
+> **Note:** This matrix records the raw evaluation results. For consolidated
+> catalog status, see [initial-catalog-status.md](./initial-catalog-status.md).
+> For recipe lists, see [validated-recipes.txt](./validated-recipes.txt).
+
 All researched self-hosted app repositories tested against Ato OCI recipe infrastructure.
 
 **Branch:** `feat/recipe-exhaustive-aodd`  
