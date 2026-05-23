@@ -1,0 +1,63 @@
+schema_version = "0.3"
+name = "twenty"
+version = "0.50.0"
+type = "app"
+description = "Open-source CRM — modern alternative to Salesforce"
+homepage = "https://github.com/twentyhq/twenty"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "twenty", POSTGRES_USER = "twenty", POSTGRES_PASSWORD = "twenty-secret" }
+
+[targets.redis]
+runtime = "oci"
+image = "redis:7-alpine"
+port = 6379
+
+[targets.app]
+runtime = "oci"
+image = "twentyhq/twenty-server:0.50.0"
+port = 3000
+env = { PG_DATABASE_URL = "postgresql://twenty:twenty-secret@db:5432/twenty", REDIS_URL = "redis://redis:6379", STORAGE_TYPE = "local", APP_SECRET = "changeme-demo-secret", SERVER_URL = "http://localhost:3000" }
+depends_on = ["db", "redis"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Twenty CRM PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:twenty-pgdata-v1"
+
+[state.storage]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Twenty CRM local file storage"
+attach = "explicit"
+schema_id = "sha256:twenty-storage-v1"
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "twenty"], port = "5432" }
+
+[services.redis]
+target = "redis"
+readiness_probe = { exec = ["redis-cli", "ping"], initial_delay_seconds = 2 }
+
+# twenty-server runs DB migrations on first boot then starts API + worker.
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/healthz", port = "3000", timeout_seconds = 180 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
+
+[[services.main.state_bindings]]
+state = "storage"
+target = "/app/packages/twenty-server/.local-storage"
+service_target = "app"
