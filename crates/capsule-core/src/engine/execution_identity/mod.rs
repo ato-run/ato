@@ -2575,4 +2575,111 @@ pub(in crate::engine::execution_identity) mod tests {
             Some("blake3:resolved")
         );
     }
+
+    #[test]
+    fn ingress_in_oci_envelope_changes_identity() {
+        use crate::types::{IngressConfig, IngressMode, IngressRoute};
+
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "web".to_string(),
+            IngressRoute {
+                target: "web".to_string(),
+                port: 3000,
+                listed: true,
+                alias: None,
+                strip_prefix: true,
+                upstream_path_prefix: None,
+                root: true,
+            },
+        );
+
+        let ingress = IngressConfig {
+            mode: IngressMode::Path,
+            routes,
+            env_inject: BTreeMap::new(),
+        };
+
+        let envelope_no_ingress = sample_oci_envelope();
+        let envelope_with_ingress = sample_oci_envelope().with_ingress(Some(ingress));
+
+        let base = sample_input_v2();
+
+        let input_no = base
+            .clone()
+            .with_oci_launch_envelope(Some(envelope_no_ingress));
+        let input_with = base.with_oci_launch_envelope(Some(envelope_with_ingress));
+
+        let id_no = compute_execution_id_v2(&input_no).unwrap();
+        let id_with = compute_execution_id_v2(&input_with).unwrap();
+
+        assert_ne!(
+            id_no.execution_id, id_with.execution_id,
+            "adding ingress to OCI envelope must change the execution identity"
+        );
+    }
+
+    #[test]
+    fn ingress_env_inject_template_changes_identity() {
+        use crate::types::{IngressConfig, IngressMode, IngressRoute};
+
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "api".to_string(),
+            IngressRoute {
+                target: "api".to_string(),
+                port: 5001,
+                listed: false,
+                alias: Some("api".to_string()),
+                strip_prefix: true,
+                upstream_path_prefix: Some("/api".to_string()),
+                root: false,
+            },
+        );
+
+        let mut env_a = BTreeMap::new();
+        env_a.insert("URL".to_string(), "{{ingress.routes.api.url}}".to_string());
+
+        let ingress_a = IngressConfig {
+            mode: IngressMode::Path,
+            routes: routes.clone(),
+            env_inject: {
+                let mut m = BTreeMap::new();
+                m.insert("web".to_string(), env_a);
+                m
+            },
+        };
+
+        let mut env_b = BTreeMap::new();
+        env_b.insert(
+            "URL".to_string(),
+            "{{ingress.routes.api.base_url}}".to_string(),
+        );
+
+        let ingress_b = IngressConfig {
+            mode: IngressMode::Path,
+            routes,
+            env_inject: {
+                let mut m = BTreeMap::new();
+                m.insert("web".to_string(), env_b);
+                m
+            },
+        };
+
+        let envelope_a = sample_oci_envelope().with_ingress(Some(ingress_a));
+        let envelope_b = sample_oci_envelope().with_ingress(Some(ingress_b));
+
+        let base = sample_input_v2();
+
+        let input_a = base.clone().with_oci_launch_envelope(Some(envelope_a));
+        let input_b = base.with_oci_launch_envelope(Some(envelope_b));
+
+        let id_a = compute_execution_id_v2(&input_a).unwrap();
+        let id_b = compute_execution_id_v2(&input_b).unwrap();
+
+        assert_ne!(
+            id_a.execution_id, id_b.execution_id,
+            "different ingress env_inject templates must produce different identity hashes"
+        );
+    }
 }
