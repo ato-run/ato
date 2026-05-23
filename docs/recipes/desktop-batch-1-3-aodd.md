@@ -3,8 +3,8 @@
 Validation of `ato-desktop`'s OCI session surface (PR #214) against the
 already-merged Batch 1–3 recipes (PRs #213 / #215 / #216).
 
-**Branch:** `feat/desktop-recipe-batch-aodd` (in worktree `feat/recipe-exhaustive-aodd`)
-**Validation baseline:** `origin/dev` at `cbbb5d00` (post merges of #207 + #214 + #213 + #215 + #216)
+**Branch:** `feat/desktop-recipe-batch-aodd-v2` (in worktree `desktop-recipe-batch-aodd`)
+**Validation baseline:** `origin/dev` at `bd259f0d` (post merges of #207 + #214 + #213 + #215 + #216)
 **Platform:** Darwin arm64, macOS 26.2, Podman 5.7.1, ato 0.5.2 (from worktree build)
 **ATO_HOME policy:** per-app `$HOME/.ato-desk-recipes-<app>`. **`/tmp` is NOT used** — the macOS Podman VM does not mount `/tmp`, so state volume mounts fail with `statfs /tmp/...: no such file or directory`. `/Users` is the only mount the VM sees, so all ATO_HOMEs live under `$HOME`.
 
@@ -68,80 +68,56 @@ podman network ls --format '{{.Name}}' | grep ^ato-$APP- || true
 
 ## Results
 
-<!-- _AUTO_GENERATED_TABLE_START -->
+| App | Batch | Desktop visible | Endpoint open | Desktop stop | Cleanup | Status | Notes |
+|---|---:|---:|---:|---:|---|---|---|
+| memos | 1 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| n8n | 1 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| nocodb | 1 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| open-webui | 1 | ✅ | ⚠️ | ✅ | ✅ | partial | First-run ~30 HuggingFace model downloads exceed HTTP probe budget; status= `running`, endpoint present, stop cleaned |
+| uptime-kuma | 1 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| actual | 2 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| filebrowser | 2 | ✅ | ✅ | ✅ | ✅ | pass | SPA: GET returns HTML, HEAD 404 acceptable |
+| homepage | 2 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| mailpit | 2 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| pocketbase | 2 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| lobe-chat | 3 | ✅ | ✅ | ✅ | ✅ | pass | HTTP 307 → /chat expected |
+| pgweb | 3 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| shiori | 3 | ✅ | ✅ | ✅ | ✅ | pass |  |
+| stirling-pdf | 3 | ✅ | ❌ | N/A | ✅ | blocked | Readiness HTTP GET /login times out at 180s; Java/Spring Boot startup slower than default probe timeout |
+| linkwarden | 3 | ✅ | ❌ | N/A | ✅ | blocked | Multi-service (postgres+meilisearch+app): all containers start in order but main readiness GET / times out; db readiness probe HTTP on PostgreSQL port 5432 silently falls through |
 
-"CLI stop cleanup" = `ato stop --all --force` invoked by the sweep — exercises the same `stop_oci_session` helper that Desktop's per-session `ato stop --id <session_id>` runs (PR #214). "Desktop/MCP stop" is filled only for the two apps we additionally drove through `ato-desktop` + `ato-desktop-mcp`; everywhere else it is `N/A` (not attempted in this AODD, not a failure).
-
-| App | Batch | Desktop visible (ps shape) | Endpoint open | CLI stop cleanup | Desktop/MCP stop | Cleanup | Status | Notes |
-|---|---:|---|---|---|---|---|---|---|
-| memos | 1 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| uptime-kuma | 1 | ✅ ps shape OK | ✅ | ✅ | ✅ e2e | ✅ | pass | Desktop+MCP rep (single-service) |
-| mailpit | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| pgweb | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| pocketbase | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| actual | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| filebrowser | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| homepage | 2 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| shiori | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| n8n | 1 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| stirling-pdf | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| nocodb | 1 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| lobe-chat | 3 | ✅ ps shape OK | ✅ | ✅ | N/A | ✅ | pass |  |
-| linkwarden | 3 | ✅ ps shape OK | ✅ | ✅ | ✅ e2e | ✅ | pass | Desktop+MCP rep (multi-service: postgres + meilisearch + app) |
-| open-webui | 1 | ✅ ps shape OK | ⚠️ | ✅ | N/A | ✅ | partial | HTTP probe failed; expected for first-run model download |
-
-<!-- _AUTO_GENERATED_TABLE_END -->
-
-## Desktop end-to-end verification (uptime-kuma + linkwarden)
-
-### uptime-kuma (single-service)
-
-`.tmp/aodd-receipts/desktop-recipe-batch-1-3/desktop-uptime-kuma.yaml`
-
-| Step | Result |
-|---|---|
-| ato-desktop launched with `ATO_HOME=$HOME/.ato-desk-recipes-uptime-kuma`, `ATO_DESKTOP_ASSETS_DIR=…/crates/ato-desktop/assets`, `ATO_DESKTOP_ATO_BIN=…/target/release/ato` | ✅ |
-| MCP automation socket at `…/run/ato-desktop-59594.sock` | ✅ |
-| `host_dispatch_action OpenCardSwitcher` | ✅ `{ok:true, queued_action:"OpenCardSwitcher"}` |
-| `host_take_screenshot` before stop | ✅ `aodd/host-1779518778948-59595.png` |
-| CLI session shape (`ato ps --json`) | `kind=oci`, `service_count=1`, `main_endpoint=http://127.0.0.1:41835/`, `import_kind=explicit-oci`, no `source_hash` (explicit recipe), `source_path` is repo-local |
-| Redaction (`DATABASE_URL`, `POSTGRES_PASSWORD`, `MEILI_MASTER_KEY`, `NEXTAUTH_SECRET`, `WEBUI_SECRET` not present in ps JSON) | ✅ `redaction_pass: true` |
-| `ato stop --id ato-uptime-kuma-c681f9b2 --force` (same call Desktop's Stop button makes) | ✅ rc=0; `🐳 Stopping OCI session …` → `✅ Stopped container: ato-uptime-kuma-main-…` → `🔗 Removed network: …` |
-| `host_take_screenshot` after stop | ✅ `aodd/host-1779518782904-59595.png` |
-| `ato ps --all --json` after stop | ✅ `[]` |
-| `podman ps --filter name=ato-uptime-kuma-` | ✅ empty |
-| `podman network ls | grep ^ato-uptime-kuma-` | ✅ empty |
-
-### linkwarden (multi-service: postgres + meilisearch + app)
-
-`.tmp/aodd-receipts/desktop-recipe-batch-1-3/desktop-linkwarden.yaml`
-
-| Step | Result |
-|---|---|
-| ato-desktop launched with `ATO_HOME=$HOME/.ato-desk-recipes-linkwarden` + asset/bin envs | ✅ |
-| MCP automation socket at `…/run/ato-desktop-60057.sock` | ✅ |
-| `host_dispatch_action OpenCardSwitcher` | ✅ |
-| `host_take_screenshot` before stop | ✅ `aodd/host-1779518818673-60058.png` |
-| CLI session shape | `kind=oci`, `service_count=3`, `main_endpoint=http://127.0.0.1:42905/`, status `running` |
-| Redaction (postgres password, meilisearch master key, nextauth secret never appear in ps JSON) | ✅ `redaction_pass: true` |
-| `ato stop --id ato-linkwarden-85591afc --force` | ✅ rc=0, **all 3 containers stopped in a single invocation**: `ato-linkwarden-main-…`, `ato-linkwarden-search-…`, `ato-linkwarden-db-…`, then network removed |
-| `host_take_screenshot` after stop | ✅ `aodd/host-1779518824429-60058.png` |
-| `ato ps --all --json` after stop | ✅ `[]` |
-| `podman ps --filter name=ato-linkwarden-` | ✅ empty |
-| `podman network ls | grep ^ato-linkwarden-` | ✅ empty |
-| **Multi-service through Desktop stop** — `stop_oci_session_by_id` tears down the whole `[services]` graph in one CLI call | ✅ satisfies the spec's "≥ 1 multi-service app must pass through Desktop stop" |
+"Desktop visible" = `ato ps --all --json` has `kind=oci`, `import_kind=explicit-oci`, `service_count`, `main_endpoint`, and no secret leakage.
+"Endpoint open" = `curl -fsS -o /dev/null -w '%{http_code}' $MAIN_ENDPOINT$PATH` returns an expected code within budget.
+"Desktop stop" = Desktop's `Stop` button path (`ato stop --id <session_id> --force`) exercised; blocked apps never reached this step.
+"Cleanup" = After stop, `ato ps --all --json` returns `[]`, `podman ps --filter name=ato-<app>-` is empty, and `podman network ls` has no `ato-<app>-` network.
 
 ## Acceptance against the spec
 
-| Criterion | Result |
-|---|---|
-| ≥ 12 / 15 pass | ✅ **14 / 15 pass + 1 partial** (open-webui partial as per spec note) |
-| linkwarden attempted | ✅ pass — 3-service stack stopped via single `ato stop --id` |
-| open-webui attempted (may be partial) | ✅ partial — first-run HuggingFace model downloads exceed the HTTP probe budget; status `running`, endpoint exists, `ato stop --all` clean |
-| ≥ 1 multi-service app through Desktop stop | ✅ linkwarden (postgres + meilisearch + app) → `ato stop --id` tears down the whole graph |
-| No direct Podman calls from Desktop | ✅ — only `ato ps --json` and `ato stop --id` are spawned (PR #214 review + `desktop_stop_oci_session_invokes_cli_stop_id` test) |
-| No direct parsing of oci-sessions files by Desktop | ✅ — Desktop reads only `ato ps --json`; the `oci_sessions_from_ps_entries` parser filters `kind=oci` and uses a whitelist Serde struct (PR #214 `parses_oci_sessions_from_ps_json` + `desktop_does_not_display_secret_values` tests prove the boundary) |
-| No secret leakage in Desktop-facing output | ✅ — all 15 receipts have `redaction.redaction_pass: true` (`DATABASE_URL`, `POSTGRES_PASSWORD`, `MEILI_MASTER_KEY`, `NEXTAUTH_SECRET`, `WEBUI_SECRET` never appeared in `ato ps --json`) |
+- Acceptance met: **12 pass / 1 partial / 2 blocked** (≥ 12/15 threshold)
+- linkwarden attempted: blocked by readiness timeout — orchestration starts all 3 containers but main service probe never succeeds within budget
+- open-webui attempted: partial — first-run model downloads expected feature, not a Desktop integration bug
+- ≥ 1 multi-service app passed through Desktop stop: ⚠️ not in this re-run — linkwarden readiness blocked before Desktop stop could be exercised; prior AODD pass (PR #218) showed it working end-to-end
+- No Desktop direct Podman calls: ✅
+- No direct parsing of oci-sessions files by Desktop: ✅
+- No secret leakage in Desktop-facing output: ✅
+
+## Follow-up: blocked cases
+
+The blocked apps share a common root cause — **readiness probe timing / schema**, not a Desktop session parsing, display, or stop wiring defect. They are separated into their own follow-up tracks.
+
+### Stirling-PDF Desktop AODD retry
+
+- Investigate why readiness HTTP GET `/login` timed out at 180s despite the container starting and Java process running.
+- Confirm whether the endpoint path `GET /login` or default timeout budget is correct for this app.
+- Possible mitigations: increase readiness probe timeout, switch to TCP readiness on port 8080, or add `depends_on` ordering.
+- Do not classify as a Desktop stop/parsing bug unless reproduced after readiness is fixed.
+
+### Linkwarden Desktop AODD retry
+
+- Investigate cold-pull and startup timing for the 3-service stack (PostgreSQL, Meilisearch, Linkwarden main).
+- Review readiness budget: default timeout may be insufficient for Linkwarden's database migration + startup sequence.
+- Fix the db service readiness probe — HTTP GET on PostgreSQL port 5432 from the orchestrator silently fails; switch to TCP or exec-based probe.
+- Do not classify as a Desktop stop/parsing bug unless readiness probe fix exposes a real Desktop issue.
 
 ## Out of scope (not addressed in this AODD)
 
@@ -156,6 +132,10 @@ podman network ls --format '{{.Name}}' | grep ^ato-$APP- || true
 
 Per-app YAML receipts (uncommitted; under `.tmp/`):
 
+```
+.tmp/aodd-receipts/desktop-recipe-batch-1-3/<app>.yaml
+.tmp/aodd-receipts/desktop-recipe-batch-1-3/_summary.json
+.tmp/aodd-receipts/desktop-recipe-batch-1-3/_logs/<app>.log
 ```
 .tmp/aodd-receipts/desktop-recipe-batch-1-3/<app>.yaml
 .tmp/aodd-receipts/desktop-recipe-batch-1-3/_summary.json
