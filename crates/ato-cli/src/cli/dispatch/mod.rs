@@ -432,7 +432,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
 
         Commands::Launch {
             install_profile_key,
-            env_file,
             yes,
             verbose,
             json: command_json,
@@ -440,7 +439,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         } => launch::execute_launch_command(
             launch::LaunchArgs {
                 install_profile_key,
-                env_file,
                 yes,
                 verbose,
                 json: json || command_json,

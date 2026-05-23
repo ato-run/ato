@@ -21,7 +21,6 @@ use crate::{EnforcementMode, ProviderToolchain, RunAgentMode};
 
 pub(crate) struct LaunchArgs {
     pub(crate) install_profile_key: String,
-    pub(crate) env_file: Option<PathBuf>,
     pub(crate) yes: bool,
     pub(crate) verbose: bool,
     pub(crate) json: bool,
@@ -110,7 +109,7 @@ pub(crate) fn execute_launch_command(
 
     execute_run_command(
         revision_output_dir.clone(),
-        /* target */ Some(capsule_handle.clone()),
+        /* target */ None,
         /* args */ profile_args,
         /* watch */ false,
         /* background */ false,
