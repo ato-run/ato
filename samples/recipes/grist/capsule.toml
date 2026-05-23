@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "grist"
+version = "1.5.1"
+type = "app"
+description = "Modern spreadsheet database — Python formulas, relational data, API"
+homepage = "https://github.com/gristlabs/grist-core"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "gristlabs/grist:1.5.1"
+port = 8484
+env = { GRIST_SESSION_SECRET = "changeme-demo-secret" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Grist documents and configuration"
+attach = "explicit"
+schema_id = "sha256:grist-persist-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8484" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/persist"

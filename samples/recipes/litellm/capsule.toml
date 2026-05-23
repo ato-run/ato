@@ -1,0 +1,18 @@
+schema_version = "0.3"
+name = "litellm"
+version = "1.72.1"
+type = "app"
+description = "OpenAI-compatible proxy gateway for 100+ LLM providers"
+homepage = "https://github.com/BerriAI/litellm"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/berriai/litellm:main-stable"
+port = 4000
+env = { LITELLM_MASTER_KEY = "sk-demo-changeme" }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/health/liveliness", port = "4000", timeout_seconds = 120 }
