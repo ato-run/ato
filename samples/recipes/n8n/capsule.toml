@@ -2,7 +2,7 @@ schema_version = "0.3"
 name = "n8n"
 version = "1.0.0"
 type = "app"
-description = "Workflow automation with AI integrations"
+description = "Workflow automation with AI integrations. NOTE: single-user / demo mode — N8N_ENCRYPTION_KEY is not auto-generated in this recipe. Not recommended for production without adding a generated secret."
 homepage = "https://github.com/n8n-io/n8n"
 
 default_target = "app"
