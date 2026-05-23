@@ -3033,3 +3033,120 @@ fn try_register_lifecycle_returns_some_when_given_valid_blake3_hash() {
         "revision dir must exist on disk"
     );
 }
+
+/// All 5 required fields of `InstallLifecycleInfo` are present and have the correct prefixes.
+/// This is the acceptance gate: install must populate every lifecycle identifier.
+#[test]
+#[serial_test::serial]
+fn install_lifecycle_all_required_fields_are_populated() {
+    use std::io::Write as _;
+
+    let ato_home = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+
+    let installed_dir = ato_home.path().join("fake_install2");
+    std::fs::create_dir_all(&installed_dir).unwrap();
+    let mut f = std::fs::File::create(installed_dir.join("capsule.toml")).unwrap();
+    f.write_all(b"[capsule]\nname = \"hello\"").unwrap();
+    drop(f);
+    let installed_path = installed_dir.join("capsule.toml");
+
+    let fake_hash = format!("blake3:{}", "deadbeefcafe1234".repeat(4));
+    let result = try_register_lifecycle("mypub/myslug", "2.0.0", &fake_hash, &installed_path);
+
+    std::env::remove_var("ATO_HOME");
+
+    let info = result.expect("install_lifecycle must be Some for valid inputs");
+
+    // installed_app_id: path-safe, no slash
+    assert!(
+        info.installed_app_id.as_str().starts_with("app_"),
+        "installed_app_id must have app_ prefix, got: {}",
+        info.installed_app_id.as_str()
+    );
+    assert_eq!(
+        info.installed_app_id.as_str().len(),
+        4 + 32,
+        "installed_app_id must be app_ + 32 hex"
+    );
+    assert!(
+        !info.installed_app_id.as_str().contains('/'),
+        "installed_app_id must not contain path separator"
+    );
+
+    // profile_id: "default"
+    assert_eq!(
+        info.profile_id.as_str(),
+        "default",
+        "initial install must use the 'default' profile"
+    );
+
+    // install_profile_key: ipk_ + 32 hex
+    assert!(
+        info.install_profile_key.as_str().starts_with("ipk_"),
+        "install_profile_key must have ipk_ prefix"
+    );
+    assert_eq!(
+        info.install_profile_key.as_str().len(),
+        4 + 32,
+        "install_profile_key must be ipk_ + 32 hex"
+    );
+
+    // install_revision_id: rev_ + 32 hex
+    assert!(
+        info.install_revision_id.as_str().starts_with("rev_"),
+        "install_revision_id must have rev_ prefix"
+    );
+    assert_eq!(
+        info.install_revision_id.as_str().len(),
+        4 + 32,
+        "install_revision_id must be rev_ + 32 hex"
+    );
+
+    // current_revision_path must exist on disk
+    assert!(
+        info.current_revision_path.exists(),
+        "current_revision_path must be a real directory: {:?}",
+        info.current_revision_path
+    );
+}
+
+/// `install_profile_key` is stable: running `try_register_lifecycle` twice for the same
+/// `scoped_id` produces the same `install_profile_key`.  This property is what makes
+/// shortcuts and dashboard entries point to the right app after an update.
+#[test]
+#[serial_test::serial]
+fn install_profile_key_is_stable_across_reinstalls() {
+    use std::io::Write as _;
+
+    let ato_home = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+
+    let make_fake_install = |ato_home: &std::path::Path, subdir: &str, hash_char: char| {
+        let installed_dir = ato_home.join(subdir);
+        std::fs::create_dir_all(&installed_dir).unwrap();
+        let path = installed_dir.join("app.js");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "// {subdir}").unwrap();
+        (path, format!("blake3:{}", hash_char.to_string().repeat(64)))
+    };
+
+    let (path_v1, hash_v1) = make_fake_install(ato_home.path(), "v1", 'a');
+    let (path_v2, hash_v2) = make_fake_install(ato_home.path(), "v2", 'b');
+
+    let info_v1 = try_register_lifecycle("stable/app", "1.0.0", &hash_v1, &path_v1)
+        .expect("first install must succeed");
+    let info_v2 = try_register_lifecycle("stable/app", "2.0.0", &hash_v2, &path_v2)
+        .expect("second install must succeed");
+
+    std::env::remove_var("ATO_HOME");
+
+    assert_eq!(
+        info_v1.install_profile_key, info_v2.install_profile_key,
+        "install_profile_key must be identical across reinstalls of the same scoped_id"
+    );
+    assert_ne!(
+        info_v1.install_revision_id, info_v2.install_revision_id,
+        "each distinct content_hash must produce a different install_revision_id"
+    );
+}

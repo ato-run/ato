@@ -455,6 +455,54 @@ mod tests {
         assert_eq!(store.current_revision(&app, &profile_id).unwrap(), rev2);
     }
 
+    // ── rollback: current_revision reverts to previous revision ──────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_reverts_current_revision_to_old_rev() {
+        let (_dir, store) = temp_store();
+        let app = InstalledAppId::new("app_rollback");
+        let profile_id = ProfileId::new("default");
+
+        let record = AppRecord {
+            installed_app_id: app.clone(),
+            publisher: "acme".into(),
+            slug: "rollback_test".into(),
+            capsule_handle: "acme/rollback_test".into(),
+            version: "1.0.0".into(),
+            installed_at: "2025-01-01T00:00:00Z".into(),
+            updated_at: "2025-01-01T00:00:00Z".into(),
+        };
+        store.write_app_record(&record).unwrap();
+        store
+            .write_profile(
+                &app,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let rev1 = InstallRevisionId::new("rev_old");
+        let rev2 = InstallRevisionId::new("rev_new");
+        store.scaffold_revision(&rev1).unwrap();
+        store.scaffold_revision(&rev2).unwrap();
+
+        // Install rev1, then update to rev2.
+        store.set_current_revision(&app, &profile_id, &rev1).unwrap();
+        store.set_current_revision(&app, &profile_id, &rev2).unwrap();
+        assert_eq!(store.current_revision(&app, &profile_id).unwrap(), rev2, "current should be rev2 after update");
+
+        // Rollback to rev1 by swapping current_revision back.
+        store.set_current_revision(&app, &profile_id, &rev1).unwrap();
+        assert_eq!(
+            store.current_revision(&app, &profile_id).unwrap(),
+            rev1,
+            "after rollback, current_revision must be rev_old, not rev_new"
+        );
+    }
+
     #[test]
     fn list_installed_apps() {
         let (_dir, store) = temp_store();
