@@ -505,7 +505,7 @@
 const POST = (window.ipc && window.ipc.postMessage)
   ? (m) => window.ipc.postMessage(JSON.stringify(m))
   : (m) => console.log('[no bridge]', m);
-const BRIDGE = (command) => POST({ capsule: 'ato-settings', command });
+const BRIDGE = (command) => POST({ capsule: 'settings', command });
 
 let _reqId = 0;
 function nextReqId() { return String(++_reqId); }

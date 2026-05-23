@@ -13,6 +13,7 @@ use wry::http::Response;
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
@@ -144,7 +145,7 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             })
             .with_url(&store_url)
             .with_initialization_script(&init_script)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue.clone()))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoStore, queue.clone()))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Store WebView");
@@ -172,6 +173,8 @@ pub fn open_store_window(cx: &mut App) -> Result<AnyWindowHandle> {
             last_focused_at: std::time::Instant::now(),
         },
     );
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoStore, *handle);
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
     Ok(*handle)
 }

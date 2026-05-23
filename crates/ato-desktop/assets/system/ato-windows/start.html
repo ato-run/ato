@@ -335,13 +335,13 @@
     let envelope;
     switch (action) {
       case 'OpenAppWindow':
-        envelope = { capsule: 'ato-windows', command: { kind: 'open_app_window' } };
+        envelope = { capsule: 'windows', command: { kind: 'open_app_window' } };
         break;
       case 'OpenStore':
-        envelope = { capsule: 'ato-store', command: { kind: 'open' } };
+        envelope = { capsule: 'store', command: { kind: 'open' } };
         break;
       case 'CloseStartWindow':
-        envelope = { capsule: 'ato-windows', command: { kind: 'close_start_window' } };
+        envelope = { capsule: 'windows', command: { kind: 'close_start_window' } };
         break;
       default:
         console.warn('start.html: unknown action', action);

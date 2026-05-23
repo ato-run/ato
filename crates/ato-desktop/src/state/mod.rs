@@ -1,4 +1,5 @@
 mod app_window;
+pub(crate) mod capsule_state;
 pub(crate) mod persistence;
 pub(crate) mod session;
 
