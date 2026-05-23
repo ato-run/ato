@@ -35,7 +35,7 @@ readiness_probe = { exec = ["pg_isready", "-U", "umami"], port = "5432" }
 
 [services.main]
 target = "app"
-readiness_probe = { http_get = "/api/heartbeat", port = "3000" }
+readiness_probe = { http_get = "/api/heartbeat", port = "3000", timeout_seconds = 300, initial_delay_seconds = 10 }
 
 [[services.main.state_bindings]]
 state = "db-data"

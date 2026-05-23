@@ -1,0 +1,62 @@
+schema_version = "0.3"
+name = "paperless-ngx"
+version = "2.13.5"
+type = "app"
+description = "Document management system with OCR, tagging, and full-text search"
+homepage = "https://github.com/paperless-ngx/paperless-ngx"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "paperless", POSTGRES_USER = "paperless", POSTGRES_PASSWORD = "paperless-secret" }
+
+[targets.redis]
+runtime = "oci"
+image = "redis:7-alpine"
+port = 6379
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/paperless-ngx/paperless-ngx:2.13.5"
+port = 8000
+env = { PAPERLESS_REDIS = "redis://redis:6379", PAPERLESS_DBENGINE = "postgresql", PAPERLESS_DBHOST = "db", PAPERLESS_DBNAME = "paperless", PAPERLESS_DBUSER = "paperless", PAPERLESS_DBPASS = "paperless-secret", PAPERLESS_SECRET_KEY = "changeme-demo-secret-key", PAPERLESS_URL = "http://localhost:8000", PAPERLESS_ALLOWED_HOSTS = "*" }
+depends_on = ["db", "redis"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Paperless-ngx PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:paperless-pgdata-v1"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Paperless-ngx documents, media, and export data"
+attach = "explicit"
+schema_id = "sha256:paperless-data-v1"
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "paperless"], port = "5432" }
+
+[services.redis]
+target = "redis"
+readiness_probe = { exec = ["redis-cli", "ping"], port = "6379", initial_delay_seconds = 2 }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8000", timeout_seconds = 300, initial_delay_seconds = 15 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/usr/src/paperless/data"
+service_target = "app"
