@@ -1001,6 +1001,7 @@ fn native_install_documented_json_contract_fields_are_present() {
             promotion_metadata_path: Some(PathBuf::from("/tmp/install/promotion.json")),
             content_hash: Some("blake3:artifact".to_string()),
         }),
+        install_lifecycle: None,
     })
     .expect("serialize install result");
 
