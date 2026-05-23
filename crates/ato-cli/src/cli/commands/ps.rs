@@ -91,11 +91,13 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 serde_json::json!({
                     "kind": "oci",
                     "id": s.session_id,
+                    "session_id": s.session_id,
                     "import_kind": s.import_kind,
                     "service_count": s.services.len(),
                     "main_endpoint": s.main_endpoint,
-                    "network": s.network_name,
                     "status": s.status.to_string(),
+                    "source_path": s.source_path,
+                    "source_hash": s.source_hash,
                     "created_at": s.created_at,
                 })
             })

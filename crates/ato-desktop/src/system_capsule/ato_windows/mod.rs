@@ -54,6 +54,8 @@ pub enum WindowsCommand {
         #[serde(rename = "sessionId")]
         session_id: String,
     },
+    /// Open an OCI session endpoint through Desktop's normal URL surface.
+    OpenEndpoint { url: String },
 }
 
 impl WindowsCommand {
@@ -62,7 +64,9 @@ impl WindowsCommand {
             WindowsCommand::CloseSwitcher | WindowsCommand::CloseStartWindow => {
                 Capability::WindowsClose
             }
-            WindowsCommand::ActivateWindow { .. } => Capability::WindowsActivate,
+            WindowsCommand::ActivateWindow { .. } | WindowsCommand::OpenEndpoint { .. } => {
+                Capability::WindowsActivate
+            }
             WindowsCommand::CloseWindow { .. } => Capability::WindowsCloseTarget,
             WindowsCommand::OpenStart => Capability::LaunchSystemCapsule,
             WindowsCommand::StopSession { .. } => Capability::WindowsCloseTarget,
@@ -130,12 +134,29 @@ pub fn dispatch(
             // registry cleanup when the OS close event fires.
         }
         WindowsCommand::StopSession { session_id } => {
-            let mut registry = cx.global_mut::<SessionRegistry>();
-            registry.stop_session_once(&session_id);
+            let stop_result = {
+                let registry = cx.global_mut::<SessionRegistry>();
+                registry.stop_oci_session_and_refresh(&session_id)
+            };
+            match stop_result {
+                Ok(true) => crate::window::card_switcher::refresh_session_snapshot(cx),
+                Ok(false) => cx
+                    .global_mut::<SessionRegistry>()
+                    .stop_session_once(&session_id),
+                Err(error) => {
+                    tracing::error!(session_id = %session_id, %error, "ato_windows: OCI stop failed");
+                    crate::window::card_switcher::refresh_session_snapshot(cx);
+                }
+            }
             tracing::info!(
                 session_id = %session_id,
                 "ato_windows: StopSession dispatched"
             );
+        }
+        WindowsCommand::OpenEndpoint { url } => {
+            if let Err(error) = crate::window::dock::open_external_url(cx, &url) {
+                tracing::error!(%url, %error, "ato_windows: endpoint open failed");
+            }
         }
     }
     Ok(())
