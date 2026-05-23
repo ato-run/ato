@@ -473,6 +473,42 @@ pub(crate) enum Commands {
         nacelle: Option<PathBuf>,
     },
 
+    #[command(about = "List install revisions for an installed app profile")]
+    Revisions {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` or `ato launch` output
+        install_profile_key: String,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    #[command(about = "Rollback an installed app profile to a previous revision")]
+    Rollback {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` or `ato launch` output
+        install_profile_key: String,
+
+        /// Specific revision ID to rollback to. If omitted, rolls back to the previous revision.
+        revision_id: Option<String>,
+    },
+
+    #[command(
+        name = "update",
+        about = "Update an installed app to its latest release"
+    )]
+    AppUpdate {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` or `ato launch` output
+        install_profile_key: String,
+
+        /// Skip interactive prompts and assume yes
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     #[command(
         hide = true,
         about = "Fetch declared development dependencies for a local project"
@@ -567,8 +603,8 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(hide = true, about = "Update ato CLI to the latest version")]
-    Update,
+    #[command(hide = true, name = "self-update", about = "Update ato CLI to the latest version")]
+    SelfUpdate,
 
     #[command(
         hide = true,
