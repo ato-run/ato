@@ -14,6 +14,7 @@ use capsule_core::foundation::install_lifecycle::{
     InstalledAppId, ProfileId,
 };
 
+use crate::cli::commands::run::InstallLifecycleContext;
 use crate::install::support::execute_run_command;
 use crate::reporters;
 use crate::{EnforcementMode, ProviderToolchain, RunAgentMode};
@@ -82,6 +83,15 @@ pub(crate) fn execute_launch_command(
         }
     }
 
+    // Register lifecycle context for session record stamping before entering run pipeline.
+    crate::app_control::session::set_install_lifecycle_context(InstallLifecycleContext {
+        installed_app_id: app_id.as_str().to_string(),
+        install_profile_id: profile_id.as_str().to_string(),
+        install_profile_key: ipk.as_str().to_string(),
+        install_revision_id: rev_id.as_str().to_string(),
+        capsule_instance_key: cik.as_str().to_string(),
+    });
+
     // Bridge into the run pipeline using the materialized output directory.
     execute_run_command(
         output_dir,
@@ -113,6 +123,14 @@ pub(crate) fn execute_launch_command(
         /* build_policy */ crate::application::build_materialization::BuildPolicy::IfStale,
         /* cache_strategy_arg */ crate::cli::shared::CacheStrategyArg::Auto,
         /* plan_only */ false,
+        /* install_lifecycle_context */
+        Some(InstallLifecycleContext {
+            installed_app_id: app_id.as_str().to_string(),
+            install_profile_id: profile_id.as_str().to_string(),
+            install_profile_key: ipk.as_str().to_string(),
+            install_revision_id: rev_id.as_str().to_string(),
+            capsule_instance_key: cik.as_str().to_string(),
+        }),
         reporter,
     )
 }
