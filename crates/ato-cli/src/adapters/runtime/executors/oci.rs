@@ -103,6 +103,7 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
             ports,
             network: None,
             aliases: Vec::new(),
+            platform: None,
         })
         .await?;
     client.start_container(&container_id).await?;

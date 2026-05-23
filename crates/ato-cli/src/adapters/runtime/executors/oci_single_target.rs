@@ -158,6 +158,7 @@ pub(crate) async fn execute_with_provider<P: OciProvider>(
             ports,
             network: None,
             aliases: Vec::new(),
+            platform: None,
         })
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))

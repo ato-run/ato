@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::error::{CapsuleError, Result};
 use crate::metrics::{MetricsSession, ResourceStats, RuntimeMetadata, UnifiedMetrics};
 use crate::runtime::{Measurable, RuntimeHandle};
+use crate::types::OciPlatform;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciPortSpec {
@@ -51,6 +52,9 @@ pub struct OciContainerRequest {
     pub ports: Vec<OciPortSpec>,
     pub network: Option<String>,
     pub aliases: Vec<String>,
+    /// Optional platform override for emulated execution (e.g., linux/amd64 on arm64 host).
+    /// When set and different from host platform, the provider must pass `--platform` to create.
+    pub platform: Option<OciPlatform>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
