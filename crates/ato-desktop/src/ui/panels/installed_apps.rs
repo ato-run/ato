@@ -161,7 +161,7 @@ fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div
                         .font_weight(FontWeight(500.0))
                         .cursor_pointer()
                         .child("Launch")
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             let ipk = ipk.clone();
                             let ato_bin =
                                 match crate::orchestrator::resolve_ato_binary() {
@@ -173,19 +173,25 @@ fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div
                                         return;
                                     }
                                 };
-                            std::thread::spawn(move || {
-                                if let Err(e) =
-                                    crate::install_lifecycle_dashboard::spawn_launch(
-                                        &ato_bin,
-                                        &ipk,
-                                    )
-                                {
-                                    tracing::error!(
-                                        "launch installed app {ipk}: {e}"
-                                    );
-                                }
-                                DashboardCache::refresh();
-                            });
+                            let async_cx = cx.to_async();
+                            cx.foreground_executor()
+                                .spawn(async move {
+                                    let result =
+                                        crate::install_lifecycle_dashboard::spawn_launch(
+                                            &ato_bin,
+                                            &ipk,
+                                        );
+                                    DashboardCache::refresh();
+                                    let _ = async_cx.update(|app| {
+                                        if let Err(e) = result {
+                                            tracing::error!(
+                                                "launch installed app {ipk}: {e}"
+                                            );
+                                        }
+                                        app.refresh_windows();
+                                    });
+                                })
+                                .detach();
                         }),
                 ),
         )
