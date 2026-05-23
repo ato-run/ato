@@ -18,6 +18,14 @@ NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 OS_ARCH="$(uname -s)/$(uname -m)"
 RECEIPT_DIR=".tmp/aodd-receipts/catalog-regression"
 HOST_STATE_DIR="${HOME}/.ato-aodd-regression"
+# Prefer worktree build over installed ato
+if [ -x "$(dirname "$0")/../target/debug/ato" ]; then
+  ATO_BIN="$(cd "$(dirname "$0")/.." && pwd)/target/debug/ato"
+elif [ -x "$(dirname "$0")/../target/release/ato" ]; then
+  ATO_BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/ato"
+else
+  ATO_BIN="ato"
+fi
 
 usage() {
   sed -n '2,12p;13q' "$0"
@@ -32,11 +40,13 @@ warn()  { printf "  ⚠️  %s\n" "$*"; }
 
 cleanup() {
   local rc=$?
+  [ -n "$CLEANUP_DONE" ] && return 0
+  CLEANUP_DONE=1
   if [ -n "${ATO_SESSION_ID:-}" ]; then
     info "Cleanup: stopping session $ATO_SESSION_ID"
-    ato stop --id "$ATO_SESSION_ID" --force 2>/dev/null || true
+    "$ATO_BIN" stop --id "$ATO_SESSION_ID" --force 2>/dev/null || true
   fi
-  ato stop --all --force 2>/dev/null || true
+  "$ATO_BIN" stop --all --force 2>/dev/null || true
   # Podman cleanup check
   if [ -n "${CONTAINER_FILTER:-}" ]; then
     local left
@@ -60,6 +70,7 @@ run_single() {
   local recipe_name
   recipe_name="$(basename "$recipe_path")"
   local ato_home
+  mkdir -p "$HOST_STATE_DIR"
   ato_home="$(mktemp -d "$HOST_STATE_DIR/$recipe_name.XXXXXX")"
   export ATO_HOME="$ato_home"
 
@@ -77,7 +88,9 @@ run_single() {
     fi
   done < <(toml_get_states "$recipe_path")
 
-  local start_time end_time elapsed endpoint http_code
+  local start_time end_time elapsed
+  local endpoint=""
+  local http_code=""
   local result_status="pass"
   local failures=()
   local image_digests="{}"
@@ -89,29 +102,57 @@ run_single() {
 
   CONTAINER_FILTER="ato-${recipe_name}-"
   NETWORK_FILTER="ato-${recipe_name}-"
+  CLEANUP_DONE=""
 
   trap cleanup EXIT
 
-  # Step 1: ato run
+  # Step 1: ato run (background supervisor)
   start_time="$(date +%s)"
-  info "Starting: ato run $recipe_path ${state_flags[*]}"
-  if ato run "$recipe_path" "${state_flags[@]}" 2>&1; then
-    end_time="$(date +%s)"
-    elapsed=$((end_time - start_time))
-    pass "Startup completed in ${elapsed}s"
-  else
-    end_time="$(date +%s)"
-    elapsed=$((end_time - start_time))
-    result_status="fail"
-    failures+=("ato run failed after ${elapsed}s")
-    warn "ato run failed"
+  info "Starting: $ATO_BIN run $recipe_path ${state_flags[*]} (backgrounded)"
+  $ATO_BIN run "$recipe_path" "${state_flags[@]}" > "$RECEIPT_DIR/$recipe_name.supervisor.log" 2>&1 &
+  local run_pid=$!
+  # Wait up to 120s for the service to become ready
+  local poll_interval=5
+  local max_polls=$((120 / poll_interval))
+  local poll_count=0
+  local service_url=""
+  while [ $poll_count -lt $max_polls ]; do
+    sleep $poll_interval
+    if ! kill -0 "$run_pid" 2>/dev/null; then
+      # Process exited — check log for failure
+      if grep -q "OCI service available at" "$RECEIPT_DIR/$recipe_name.supervisor.log" 2>/dev/null; then
+        service_url="$(grep -o 'http://[^ ]*' "$RECEIPT_DIR/$recipe_name.supervisor.log" | tail -1)"
+        break
+      fi
+      end_time="$(date +%s)"
+      elapsed=$((end_time - start_time))
+      result_status="fail"
+      failures+=("ato run exited prematurely after ${elapsed}s")
+      warn "ato run failed (exited before ready)"
+      break
+    fi
+    if grep -q "OCI service available at" "$RECEIPT_DIR/$recipe_name.supervisor.log" 2>/dev/null; then
+      service_url="$(grep -o 'http://[^ ]*' "$RECEIPT_DIR/$recipe_name.supervisor.log" | tail -1)"
+      break
+    fi
+    poll_count=$((poll_count + 1))
+  done
+  end_time="$(date +%s)"
+  elapsed=$((end_time - start_time))
+  if [ -n "$service_url" ]; then
+    pass "Startup completed in ${elapsed}s at $service_url"
+  elif [ "$result_status" != "fail" ]; then
+    result_status="partial"
+    failures+=("service not ready within ${elapsed}s")
+    warn "Service not ready within ${elapsed}s"
   fi
 
   # Step 2: ato ps
   local ps_json=""
   if [ "$result_status" != "fail" ]; then
-    info "Checking: ato ps --all --json"
-    ps_json="$(ato ps --all --json 2>/dev/null || true)"
+    sleep 2
+    info "Checking: $ATO_BIN ps --all --json"
+    ps_json="$($ATO_BIN ps --all --json 2>/dev/null || true)"
     if echo "$ps_json" | python3 -c "import sys,json; data=json.load(sys.stdin); assert isinstance(data, list) and len(data) > 0" 2>/dev/null; then
       endpoint="$(echo "$ps_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('main_endpoint',''))" 2>/dev/null || true)"
       pass "ato ps shows session"
@@ -139,9 +180,15 @@ run_single() {
     fi
   fi
 
-  # Step 4: ato stop --all
-  info "Stopping: ato stop --all --force"
-  if ato stop --all --force 2>&1; then
+  # Step 4: stop backgrounded ato run, then ato stop --all
+  if [ -n "${run_pid:-}" ] && kill -0 "$run_pid" 2>/dev/null; then
+    info "Stopping background ato run (PID $run_pid)"
+    kill "$run_pid" 2>/dev/null || true
+    sleep 1
+  fi
+  CLEANUP_DONE=1
+  info "Stopping: $ATO_BIN stop --all --force"
+  if $ATO_BIN stop --all --force 2>&1; then
     pass "ato stop --all succeeded"
   else
     warn "ato stop --all encountered issues"
@@ -182,7 +229,7 @@ run_single() {
     echo "recipe_path: \"$recipe_path\""
     echo "ato_home: \"$ATO_HOME\""
     echo "os_arch: \"$OS_ARCH\""
-    echo "command: \"ato run $recipe_path ${state_flags[*]}\""
+    echo "command: \"$ATO_BIN run $recipe_path ${state_flags[*]}\""
     echo "startup_time_seconds: $elapsed"
     echo "endpoint: \"${endpoint:-}\""
     echo "status_code: \"${http_code:-}\""
