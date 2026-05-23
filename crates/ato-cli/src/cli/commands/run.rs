@@ -67,13 +67,16 @@ type RunPipelineState = run_phase::RunPipelineState;
 /// When present, these IDs are stamped onto the session record so receipts,
 /// dashboards, and replay tools can correlate sessions with installed app
 /// instances.
+///
+/// Note: `capsule_instance_key` is NOT stored here. The session writer derives
+/// it from `(install_profile_key + install_revision_id + session execution_id)`
+/// at record-write time so the CIK reflects the real receipt execution identity.
 #[derive(Debug, Clone)]
 pub struct InstallLifecycleContext {
     pub installed_app_id: String,
     pub install_profile_id: String,
     pub install_profile_key: String,
     pub install_revision_id: String,
-    pub capsule_instance_key: String,
 }
 
 pub struct RunArgs {

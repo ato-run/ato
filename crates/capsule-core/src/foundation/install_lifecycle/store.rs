@@ -38,6 +38,11 @@ pub struct AppRecord {
     pub installed_app_id: InstalledAppId,
     pub publisher: String,
     pub slug: String,
+    /// The capsule handle used for launching (e.g. `"publisher/slug"`).
+    /// Stored here so `ato launch` can resolve the correct run target without
+    /// hard-coding assumptions about the filesystem layout.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub capsule_handle: String,
     /// The version string of the *first* install; updated on update.
     pub version: String,
     /// RFC 3339 timestamp of first install.
@@ -367,6 +372,7 @@ mod tests {
             installed_app_id: app.clone(),
             publisher: "acme".into(),
             slug: "hello".into(),
+            capsule_handle: "acme/hello".into(),
             version: "1.0.0".into(),
             installed_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
@@ -386,6 +392,7 @@ mod tests {
             installed_app_id: app.clone(),
             publisher: "acme".into(),
             slug: "world".into(),
+            capsule_handle: "acme/world".into(),
             version: "1.0.0".into(),
             installed_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
@@ -416,6 +423,7 @@ mod tests {
             installed_app_id: app.clone(),
             publisher: "acme".into(),
             slug: "swap_test".into(),
+            capsule_handle: "acme/swap_test".into(),
             version: "1.0.0".into(),
             installed_at: "2025-01-01T00:00:00Z".into(),
             updated_at: "2025-01-01T00:00:00Z".into(),
@@ -455,6 +463,7 @@ mod tests {
                 installed_app_id: InstalledAppId::new(*id),
                 publisher: "p".into(),
                 slug: id.to_string(),
+                capsule_handle: format!("p/{id}"),
                 version: "1.0.0".into(),
                 installed_at: "2025-01-01T00:00:00Z".into(),
                 updated_at: "2025-01-01T00:00:00Z".into(),
