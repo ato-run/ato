@@ -1,0 +1,31 @@
+schema_version = "0.3"
+name = "actual"
+version = "1.0.0"
+type = "app"
+description = "Local-first personal finance and budgeting tool with zero-knowledge sync"
+homepage = "https://github.com/actualbudget/actual"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Pin note: `:latest` used for initial AODD run
+# Follow-up: pin to actualbudget/actual-server:<version>
+image = "actualbudget/actual-server:latest"
+port = 5006
+env = {}
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Actual budget data files"
+attach = "explicit"
+schema_id = "sha256:b36041c3dc2575cf768fd91d59eba5afb43ac81e30402c8adf7630b4fcb302f3"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "5006" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data"
