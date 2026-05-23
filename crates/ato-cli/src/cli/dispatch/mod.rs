@@ -12,6 +12,7 @@ mod install;
 mod internal;
 mod ipc;
 mod key;
+mod launch;
 mod package;
 mod profile;
 mod project;
@@ -428,6 +429,25 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 auto_fix_all,
             ),
         }),
+
+        Commands::Launch {
+            install_profile_key,
+            env_file,
+            yes,
+            verbose,
+            json: command_json,
+            nacelle,
+        } => launch::execute_launch_command(
+            launch::LaunchArgs {
+                install_profile_key,
+                env_file,
+                yes,
+                verbose,
+                json: json || command_json,
+                nacelle,
+            },
+            reporter,
+        ),
 
         Commands::Search {
             query,

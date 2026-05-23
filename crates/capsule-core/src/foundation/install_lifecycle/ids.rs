@@ -235,6 +235,17 @@ impl ExecutionId {
     pub fn looks_like(s: &str) -> bool {
         s.starts_with("exec_")
     }
+
+    /// Generate a fresh, cryptographically random `ExecutionId`.
+    ///
+    /// Shape: `exec_<32 lowercase hex>` (128-bit random).
+    pub fn generate() -> Self {
+        use rand::RngCore as _;
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        Self::new(format!("exec_{hex}"))
+    }
 }
 
 /// Validate shape: `<prefix>` + exactly `hex_len` lowercase hex chars.
