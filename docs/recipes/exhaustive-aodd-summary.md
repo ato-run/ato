@@ -7,9 +7,9 @@
 
 | Classification | Count |
 |---|---:|
-| **pass** (full clean AODD or live-aodd) | **33** |
+| **pass** (full clean AODD or live-aodd) | **34** |
 | **partial** (starts, degraded or slow) | **6** |
-| **blocked** (runtime limitation) | **18** |
+| **blocked** (runtime limitation) | **17** |
 | **rejected** (unsafe / out of scope) | **15** |
 | **Total repos evaluated** | **72** |
 
@@ -20,6 +20,8 @@ Batch 1–3: open-webui (partial→degraded), n8n, memos, nocodb, uptime-kuma, m
 Wave A: adminer, changedetection, bytebase, dbgate, excalidraw, pingvin-share, kavita, searxng, grist, wallabag, flowise, litellm, directus (13)
 
 Wave B/C: anything-llm, superset, langflow (3)
+
+Post-emulation PR #223/224: langfuse (1)
 
 ### Partial (6)
 
@@ -133,7 +135,35 @@ After merging `feat/runtime-depends_on`, `feat/runtime-readiness-timing`:
 
 ### Open issues surfaced
 
-1. **Ato single-arch image resolver** — Ato rejects amd64-only images on arm64 host even though Podman/Docker can run them via emulation. Should emit clear error and expose `--allow-emulation` or automatic fallback.
+1. **Ato single-arch image resolver** — Ato rejects amd64-only images on arm64 host even though Podman/Docker can run them via emulation. Should emit clear error and expose `--allow-emulation` or automatic fallback. **→ Fixed in PR #223**
 2. **exec probe requires port field** — Schema mandates `port` on all probe types even when exec ignores it. Consider making `port` optional for exec probes.
 3. **tcp_connect probes for internal services** — TCP probes always use `127.0.0.1:<port>` (host), so internal services not port-mapped to host will always fail. Documented; use exec probes for internal postgres/redis.
 4. **ato auto-overwrites invalid capsule.toml with --yes** — When recipe validation fails in auto-mode, Ato replaces the file. Recipe authors must validate manually before running with `--yes`.
+5. **macOS /tmp symlink rejected by Podman** — Podman on macOS does not resolve `/tmp` → `/private/tmp` for volume mounts. Any state path under `/tmp` fails with `statfs` error. **→ Fixed in PR #224**
+
+---
+
+## Retry after OCI platform emulation (PR #223 + #224)
+
+After merging:
+- `feat(runtime): add explicit OCI platform emulation policy` (PR #223)
+- `fix(runtime): canonicalize OCI mount source paths to resolve symlinks` (PR #224)
+
+| App | Previous status | New status | What changed | Startup | Endpoint | Remaining blocker |
+|---|---|---|---|---:|---|---|
+| langfuse | blocked (arm64 arch) | **pass** | `allow_emulation = true` in recipe; path canonicalize fix; emulated linux/amd64 via Podman | ~120s | `{"status":"OK","version":"2.32.0"}` | none |
+
+### Platform emulation behavior confirmed
+
+- `langfuse/langfuse:2.32.0` resolved to `sha256:e55e2ae1532e` (linux/amd64) on macOS arm64
+- Emulation warning logged: `Emulating linux/amd64 image ... on non-native host (allow_emulation=true)`
+- `podman pull --platform linux/amd64` succeeded
+- Container created and started with emulated platform
+- Postgres db sidecar started with correct state binding under `/private/tmp/...` (canonicalized)
+- Health endpoint returned `{"status":"OK","version":"2.32.0"}`
+
+### Remaining open issues
+
+- **twenty** — private Docker image (upstream). No fix until twenty publishes a public image.
+- **dify** — 10-service stack, deferred as separate spike.
+- **exec probe port field** — minor schema friction; `port` required even for exec probes.
