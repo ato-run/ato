@@ -388,6 +388,221 @@ impl InstallInstanceStore {
     // ── Profile list ──────────────────────────────────────────────────────
 
     /// List all profile IDs for an installed app.
+    // ── GC helpers ─────────────────────────────────────────────────────────
+
+    /// Path of the per-revision pin marker file.
+    pub fn revision_pin_path(&self, rev: &InstallRevisionId) -> PathBuf {
+        self.revision_dir(rev).join(".pinned")
+    }
+
+    /// Mark a revision as user-pinned (prevents GC from deleting it).
+    pub fn pin_revision(&self, rev: &InstallRevisionId) -> Result<()> {
+        let rev_dir = self.revision_dir(rev);
+        if !rev_dir.exists() {
+            anyhow::bail!("revision '{}' does not exist", rev.as_str());
+        }
+        let pin = self.revision_pin_path(rev);
+        fs::write(&pin, b"pinned").with_context(|| format!("write pin {}", pin.display()))?;
+        Ok(())
+    }
+
+    /// Remove a user pin from a revision.
+    pub fn unpin_revision(&self, rev: &InstallRevisionId) -> Result<()> {
+        let pin = self.revision_pin_path(rev);
+        if pin.exists() {
+            fs::remove_file(&pin).with_context(|| format!("remove pin {}", pin.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if the revision has a user pin.
+    pub fn is_pinned(&self, rev: &InstallRevisionId) -> bool {
+        self.revision_pin_path(rev).exists()
+    }
+
+    /// List every revision directory present in `revisions/`.
+    pub fn list_all_revisions(&self) -> Result<Vec<InstallRevisionId>> {
+        let revs_dir = self.root.join("revisions");
+        if !revs_dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut revisions = Vec::new();
+        for entry in
+            fs::read_dir(&revs_dir).with_context(|| format!("read {}", revs_dir.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    revisions.push(InstallRevisionId::new(name));
+                }
+            }
+        }
+        Ok(revisions)
+    }
+
+    /// Delete a single revision directory, refusing to touch a revision that
+    /// is currently the `current_revision` of any profile.
+    ///
+    /// This is the safe wrapper used by `ato gc`. It walks every installed
+    /// app's profiles and bails out with `Err` if `rev` matches any
+    /// `current_revision` symlink. For test fixtures and other contexts where
+    /// the caller has already proven safety, use [`delete_revision_unchecked`].
+    pub fn delete_revision(&self, rev: &InstallRevisionId) -> Result<()> {
+        let apps = self
+            .list_installed_apps()
+            .with_context(|| "delete_revision: enumerate installed apps")?;
+        for app in &apps {
+            let profiles = self
+                .list_profiles(app)
+                .with_context(|| format!("delete_revision: list profiles for {}", app.as_str()))?;
+            for profile in &profiles {
+                let link = self.current_revision_link(app, profile);
+                if !link.exists() {
+                    continue;
+                }
+                let current = self.current_revision(app, profile).with_context(|| {
+                    format!(
+                        "delete_revision: read current_revision for {}/{}",
+                        app.as_str(),
+                        profile.as_str()
+                    )
+                })?;
+                if current.as_str() == rev.as_str() {
+                    anyhow::bail!(
+                        "refusing to delete revision '{}': still current for profile {}/{}",
+                        rev.as_str(),
+                        app.as_str(),
+                        profile.as_str()
+                    );
+                }
+            }
+        }
+        self.delete_revision_unchecked(rev)
+    }
+
+    /// Delete a revision directory without checking protection rules.
+    ///
+    /// Caller is fully responsible for verifying the revision is not
+    /// referenced by any profile, active session, or pin marker. Misuse
+    /// will corrupt installed apps. Prefer [`delete_revision`].
+    pub fn delete_revision_unchecked(&self, rev: &InstallRevisionId) -> Result<()> {
+        let rev_dir = self.revision_dir(rev);
+        if !rev_dir.exists() {
+            return Ok(());
+        }
+        fs::remove_dir_all(&rev_dir)
+            .with_context(|| format!("delete revision dir {}", rev_dir.display()))?;
+        Ok(())
+    }
+
+    /// Determine which revisions can be safely deleted.
+    ///
+    /// A revision is **protected** (kept) if any of these hold:
+    /// - It appears in `protected_rev_ids` (current + active-session + user-pinned)
+    /// - It is user-pinned on disk
+    /// - It falls within the last `keep_last_n` revisions in the log of any profile
+    /// - Its `finalized_at` in the artifact manifest is within `retention_days` of now
+    ///
+    /// Everything else is reclaimable.
+    ///
+    /// `all_revisions` is the full list from [`list_all_revisions`].
+    ///
+    /// # Errors
+    ///
+    /// GC is a destructive operation, so this function is **fail-closed**:
+    /// any I/O error or parse failure while walking the installed apps,
+    /// profiles, revision logs, or revision manifests is propagated as
+    /// `Err`. A corrupt `revision_log.json` or `artifact_manifest.json`
+    /// must stop GC entirely rather than cause a revision to be wrongly
+    /// classified as reclaimable.
+    pub fn collect_reclaimable_revisions(
+        &self,
+        protected_rev_ids: &std::collections::HashSet<String>,
+        all_revisions: &[InstallRevisionId],
+        keep_last_n: usize,
+        retention_days: u64,
+    ) -> Result<Vec<InstallRevisionId>> {
+        // Build set of revisions protected by recency within any profile log.
+        // Any error here — listing apps/profiles or parsing a revision log —
+        // aborts GC. We never want a corrupt log to be silently treated as
+        // "no protected revisions for this profile".
+        let mut recency_protected: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let apps = self
+            .list_installed_apps()
+            .with_context(|| "collect_reclaimable_revisions: list installed apps")?;
+        for app in &apps {
+            let profiles = self.list_profiles(app).with_context(|| {
+                format!(
+                    "collect_reclaimable_revisions: list profiles for {}",
+                    app.as_str()
+                )
+            })?;
+            for profile in &profiles {
+                let log = self.list_profile_revisions(app, profile).with_context(|| {
+                    format!(
+                        "collect_reclaimable_revisions: read revision log for {}/{}",
+                        app.as_str(),
+                        profile.as_str()
+                    )
+                })?;
+                for rev in log.iter().rev().take(keep_last_n) {
+                    recency_protected.insert(rev.as_str().to_owned());
+                }
+            }
+        }
+
+        let retention_secs = retention_days.saturating_mul(86400);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut reclaimable = Vec::new();
+        for rev in all_revisions {
+            let id = rev.as_str();
+            // Explicit protection (current_revision, active session, user pin arg).
+            if protected_rev_ids.contains(id) {
+                continue;
+            }
+            // Disk pin marker.
+            if self.is_pinned(rev) {
+                continue;
+            }
+            // Recency within profile log (keep_last_n).
+            if recency_protected.contains(id) {
+                continue;
+            }
+            // Retention window: keep if finalized_at is recent enough.
+            // A corrupt manifest is an error — *not* an excuse to delete the
+            // revision. If the manifest is missing entirely (None) we fall
+            // through, since the retention window simply does not apply.
+            let manifest = self.read_revision_manifest(rev).with_context(|| {
+                format!(
+                    "collect_reclaimable_revisions: read manifest for revision {}",
+                    rev.as_str()
+                )
+            })?;
+            if let Some(manifest) = manifest {
+                if let Some(ts) = manifest.get("finalized_at").and_then(|v| v.as_str()) {
+                    let dt = chrono::DateTime::parse_from_rfc3339(ts).with_context(|| {
+                        format!(
+                            "collect_reclaimable_revisions: parse finalized_at '{}' for revision {}",
+                            ts,
+                            rev.as_str()
+                        )
+                    })?;
+                    let age_secs = now.saturating_sub(dt.timestamp().max(0) as u64);
+                    if age_secs < retention_secs {
+                        continue;
+                    }
+                }
+            }
+            reclaimable.push(rev.clone());
+        }
+        Ok(reclaimable)
+    }
+
     pub fn list_profiles(&self, app: &InstalledAppId) -> Result<Vec<ProfileId>> {
         let profiles_dir = self.instance_dir(app).join("profiles");
         if !profiles_dir.exists() {

@@ -509,6 +509,25 @@ pub(crate) enum Commands {
         json: bool,
     },
 
+    #[command(about = "Collect unused install revisions")]
+    Gc {
+        /// Report what would be deleted without removing anything
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Keep at least this many recent revisions per profile (default: 2)
+        #[arg(long, default_value_t = 2)]
+        keep_last: usize,
+
+        /// Keep revisions finalized within this many days (default: 14)
+        #[arg(long, default_value_t = 14)]
+        retention_days: u64,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     #[command(
         hide = true,
         about = "Fetch declared development dependencies for a local project"
