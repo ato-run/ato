@@ -1147,6 +1147,8 @@ pub fn start_boot_launch(
                                             process_state: SessionProcessState::Ready,
                                             local_url: session.local_url.clone(),
                                             healthcheck_url: session.healthcheck_url.clone(),
+                                            session_kind:
+                                                crate::state::session::DesktopSessionKind::NativeSource,
                                             launch_context: CapsuleLaunchContext {
                                                 handle_or_url: session.handle.clone(),
                                                 target: Some(session.target_label.clone()),
