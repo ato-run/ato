@@ -1001,6 +1001,7 @@ fn native_install_documented_json_contract_fields_are_present() {
             promotion_metadata_path: Some(PathBuf::from("/tmp/install/promotion.json")),
             content_hash: Some("blake3:artifact".to_string()),
         }),
+        install_lifecycle: None,
     })
     .expect("serialize install result");
 
@@ -2978,4 +2979,57 @@ fn test_atomic_install_writes_via_tmp_and_rename() {
         })
         .count();
     assert_eq!(leftovers, 0);
+}
+
+// ── install_lifecycle integration ─────────────────────────────────────────
+
+#[test]
+#[serial_test::serial]
+fn try_register_lifecycle_returns_some_when_given_valid_blake3_hash() {
+    use std::io::Write as _;
+
+    let ato_home = tempfile::tempdir().expect("tempdir");
+    // Point ATO_HOME to our isolated temp dir so instances are written there.
+    std::env::set_var("ATO_HOME", ato_home.path().to_str().unwrap());
+
+    // Build a fake "installed" output directory with a regular file.
+    let installed_dir = ato_home.path().join("fake_install");
+    std::fs::create_dir_all(&installed_dir).unwrap();
+    let mut f = std::fs::File::create(installed_dir.join("app.js")).unwrap();
+    f.write_all(b"console.log('hello')").unwrap();
+    drop(f);
+    let installed_path = installed_dir.join("app.js");
+
+    // A valid blake3 content hash (64 lowercase hex chars = 32 bytes).
+    let fake_hash = format!("blake3:{}", "a1b2c3d4e5f6a7b8".repeat(4));
+
+    let result = try_register_lifecycle("testpub/testslug", "0.1.0", &fake_hash, &installed_path);
+
+    std::env::remove_var("ATO_HOME");
+
+    assert!(
+        result.is_some(),
+        "install_lifecycle must be Some when a valid content_hash and output path are provided"
+    );
+    let info = result.unwrap();
+    assert!(
+        info.installed_app_id.as_str().starts_with("app_"),
+        "installed_app_id must be path-safe"
+    );
+    assert!(
+        !info.installed_app_id.as_str().contains('/'),
+        "installed_app_id must not contain '/'"
+    );
+    assert!(
+        info.install_profile_key.as_str().starts_with("ipk_"),
+        "profile key must have ipk_ prefix"
+    );
+    assert!(
+        info.install_revision_id.as_str().starts_with("rev_"),
+        "revision id must have rev_ prefix"
+    );
+    assert!(
+        info.current_revision_path.exists(),
+        "revision dir must exist on disk"
+    );
 }
