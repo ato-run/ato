@@ -837,6 +837,7 @@ mod tests {
         s.readiness_probe = Some(crate::capsule_types::capsule_v1::ReadinessProbe {
             http_get: None,
             tcp_connect: Some("127.0.0.1".to_string()),
+            exec: None,
             port: port.to_string(),
         });
         services.insert("svc".to_string(), s);

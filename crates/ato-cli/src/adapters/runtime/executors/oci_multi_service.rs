@@ -396,7 +396,8 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             reporter
                 .notify(format!("⏳ [{}] Waiting for readiness", service_name))
                 .await?;
-            let ready = run_readiness_probe(probe, host_port).await;
+            let cname = started.last().map(|r| r.container_name.as_str());
+            let ready = run_readiness_probe(probe, host_port, cname).await;
             if !ready {
                 graph_error = Some(anyhow::anyhow!(
                     "oci_healthcheck_timeout: service '{}' did not become ready",
@@ -700,14 +701,49 @@ pub(crate) async fn wait_http_ready(url: &str, attempts: u32, interval: Duration
     false
 }
 
+/// Run a command inside `container_name` via `podman exec`; exit 0 = ready.
+pub(crate) async fn wait_exec_ready(
+    container_name: &str,
+    cmd: &[String],
+    attempts: u32,
+    interval: Duration,
+) -> bool {
+    for _ in 0..attempts {
+        let result = tokio::process::Command::new("podman")
+            .arg("exec")
+            .arg(container_name)
+            .args(cmd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        if let Ok(status) = result {
+            if status.success() {
+                return true;
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+    false
+}
+
 /// Run the readiness probe for a service.
 ///
 /// Returns `true` when the service is ready, `false` on timeout.
 async fn run_readiness_probe(
     probe: &capsule_core::types::ReadinessProbe,
     host_port: Option<u16>,
+    container_name: Option<&str>,
 ) -> bool {
     let interval = Duration::from_millis(READINESS_INTERVAL_MS);
+
+    // Exec probe: run command inside the container; exit 0 means ready.
+    if let Some(cmd) = &probe.exec {
+        if let Some(cname) = container_name {
+            return wait_exec_ready(cname, cmd, READINESS_HTTP_ATTEMPTS, interval).await;
+        }
+    }
 
     // HTTP probe: GET the path on the host port.
     if let Some(path) = &probe.http_get {
