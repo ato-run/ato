@@ -352,7 +352,7 @@ pub struct IsolationConfig {
 /// Service specification for Supervisor Mode (multi-process orchestration).
 ///
 /// This is intentionally minimal in Step 1: schema + dependency graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServiceSpec {
     /// Command line to execute.
     ///
@@ -395,6 +395,10 @@ pub struct ServiceSpec {
 pub struct ServiceStateBinding {
     pub state: String,
     pub target: String,
+    /// Name of the service whose container receives this mount. Defaults to
+    /// the enclosing service when omitted.
+    #[serde(default)]
+    pub service_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -419,6 +423,11 @@ pub struct ReadinessProbe {
 
     #[serde(default)]
     pub tcp_connect: Option<String>,
+
+    /// Command to run inside the container; success (exit 0) means ready.
+    /// Example: `exec = ["pg_isready", "-U", "postgres"]`
+    #[serde(default)]
+    pub exec: Option<Vec<String>>,
 
     /// Placeholder name that resolves to a concrete port (e.g., "PORT").
     pub port: String,
@@ -1384,9 +1393,9 @@ pub struct NamedTarget {
     pub required_env: Vec<String>,
 
     /// Service dependencies that must be ready before this target is started.
-    /// Each entry must be either a top-level `[dependencies.*]` alias or a
-    /// sibling target label (`CAPSULE_DEPENDENCY_CONTRACTS.md` §8).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Each entry must be a sibling target label. Accepted as either `needs`
+    /// (legacy) or `depends_on` in TOML.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "depends_on")]
     pub needs: Vec<String>,
 
     /// Optional rich schema for user-facing config inputs. When populated,

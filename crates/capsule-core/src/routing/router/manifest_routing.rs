@@ -244,6 +244,7 @@ pub(super) fn synthesize_runtime_model_from_v03(
             .map(|s| ReadinessProbe {
                 http_get: Some(s.to_string()),
                 tcp_connect: None,
+                exec: None,
                 port: "PORT".to_string(),
             })
             .or_else(|| {
@@ -256,6 +257,13 @@ pub(super) fn synthesize_runtime_model_from_v03(
                         .get("tcp_connect")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
+                    exec: table.get("exec").and_then(|v| {
+                        v.as_array().map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| s.as_str().map(str::to_string))
+                                .collect()
+                        })
+                    }),
                     port: table
                         .get("port")
                         .and_then(|v| v.as_str())
