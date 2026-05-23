@@ -216,6 +216,7 @@ fn execute_standard_run_with_env_assistance(
             args.build_policy,
             args.cache_strategy,
             args.plan_only,
+            /* install_lifecycle_context */ None,
             args.reporter.clone(),
         )
     };

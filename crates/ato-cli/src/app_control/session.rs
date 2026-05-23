@@ -51,6 +51,40 @@ use crate::ProviderToolchain;
 
 use super::resolve::resolve_local_plan;
 
+/// Process-scoped install lifecycle context set by `ato launch` before
+/// calling `execute_run_command`. When set, session record writers stamp
+/// these IDs onto every new session record so dashboards, receipts, and
+/// replay tools can correlate sessions with installed app instances.
+///
+/// Uses `OnceLock` because launch sets this once per process and the session
+/// writer may run in a spawned async task.
+static INSTALL_LIFECYCLE_CONTEXT: std::sync::OnceLock<crate::cli::commands::run::InstallLifecycleContext> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn set_install_lifecycle_context(
+    ctx: crate::cli::commands::run::InstallLifecycleContext,
+) {
+    // Ignore error: if already set (e.g., in tests), keep the first value.
+    let _ = INSTALL_LIFECYCLE_CONTEXT.set(ctx);
+}
+
+fn get_install_lifecycle_context(
+) -> Option<&'static crate::cli::commands::run::InstallLifecycleContext> {
+    INSTALL_LIFECYCLE_CONTEXT.get()
+}
+
+/// Stamp install lifecycle IDs onto `record` if `set_install_lifecycle_context`
+/// was called before this session started (i.e., we're running via `ato launch`).
+fn apply_install_lifecycle(record: &mut StoredSessionInfo) {
+    if let Some(ctx) = get_install_lifecycle_context() {
+        record.installed_app_id = Some(ctx.installed_app_id.clone());
+        record.install_profile_id = Some(ctx.install_profile_id.clone());
+        record.install_profile_key = Some(ctx.install_profile_key.clone());
+        record.install_revision_id = Some(ctx.install_revision_id.clone());
+        record.capsule_instance_key = Some(ctx.capsule_instance_key.clone());
+    }
+}
+
 const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
 const SESSION_RUNTIME: &str = "ato-desktop-session";
@@ -573,6 +607,11 @@ pub(super) fn start_guest_session(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -866,6 +905,11 @@ pub(super) fn start_runtime_session(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -1177,6 +1221,11 @@ pub(super) fn start_orchestration_session_in_process(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root_path, &session)?;
 
@@ -1392,6 +1441,11 @@ pub(super) fn start_orchestration_session_supervisor(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root, &session)?;
 
@@ -2645,6 +2699,14 @@ pub(crate) fn session_root() -> Result<PathBuf> {
 /// record. Replaces the legacy `fs::write` call (RFC v0.3 §9.4
 /// prerequisite for Phase 1).
 fn write_session_record(root: &Path, session: &StoredSessionInfo) -> Result<()> {
+    // If this process was started via `ato launch`, stamp the install lifecycle
+    // IDs onto every session record so dashboards and replay tools can correlate
+    // sessions with installed app instances.
+    if get_install_lifecycle_context().is_some() {
+        let mut patched = session.clone();
+        apply_install_lifecycle(&mut patched);
+        return write_session_record_atomic(root, &patched);
+    }
     write_session_record_atomic(root, session)
 }
 
@@ -3233,6 +3295,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         // Provider-set parity: graph providers ≡ dependency_contracts providers.
@@ -3373,6 +3440,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3442,6 +3514,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3534,6 +3611,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -3605,6 +3687,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -3726,6 +3813,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -3826,6 +3918,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -3947,6 +4044,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4104,6 +4206,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -4267,6 +4374,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4530,6 +4642,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)

@@ -310,6 +310,26 @@ impl InstallInstanceStore {
         }
         Ok(apps)
     }
+
+    /// List all profile IDs for an installed app.
+    pub fn list_profiles(&self, app: &InstalledAppId) -> Result<Vec<ProfileId>> {
+        let profiles_dir = self.instance_dir(app).join("profiles");
+        if !profiles_dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut profiles = Vec::new();
+        for entry in fs::read_dir(&profiles_dir)
+            .with_context(|| format!("read profiles dir {}", profiles_dir.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    profiles.push(ProfileId::new(name));
+                }
+            }
+        }
+        Ok(profiles)
+    }
 }
 
 // ── Atomic write helper ────────────────────────────────────────────────────
