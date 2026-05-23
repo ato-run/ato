@@ -21,7 +21,7 @@ function getPostMessage() {
 const postMessage = getPostMessage();
 
 export function postDockCommand(command) {
-  return postMessage({ capsule: "ato-dock", command });
+  return postMessage({ capsule: "dock", command });
 }
 
 export function requestLogin() {
@@ -35,7 +35,7 @@ export function requestLogin() {
  * capsule.
  */
 export function postImportOpen(url) {
-  return postMessage({ capsule: "ato-import", command: { kind: "open", url } });
+  return postMessage({ capsule: "import", command: { kind: "open", url } });
 }
 
 /**

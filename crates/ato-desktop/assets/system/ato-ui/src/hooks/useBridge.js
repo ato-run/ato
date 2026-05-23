@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
  * IPC bridge hook for all ato-launch / ato-dock wizard windows.
  * Handles both window.ipc (WKWebView) and window.__ATO_IPC__ (fallback).
  */
-export function useBridge(capsule = "ato-launch") {
+export function useBridge(capsule = "launch") {
   const send = useCallback(
     (command) => {
       const payload = JSON.stringify({ capsule, command });

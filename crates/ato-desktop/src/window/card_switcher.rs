@@ -26,6 +26,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::state::session::SessionRegistry;
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -283,7 +284,7 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         let webview = WebViewBuilder::new()
             .with_html(SWITCHER_HTML)
             .with_initialization_script(init_script.as_str())
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoWindows, queue_for_ipc))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Card Switcher WebView");
@@ -303,6 +304,8 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
     cx.set_global(CardSwitcherWindowSlot(Some(*handle)));
     cx.set_global(CardSwitcherEntitySlot(entity_capture.borrow_mut().take()));
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoWindows, *handle);
     system_ipc::spawn_drain_loop(cx, drain_queue, *handle);
 
     // Dispatch asynchronous WKWebView snapshot requests for each card.
