@@ -9,7 +9,7 @@ default_target = "app"
 
 [targets.app]
 runtime = "oci"
-image = "excalidraw/excalidraw:latest"
+image = "excalidraw/excalidraw:0.17.6"
 port = 80
 
 [services.main]
