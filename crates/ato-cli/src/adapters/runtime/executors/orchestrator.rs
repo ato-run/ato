@@ -570,6 +570,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     ports,
                     network: network_name.map(str::to_string),
                     aliases: service.network.aliases.clone(),
+                    platform: None,
                 })
                 .await?;
             client.start_container(&container_id).await?;
