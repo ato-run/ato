@@ -2,11 +2,10 @@ use gpui::prelude::*;
 use gpui::{div, hsla, px, AnyElement, FontWeight, IntoElement, MouseButton, Styled};
 
 use super::super::theme::Theme;
-use crate::install_lifecycle_dashboard::InstalledAppDashboardItem;
+use crate::install_lifecycle_dashboard::{DashboardCache, InstalledAppDashboardItem};
 
 pub(in crate::ui) fn render_installed_apps_section(
     items: &[InstalledAppDashboardItem],
-    on_launch: impl Fn(String) + 'static + Clone,
     theme: &Theme,
 ) -> AnyElement {
     if items.is_empty() {
@@ -46,26 +45,25 @@ pub(in crate::ui) fn render_installed_apps_section(
         .children(
             items
                 .iter()
-                .map(|item| render_app_card(item, &on_launch, theme))
+                .map(|item| render_app_card(item, theme))
                 .collect::<Vec<_>>(),
         )
         .into_any_element()
 }
 
-fn render_app_card(
-    item: &InstalledAppDashboardItem,
-    on_launch: &(impl Fn(String) + 'static + Clone),
-    theme: &Theme,
-) -> gpui::Div {
+fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div {
     let handle = item.capsule_handle.clone();
     let version = item.version.clone();
     let profile_count = item.profiles.len();
     let profile_info = if profile_count == 1 {
-        let p = &item.profiles[0];
         format!(
             "{} revision{}",
-            p.revisions_count,
-            if p.revisions_count != 1 { "s" } else { "" }
+            item.profiles[0].revisions_count,
+            if item.profiles[0].revisions_count != 1 {
+                "s"
+            } else {
+                ""
+            }
         )
     } else {
         format!("{} profiles", profile_count)
@@ -83,9 +81,6 @@ fn render_app_card(
     } else {
         ipk.clone()
     };
-
-    let launch_ipk = ipk.clone();
-    let on_launch = on_launch.clone();
 
     div()
         .flex()
@@ -167,7 +162,30 @@ fn render_app_card(
                         .cursor_pointer()
                         .child("Launch")
                         .on_mouse_down(MouseButton::Left, move |_event, _window, _cx| {
-                            (on_launch)(launch_ipk.clone());
+                            let ipk = ipk.clone();
+                            let ato_bin =
+                                match crate::orchestrator::resolve_ato_binary() {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "cannot resolve ato binary: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+                            std::thread::spawn(move || {
+                                if let Err(e) =
+                                    crate::install_lifecycle_dashboard::spawn_launch(
+                                        &ato_bin,
+                                        &ipk,
+                                    )
+                                {
+                                    tracing::error!(
+                                        "launch installed app {ipk}: {e}"
+                                    );
+                                }
+                                DashboardCache::refresh();
+                            });
                         }),
                 ),
         )
