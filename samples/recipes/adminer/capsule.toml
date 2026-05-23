@@ -1,0 +1,17 @@
+schema_version = "0.3"
+name = "adminer"
+version = "4.8.1"
+type = "app"
+description = "Lightweight database management tool in a single PHP file"
+homepage = "https://github.com/vrana/adminer"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "adminer:4.8.1"
+port = 8080
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8080" }
