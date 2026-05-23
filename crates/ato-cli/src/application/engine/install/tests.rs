@@ -3003,7 +3003,7 @@ fn try_register_lifecycle_returns_some_when_given_valid_blake3_hash() {
     // A valid blake3 content hash (64 lowercase hex chars = 32 bytes).
     let fake_hash = format!("blake3:{}", "a1b2c3d4e5f6a7b8".repeat(4));
 
-    let result = try_register_lifecycle("testpub/testslug", &fake_hash, &installed_path);
+    let result = try_register_lifecycle("testpub/testslug", "0.1.0", &fake_hash, &installed_path);
 
     std::env::remove_var("ATO_HOME");
 
