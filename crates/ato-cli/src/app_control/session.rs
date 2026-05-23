@@ -51,38 +51,67 @@ use crate::ProviderToolchain;
 
 use super::resolve::resolve_local_plan;
 
-/// Process-scoped install lifecycle context set by `ato launch` before
-/// calling `execute_run_command`. When set, session record writers stamp
-/// these IDs onto every new session record so dashboards, receipts, and
-/// replay tools can correlate sessions with installed app instances.
-///
-/// Uses `OnceLock` because launch sets this once per process and the session
-/// writer may run in a spawned async task.
-static INSTALL_LIFECYCLE_CONTEXT: std::sync::OnceLock<crate::cli::commands::run::InstallLifecycleContext> =
-    std::sync::OnceLock::new();
+/// Thread-local install lifecycle context set by `ato launch` before calling
+/// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
+/// means:
+/// - Multiple sequential launches in the same process work correctly (daemon / Desktop)
+/// - Test isolation: each test thread gets its own slot; no cross-test leakage
+/// - The context is automatically cleared when the thread terminates
+thread_local! {
+    static INSTALL_LIFECYCLE_CONTEXT: std::cell::RefCell<
+        Option<crate::cli::commands::run::InstallLifecycleContext>,
+    > = const { std::cell::RefCell::new(None) };
+}
 
 pub(crate) fn set_install_lifecycle_context(
     ctx: crate::cli::commands::run::InstallLifecycleContext,
 ) {
-    // Ignore error: if already set (e.g., in tests), keep the first value.
-    let _ = INSTALL_LIFECYCLE_CONTEXT.set(ctx);
+    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(ctx);
+    });
 }
 
-fn get_install_lifecycle_context(
-) -> Option<&'static crate::cli::commands::run::InstallLifecycleContext> {
-    INSTALL_LIFECYCLE_CONTEXT.get()
+fn with_install_lifecycle_context<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&crate::cli::commands::run::InstallLifecycleContext>) -> R,
+{
+    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
+        let guard = slot.borrow();
+        f(guard.as_ref())
+    })
 }
 
-/// Stamp install lifecycle IDs onto `record` if `set_install_lifecycle_context`
-/// was called before this session started (i.e., we're running via `ato launch`).
+/// Stamp install lifecycle IDs onto `record` if a lifecycle context was set
+/// (i.e., we are running via `ato launch`).
+///
+/// `CapsuleInstanceKey` is derived here from the session's own `execution_id`
+/// (the receipt identity assigned by the run pipeline) so CIK, session record,
+/// and receipt all share the same execution identity.
 fn apply_install_lifecycle(record: &mut StoredSessionInfo) {
-    if let Some(ctx) = get_install_lifecycle_context() {
-        record.installed_app_id = Some(ctx.installed_app_id.clone());
-        record.install_profile_id = Some(ctx.install_profile_id.clone());
-        record.install_profile_key = Some(ctx.install_profile_key.clone());
-        record.install_revision_id = Some(ctx.install_revision_id.clone());
-        record.capsule_instance_key = Some(ctx.capsule_instance_key.clone());
-    }
+    with_install_lifecycle_context(|ctx| {
+        if let Some(ctx) = ctx {
+            record.installed_app_id = Some(ctx.installed_app_id.clone());
+            record.install_profile_id = Some(ctx.install_profile_id.clone());
+            record.install_profile_key = Some(ctx.install_profile_key.clone());
+            record.install_revision_id = Some(ctx.install_revision_id.clone());
+
+            // Derive CIK from the session's real execution_id so the key
+            // reflects the actual receipt/execution closure, not a random id.
+            if let Some(exec_id_str) = &record.execution_id {
+                use capsule_core::foundation::install_lifecycle::{
+                    derive_capsule_instance_key, ExecutionId, InstallProfileKey,
+                    InstallRevisionId,
+                };
+                let ipk = InstallProfileKey::new(ctx.install_profile_key.clone());
+                let rev_id = InstallRevisionId::new(ctx.install_revision_id.clone());
+                let exec = ExecutionId::new(exec_id_str.clone());
+                let cik = derive_capsule_instance_key(&ipk, &rev_id, &exec);
+                record.capsule_instance_key = Some(cik.as_str().to_string());
+            }
+            // If execution_id is not yet set at write time, capsule_instance_key
+            // stays None. It can be back-filled when the receipt is finalized.
+        }
+    });
 }
 
 const SESSION_ACTION_START: &str = "session_start";
@@ -2702,7 +2731,8 @@ fn write_session_record(root: &Path, session: &StoredSessionInfo) -> Result<()> 
     // If this process was started via `ato launch`, stamp the install lifecycle
     // IDs onto every session record so dashboards and replay tools can correlate
     // sessions with installed app instances.
-    if get_install_lifecycle_context().is_some() {
+    let has_ctx = with_install_lifecycle_context(|c| c.is_some());
+    if has_ctx {
         let mut patched = session.clone();
         apply_install_lifecycle(&mut patched);
         return write_session_record_atomic(root, &patched);
