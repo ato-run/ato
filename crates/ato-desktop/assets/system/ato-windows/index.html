@@ -135,6 +135,82 @@
   /* FOOTER */
   .footer { font-size: 11px; color: var(--muted-on-dark); }
 
+  /* RUNNING SESSIONS */
+  .sessions {
+    width: min(1040px, calc(100vw - 48px));
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sessions[hidden] { display: none; }
+  .sessions-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--muted-on-dark);
+  }
+  .session-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .session-row {
+    min-height: 60px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.08);
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(220px, auto) auto;
+    gap: 12px;
+    align-items: center;
+  }
+  .session-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .session-title {
+    min-width: 0;
+    color: var(--text-on-dark);
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-source {
+    color: var(--muted-on-dark);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-meta, .session-actions { display: flex; gap: 6px; align-items: center; }
+  .session-meta { justify-content: flex-end; flex-wrap: wrap; }
+  .session-pill {
+    min-height: 22px;
+    padding: 3px 7px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.10);
+    color: var(--text-on-dark);
+    font-size: 11px;
+    line-height: 14px;
+  }
+  .session-pill.oci { background: rgba(14,165,233,0.24); color: #d8f3ff; }
+  .session-pill.warning { background: rgba(245,158,11,0.24); color: #fde68a; }
+  .session-action {
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 7px;
+    background: rgba(255,255,255,0.10);
+    color: var(--text-on-dark);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  .session-action.primary { background: rgba(129,140,248,0.28); border-color: rgba(129,140,248,0.44); }
+  .session-action:hover { background: rgba(255,255,255,0.18); }
+  .session-action:disabled { opacity: 0.52; cursor: wait; }
+
   /* SEARCH — Safari Tab Overview-style filter input */
   .switcher-search {
     width: 320px; height: 36px; padding: 0 14px;
@@ -350,6 +426,14 @@
 
 <div id="cards" class="cards"></div>
 
+<section id="sessions" class="sessions" hidden>
+  <div class="sessions-head">
+    <span>Running Apps</span>
+    <span id="session-count"></span>
+  </div>
+  <div id="session-rows" class="session-rows"></div>
+</section>
+
 <div class="footer" data-i18n="windows.hint">クリックで切り替え、Esc または背景クリックで閉じる</div>
 
 <div id="dock" class="dock"></div>
@@ -366,6 +450,7 @@
   const BRIDGE = (command) => POST({ capsule: 'windows', command });
 
   const WINDOWS = window.__ATO_WINDOWS || [];
+  let SESSIONS = window.__ATO_SESSIONS || [];
 
   // Glyph library — mirrors the legacy sidebar's per-kind icon
   // vocabulary. Rust picks the glyph name via `glyph_for(title, kind)`
@@ -586,6 +671,50 @@
     return `<div class="dock-tile" style="background:linear-gradient(135deg, ${accent} 0%, ${withAlpha(accent, 0.8)} 100%)" data-window-id="${entry.windowId}">${glyphOrLetter(entry)}</div>`;
   }
 
+  function makeSessionRow(entry) {
+    const detail = entry.session_kind || { kind: 'native_source' };
+    const isOci = detail.kind === 'oci';
+    const status = isOci ? detail.status : entry.presentation_state;
+    const retry = status === 'stop_failed';
+    const endpoint = isOci ? detail.endpoint_url : entry.local_url;
+    const endpointAction = endpoint
+      ? `<button class="session-action primary" data-session-endpoint="${escapeHtml(endpoint)}">Open</button>`
+      : '';
+    const stopAction = isOci
+      ? `<button class="session-action" data-session-stop="${escapeHtml(entry.session_id)}">${retry ? 'Retry' : 'Stop'}</button>`
+      : '';
+    const ociMeta = isOci
+      ? `
+        <span class="session-pill oci">OCI</span>
+        <span class="session-pill">${escapeHtml(detail.import_kind)}</span>
+        <span class="session-pill">${Number(detail.service_count || 0)} services</span>`
+      : `<span class="session-pill">Source</span>`;
+    const statusClass = retry ? ' warning' : '';
+    return `
+      <div class="session-row" data-session-id="${escapeHtml(entry.session_id)}">
+        <div class="session-main">
+          <div class="session-title">${escapeHtml(entry.title)}</div>
+          <div class="session-source">${escapeHtml(entry.handle)}</div>
+        </div>
+        <div class="session-meta">
+          ${ociMeta}
+          <span class="session-pill${statusClass}">${escapeHtml(status)}</span>
+        </div>
+        <div class="session-actions">${endpointAction}${stopAction}</div>
+      </div>`;
+  }
+
+  function renderSessions(nextSessions) {
+    SESSIONS = Array.isArray(nextSessions) ? nextSessions : [];
+    const root = document.getElementById('sessions');
+    const rows = document.getElementById('session-rows');
+    const count = document.getElementById('session-count');
+    rows.innerHTML = SESSIONS.map(makeSessionRow).join('');
+    count.textContent = `${SESSIONS.length}`;
+    root.hidden = SESSIONS.length === 0;
+  }
+  window.__ATO_SESSIONS_REFRESH__ = renderSessions;
+
   // Render
   (function render() {
     const cardsEl = document.getElementById('cards');
@@ -595,6 +724,7 @@
     const dockEl = document.getElementById('dock');
     WINDOWS.forEach((w) => dockEl.insertAdjacentHTML('beforeend', makeDockTile(w)));
     dockEl.insertAdjacentHTML('beforeend', '<div class="dock-tile plus" id="dock-plus">+</div>');
+    renderSessions(SESSIONS);
 
     const subEl = document.getElementById('subtitle');
     const t = window.__ATO_T__;
@@ -606,6 +736,19 @@
 
   // Handlers
   document.addEventListener('click', (e) => {
+    const endpointBtn = e.target.closest('[data-session-endpoint]');
+    if (endpointBtn) {
+      e.stopPropagation();
+      BRIDGE({ kind: 'open_endpoint', url: endpointBtn.getAttribute('data-session-endpoint') });
+      return;
+    }
+    const stopBtn = e.target.closest('[data-session-stop]');
+    if (stopBtn) {
+      e.stopPropagation();
+      stopBtn.disabled = true;
+      BRIDGE({ kind: 'stop_session', sessionId: stopBtn.getAttribute('data-session-stop') });
+      return;
+    }
     // Close-button must be checked before the general [data-window-id]
     // handler because the button sits inside a card that also carries
     // data-window-id. stopPropagation prevents activate from firing.

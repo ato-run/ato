@@ -160,6 +160,14 @@ impl OciSessionStore {
         Ok(records)
     }
 
+    pub fn find_session(&self, session_id: &str) -> Result<Option<OciSessionRecord>> {
+        let path = self.record_path(session_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        self.read_record_from_path(&path).map(Some)
+    }
+
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         let path = self.record_path(session_id);
         if path.exists() {
@@ -285,6 +293,40 @@ pub fn stop_oci_session(record: &OciSessionRecord, force: bool) -> StopResult {
 }
 
 #[derive(Debug)]
+pub struct StopByIdAttempt {
+    pub record: OciSessionRecord,
+    pub result: StopResult,
+}
+
+/// Stop one OCI session by its stable CLI session id.
+///
+/// The store update is shared with `ato stop --all`: successful cleanup deletes
+/// the record, while partial cleanup keeps it as `StopFailed` for retry.
+pub fn stop_oci_session_by_id(
+    store: &OciSessionStore,
+    session_id: &str,
+    force: bool,
+) -> Result<Option<StopByIdAttempt>> {
+    stop_oci_session_by_id_with(store, session_id, |record| stop_oci_session(record, force))
+}
+
+fn stop_oci_session_by_id_with<F>(
+    store: &OciSessionStore,
+    session_id: &str,
+    stop: F,
+) -> Result<Option<StopByIdAttempt>>
+where
+    F: FnOnce(&OciSessionRecord) -> StopResult,
+{
+    let Some(record) = store.find_session(session_id)? else {
+        return Ok(None);
+    };
+    let result = stop(&record);
+    apply_stop_result(store, session_id, &result);
+    Ok(Some(StopByIdAttempt { record, result }))
+}
+
+#[derive(Debug)]
 pub struct StopResult {
     pub stopped_containers: Vec<String>,
     pub network_removed: bool,
@@ -377,7 +419,6 @@ fn is_leap(year: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -756,5 +797,108 @@ mod tests {
             sessions.is_empty(),
             "record must be deleted after successful retry"
         );
+    }
+
+    #[test]
+    fn stop_by_id_stops_oci_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-by-id-stop-1234");
+        store.write_session(&record).unwrap();
+
+        let attempt = stop_oci_session_by_id_with(&store, &record.session_id, |_| StopResult {
+            stopped_containers: vec!["app".to_string(), "db".to_string()],
+            network_removed: true,
+            errors: vec![],
+        })
+        .unwrap()
+        .expect("session should be found");
+
+        assert_eq!(attempt.record.session_id, record.session_id);
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_by_id_marks_stop_failed_on_partial_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-by-id-failed-1");
+        store.write_session(&record).unwrap();
+
+        stop_oci_session_by_id_with(&store, &record.session_id, |_| StopResult {
+            stopped_containers: vec!["app".to_string()],
+            network_removed: false,
+            errors: vec!["network is busy".to_string()],
+        })
+        .unwrap();
+
+        assert_eq!(
+            store.list_sessions().unwrap()[0].status,
+            OciSessionStatus::StopFailed
+        );
+    }
+
+    #[test]
+    fn stop_by_id_retries_stop_failed_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let mut record = make_record("ato-by-id-retry-12");
+        record.status = OciSessionStatus::StopFailed;
+        store.write_session(&record).unwrap();
+
+        let attempt = stop_oci_session_by_id_with(&store, &record.session_id, |_| StopResult {
+            stopped_containers: vec!["app".to_string(), "db".to_string()],
+            network_removed: true,
+            errors: vec![],
+        })
+        .unwrap();
+
+        assert!(attempt.is_some());
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_by_id_does_not_delete_record_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-by-id-keep-123");
+        store.write_session(&record).unwrap();
+
+        stop_oci_session_by_id_with(&store, &record.session_id, |_| StopResult {
+            stopped_containers: vec![],
+            network_removed: false,
+            errors: vec!["podman machine stopped".to_string()],
+        })
+        .unwrap();
+
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stop_by_id_preserves_persistent_volumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let record = make_record("ato-by-id-volume-1");
+        store.write_session(&record).unwrap();
+
+        stop_oci_session_by_id_with(&store, &record.session_id, |found| {
+            assert_eq!(
+                found.services[0].persistent_volumes,
+                vec!["ato-pg-data".to_string()]
+            );
+            StopResult {
+                stopped_containers: found
+                    .services
+                    .iter()
+                    .rev()
+                    .map(|service| service.container_name.clone())
+                    .collect(),
+                network_removed: true,
+                errors: vec![],
+            }
+        })
+        .unwrap();
+
+        assert!(store.list_sessions().unwrap().is_empty());
     }
 }
