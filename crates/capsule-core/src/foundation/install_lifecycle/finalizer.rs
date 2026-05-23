@@ -16,14 +16,13 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::ids::{
-    derive_capsule_instance_key, derive_install_profile_key, ArtifactBuildId, CapsuleInstanceKey,
-    InstallProfileKey, InstallRevisionId, InstalledAppId, ProfileId,
+    derive_install_profile_key, revision_id_for_build, ArtifactBuildId, InstallProfileKey,
+    InstallRevisionId, InstalledAppId, ProfileId,
 };
 use super::store::InstallInstanceStore;
 
@@ -48,15 +47,18 @@ pub struct FinalizerInput {
 
 // ── Output ─────────────────────────────────────────────────────────────────
 
-/// All typed IDs produced by the finalizer.  Attach these to session records
-/// and execution receipts.
+/// All typed IDs produced by the finalizer.
+///
+/// **Note:** [`CapsuleInstanceKey`] is intentionally absent here.
+/// The finalizer does not have an [`ExecutionId`], which is required to derive the CIK.
+/// Callers should mint the `CapsuleInstanceKey` at launch time using
+/// [`derive_capsule_instance_key(profile_key, revision_id, execution_id)`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalizerOutput {
     pub installed_app_id: InstalledAppId,
     pub profile_id: ProfileId,
     pub install_profile_key: InstallProfileKey,
     pub install_revision_id: InstallRevisionId,
-    pub capsule_instance_key: CapsuleInstanceKey,
     /// The artifact_build_id from the input, preserved for traceability.
     pub artifact_build_id: ArtifactBuildId,
     /// Absolute path to the frozen revision directory.
@@ -94,18 +96,14 @@ impl<'s> InstallRevisionFinalizer<'s> {
     /// Run the finalization pipeline.
     pub fn finalize(&self, input: FinalizerInput) -> Result<FinalizerOutput> {
         // 1. Validate build id.
-        anyhow::ensure!(
-            input.artifact_build_id.is_valid(),
-            "artifact_build_id must start with 'build_', got: {}",
-            input.artifact_build_id
-        );
+        if let Err(e) = input.artifact_build_id.validate() {
+            anyhow::bail!("invalid artifact_build_id: {e}");
+        }
 
         // 2. Derive stable IDs.
         let install_profile_key =
             derive_install_profile_key(&input.installed_app_id, &input.profile_id);
-        let install_revision_id = mint_revision_id(&input.artifact_build_id);
-        let capsule_instance_key =
-            derive_capsule_instance_key(&install_profile_key, &install_revision_id);
+        let install_revision_id = revision_id_for_build(&input.artifact_build_id);
 
         // 3. Scaffold the immutable revision root.
         self.store.scaffold_revision(&install_revision_id)?;
@@ -180,7 +178,6 @@ impl<'s> InstallRevisionFinalizer<'s> {
             profile_id: input.profile_id,
             install_profile_key,
             install_revision_id,
-            capsule_instance_key,
             artifact_build_id: input.artifact_build_id,
             revision_dir,
         })
@@ -188,21 +185,6 @@ impl<'s> InstallRevisionFinalizer<'s> {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-/// Generate a new [`InstallRevisionId`] from a build id + wall-clock epoch ms.
-///
-/// Format: `rev_<build_id_stem>_<epoch_ms>`
-fn mint_revision_id(build_id: &ArtifactBuildId) -> InstallRevisionId {
-    let stem = build_id
-        .as_str()
-        .strip_prefix("build_")
-        .unwrap_or(build_id.as_str());
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    InstallRevisionId::new(format!("rev_{stem}_{ts}"))
-}
 
 fn iso8601_now() -> String {
     // Use chrono if available; fall back to a placeholder.
@@ -264,6 +246,13 @@ mod tests {
         (dir, store, app, profile_id)
     }
 
+    fn valid_build_id(suffix: &str) -> ArtifactBuildId {
+        // Produce a well-formed build_<64 hex> id using distinct hex-char repetitions.
+        let hex: String = suffix.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let padded = format!("{:0<64}", hex);
+        ArtifactBuildId::new(format!("build_{}", &padded[..64]))
+    }
+
     fn make_output_dir(base: &std::path::Path) -> PathBuf {
         let out = base.join("output");
         fs::create_dir_all(&out).unwrap();
@@ -282,7 +271,7 @@ mod tests {
             .finalize(FinalizerInput {
                 installed_app_id: app.clone(),
                 profile_id: profile_id.clone(),
-                artifact_build_id: ArtifactBuildId::new("build_abc123"),
+                artifact_build_id: valid_build_id("abc"),
                 output_dir,
                 artifact_manifest_json: None,
                 source_provenance_json: None,
@@ -292,42 +281,69 @@ mod tests {
 
         assert_eq!(result.installed_app_id, app);
         assert_eq!(result.profile_id, profile_id);
-        assert!(result
-            .install_revision_id
-            .as_str()
-            .starts_with("rev_abc123_"));
-        assert!(!result.install_profile_key.as_str().is_empty());
-        assert!(!result.capsule_instance_key.as_str().is_empty());
+        assert!(result.install_revision_id.as_str().starts_with("rev_"));
+        assert!(result.install_profile_key.as_str().starts_with("ipk_"));
+        // CapsuleInstanceKey is NOT present on FinalizerOutput by design.
     }
 
     #[test]
-    fn finalizer_swaps_current_revision() {
+    fn finalizer_revision_id_is_deterministic() {
         let (dir, store, app, profile_id) = setup();
-        let out1 = make_output_dir(&dir.path().join("build1"));
-        let out2 = make_output_dir(&dir.path().join("build2"));
+        let build_id = valid_build_id("deadbeef");
         let finalizer = InstallRevisionFinalizer::new(&store);
 
         let r1 = finalizer
             .finalize(FinalizerInput {
                 installed_app_id: app.clone(),
                 profile_id: profile_id.clone(),
-                artifact_build_id: ArtifactBuildId::new("build_v1"),
-                output_dir: out1,
+                artifact_build_id: build_id.clone(),
+                output_dir: make_output_dir(dir.path()),
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
             })
             .unwrap();
 
-        // Small sleep to ensure different epoch_ms.
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // Same build id → same revision id (idempotent).
+        let r2 = finalizer
+            .finalize(FinalizerInput {
+                installed_app_id: app.clone(),
+                profile_id: profile_id.clone(),
+                artifact_build_id: build_id.clone(),
+                output_dir: make_output_dir(&dir.path().join("second")),
+                artifact_manifest_json: None,
+                source_provenance_json: None,
+                oci_lock_json: None,
+            })
+            .unwrap();
+
+        assert_eq!(r1.install_revision_id, r2.install_revision_id);
+        assert_eq!(r1.install_profile_key, r2.install_profile_key);
+    }
+
+    #[test]
+    fn finalizer_swaps_current_revision() {
+        let (dir, store, app, profile_id) = setup();
+        let finalizer = InstallRevisionFinalizer::new(&store);
+
+        let r1 = finalizer
+            .finalize(FinalizerInput {
+                installed_app_id: app.clone(),
+                profile_id: profile_id.clone(),
+                artifact_build_id: valid_build_id("1111"),
+                output_dir: make_output_dir(&dir.path().join("build1")),
+                artifact_manifest_json: None,
+                source_provenance_json: None,
+                oci_lock_json: None,
+            })
+            .unwrap();
 
         let r2 = finalizer
             .finalize(FinalizerInput {
                 installed_app_id: app.clone(),
                 profile_id: profile_id.clone(),
-                artifact_build_id: ArtifactBuildId::new("build_v2"),
-                output_dir: make_output_dir(&dir.path().join("build3")),
+                artifact_build_id: valid_build_id("2222"),
+                output_dir: make_output_dir(&dir.path().join("build2")),
                 artifact_manifest_json: None,
                 source_provenance_json: None,
                 oci_lock_json: None,
@@ -336,9 +352,8 @@ mod tests {
 
         // profile key must be stable across revisions
         assert_eq!(r1.install_profile_key, r2.install_profile_key);
-
-        // instance key must differ because revision differs
-        assert_ne!(r1.capsule_instance_key, r2.capsule_instance_key);
+        // different builds → different revision ids
+        assert_ne!(r1.install_revision_id, r2.install_revision_id);
 
         // current_revision must point to r2
         #[cfg(unix)]
@@ -358,7 +373,7 @@ mod tests {
         let err = finalizer.finalize(FinalizerInput {
             installed_app_id: app,
             profile_id,
-            artifact_build_id: ArtifactBuildId::new("exec_not_a_build"),
+            artifact_build_id: ArtifactBuildId::new(format!("exec_{}", "a".repeat(64))),
             output_dir: out,
             artifact_manifest_json: None,
             source_provenance_json: None,
@@ -377,7 +392,7 @@ mod tests {
             .finalize(FinalizerInput {
                 installed_app_id: app,
                 profile_id,
-                artifact_build_id: ArtifactBuildId::new("build_copy_test"),
+                artifact_build_id: valid_build_id("cafebabe"),
                 output_dir,
                 artifact_manifest_json: Some(r#"{"name":"test"}"#.into()),
                 source_provenance_json: Some(r#"{"git_ref":"main"}"#.into()),
