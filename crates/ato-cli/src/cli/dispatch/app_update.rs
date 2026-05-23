@@ -26,13 +26,21 @@ pub(crate) fn execute_app_update_command(args: AppUpdateArgs) -> Result<()> {
     let store = InstallInstanceStore::new(&store_root)
         .with_context(|| format!("open instance store at {}", store_root.display()))?;
 
-    let (app_id, _profile_id, capsule_handle) =
+    let (app_id, profile_id, capsule_handle) =
         find_app_handle(&store, &args.install_profile_key).with_context(|| {
             format!(
                 "install profile key '{}' not found. Run `ato install` first.",
                 args.install_profile_key
             )
         })?;
+
+    if profile_id.as_str() != "default" {
+        anyhow::bail!(
+            "ato update currently only supports the default profile. \
+             Profile '{}' is not supported. Use `ato install <handle>` to update directly.",
+            profile_id.as_str()
+        );
+    }
 
     if !args.json {
         eprintln!("Updating {} ({}) …", capsule_handle, app_id.as_str());

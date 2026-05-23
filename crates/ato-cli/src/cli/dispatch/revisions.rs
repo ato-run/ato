@@ -109,10 +109,7 @@ fn find_profile_revisions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule_core::foundation::install_lifecycle::{
-        ids::ArtifactBuildId, AppRecord, InstallRevisionFinalizer, LaunchProfile,
-    };
-    use std::path::PathBuf;
+    use capsule_core::foundation::install_lifecycle::{AppRecord, LaunchProfile};
 
     fn make_store() -> (tempfile::TempDir, InstallInstanceStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -153,10 +150,7 @@ mod tests {
         let (_dir, store) = make_store();
         let (app_id, profile_id, _ipk) = write_app_and_profile(&store);
 
-        let finalizer = InstallRevisionFinalizer::new(&store);
-        let build_id = ArtifactBuildId::new(format!("build_{}", "a".repeat(64)));
-        let src = PathBuf::from("/dev/null"); // no actual copy in this test
-        // Manually scaffold + set revisions to populate the log.
+        // Scaffold and set two revisions to populate the log.
         let rev1 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_0000000000000000000000000000000a",
         );
