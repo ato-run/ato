@@ -431,6 +431,28 @@ pub struct ReadinessProbe {
 
     /// Placeholder name that resolves to a concrete port (e.g., "PORT").
     pub port: String,
+
+    /// Seconds to wait before the first probe attempt (default: 0).
+    #[serde(default)]
+    pub initial_delay_seconds: u32,
+
+    /// Total seconds before the probe is considered failed (default: 180).
+    /// Must be > 0 and >= initial_delay_seconds.
+    #[serde(default = "default_readiness_timeout_seconds")]
+    pub timeout_seconds: u32,
+
+    /// Seconds between consecutive probe attempts (default: 2).
+    /// Must be > 0.
+    #[serde(default = "default_readiness_interval_seconds")]
+    pub interval_seconds: u32,
+}
+
+fn default_readiness_timeout_seconds() -> u32 {
+    180
+}
+
+fn default_readiness_interval_seconds() -> u32 {
+    2
 }
 
 /// Host integration capability names.
