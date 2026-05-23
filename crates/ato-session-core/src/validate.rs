@@ -204,6 +204,11 @@ mod tests {
             process_start_time_unix_ms: crate::process::process_start_time_unix_ms(
                 std::process::id(),
             ),
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         }
     }
 
