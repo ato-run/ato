@@ -652,6 +652,8 @@ fn render_refresh_button() -> gpui::AnyElement {
         .child("Refresh")
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             let async_cx = cx.to_async();
+            // GPUI's foreground_executor runs on a tokio multi-thread runtime (not the
+            // UI thread), so blocking FS I/O here does not block rendering.
             cx.foreground_executor()
                 .spawn(async move {
                     DashboardCache::refresh();
