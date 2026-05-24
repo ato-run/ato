@@ -8,9 +8,9 @@
 
 This document records the spike AODD for [langgenius/dify](https://github.com/langgenius/dify) v1.14.2 — an open-source LLM app development platform with RAG, AI workflows, and multi-model support.
 
-**Final status: partial-pass**
+**Final status: partial-pass** (B4 shared state resolved)
 
-The Dify web UI reaches HTTP 200 after startup. DB migrations complete, API process runs, and `ato stop --all` cleanly removes all containers and network. Full interactive functionality is limited by the architectural constraints documented below.
+The Dify web UI reaches HTTP 200 after startup. DB migrations complete, API process runs, and `ato stop --all` cleanly removes all containers and network. Shared mutable state (`api-storage`) confirmed working with `sharing="same-capsule"`. Full interactive functionality remains limited by the missing ingress/proxy layer (B1).
 
 ---
 
@@ -48,7 +48,7 @@ main/web (langgenius/dify-web:1.14.2, amd64, emulated)
 
 | Service | Reason |
 |---|---|
-| `init_permissions` | `run_once` lifecycle now lands in `feat/runtime-oci-run-once`; full Dify wire-up still gated by shared-mutable-state (B4) so the chown step is omitted in this spike |
+| `init_permissions` | B4 (shared state) resolved; init_permissions remains omitted because its chown semantics need verification with `run_once` + shared state combination |
 | `sandbox` | Requires `cap_add: SYS_ADMIN` / privileged-adjacent config |
 | `ssrf_proxy` | Requires bind-mounting a repo config file |
 | `plugin_daemon` | Optional for minimal local use |
@@ -158,7 +158,7 @@ Warm restart (images cached): ~3 min.
 | No secret leakage | ✅ pass |
 | Full interactive UI (API calls work) | ⚠️ partial |
 | File upload flows | ⚠️ unverified (init_permissions omitted) |
-| Worker file ops | ⚠️ partial (shared state not supported) |
+| Worker file ops | ⚠️ partial (shared state confirmed, but full flow needs init_permissions + ingress) |
 
 ---
 
@@ -181,23 +181,28 @@ starts the container, waits for it to exit, treats exit-0 as the readiness
 condition for dependents, and treats non-zero / timeout / wait error as a typed
 `oci_run_once_failed` / `oci_run_once_timeout`.
 
-The Dify `init_permissions` step itself is still partially blocked by **B4**
-(shared mutable state): even with `run_once`, the chowned volume cannot be
-shared read-write with both `api` and `worker`. Modelling `init_permissions`
-end-to-end therefore needs B4 too. The blocker is now *shared-state*, not
-*lifecycle*.
+The Dify `init_permissions` step itself was partially blocked by **B4**
+(shared mutable state): even with `run_once`, the chowned volume could not be
+shared read-write with both `api` and `worker`. With `sharing="same-capsule"`,
+B4 is now resolved. The remaining gap is verifying the `init_permissions` →
+`run_once` → shared state combination end-to-end.
 
 ### B3: ~~v0.3 cannot override Docker CMD~~ ✅ Resolved
 
 **Resolved in `feat/runtime-oci-command-override`.**
 v0.3 now allows `cmd = [...]` on OCI-typed named targets. Redis is now started with `redis-server --requirepass difyai123456`, and `REDIS_PASSWORD` on api/worker is set to match. The readiness probe now uses `redis-cli -a difyai123456 ping`.
 
-### B4: Shared mutable state (Ato design constraint)
+### B4: ~~Shared mutable state (Ato design constraint)~~ ✅ Resolved
 
-Dify's `api` and `worker` containers share the same named volume for `/app/api/storage` in upstream compose. Ato does not support shared mutable state across services — only `api` (mapped via `services.main`) gets the `api-storage` binding. Worker file operations that write to this path will not be persisted.
+**Resolved by PR #239 (`feat/runtime-shared-state-policy`), confirmed by AODD on 2026-05-24.**
 
-**Classification:** Ato design constraint.
-**Follow-up:** Consider a `shared_state` or `state_group` concept for read-write volumes shared across services.
+Dify's `api` and `worker` containers share the same named volume for `/app/api/storage` in upstream compose. With `sharing="same-capsule"` on `state.api-storage`, both services now receive identical mount sources.
+
+AODD verification:
+- `podman inspect` confirms both `api` and `worker` mount the same `Source` path for `/app/api/storage`
+- No `StateSharedConflictingMountMode` or `StateSharedRequiresPolicy` errors
+- No secret leakage in container inspect output or session logs
+- Persistent `api-storage` directory preserved after `ato stop --all`
 
 ---
 
@@ -210,7 +215,7 @@ These are new findings from this spike:
 | `tcp_connect` probe requires placeholder name, not port number | Minor — use exec probe for Redis instead |
 | ~~v0.3 rejects `cmd` in named OCI targets~~ | ✅ Resolved — `cmd` now allowed for OCI targets |
 | ~~No `run_once`/one-shot service~~ | ✅ Resolved — `run_once = true` on OCI targets gates dependents on exit-0 |
-| ~~Shared mutable state not supported~~ | ✅ Policy support landed via `feat/runtime-shared-state-policy`; B4 pending AODD confirmation |
+| ~~Shared mutable state not supported~~ | ✅ Resolved via `feat/runtime-shared-state-policy`; `sharing="same-capsule"` confirmed by AODD (2026-05-24) |
 | `CONSOLE_API_URL` dynamic port (no ingress) | Browser API client calls cannot reach dynamic API port |
 | `allow_emulation = true` required for amd64-only images | Works but adds ~30% overhead on arm64 |
 
