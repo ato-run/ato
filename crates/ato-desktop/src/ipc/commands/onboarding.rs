@@ -7,6 +7,10 @@ use crate::system_capsule::broker::Capability;
 pub fn specs() -> Vec<IpcCommandSpec> {
     vec![
         spec("onboarding.getStatus", SystemCapsule, &[]),
-        spec("onboarding.complete",  SystemCapsule, &[Capability::OnboardingComplete]),
+        spec(
+            "onboarding.complete",
+            SystemCapsule,
+            &[Capability::OnboardingComplete],
+        ),
     ]
 }

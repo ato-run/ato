@@ -28,6 +28,32 @@ use capsule_core::foundation::install_lifecycle::{
 };
 use serde::Serialize;
 
+// ── UI Selection State ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct InstalledAppsUiState {
+    pub selected_installed_app_id: Option<String>,
+    pub selected_profile_id: Option<String>,
+    pub detail_error: Option<String>,
+}
+
+impl InstalledAppsUiState {
+    pub fn select_app(&mut self, installed_app_id: String) {
+        self.selected_installed_app_id = Some(installed_app_id);
+        self.selected_profile_id = Some("default".to_string());
+        self.detail_error = None;
+    }
+
+    pub fn select_profile(&mut self, installed_app_id: &str, profile_id: &str) {
+        let current = self.selected_installed_app_id.as_deref();
+        if current.is_none() || current == Some(installed_app_id) {
+            self.selected_installed_app_id = Some(installed_app_id.to_string());
+            self.selected_profile_id = Some(profile_id.to_string());
+            self.detail_error = None;
+        }
+    }
+}
+
 // ── DTOs ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +83,7 @@ pub struct InstalledProfileDashboardItem {
     pub revisions_count: usize,
     pub latest_finalized_at: Option<String>,
     pub current_output_dir: Option<String>,
+    pub revisions: Vec<InstalledRevisionDashboardItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,10 +135,8 @@ impl DashboardCache {
     /// Safe to call from any thread.
     pub fn refresh() {
         let result = (|| -> Result<_> {
-            let mut items = list_installed_apps_dashboard()
-                .context("list installed apps")?;
-            attach_running_sessions(&mut items)
-                .context("attach running sessions")?;
+            let mut items = list_installed_apps_dashboard().context("list installed apps")?;
+            attach_running_sessions(&mut items).context("attach running sessions")?;
             Ok(items)
         })();
 
@@ -169,14 +194,12 @@ pub fn list_app_revisions(
     let app_id = InstalledAppId::new(installed_app_id);
     let prof_id = ProfileId::new(profile_id);
 
-    let current_rev = store
-        .current_revision(&app_id, &prof_id)
-        .with_context(|| {
-            format!(
-                "read current revision for {}/{}",
-                installed_app_id, profile_id
-            )
-        })?;
+    let current_rev = store.current_revision(&app_id, &prof_id).with_context(|| {
+        format!(
+            "read current revision for {}/{}",
+            installed_app_id, profile_id
+        )
+    })?;
     let current_str = current_rev.as_str();
 
     let revision_log = store
@@ -250,14 +273,20 @@ pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Resul
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("dashboard: skip unreadable session record {}: {e}", path.display());
+                tracing::warn!(
+                    "dashboard: skip unreadable session record {}: {e}",
+                    path.display()
+                );
                 continue;
             }
         };
         let record: ato_session_core::record::StoredSessionInfo = match serde_json::from_str(&raw) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("dashboard: skip corrupt session record {}: {e}", path.display());
+                tracing::warn!(
+                    "dashboard: skip corrupt session record {}: {e}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -394,13 +423,15 @@ fn build_profile_item(
         let link = store.current_revision_link(app_id, profile_id);
         match std::fs::symlink_metadata(&link) {
             Ok(_) => {
-                let rev = store.current_revision(app_id, profile_id).with_context(|| {
-                    format!(
-                        "read current_revision for {}/{}",
-                        app_id.as_str(),
-                        profile_id.as_str()
-                    )
-                })?;
+                let rev = store
+                    .current_revision(app_id, profile_id)
+                    .with_context(|| {
+                        format!(
+                            "read current_revision for {}/{}",
+                            app_id.as_str(),
+                            profile_id.as_str()
+                        )
+                    })?;
                 Some(rev.as_str().to_owned())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -422,18 +453,34 @@ fn build_profile_item(
         })?;
     let revisions_count = revisions.len();
 
-    let latest_finalized_at = revisions
+    let current_rev_str = current_rev.as_deref().unwrap_or("");
+    let mut latest_finalized_at: Option<String> = None;
+    let revision_items: Result<Vec<InstalledRevisionDashboardItem>> = revisions
         .iter()
-        .rev()
-        .find_map(|rev| revision_finalized_at(store, rev).transpose())
-        .transpose()
-        .with_context(|| {
-            format!(
-                "read revision manifests for {}/{}",
-                app_id.as_str(),
-                profile_id.as_str()
-            )
-        })?;
+        .map(|rev| {
+            let is_current = rev.as_str() == current_rev_str;
+            let is_pinned = store.is_pinned(rev);
+            let finalized_at = store
+                .read_revision_manifest(rev)
+                .with_context(|| format!("read manifest for revision {}", rev.as_str()))?
+                .and_then(|v| {
+                    v.get("finalized_at")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                });
+            if finalized_at.is_some() {
+                latest_finalized_at = finalized_at.clone();
+            }
+            let output_dir = store.revision_output_dir(rev).display().to_string();
+            Ok(InstalledRevisionDashboardItem {
+                revision_id: rev.as_str().to_owned(),
+                is_current,
+                is_pinned,
+                finalized_at,
+                output_dir,
+            })
+        })
+        .collect();
 
     let current_output_dir = current_rev.as_ref().map(|rev_id_str| {
         let rev = InstallRevisionId::new(rev_id_str.as_str());
@@ -447,6 +494,7 @@ fn build_profile_item(
         revisions_count,
         latest_finalized_at,
         current_output_dir,
+        revisions: revision_items?,
     })
 }
 
@@ -661,8 +709,7 @@ mod tests {
             );
             let msg = format!("{:#}", result.unwrap_err());
             assert!(
-                msg.contains("revision id from symlink")
-                    || msg.contains("current_revision"),
+                msg.contains("revision id from symlink") || msg.contains("current_revision"),
                 "expected 'revision id' or 'current_revision' context in error: {msg}"
             );
         }
@@ -707,5 +754,61 @@ mod tests {
 
         DashboardCache::reset_for_test();
         std::env::remove_var("ATO_HOME");
+    }
+
+    #[test]
+    fn installed_apps_ui_select_profile_when_app_id_is_none() {
+        let mut ui = super::InstalledAppsUiState::default();
+        assert!(ui.selected_installed_app_id.is_none());
+        assert!(ui.selected_profile_id.is_none());
+
+        ui.select_profile("app_aaa", "prod");
+
+        assert_eq!(ui.selected_installed_app_id.as_deref(), Some("app_aaa"));
+        assert_eq!(ui.selected_profile_id.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn installed_apps_ui_select_profile_ignores_mismatched_app() {
+        let mut ui = super::InstalledAppsUiState::default();
+        ui.select_app("app_bbb".into());
+        assert_eq!(ui.selected_installed_app_id.as_deref(), Some("app_bbb"));
+        assert_eq!(ui.selected_profile_id.as_deref(), Some("default"));
+
+        ui.select_profile("app_aaa", "prod");
+
+        assert_eq!(
+            ui.selected_installed_app_id.as_deref(),
+            Some("app_bbb"),
+            "selected app must not change on mismatch"
+        );
+        assert_eq!(
+            ui.selected_profile_id.as_deref(),
+            Some("default"),
+            "profile must not change on mismatch"
+        );
+    }
+
+    #[test]
+    fn installed_apps_ui_select_profile_matching_app_succeeds() {
+        let mut ui = super::InstalledAppsUiState::default();
+        ui.select_app("app_bbb".into());
+
+        ui.select_profile("app_bbb", "prod");
+
+        assert_eq!(ui.selected_installed_app_id.as_deref(), Some("app_bbb"));
+        assert_eq!(ui.selected_profile_id.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn installed_apps_ui_select_app_clears_error() {
+        let mut ui = super::InstalledAppsUiState {
+            detail_error: Some("corrupt".into()),
+            ..Default::default()
+        };
+
+        ui.select_app("app_aaa".into());
+
+        assert!(ui.detail_error.is_none());
     }
 }

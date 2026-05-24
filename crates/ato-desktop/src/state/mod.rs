@@ -1097,6 +1097,8 @@ pub struct CapsuleInspectorView {
     pub logs: Vec<CapsuleLogEntry>,
 }
 
+pub use crate::install_lifecycle_dashboard::InstalledAppsUiState;
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub shell_mode: ShellMode,
@@ -1209,6 +1211,7 @@ pub struct AppState {
     pub capsule_policy_overrides: crate::config::CapsulePolicyOverrideStore,
     pub capsule_search_results: Vec<CapsuleSearchResult>,
     pub capsule_search_query: String,
+    pub installed_apps_ui: InstalledAppsUiState,
     /// Multi-window registry — layer 1 of the Focus View redesign (#167).
     /// Empty until #169 wires the orchestrator to populate it; today it
     /// is unread by the renderer.
@@ -1349,6 +1352,7 @@ impl AppState {
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
+            installed_apps_ui: InstalledAppsUiState::default(),
             app_windows: AppWindowRegistry::default(),
             pending_host_actions: VecDeque::new(),
             pending_close_panes: VecDeque::new(),
@@ -1544,6 +1548,7 @@ impl AppState {
             capsule_policy_overrides: crate::config::load_capsule_policy_overrides(),
             capsule_search_results: Vec::new(),
             capsule_search_query: String::new(),
+            installed_apps_ui: InstalledAppsUiState::default(),
             app_windows: AppWindowRegistry::default(),
             pending_host_actions: VecDeque::new(),
             pending_close_panes: VecDeque::new(),

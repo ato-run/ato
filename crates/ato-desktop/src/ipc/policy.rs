@@ -115,8 +115,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::system_capsule::broker::SystemCapsuleId;
     use crate::ipc::principal::IpcPrincipal;
+    use crate::system_capsule::broker::SystemCapsuleId;
 
     fn system_principal(id: SystemCapsuleId) -> IpcPrincipal {
         IpcPrincipal::SystemCapsule {
@@ -183,6 +183,9 @@ mod tests {
             IpcVisibility::SystemCapsule,
             &[Capability::SettingsWrite],
         );
-        assert_eq!(outcome, PolicyOutcome::MissingCapability(Capability::SettingsWrite));
+        assert_eq!(
+            outcome,
+            PolicyOutcome::MissingCapability(Capability::SettingsWrite)
+        );
     }
 }

@@ -135,7 +135,10 @@ pub fn open_onboarding_window(cx: &mut App) -> Result<()> {
             )
             .with_url(&onboarding_url)
             .with_initialization_script(&init_script)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoOnboarding, queue.clone()))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoOnboarding,
+                queue.clone(),
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for onboarding WebView");

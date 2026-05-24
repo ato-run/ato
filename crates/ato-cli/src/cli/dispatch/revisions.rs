@@ -46,7 +46,10 @@ pub(crate) fn execute_revisions_command(args: RevisionsArgs) -> Result<()> {
         if args.json {
             println!("[]");
         } else {
-            eprintln!("No revisions found for profile '{}'.", args.install_profile_key);
+            eprintln!(
+                "No revisions found for profile '{}'.",
+                args.install_profile_key
+            );
         }
         return Ok(());
     }
@@ -59,7 +62,11 @@ pub(crate) fn execute_revisions_command(args: RevisionsArgs) -> Result<()> {
                 .read_revision_manifest(rev)
                 .ok()
                 .flatten()
-                .and_then(|v| v.get("finalized_at").and_then(|s| s.as_str()).map(String::from));
+                .and_then(|v| {
+                    v.get("finalized_at")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                });
             let output_dir = store.revision_output_dir(rev).display().to_string();
             RevisionEntry {
                 rev_id: rev.as_str().to_owned(),
@@ -79,10 +86,7 @@ pub(crate) fn execute_revisions_command(args: RevisionsArgs) -> Result<()> {
         );
         for entry in &entries {
             let marker = if entry.is_current { "* " } else { "  " };
-            let date = entry
-                .finalized_at
-                .as_deref()
-                .unwrap_or("unknown date");
+            let date = entry.finalized_at.as_deref().unwrap_or("unknown date");
             println!("{}{} ({})", marker, entry.rev_id, date);
         }
         if let Some(cur) = entries.iter().find(|e| e.is_current) {
@@ -127,25 +131,36 @@ mod tests {
 
     fn write_app_and_profile(
         store: &InstallInstanceStore,
-    ) -> (InstalledAppId, ProfileId, capsule_core::foundation::install_lifecycle::InstallProfileKey) {
+    ) -> (
+        InstalledAppId,
+        ProfileId,
+        capsule_core::foundation::install_lifecycle::InstallProfileKey,
+    ) {
         let app_id = InstalledAppId::new("app_test_rev001");
         let profile_id = ProfileId::new("default");
-        store.write_app_record(&AppRecord {
-            installed_app_id: app_id.clone(),
-            publisher: "acme".into(),
-            slug: "hello".into(),
-            capsule_handle: "acme/hello".into(),
-            version: "1.0.0".into(),
-            installed_at: "2025-01-01T00:00:00Z".into(),
-            updated_at: "2025-01-01T00:00:00Z".into(),
-        }).unwrap();
-        store.write_profile(&app_id, &LaunchProfile {
-            profile_id: profile_id.clone(),
-            port_policy: "auto".into(),
-            concurrency_policy: "single".into(),
-            isolation: "default".into(),
-            ..Default::default()
-        }).unwrap();
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app_id.clone(),
+                publisher: "acme".into(),
+                slug: "hello".into(),
+                capsule_handle: "acme/hello".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app_id,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    port_policy: "auto".into(),
+                    concurrency_policy: "single".into(),
+                    isolation: "default".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let ipk = derive_install_profile_key(&app_id, &profile_id);
         (app_id, profile_id, ipk)
     }
@@ -162,9 +177,13 @@ mod tests {
             "rev_0000000000000000000000000000000b",
         );
         store.scaffold_revision(&rev1).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev1).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev1)
+            .unwrap();
         store.scaffold_revision(&rev2).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev2).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev2)
+            .unwrap();
 
         let revisions = store.list_profile_revisions(&app_id, &profile_id).unwrap();
         assert_eq!(revisions.len(), 2);
@@ -181,7 +200,9 @@ mod tests {
             "rev_0000000000000000000000000000000c",
         );
         store.scaffold_revision(&rev).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev)
+            .unwrap();
 
         let result = find_profile_revisions(&store, ipk.as_str());
         assert!(result.is_some());
@@ -199,22 +220,29 @@ mod tests {
         let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_test_rvcmd");
         let profile_id = ProfileId::new("default");
-        store.write_app_record(&AppRecord {
-            installed_app_id: app_id.clone(),
-            publisher: "acme".into(),
-            slug: "rvcmd".into(),
-            capsule_handle: "acme/rvcmd".into(),
-            version: "1.0.0".into(),
-            installed_at: "2025-01-01T00:00:00Z".into(),
-            updated_at: "2025-01-01T00:00:00Z".into(),
-        }).unwrap();
-        store.write_profile(&app_id, &LaunchProfile {
-            profile_id: profile_id.clone(),
-            port_policy: "auto".into(),
-            concurrency_policy: "single".into(),
-            isolation: "default".into(),
-            ..Default::default()
-        }).unwrap();
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app_id.clone(),
+                publisher: "acme".into(),
+                slug: "rvcmd".into(),
+                capsule_handle: "acme/rvcmd".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app_id,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    port_policy: "auto".into(),
+                    concurrency_policy: "single".into(),
+                    isolation: "default".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let rev1 = capsule_core::foundation::install_lifecycle::ids::InstallRevisionId::new(
             "rev_cc00000000000000000000000000001a",
         );
@@ -222,9 +250,13 @@ mod tests {
             "rev_cc00000000000000000000000000001b",
         );
         store.scaffold_revision(&rev1).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev1).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev1)
+            .unwrap();
         store.scaffold_revision(&rev2).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev2).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev2)
+            .unwrap();
 
         let ipk = derive_install_profile_key(&app_id, &profile_id);
         std::env::set_var("ATO_HOME", dir.path());
@@ -247,10 +279,14 @@ mod tests {
             "rev_dd00000000000000000000000000001a",
         );
         store.scaffold_revision(&rev).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev)
+            .unwrap();
 
         // Overwrite the log with corrupt JSON using the public profile_dir API.
-        let log_path = store.profile_dir(&app_id, &profile_id).join("revision_log.json");
+        let log_path = store
+            .profile_dir(&app_id, &profile_id)
+            .join("revision_log.json");
         std::fs::write(&log_path, b"not valid json {{{{").unwrap();
 
         let result = store.list_profile_revisions(&app_id, &profile_id);

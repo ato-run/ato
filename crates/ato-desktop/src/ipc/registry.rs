@@ -98,11 +98,7 @@ impl RegistryBuilder {
     }
 
     pub fn build(self) -> IpcCommandRegistry {
-        let commands = self
-            .commands
-            .into_iter()
-            .map(|s| (s.name, s))
-            .collect();
+        let commands = self.commands.into_iter().map(|s| (s.name, s)).collect();
         IpcCommandRegistry { commands }
     }
 }

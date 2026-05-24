@@ -134,8 +134,7 @@ fn apply_install_lifecycle(record: &mut StoredSessionInfo) {
             // reflects the actual receipt/execution closure, not a random id.
             if let Some(exec_id_str) = &record.execution_id {
                 use capsule_core::foundation::install_lifecycle::{
-                    derive_capsule_instance_key, ExecutionId, InstallProfileKey,
-                    InstallRevisionId,
+                    derive_capsule_instance_key, ExecutionId, InstallProfileKey, InstallRevisionId,
                 };
                 let ipk = InstallProfileKey::new(ctx.install_profile_key.clone());
                 let rev_id = InstallRevisionId::new(ctx.install_revision_id.clone());
@@ -3360,11 +3359,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         // Provider-set parity: graph providers ≡ dependency_contracts providers.
@@ -3505,11 +3504,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3579,11 +3578,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3676,11 +3675,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -3752,11 +3751,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -3878,11 +3877,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -3983,11 +3982,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -4109,11 +4108,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4271,11 +4270,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -4439,11 +4438,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4707,11 +4706,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
-        installed_app_id: None,
-        install_profile_id: None,
-        install_profile_key: None,
-        install_revision_id: None,
-        capsule_instance_key: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4755,7 +4754,8 @@ mod tests {
             Some(id) => format!(r#","execution_id":"{id}""#),
             None => String::new(),
         };
-        let json = format!(r#"{{
+        let json = format!(
+            r#"{{
             "session_id":"test_session",
             "handle":"test/handle",
             "normalized_handle":"test/handle",
@@ -4770,7 +4770,8 @@ mod tests {
             "notes":[],
             "guest":null,"web":null,"terminal":null,"service":null
             {exec_field}
-        }}"#);
+        }}"#
+        );
         serde_json::from_str(&json).expect("failed to build minimal session record")
     }
 
@@ -4803,10 +4804,22 @@ mod tests {
         apply_install_lifecycle(&mut record);
 
         // All 4 identity fields must be stamped.
-        assert_eq!(record.installed_app_id.as_deref(), Some(ctx.installed_app_id.as_str()));
-        assert_eq!(record.install_profile_id.as_deref(), Some(ctx.install_profile_id.as_str()));
-        assert_eq!(record.install_profile_key.as_deref(), Some(ctx.install_profile_key.as_str()));
-        assert_eq!(record.install_revision_id.as_deref(), Some(ctx.install_revision_id.as_str()));
+        assert_eq!(
+            record.installed_app_id.as_deref(),
+            Some(ctx.installed_app_id.as_str())
+        );
+        assert_eq!(
+            record.install_profile_id.as_deref(),
+            Some(ctx.install_profile_id.as_str())
+        );
+        assert_eq!(
+            record.install_profile_key.as_deref(),
+            Some(ctx.install_profile_key.as_str())
+        );
+        assert_eq!(
+            record.install_revision_id.as_deref(),
+            Some(ctx.install_revision_id.as_str())
+        );
 
         // CIK must be derived from (profile_key, revision_id, execution_id).
         let expected_cik = derive_capsule_instance_key(
@@ -4861,7 +4874,9 @@ mod tests {
         }
         // After drop, context must be cleared.
         let has_ctx = with_install_lifecycle_context(|c| c.is_some());
-        assert!(!has_ctx, "ScopedInstallLifecycleGuard must clear context on drop");
+        assert!(
+            !has_ctx,
+            "ScopedInstallLifecycleGuard must clear context on drop"
+        );
     }
-
 }

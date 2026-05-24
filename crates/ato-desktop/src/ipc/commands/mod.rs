@@ -59,7 +59,12 @@ pub(crate) fn spec(
     visibility: IpcVisibility,
     required_capabilities: &'static [Capability],
 ) -> IpcCommandSpec {
-    IpcCommandSpec { name, visibility, required_capabilities, handler: stub() }
+    IpcCommandSpec {
+        name,
+        visibility,
+        required_capabilities,
+        handler: stub(),
+    }
 }
 
 /// Build the default `IpcCommandRegistry` with all known commands registered.
@@ -88,8 +93,14 @@ mod tests {
     fn default_registry_contains_expected_public_commands() {
         let reg = build_default_registry();
         for name in ["capsule.context.get", "shell.openExternal"] {
-            let spec = reg.get(name).unwrap_or_else(|| panic!("missing command: {name}"));
-            assert_eq!(spec.visibility, IpcVisibility::PublicCapsule, "{name} should be PublicCapsule");
+            let spec = reg
+                .get(name)
+                .unwrap_or_else(|| panic!("missing command: {name}"));
+            assert_eq!(
+                spec.visibility,
+                IpcVisibility::PublicCapsule,
+                "{name} should be PublicCapsule"
+            );
         }
     }
 
@@ -105,15 +116,23 @@ mod tests {
             "account.login",
             "onboarding.complete",
         ] {
-            let spec = reg.get(name).unwrap_or_else(|| panic!("missing command: {name}"));
-            assert_eq!(spec.visibility, IpcVisibility::SystemCapsule, "{name} should be SystemCapsule");
+            let spec = reg
+                .get(name)
+                .unwrap_or_else(|| panic!("missing command: {name}"));
+            assert_eq!(
+                spec.visibility,
+                IpcVisibility::SystemCapsule,
+                "{name} should be SystemCapsule"
+            );
         }
     }
 
     #[test]
     fn default_registry_contains_internal_only_commands() {
         let reg = build_default_registry();
-        let spec = reg.get("debug.reloadSystemCapsule").expect("missing debug.reloadSystemCapsule");
+        let spec = reg
+            .get("debug.reloadSystemCapsule")
+            .expect("missing debug.reloadSystemCapsule");
         assert_eq!(spec.visibility, IpcVisibility::InternalOnly);
     }
 }
