@@ -2,7 +2,7 @@
 
 | Field        | Value                                   |
 | ------------ | --------------------------------------- |
-| Status       | Proposed                                |
+| Status       | Accepted (PR 1 implemented — schema + identity) |
 | Date         | 2026-05-24                              |
 | Scope        | OCI runtime, session lifecycle, Desktop |
 | Supersedes   | —                                       |
@@ -998,18 +998,18 @@ web.FILES_URL = "{{ingress.routes.files.url}}"
 This ADR is **documentation only**. No runtime code changes are included in
 this PR.
 
-### PR 1: Route model + identity
+### PR 1: Route model + identity **(IN PROGRESS — `feat/ingress-route-model`)**
 
-- Define Rust types for `IngressConfig`, `IngressRoute`, `EnvInjection` in
+- [x] Define Rust types for `IngressConfig`, `IngressRoute`, `EnvInjection` in
   `capsule-core` (per the type model in section 5).
-- Implement `IngressMode::validate_v1()` that rejects `Host` mode.
-- Add `[ingress]` parsing to the manifest loader.
-- Implement all validation rules from section 8.
-- Integrate ingress declarations into the declared execution identity
+- [x] Implement `IngressMode::validate_v1()` that rejects `Host` mode.
+- [x] Add `[ingress]` parsing to the manifest loader.
+- [x] Implement all validation rules from section 8.
+- [x] Integrate ingress declarations into the declared execution identity
   computation. Ensure resolved URL values are excluded from the canonical
   env closure.
-- Add round-trip tests for the new types.
-- **No proxy, no runtime changes.**
+- [x] Add round-trip tests for the new types.
+- [x] **No proxy, no runtime changes.**
 
 ### PR 2: Local path router for OCI sessions
 

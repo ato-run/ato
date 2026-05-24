@@ -162,6 +162,8 @@ pub struct OciLaunchEnvelope {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<OciServiceLaunchShape>,
     pub policy: OciPolicyEnvelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<super::manifest::IngressConfig>,
 }
 
 impl OciProviderSemantics {
@@ -203,6 +205,12 @@ impl OciLaunchEnvelope {
             provider,
             services,
             policy,
+            ingress: None,
         }
+    }
+
+    pub fn with_ingress(mut self, ingress: Option<super::manifest::IngressConfig>) -> Self {
+        self.ingress = ingress;
+        self
     }
 }

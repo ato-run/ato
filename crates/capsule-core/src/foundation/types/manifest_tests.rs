@@ -3509,3 +3509,688 @@ run_once = true
         "error must mention OCI-only constraint; got: {msg}"
     );
 }
+
+const INGRESS_BASE_TOML: &str = r#"
+schema_version = "0.3"
+name = "ingress-demo"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[targets.api]
+runtime = "oci"
+image = "api:latest"
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+listed = true
+root = true
+strip_prefix = true
+
+[ingress.routes.api]
+target = "api"
+port = 5001
+listed = false
+alias = "api"
+strip_prefix = true
+upstream_path_prefix = "/api"
+
+[ingress.env_inject]
+web.CONSOLE_API_URL = "{{ingress.routes.api.url}}"
+"#;
+
+#[test]
+fn ingress_route_model_parses() {
+    let manifest = CapsuleManifest::from_toml(INGRESS_BASE_TOML).unwrap();
+    let ingress = manifest.ingress.as_ref().expect("ingress must parse");
+
+    assert!(matches!(ingress.mode, super::IngressMode::Path));
+    assert_eq!(ingress.routes.len(), 2);
+
+    let web = &ingress.routes["web"];
+    assert_eq!(web.target, "web");
+    assert_eq!(web.port, 3000);
+    assert!(web.listed);
+    assert!(web.root);
+    assert!(web.strip_prefix);
+
+    let api = &ingress.routes["api"];
+    assert_eq!(api.target, "api");
+    assert_eq!(api.port, 5001);
+    assert!(!api.listed);
+    assert_eq!(api.alias.as_deref(), Some("api"));
+    assert_eq!(api.upstream_path_prefix.as_deref(), Some("/api"));
+
+    let web_env = &ingress.env_inject["web"];
+    assert_eq!(
+        web_env.get("CONSOLE_API_URL"),
+        Some(&"{{ingress.routes.api.url}}".to_string())
+    );
+
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn ingress_host_mode_rejected_in_v1() {
+    let toml = INGRESS_BASE_TOML.replace("mode = \"path\"", "mode = \"host\"");
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("host mode must be rejected in v1");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("host") && msg.contains("v1")
+        )),
+        "expected host-mode rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_duplicate_alias_rejected() {
+    let toml = r#"
+schema_version = "0.3"
+name = "dup-alias"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[targets.api]
+runtime = "oci"
+image = "api:latest"
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "shared"
+
+[ingress.routes.api]
+target = "api"
+port = 5001
+alias = "shared"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("duplicate alias must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("duplicate") && msg.contains("shared")
+        )),
+        "expected duplicate alias rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_root_route_with_alias_rejected() {
+    let toml = r#"
+schema_version = "0.3"
+name = "root-alias"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+alias = "www"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("root route with alias must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("root") && msg.contains("alias")
+        )),
+        "expected root-with-alias rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_env_inject_missing_route_rejected() {
+    let toml = r#"
+schema_version = "0.3"
+name = "missing-route-ref"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+
+[ingress.env_inject]
+web.API_URL = "{{ingress.routes.nonexistent.url}}"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("missing route reference must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("nonexistent")
+        )),
+        "expected missing route rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_template_shape_changes_identity() {
+    use std::collections::BTreeMap;
+
+    let mut env_a = BTreeMap::new();
+    env_a.insert(
+        "CONSOLE_API_URL".to_string(),
+        "{{ingress.routes.api.url}}".to_string(),
+    );
+
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "api".to_string(),
+        super::IngressRoute {
+            target: "api".to_string(),
+            port: 5001,
+            listed: false,
+            alias: Some("api".to_string()),
+            strip_prefix: true,
+            upstream_path_prefix: Some("/api".to_string()),
+            root: false,
+        },
+    );
+
+    let ingress_a = super::IngressConfig {
+        mode: super::IngressMode::Path,
+        routes: routes.clone(),
+        env_inject: {
+            let mut m = BTreeMap::new();
+            m.insert("web".to_string(), env_a);
+            m
+        },
+    };
+
+    let mut env_b = BTreeMap::new();
+    env_b.insert(
+        "CONSOLE_API_URL".to_string(),
+        "{{ingress.routes.api.base_url}}".to_string(),
+    );
+
+    let ingress_b = super::IngressConfig {
+        mode: super::IngressMode::Path,
+        routes,
+        env_inject: {
+            let mut m = BTreeMap::new();
+            m.insert("web".to_string(), env_b);
+            m
+        },
+    };
+
+    let json_a = serde_json::to_string(&ingress_a).unwrap();
+    let json_b = serde_json::to_string(&ingress_b).unwrap();
+
+    let hash_a = format!("blake3:{}", blake3::hash(json_a.as_bytes()).to_hex());
+    let hash_b = format!("blake3:{}", blake3::hash(json_b.as_bytes()).to_hex());
+
+    assert_ne!(
+        hash_a, hash_b,
+        "different env_inject templates must produce different identity hashes"
+    );
+}
+
+#[test]
+fn resolved_ingress_url_not_in_execution_identity() {
+    use std::collections::BTreeMap;
+
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "web".to_string(),
+        super::IngressRoute {
+            target: "web".to_string(),
+            port: 3000,
+            listed: true,
+            alias: None,
+            strip_prefix: true,
+            upstream_path_prefix: None,
+            root: true,
+        },
+    );
+
+    let ingress = super::IngressConfig {
+        mode: super::IngressMode::Path,
+        routes,
+        env_inject: BTreeMap::new(),
+    };
+
+    let json = serde_json::to_string(&ingress).unwrap();
+    assert!(
+        !json.contains("127.0.0.1"),
+        "resolved URLs (localhost addresses) must not appear in ingress identity"
+    );
+    assert!(
+        !json.contains("/i/"),
+        "session-scoped path prefixes must not appear in ingress identity"
+    );
+    assert!(
+        json.contains("\"target\":\"web\""),
+        "declared target must be present in identity"
+    );
+    assert!(
+        json.contains("\"port\":3000"),
+        "declared port must be present in identity"
+    );
+}
+
+#[test]
+fn existing_recipes_without_ingress_unchanged() {
+    let manifest = CapsuleManifest::from_toml(VALID_TOML).unwrap();
+    assert!(
+        manifest.ingress.is_none(),
+        "manifests without [ingress] must parse with ingress = None"
+    );
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn ingress_route_name_used_as_alias_must_be_url_safe() {
+    let toml = r#"
+schema_version = "0.3"
+name = "route-name-alias"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[targets.api]
+runtime = "oci"
+image = "api:latest"
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes."api/v1"]
+target = "api"
+port = 5001
+listed = false
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("route name with slash must be rejected when used as alias");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("api/v1") && msg.contains("URL-safe")
+        )),
+        "expected route name fallback alias validation; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_quoted_route_name_with_percent_rejected_when_alias_missing() {
+    let toml = r#"
+schema_version = "0.3"
+name = "percent-route"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes."api%20v1"]
+target = "web"
+port = 3000
+listed = true
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("route name with percent must be rejected when used as alias");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("URL-safe")
+        )),
+        "expected percent-encoded route name rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_upstream_prefix_rejects_parent_traversal() {
+    let toml = r#"
+schema_version = "0.3"
+name = "prefix-traversal"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "web"
+strip_prefix = true
+upstream_path_prefix = "/../admin"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("upstream_path_prefix with .. must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("parent-traversal")
+        )),
+        "expected traversal rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_upstream_prefix_rejects_percent_encoded_slash() {
+    let toml = r#"
+schema_version = "0.3"
+name = "prefix-pct"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "web"
+strip_prefix = true
+upstream_path_prefix = "/api%2fv1"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("upstream_path_prefix with %2f must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("percent-encoded")
+        )),
+        "expected percent-encoded rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_upstream_prefix_rejects_backslash() {
+    let toml = r#"
+schema_version = "0.3"
+name = "prefix-bs"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "web"
+strip_prefix = true
+upstream_path_prefix = "/api\\v1"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("upstream_path_prefix with backslash must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("backslash")
+        )),
+        "expected backslash rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_env_inject_rejects_unknown_template_field() {
+    let toml = r#"
+schema_version = "0.3"
+name = "bad-template-field"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+
+[ingress.env_inject]
+web.API_URL = "{{ingress.routes.web.bad}}"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("unknown template field must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains(".bad") && msg.contains("unsupported")
+        )),
+        "expected unknown field rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_env_inject_accepts_url_base_url_path_origin() {
+    let toml = r#"
+schema_version = "0.3"
+name = "valid-template-fields"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+
+[ingress.env_inject]
+web.API_URL = "{{ingress.routes.web.url}}"
+web.BASE_URL = "{{ingress.routes.web.base_url}}"
+web.PATH = "{{ingress.routes.web.path}}"
+web.ORIGIN = "{{ingress.routes.web.origin}}"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(
+        manifest.validate().is_ok(),
+        "all four allowed template suffixes must pass validation"
+    );
+}
+
+#[test]
+fn manifest_ingress_changes_declared_execution_id() {
+    let toml_no_ingress = r#"
+schema_version = "0.3"
+name = "id-test"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+"#;
+
+    let toml_with_ingress = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        toml_no_ingress.trim(),
+        "[ingress]",
+        "mode = \"path\"",
+        "",
+        "[ingress.routes.web]",
+        "target = \"web\"",
+        "port = 3000",
+        "root = true",
+        "",
+        "[ingress.env_inject]",
+        "web.API_URL = \"{{ingress.routes.web.url}}\"",
+    );
+
+    let m_no = CapsuleManifest::from_toml(toml_no_ingress).unwrap();
+    let m_with = CapsuleManifest::from_toml(&toml_with_ingress).unwrap();
+
+    assert!(m_no.ingress.is_none());
+    assert!(m_with.ingress.is_some());
+
+    assert!(m_no.validate().is_ok());
+    assert!(m_with.validate().is_ok());
+}

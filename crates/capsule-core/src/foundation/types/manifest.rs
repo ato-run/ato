@@ -692,6 +692,108 @@ pub struct CapsuleManifest {
     /// that correspond to each capability name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_capabilities: Vec<HostCapabilitySpec>,
+
+    /// Local ingress route configuration for multi-service OCI sessions.
+    ///
+    /// When present, Ato starts a session-scoped reverse proxy that routes
+    /// requests by path prefix to upstream container services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<IngressConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressMode {
+    Path,
+    Host,
+}
+
+impl IngressMode {
+    pub fn validate_v1(&self) -> Result<(), IngressError> {
+        match self {
+            IngressMode::Path => Ok(()),
+            IngressMode::Host => Err(IngressError::UnsupportedInV1 {
+                mode: "host".to_string(),
+                message: "hostname-based ingress is deferred to v2".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressConfig {
+    pub mode: IngressMode,
+    pub routes: BTreeMap<String, IngressRoute>,
+    #[serde(default)]
+    pub env_inject: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressRoute {
+    pub target: String,
+    pub port: u16,
+    #[serde(default)]
+    pub listed: bool,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default = "default_true")]
+    pub strip_prefix: bool,
+    #[serde(default)]
+    pub upstream_path_prefix: Option<String>,
+    #[serde(default)]
+    pub root: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressError {
+    #[error("ingress mode '{mode}' is unsupported in v1: {message}")]
+    UnsupportedInV1 { mode: String, message: String },
+    #[error("duplicate ingress alias '{alias}' on routes '{route_a}' and '{route_b}'")]
+    DuplicateAlias {
+        alias: String,
+        route_a: String,
+        route_b: String,
+    },
+    #[error("invalid ingress alias '{alias}': {reason}")]
+    InvalidAlias { alias: String, reason: String },
+    #[error("root route '{route}' must not set alias")]
+    RootWithAlias { route: String },
+    #[error("multiple root routes: '{route_a}' and '{route_b}'")]
+    MultipleRootRoutes { route_a: String, route_b: String },
+    #[error("non-root route '{route}' must have an alias or use the route name as alias")]
+    NonRootWithoutAlias { route: String },
+    #[error("ingress route '{route}' references missing service '{target}'")]
+    MissingService { route: String, target: String },
+    #[error("ingress route '{route}' has invalid port {port}")]
+    InvalidPort { route: String, port: u16 },
+    #[error("ingress route '{route}' declares upstream_path_prefix but strip_prefix is false")]
+    UpstreamPrefixWithoutStrip { route: String },
+    #[error("ingress route '{route}' upstream_path_prefix '{prefix}' must start with '/'")]
+    UpstreamPrefixMissingSlash { route: String, prefix: String },
+    #[error("ingress route '{route}' upstream_path_prefix '{prefix}' is invalid: {reason}")]
+    InvalidUpstreamPrefix {
+        route: String,
+        prefix: String,
+        reason: String,
+    },
+    #[error("ingress env_inject target '{target}' does not reference a declared service")]
+    EnvInjectTargetMissing { target: String },
+    #[error("ingress env_inject template '{template}' references unknown route '{route_name}'")]
+    EnvInjectMissingRoute {
+        target: String,
+        env_name: String,
+        route_name: String,
+        template: String,
+    },
+    #[error("ingress env_inject template '{template}' has unsupported field '.{field}' (allowed: url, base_url, path, origin)")]
+    EnvInjectUnknownField {
+        target: String,
+        env_name: String,
+        template: String,
+        field: String,
+    },
+    #[error("ingress env_inject has invalid env var name '{name}'")]
+    InvalidEnvVarName { name: String },
 }
 
 /// Foundation conformance requirements (§3.6, Part I of the Capsule Protocol spec).
