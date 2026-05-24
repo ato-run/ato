@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::adapters::runtime::oci_session_store::{OciSessionStatus, OciSessionStore};
+use crate::adapters::runtime::oci_session_store::{
+    OciSessionIngressRecord, OciSessionStatus, OciSessionStore,
+};
 use crate::binding;
 use crate::reporters::CliReporter;
 use crate::runtime::process::{format_duration, get_process_uptime, ProcessManager, ProcessStatus};
@@ -88,6 +90,17 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .iter()
             .filter(|s| args.all || s.status == OciSessionStatus::Running)
             .map(|s| {
+                let ingress_json = s.ingress.as_ref().map(|i| {
+                    serde_json::json!({
+                        "mode": i.mode,
+                        "router_port": i.router_port,
+                        "primary_url": i.primary_url,
+                        "routes": i.routes,
+                        // Token is included in URLs; include it here for
+                        // programmatic access alongside the session record.
+                        "token": i.token,
+                    })
+                });
                 serde_json::json!({
                     "kind": "oci",
                     "id": s.session_id,
@@ -95,6 +108,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                     "import_kind": s.import_kind,
                     "service_count": s.services.len(),
                     "main_endpoint": s.main_endpoint,
+                    "ingress": ingress_json,
                     "status": s.status.to_string(),
                     "source_path": s.source_path,
                     "source_hash": s.source_hash,

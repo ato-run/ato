@@ -18,6 +18,8 @@
 //! - Desktop UX / session replay (deferred).
 //! - Secret values are never stored here.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -79,6 +81,25 @@ pub struct OciServiceRecord {
     pub persistent_volumes: Vec<String>,
 }
 
+/// Ingress endpoint metadata stored in the OCI session record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OciSessionIngressRecord {
+    pub mode: String,
+    pub router_port: u16,
+    pub token: String,
+    pub primary_url: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub routes: BTreeMap<String, IngressRouteRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngressRouteRecord {
+    pub url: String,
+    pub target: String,
+    pub port: u16,
+    pub listed: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OciSessionRecord {
     pub session_id: String,
@@ -93,6 +114,10 @@ pub struct OciSessionRecord {
     pub services: Vec<OciServiceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_endpoint: Option<String>,
+    /// Ingress path router metadata, present when the manifest declares
+    /// `[ingress]` with `mode = "path"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<OciSessionIngressRecord>,
     /// ISO 8601 timestamp of session creation.
     pub created_at: String,
     pub status: OciSessionStatus,
@@ -489,6 +514,7 @@ mod tests {
                 },
             ],
             main_endpoint: Some("http://127.0.0.1:37079/".to_string()),
+            ingress: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             status: OciSessionStatus::Running,
         }
