@@ -1097,12 +1097,7 @@ pub struct CapsuleInspectorView {
     pub logs: Vec<CapsuleLogEntry>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct InstalledAppsUiState {
-    pub selected_installed_app_id: Option<String>,
-    pub selected_profile_id: Option<String>,
-    pub detail_error: Option<String>,
-}
+pub use crate::install_lifecycle_dashboard::InstalledAppsUiState;
 
 #[derive(Clone, Debug)]
 pub struct AppState {

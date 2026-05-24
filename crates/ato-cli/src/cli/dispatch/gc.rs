@@ -88,8 +88,7 @@ pub(crate) fn execute_gc_command(args: GcArgs) -> Result<()> {
     //    reliably probe process liveness. Read failures on an *existing*
     //    session root abort GC: we cannot prove an unreadable record does
     //    not reference one of the revisions we are about to delete.
-    collect_active_session_revisions(&mut protected)
-        .context("collect active session revisions")?;
+    collect_active_session_revisions(&mut protected).context("collect active session revisions")?;
 
     // ── All known revisions ─────────────────────────────────────────────────
     let all_revs = store.list_all_revisions().context("list all revisions")?;
@@ -184,18 +183,16 @@ fn collect_active_session_revisions(
     let entries = std::fs::read_dir(&session_root)
         .with_context(|| format!("read session root {}", session_root.display()))?;
     for entry in entries {
-        let entry = entry
-            .with_context(|| format!("iterate session root {}", session_root.display()))?;
+        let entry =
+            entry.with_context(|| format!("iterate session root {}", session_root.display()))?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("read session record {}", path.display()))?;
-        let record: ato_session_core::record::StoredSessionInfo =
-            serde_json::from_str(&raw).with_context(|| {
-                format!("parse session record {}", path.display())
-            })?;
+        let record: ato_session_core::record::StoredSessionInfo = serde_json::from_str(&raw)
+            .with_context(|| format!("parse session record {}", path.display()))?;
         let rev_id = match &record.install_revision_id {
             Some(id) if !id.is_empty() => id,
             _ => continue,
@@ -250,15 +247,19 @@ fn session_record_is_alive(record: &ato_session_core::record::StoredSessionInfo)
 
 #[cfg(unix)]
 fn nix_pid(raw: i32) -> Option<u32> {
-    if raw <= 0 { None } else { Some(raw as u32) }
+    if raw <= 0 {
+        None
+    } else {
+        Some(raw as u32)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use capsule_core::foundation::install_lifecycle::{
-        AppRecord, InstallInstanceStore, LaunchProfile,
         ids::{InstalledAppId, ProfileId},
+        AppRecord, InstallInstanceStore, LaunchProfile,
     };
     use serial_test::serial;
 
@@ -274,29 +275,36 @@ mod tests {
         let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_gc_test");
         let profile_id = ProfileId::new("default");
-        store.write_app_record(&AppRecord {
-            installed_app_id: app_id.clone(),
-            publisher: "acme".into(),
-            slug: "gc".into(),
-            capsule_handle: "acme/gc".into(),
-            version: "1.0.0".into(),
-            installed_at: "2025-01-01T00:00:00Z".into(),
-            updated_at: "2025-01-01T00:00:00Z".into(),
-        }).unwrap();
-        store.write_profile(&app_id, &LaunchProfile {
-            profile_id: profile_id.clone(),
-            port_policy: "auto".into(),
-            concurrency_policy: "single".into(),
-            isolation: "default".into(),
-            ..Default::default()
-        }).unwrap();
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app_id.clone(),
+                publisher: "acme".into(),
+                slug: "gc".into(),
+                capsule_handle: "acme/gc".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app_id,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    port_policy: "auto".into(),
+                    concurrency_policy: "single".into(),
+                    isolation: "default".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let mut revs = Vec::new();
         for i in 0..n_revs {
-            let rev = InstallRevisionId::new(
-                &format!("rev_{:032x}", i + 1),
-            );
+            let rev = InstallRevisionId::new(&format!("rev_{:032x}", i + 1));
             store.scaffold_revision(&rev).unwrap();
-            store.set_current_revision(&app_id, &profile_id, &rev).unwrap();
+            store
+                .set_current_revision(&app_id, &profile_id, &rev)
+                .unwrap();
             revs.push(rev);
         }
         (store, app_id, profile_id, revs)
@@ -309,7 +317,13 @@ mod tests {
         let (store, app_id, profile_id, revs) = make_store_with_revs(&dir, 4);
         // current = revs[3]; log = [0,1,2,3]
         let mut protected = std::collections::HashSet::new();
-        protected.insert(store.current_revision(&app_id, &profile_id).unwrap().as_str().to_owned());
+        protected.insert(
+            store
+                .current_revision(&app_id, &profile_id)
+                .unwrap()
+                .as_str()
+                .to_owned(),
+        );
 
         let all_revs = store.list_all_revisions().unwrap();
         // keep_last=2, retention_days=0 (no retention window protection)
@@ -318,7 +332,12 @@ mod tests {
             .unwrap();
 
         // revs[0] and revs[1] are beyond keep_last=2 and older than 0 days
-        assert_eq!(reclaimable.len(), 2, "expected 2 reclaimable, got {:?}", reclaimable);
+        assert_eq!(
+            reclaimable.len(),
+            2,
+            "expected 2 reclaimable, got {:?}",
+            reclaimable
+        );
         let rec_ids: Vec<&str> = reclaimable.iter().map(|r| r.as_str()).collect();
         assert!(rec_ids.contains(&revs[0].as_str()));
         assert!(rec_ids.contains(&revs[1].as_str()));
@@ -333,14 +352,23 @@ mod tests {
         store.pin_revision(&revs[0]).unwrap();
 
         let mut protected = std::collections::HashSet::new();
-        protected.insert(store.current_revision(&app_id, &profile_id).unwrap().as_str().to_owned());
+        protected.insert(
+            store
+                .current_revision(&app_id, &profile_id)
+                .unwrap()
+                .as_str()
+                .to_owned(),
+        );
         let all_revs = store.list_all_revisions().unwrap();
         let reclaimable = store
             .collect_reclaimable_revisions(&protected, &all_revs, 2, 0)
             .unwrap();
 
         let rec_ids: Vec<&str> = reclaimable.iter().map(|r| r.as_str()).collect();
-        assert!(!rec_ids.contains(&revs[0].as_str()), "pinned rev should not be reclaimable");
+        assert!(
+            !rec_ids.contains(&revs[0].as_str()),
+            "pinned rev should not be reclaimable"
+        );
     }
 
     /// Explicitly protected revision (e.g. active session) is never reclaimable.
@@ -350,7 +378,13 @@ mod tests {
         let (store, app_id, profile_id, revs) = make_store_with_revs(&dir, 4);
 
         let mut protected = std::collections::HashSet::new();
-        protected.insert(store.current_revision(&app_id, &profile_id).unwrap().as_str().to_owned());
+        protected.insert(
+            store
+                .current_revision(&app_id, &profile_id)
+                .unwrap()
+                .as_str()
+                .to_owned(),
+        );
         // Protect revs[0] as if an active session is using it.
         protected.insert(revs[0].as_str().to_owned());
 
@@ -360,7 +394,10 @@ mod tests {
             .unwrap();
 
         let rec_ids: Vec<&str> = reclaimable.iter().map(|r| r.as_str()).collect();
-        assert!(!rec_ids.contains(&revs[0].as_str()), "session-protected rev should not be reclaimable");
+        assert!(
+            !rec_ids.contains(&revs[0].as_str()),
+            "session-protected rev should not be reclaimable"
+        );
     }
 
     /// `delete_revision` removes a non-current revision directory and a
@@ -373,9 +410,18 @@ mod tests {
         store.delete_revision(&revs[0]).unwrap();
         let all_revs = store.list_all_revisions().unwrap();
         let ids: Vec<&str> = all_revs.iter().map(|r| r.as_str()).collect();
-        assert!(!ids.contains(&revs[0].as_str()), "deleted rev should not appear in list");
-        assert!(ids.contains(&revs[1].as_str()), "non-deleted rev should remain");
-        assert!(ids.contains(&revs[2].as_str()), "non-deleted rev should remain");
+        assert!(
+            !ids.contains(&revs[0].as_str()),
+            "deleted rev should not appear in list"
+        );
+        assert!(
+            ids.contains(&revs[1].as_str()),
+            "non-deleted rev should remain"
+        );
+        assert!(
+            ids.contains(&revs[2].as_str()),
+            "non-deleted rev should remain"
+        );
     }
 
     /// `delete_revision` refuses to delete the current revision of any
@@ -401,7 +447,9 @@ mod tests {
         );
         // And the directory must still be on disk.
         assert!(
-            store.list_all_revisions().unwrap()
+            store
+                .list_all_revisions()
+                .unwrap()
                 .iter()
                 .any(|r| r.as_str() == current.as_str()),
             "rejected revision must remain on disk"
@@ -600,6 +648,11 @@ mod tests {
         std::env::remove_var("ATO_HOME");
         assert!(result.is_ok(), "gc failed: {:?}", result);
         let all_revs = store.list_all_revisions().unwrap();
-        assert_eq!(all_revs.len(), 2, "expected 2 revisions after GC, got {}", all_revs.len());
+        assert_eq!(
+            all_revs.len(),
+            2,
+            "expected 2 revisions after GC, got {}",
+            all_revs.len()
+        );
     }
 }
