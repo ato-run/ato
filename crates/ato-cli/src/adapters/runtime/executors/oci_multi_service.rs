@@ -18,7 +18,7 @@
 //! * Internal service-to-service connections use Podman network aliases, not localhost.
 //! * Only the main (published) service exposes a host port.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,19 +30,21 @@ use capsule_core::runtime::oci::{
     OciContainerRequest, OciMountSpec, OciNetworkRequest, OciPortSpec,
 };
 use capsule_core::types::{
-    OciImageResolution, OrchestrationPlan, ResolvedService, ResolvedServiceRuntime, StateDurability,
+    IngressConfig, OciImageResolution, OrchestrationPlan, ResolvedService, ResolvedServiceRuntime,
+    StateDurability,
 };
 use capsule_core::CapsuleReporter;
 
 use super::launch_context::RuntimeLaunchContext;
+use crate::adapters::runtime::ingress_router;
 use crate::adapters::runtime::oci_provider::{
     build_digest_pull_ref, DefaultOciProviderSelector, OciImageResolutionMode,
     OciImageResolutionRequest, OciPlatformPolicy, OciProvider, OciProviderError,
     OciProviderSelector,
 };
 use crate::adapters::runtime::oci_session_store::{
-    now_iso8601, OciServiceRecord, OciSessionMeta, OciSessionRecord, OciSessionStatus,
-    OciSessionStore,
+    now_iso8601, IngressRouteRecord, OciServiceRecord, OciSessionIngressRecord, OciSessionMeta,
+    OciSessionRecord, OciSessionStatus, OciSessionStore,
 };
 use crate::application::preflight::{
     preflight_oci_provider_readiness, OciProviderReadinessMode, OciProviderReadinessRequirements,
@@ -196,6 +198,8 @@ pub(crate) async fn execute_multi_service(
         .unwrap_or_else(|| "capsule".to_string());
     let source_path = Some(plan.workspace_root.display().to_string());
 
+    let ingress_config = plan.typed_manifest().ok().and_then(|m| m.ingress);
+
     execute_service_graph_with_provider(
         &orch_plan,
         &images,
@@ -203,6 +207,7 @@ pub(crate) async fn execute_multi_service(
         &egress_allow,
         &manifest_name,
         &ephemeral_mount_sources,
+        ingress_config.as_ref(),
         &reporter,
         &provider,
         Some(OciSessionMeta {
@@ -212,6 +217,66 @@ pub(crate) async fn execute_multi_service(
         }),
     )
     .await
+}
+
+/// Try to start the ingress router.
+///
+/// Builds the route table, generates a session token, starts the router, and
+/// builds the `OciSessionIngressRecord`.  On error the caller MUST clean up any
+/// already-started services because this function has no side-effects that need
+/// rollback beyond what the caller manages.
+async fn try_start_ingress_router(
+    ingress: &IngressConfig,
+    route_target_host_ports: &BTreeMap<String, u16>,
+    reporter: &Arc<CliReporter>,
+) -> Result<(ingress_router::RouterHandle, OciSessionIngressRecord)> {
+    let route_entries = ingress_router::build_route_table(ingress, route_target_host_ports)
+        .map_err(|e| anyhow::anyhow!("ingress route table build failed: {e}"))?;
+
+    let token = ingress_router::generate_session_token();
+
+    let handle = ingress_router::start_ingress_router(token.clone(), 0, route_entries).await?;
+
+    let router_port = handle.port;
+    let primary_url = format!("http://127.0.0.1:{router_port}/i/{token}/");
+
+    let mut route_records = BTreeMap::new();
+    for (route_name, route) in &ingress.routes {
+        let alias_val = if route.root {
+            String::new()
+        } else {
+            route.alias.clone().unwrap_or_else(|| route_name.clone())
+        };
+        let url = if route.root {
+            primary_url.clone()
+        } else {
+            format!("http://127.0.0.1:{router_port}/i/{token}/{alias_val}/")
+        };
+        route_records.insert(
+            route_name.clone(),
+            IngressRouteRecord {
+                url,
+                target: route.target.clone(),
+                port: route.port,
+                listed: route.listed,
+            },
+        );
+    }
+
+    reporter
+        .notify(format!("🌐 Ingress available at {primary_url}"))
+        .await?;
+
+    Ok((
+        handle,
+        OciSessionIngressRecord {
+            mode: "path".to_string(),
+            router_port,
+            token,
+            primary_url,
+            routes: route_records,
+        },
+    ))
 }
 
 /// Core multi-service graph execution logic; accepts any `OciProvider` for testability.
@@ -225,6 +290,7 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     egress_allow: &[String],
     manifest_name: &str,
     ephemeral_mount_sources: &HashSet<String>,
+    ingress_config: Option<&IngressConfig>,
     reporter: &Arc<CliReporter>,
     provider: &P,
     session_meta: Option<OciSessionMeta>,
@@ -253,6 +319,12 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))
         .context("failed to create session network")?;
+
+    // Collect ingress route target labels so we can publish their ports
+    // even when the service is not the main published front-end.
+    let ingress_route_targets: HashSet<String> = ingress_config
+        .map(|ic| ic.routes.values().map(|r| r.target.clone()).collect())
+        .unwrap_or_default();
 
     let mut started: Vec<ServiceStartRecord> = Vec::new();
     let mut graph_error: Option<anyhow::Error> = None;
@@ -323,8 +395,9 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         // Build env: merge target env with connection env from already-started dependencies.
         let env = build_service_env(service, &started, &target_runtime.env);
 
-        // Ports: only publish for the main/user-facing service.
-        let ports = if service.network.publish {
+        // Ports: publish for the main/user-facing service AND for services
+        // that are declared as ingress route targets.
+        let ports = if service.network.publish || ingress_route_targets.contains(target_label) {
             if let Some(container_port) = target_runtime.port {
                 vec![OciPortSpec {
                     container_port,
@@ -464,7 +537,9 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         }
 
         // Inspect to get the auto-allocated host port.
-        let host_port = if service.network.publish {
+        // We need the host port for published services AND for ingress route
+        // targets (which had ports auto-allocated but are not published).
+        let host_port = if service.network.publish || ingress_route_targets.contains(target_label) {
             let inspect = provider
                 .inspect_container(&container_id)
                 .await
@@ -520,11 +595,61 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
         })
         .and_then(|r| r.host_port.map(|p| format!("http://127.0.0.1:{p}/")));
 
-    // Report the main endpoint.
-    if let Some(ref endpoint) = main_endpoint {
-        reporter
-            .notify(format!("🌐 OCI service available at {endpoint}",))
-            .await?;
+    // Build a map of target label → allocated host port for all started services.
+    // This is used by the ingress router to know where to proxy.
+    let mut route_target_host_ports: BTreeMap<String, u16> = BTreeMap::new();
+    for sr in &started {
+        if let Some(hp) = sr.host_port {
+            let target_label = orch_plan
+                .services
+                .iter()
+                .find(|s| s.name == sr.service_name)
+                .and_then(|s| match &s.runtime {
+                    ResolvedServiceRuntime::Oci(rt) => Some(rt.target.clone()),
+                    _ => None,
+                });
+            if let Some(label) = target_label {
+                route_target_host_ports.insert(label, hp);
+            }
+        }
+    }
+
+    // ── Start ingress path router ──────────────────────────────────────────
+    let mut router_handle: Option<ingress_router::RouterHandle> = None;
+    let ingress_metadata: Option<OciSessionIngressRecord> = if let Some(ingress) = ingress_config {
+        match try_start_ingress_router(ingress, &route_target_host_ports, reporter).await {
+            Ok((handle, metadata)) => {
+                router_handle = Some(handle);
+                Some(metadata)
+            }
+            Err(e) => {
+                // Ingress init failed after services started. Clean up
+                // containers/network so we don't orphan them.
+                cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+                return Err(e.into());
+            }
+        }
+    } else {
+        None
+    };
+
+    // The primary endpoint shown to users prefers the ingress URL when present.
+    let display_endpoint = ingress_metadata
+        .as_ref()
+        .map(|i| i.primary_url.clone())
+        .or_else(|| main_endpoint.clone());
+
+    if let Some(ref endpoint) = display_endpoint {
+        if let Err(e) = reporter
+            .notify(format!("🌐 OCI service available at {endpoint}"))
+            .await
+        {
+            cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+            if let Some(ref mut handle) = router_handle {
+                handle.stop().await;
+            }
+            return Err(e.into());
+        }
     }
 
     // Write OCI session record so `ato ps` and `ato stop --all` can track it.
@@ -560,7 +685,8 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
             source_hash: meta.source_hash,
             network_name: network_name.clone(),
             services: service_records,
-            main_endpoint: main_endpoint.clone(),
+            main_endpoint: display_endpoint.clone(),
+            ingress: ingress_metadata.clone(),
             created_at: now_iso8601(),
             status: OciSessionStatus::Running,
         };
@@ -572,6 +698,11 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     let exit_code = wait_all_services(&started, orch_plan, reporter, provider).await;
 
     cleanup_services(&started, &network_name, ephemeral_mount_sources, provider).await;
+
+    // Stop ingress router (if it was started).
+    if let Some(ref mut handle) = router_handle {
+        handle.stop().await;
+    }
 
     // Remove the session record after cleanup.
     if let Some((store, sid)) = oci_session_record {
@@ -1109,6 +1240,7 @@ mod tests {
             &[],
             "blinko",
             &HashSet::new(),
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             provider,
             None,
@@ -1466,6 +1598,7 @@ mod tests {
             &[],
             "blinko",
             &ephemeral,
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
@@ -1508,6 +1641,7 @@ mod tests {
             &[],
             "blinko",
             &ephemeral,
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
@@ -1607,6 +1741,7 @@ volumes:
                 &[],
                 "blinko-compose",
                 &HashSet::new(),
+                None, // ingress_config
                 &Arc::new(crate::reporters::CliReporter::new(false)),
                 &provider,
                 None,
@@ -1669,6 +1804,7 @@ volumes:
             &[],
             "myapp",
             &HashSet::new(),
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
@@ -1721,6 +1857,7 @@ volumes:
             &[],
             "myapp",
             &HashSet::new(),
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,
@@ -1848,6 +1985,7 @@ volumes:
             &[],
             "smoke",
             &HashSet::new(),
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             provider,
             None,
@@ -2169,6 +2307,7 @@ volumes:
             &[],
             "shared-state-app",
             &ephemeral,
+            None, // ingress_config
             &Arc::new(crate::reporters::CliReporter::new(false)),
             &provider,
             None,

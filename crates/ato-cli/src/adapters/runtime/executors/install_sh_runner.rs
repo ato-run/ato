@@ -424,6 +424,7 @@ pub(crate) async fn execute_install_sh_run_with_provider<P: OciProvider>(
         egress_allow,
         project_name,
         &ephemeral_mount_sources,
+        None, // ingress_config: install-sh imports do not support ingress in v1
         reporter,
         provider,
         session_meta,

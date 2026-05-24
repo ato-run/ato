@@ -1,0 +1,46 @@
+schema_version = "0.3"
+name = "oci-ingress-smoke"
+version = "0.1.0"
+type = "app"
+description = "OCI ingress path router smoke test"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "docker.io/nginx:alpine"
+port = 80
+
+[targets.api]
+runtime = "oci"
+image = "docker.io/nginx:alpine"
+port = 80
+
+[services.main]
+target = "web"
+publish = true
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 80
+root = true
+listed = true
+strip_prefix = true
+
+[ingress.routes.api]
+target = "api"
+port = 80
+alias = "api"
+listed = true
+strip_prefix = true
+
+[network]
+egress_allow = []
