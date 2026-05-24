@@ -586,9 +586,7 @@ fn build_sample_recipe_resolution(
         })?;
 
     let manifest_rel = format!("samples/recipes/{slug}/capsule.toml");
-    notes.push(format!(
-        "Resolved via bundled sample recipe '{slug}'."
-    ));
+    notes.push(format!("Resolved via bundled sample recipe '{slug}'."));
 
     let snapshot = Some(ResolvedSnapshot::LocalPath {
         resolved_path: manifest_path.display().to_string(),
@@ -605,11 +603,7 @@ fn build_sample_recipe_resolution(
         source: Some("sample_recipe".to_string()),
         trust_state: trust_state.clone(),
         restricted: true,
-        launch_plan: Some(default_launch_plan(
-            None,
-            snapshot.clone(),
-            trust_state,
-        )),
+        launch_plan: Some(default_launch_plan(None, snapshot.clone(), trust_state)),
         snapshot,
         guest: guest.as_ref().map(preview_guest_contract),
         target: Some(build_target_summary(
@@ -782,9 +776,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
         );
     }
 
-    if !input.starts_with("capsule://")
-        && !input.starts_with("github.com/")
-        && !input.contains('/')
+    if !input.starts_with("capsule://") && !input.starts_with("github.com/") && !input.contains('/')
     {
         if !input_is_existing_local_path(&input) {
             if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
@@ -1132,8 +1124,8 @@ run = "backend/mock-tauri""#,
 
     #[test]
     fn github_memos_resolves_through_sample_recipe() {
-        let normalized =
-            normalize_handle("capsule://github.com/usememos/memos").expect("normalize github memos");
+        let normalized = normalize_handle("capsule://github.com/usememos/memos")
+            .expect("normalize github memos");
         assert!(
             matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
             "expected SampleRecipe, got {:?}",
@@ -1148,8 +1140,8 @@ run = "backend/mock-tauri""#,
 
     #[test]
     fn unknown_github_falls_back_to_remote_source_ref() {
-        let normalized =
-            normalize_handle("capsule://github.com/unknown/repo").expect("normalize unknown github");
+        let normalized = normalize_handle("capsule://github.com/unknown/repo")
+            .expect("normalize unknown github");
         assert!(
             matches!(normalized.kind, NormalizedHandleKind::RemoteSourceRef),
             "expected RemoteSourceRef, got {:?}",
@@ -1161,11 +1153,15 @@ run = "backend/mock-tauri""#,
     #[test]
     fn local_path_not_hijacked_by_sample_recipe() {
         let temp = TempDir::new().expect("tempdir");
-        std::fs::write(temp.path().join("capsule.toml"), r#"schema_version = "0.3"
+        std::fs::write(
+            temp.path().join("capsule.toml"),
+            r#"schema_version = "0.3"
 name = "memos"
 version = "0.1.0"
 type = "app"
-runtime = "oci""#).expect("write");
+runtime = "oci""#,
+        )
+        .expect("write");
         let normalized = normalize_handle(temp.path().to_str().unwrap()).expect("normalize local");
         assert!(
             matches!(normalized.kind, NormalizedHandleKind::LocalPath(_)),
@@ -1180,11 +1176,15 @@ runtime = "oci""#).expect("write");
         let parent = TempDir::new().expect("parent tempdir");
         let memos_dir = parent.path().join("memos");
         std::fs::create_dir(&memos_dir).expect("create memos dir");
-        std::fs::write(memos_dir.join("capsule.toml"), r#"schema_version = "0.3"
+        std::fs::write(
+            memos_dir.join("capsule.toml"),
+            r#"schema_version = "0.3"
 name = "local-memos"
 version = "0.1.0"
 type = "app"
-runtime = "oci""#).expect("write");
+runtime = "oci""#,
+        )
+        .expect("write");
         let orig_cwd = std::env::current_dir().expect("current dir");
         std::env::set_current_dir(parent.path()).expect("chdir to parent");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1205,21 +1205,24 @@ runtime = "oci""#).expect("write");
 
     #[test]
     fn build_sample_recipe_memos_has_oci_runtime() {
-        let resolution = build_resolution("memos", None, None).expect("resolve memos sample recipe");
+        let resolution =
+            build_resolution("memos", None, None).expect("resolve memos sample recipe");
         assert_eq!(resolution.kind, HandleKind::SampleRecipe);
         assert_eq!(resolution.source.as_deref(), Some("sample_recipe"));
         let target = resolution.target.as_ref().expect("target");
         assert_eq!(target.target_label, "app");
         assert_eq!(target.runtime.as_deref(), Some("oci"));
         assert_eq!(target.port, Some(5230));
-        assert!(resolution.notes.iter().any(|n| n.contains("bundled sample recipe")));
+        assert!(resolution
+            .notes
+            .iter()
+            .any(|n| n.contains("bundled sample recipe")));
     }
 
     #[test]
     fn build_github_memos_resolves_through_sample_recipe() {
-        let resolution =
-            build_resolution("capsule://github.com/usememos/memos", None, None)
-                .expect("resolve github memos via sample recipe");
+        let resolution = build_resolution("capsule://github.com/usememos/memos", None, None)
+            .expect("resolve github memos via sample recipe");
         assert_eq!(resolution.kind, HandleKind::SampleRecipe);
         assert_eq!(resolution.source.as_deref(), Some("sample_recipe"));
     }
@@ -1227,6 +1230,9 @@ runtime = "oci""#).expect("write");
     #[test]
     fn build_unknown_github_still_uses_fallback() {
         let result = build_resolution("capsule://github.com/unknown/repo", None, None);
-        assert!(result.is_err(), "unknown GitHub repos should fail resolution (no network in tests)");
+        assert!(
+            result.is_err(),
+            "unknown GitHub repos should fail resolution (no network in tests)"
+        );
     }
 }
