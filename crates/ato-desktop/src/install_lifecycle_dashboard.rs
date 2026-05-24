@@ -57,6 +57,7 @@ pub struct InstalledProfileDashboardItem {
     pub revisions_count: usize,
     pub latest_finalized_at: Option<String>,
     pub current_output_dir: Option<String>,
+    pub revisions: Vec<InstalledRevisionDashboardItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,10 +109,8 @@ impl DashboardCache {
     /// Safe to call from any thread.
     pub fn refresh() {
         let result = (|| -> Result<_> {
-            let mut items = list_installed_apps_dashboard()
-                .context("list installed apps")?;
-            attach_running_sessions(&mut items)
-                .context("attach running sessions")?;
+            let mut items = list_installed_apps_dashboard().context("list installed apps")?;
+            attach_running_sessions(&mut items).context("attach running sessions")?;
             Ok(items)
         })();
 
@@ -169,14 +168,12 @@ pub fn list_app_revisions(
     let app_id = InstalledAppId::new(installed_app_id);
     let prof_id = ProfileId::new(profile_id);
 
-    let current_rev = store
-        .current_revision(&app_id, &prof_id)
-        .with_context(|| {
-            format!(
-                "read current revision for {}/{}",
-                installed_app_id, profile_id
-            )
-        })?;
+    let current_rev = store.current_revision(&app_id, &prof_id).with_context(|| {
+        format!(
+            "read current revision for {}/{}",
+            installed_app_id, profile_id
+        )
+    })?;
     let current_str = current_rev.as_str();
 
     let revision_log = store
@@ -250,14 +247,20 @@ pub fn attach_running_sessions(items: &mut [InstalledAppDashboardItem]) -> Resul
         let raw = match std::fs::read_to_string(&path) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("dashboard: skip unreadable session record {}: {e}", path.display());
+                tracing::warn!(
+                    "dashboard: skip unreadable session record {}: {e}",
+                    path.display()
+                );
                 continue;
             }
         };
         let record: ato_session_core::record::StoredSessionInfo = match serde_json::from_str(&raw) {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("dashboard: skip corrupt session record {}: {e}", path.display());
+                tracing::warn!(
+                    "dashboard: skip corrupt session record {}: {e}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -394,13 +397,15 @@ fn build_profile_item(
         let link = store.current_revision_link(app_id, profile_id);
         match std::fs::symlink_metadata(&link) {
             Ok(_) => {
-                let rev = store.current_revision(app_id, profile_id).with_context(|| {
-                    format!(
-                        "read current_revision for {}/{}",
-                        app_id.as_str(),
-                        profile_id.as_str()
-                    )
-                })?;
+                let rev = store
+                    .current_revision(app_id, profile_id)
+                    .with_context(|| {
+                        format!(
+                            "read current_revision for {}/{}",
+                            app_id.as_str(),
+                            profile_id.as_str()
+                        )
+                    })?;
                 Some(rev.as_str().to_owned())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -440,6 +445,31 @@ fn build_profile_item(
         store.revision_output_dir(&rev).display().to_string()
     });
 
+    let current_rev_str = current_rev.as_deref().unwrap_or("");
+    let revision_items: Result<Vec<InstalledRevisionDashboardItem>> = revisions
+        .iter()
+        .map(|rev| {
+            let is_current = rev.as_str() == current_rev_str;
+            let is_pinned = store.is_pinned(rev);
+            let finalized_at = store
+                .read_revision_manifest(rev)
+                .with_context(|| format!("read manifest for revision {}", rev.as_str()))?
+                .and_then(|v| {
+                    v.get("finalized_at")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                });
+            let output_dir = store.revision_output_dir(rev).display().to_string();
+            Ok(InstalledRevisionDashboardItem {
+                revision_id: rev.as_str().to_owned(),
+                is_current,
+                is_pinned,
+                finalized_at,
+                output_dir,
+            })
+        })
+        .collect();
+
     Ok(InstalledProfileDashboardItem {
         profile_id: profile_id.as_str().to_owned(),
         install_profile_key: ipk.as_str().to_owned(),
@@ -447,6 +477,7 @@ fn build_profile_item(
         revisions_count,
         latest_finalized_at,
         current_output_dir,
+        revisions: revision_items?,
     })
 }
 
@@ -661,8 +692,7 @@ mod tests {
             );
             let msg = format!("{:#}", result.unwrap_err());
             assert!(
-                msg.contains("revision id from symlink")
-                    || msg.contains("current_revision"),
+                msg.contains("revision id from symlink") || msg.contains("current_revision"),
                 "expected 'revision id' or 'current_revision' context in error: {msg}"
             );
         }
