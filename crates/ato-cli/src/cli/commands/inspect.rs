@@ -15,6 +15,7 @@ use capsule_core::input_resolver::{
 use capsule_core::manifest;
 use capsule_core::types::{
     CapsuleManifest, EgressIdType, ServiceSpec, StateAttach, StateDurability, StateKind,
+    StateSharing,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -132,6 +133,8 @@ pub struct StateRequirementItem {
     pub attach: Option<StateAttach>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<StateSharing>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2515,6 +2518,7 @@ fn build_state_requirements(manifest: &CapsuleManifest) -> Vec<StateRequirementI
             purpose: (!requirement.purpose.trim().is_empty()).then(|| requirement.purpose.clone()),
             attach: Some(requirement.attach),
             schema_id: requirement.schema_id.clone(),
+            sharing: Some(requirement.sharing),
         })
         .collect::<Vec<_>>();
     items.sort_by(|left, right| left.key.cmp(&right.key));

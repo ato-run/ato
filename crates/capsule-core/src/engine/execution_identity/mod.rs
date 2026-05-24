@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::error::{CapsuleError, Result};
-use crate::types::OciLaunchEnvelope;
+use crate::types::{OciLaunchEnvelope, StateSharing};
 pub use env_origin::{default_env_origin, EnvOrigin};
 pub use filesystem_builder::FilesystemIdentityBuilder;
 pub use policy_builder::PolicyIdentityBuilder;
@@ -1048,6 +1048,10 @@ pub struct StateBindingIdentity {
     pub name: String,
     pub kind: StateBindingKind,
     pub identity: Tracked<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<StateSharing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

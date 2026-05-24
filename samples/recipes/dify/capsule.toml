@@ -7,12 +7,12 @@ homepage = "https://github.com/langgenius/dify"
 
 # Spike notes:
 # - Minimal service graph: db, redis, weaviate, api, worker, web(main)
-# - Omitted: init_permissions (no one-shot/run_once support in Ato), sandbox, ssrf_proxy,
-#   plugin_daemon, nginx (require repo config file bind mounts not supported in recipes)
+# - Omitted: sandbox, ssrf_proxy, plugin_daemon, nginx (require repo config file bind mounts not supported in recipes)
 # - Images are linux/amd64 only; allow_emulation = true required on arm64 hosts
 # - CONSOLE_API_URL is left empty; web app falls back to relative-URL routing (see docs)
 # - SECRET_KEY is a hardcoded demo value; MUST be replaced for production use
 # - Redis uses cmd override to enable requirepass; api/worker use REDIS_PASSWORD to match
+# - api-storage uses sharing="same-capsule" so both api and worker mount the same volume
 
 default_target = "web"
 
@@ -89,6 +89,7 @@ durability = "persistent"
 purpose = "Dify file uploads and storage"
 attach = "explicit"
 schema_id = "sha256:dify-api-storage-v1"
+sharing = "same-capsule"
 
 # ── Services ──────────────────────────────────────────────────────────────────
 
@@ -129,3 +130,7 @@ service_target = "weaviate"
 state = "api-storage"
 target = "/app/api/storage"
 service_target = "api"
+
+[[services.worker.state_bindings]]
+state = "api-storage"
+target = "/app/api/storage"

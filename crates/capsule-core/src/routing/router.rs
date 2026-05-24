@@ -2260,6 +2260,94 @@ service_target = "db"
         );
     }
 
+    #[test]
+    fn shared_state_same_capsule_produces_identical_mount_source() {
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "shared-state-app"
+version = "1.0.0"
+type = "app"
+default_target = "api"
+
+[targets.api]
+runtime = "oci"
+image = "example/api:1.0"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "example/worker:1.0"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+sharing = "same-capsule"
+
+[services.main]
+target = "api"
+
+[services.api]
+target = "api"
+[[services.api.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#,
+        );
+        let state_override = "/var/lib/ato/persistent/shared-state-app/uploads";
+        let decision = route_manifest_with_state_overrides(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+            [("uploads".to_string(), state_override.to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+
+        let api_svc = plan.services.iter().find(|s| s.name == "api").unwrap();
+        let worker_svc = plan.services.iter().find(|s| s.name == "worker").unwrap();
+
+        let api_mount = api_svc
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .find(|m| m.target == "/app/storage")
+            .expect("api must mount shared state");
+        let worker_mount = worker_svc
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .find(|m| m.target == "/app/storage")
+            .expect("worker must mount shared state");
+
+        assert_eq!(
+            api_mount.source, worker_mount.source,
+            "shared state must produce identical mount source for both services"
+        );
+        assert_eq!(
+            api_mount.source, state_override,
+            "mount source must match the state override"
+        );
+        assert!(!api_mount.readonly, "shared state mount must be writable");
+        assert!(
+            !worker_mount.readonly,
+            "shared state mount must be writable"
+        );
+    }
+
     // ── Readiness timing tests ─────────────────────────────────────────────────
 
     fn readiness_timing_manifest(probe_extra: &str) -> String {
