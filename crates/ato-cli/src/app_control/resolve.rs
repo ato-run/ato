@@ -19,6 +19,7 @@ use capsule_core::router::{
 };
 
 use super::guest_contract::{parse_guest_contract, preview_guest_contract, GuestContract};
+use super::sample_recipes::{resolve_sample_recipe_for_github, resolve_sample_recipe_for_input};
 use crate::install::{
     download_github_repository_at_ref, fetch_capsule_detail, fetch_capsule_manifest_toml,
     fetch_github_install_draft, parse_capsule_request,
@@ -33,6 +34,7 @@ pub(super) enum HandleKind {
     LocalCapsule,
     StoreCapsule,
     RemoteSourceRef,
+    SampleRecipe,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -100,6 +102,7 @@ pub(super) enum NormalizedHandleKind {
     LocalPath(PathBuf),
     StoreCapsule,
     RemoteSourceRef,
+    SampleRecipe(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +112,7 @@ pub(super) struct NormalizedHandle {
     kind: NormalizedHandleKind,
     canonical: Option<CanonicalHandle>,
     cli_ref: Option<String>,
+    sample_recipe_slug: Option<String>,
 }
 
 pub fn resolve_handle(
@@ -160,6 +164,13 @@ pub(super) fn build_resolution(
             launch: None,
             notes: Vec::new(),
         }),
+        NormalizedHandleKind::SampleRecipe(manifest_path) => build_sample_recipe_resolution(
+            normalized.input,
+            normalized.normalized_handle,
+            normalized.sample_recipe_slug,
+            manifest_path,
+            target_label,
+        ),
         NormalizedHandleKind::RemoteSourceRef => build_github_resolution(
             normalized.input,
             normalized.normalized_handle,
@@ -555,6 +566,65 @@ fn build_github_resolution(
     })
 }
 
+fn build_sample_recipe_resolution(
+    input: String,
+    normalized_handle: String,
+    slug: Option<String>,
+    manifest_path: PathBuf,
+    target_label: Option<&str>,
+) -> Result<HandleResolution> {
+    let slug = slug.unwrap_or_else(|| "unknown".to_string());
+    let (plan, guest, mut notes) = resolve_local_plan(&manifest_path, target_label)?;
+    let launch = derive_launch_spec(&plan)
+        .map(build_launch_preview)
+        .with_context(|| {
+            format!(
+                "failed to derive launch spec for sample recipe '{}' at {}",
+                slug,
+                manifest_path.display()
+            )
+        })?;
+
+    let manifest_rel = format!("samples/recipes/{slug}/capsule.toml");
+    notes.push(format!(
+        "Resolved via bundled sample recipe '{slug}'."
+    ));
+
+    let snapshot = Some(ResolvedSnapshot::LocalPath {
+        resolved_path: manifest_path.display().to_string(),
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+    });
+    let trust_state = TrustState::Local;
+
+    Ok(HandleResolution {
+        input,
+        normalized_handle: normalized_handle.clone(),
+        kind: HandleKind::SampleRecipe,
+        render_strategy: render_strategy(&plan, guest.as_ref()),
+        canonical_handle: Some(normalized_handle),
+        source: Some("sample_recipe".to_string()),
+        trust_state: trust_state.clone(),
+        restricted: true,
+        launch_plan: Some(default_launch_plan(
+            None,
+            snapshot.clone(),
+            trust_state,
+        )),
+        snapshot,
+        guest: guest.as_ref().map(preview_guest_contract),
+        target: Some(build_target_summary(
+            &plan,
+            Some(manifest_rel),
+            Some(plan.workspace_root.display().to_string()),
+        )),
+        launch: Some(launch),
+        notes: {
+            notes.shrink_to_fit();
+            notes
+        },
+    })
+}
+
 fn build_target_summary(
     plan: &ManifestData,
     manifest_path: Option<String>,
@@ -684,6 +754,11 @@ fn render_strategy(plan: &ManifestData, guest: Option<&GuestContract>) -> Render
     RenderStrategy::Terminal
 }
 
+pub(super) fn input_is_existing_local_path(input: &str) -> bool {
+    let input_path = std::path::Path::new(input);
+    input_path.exists() || input_path.join("capsule.toml").exists()
+}
+
 pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
     let input = raw.trim().to_string();
     if input.is_empty() {
@@ -697,6 +772,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
             kind: NormalizedHandleKind::WebUrl,
             canonical: None,
             cli_ref: None,
+            sample_recipe_slug: None,
         });
     }
 
@@ -704,6 +780,27 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
         anyhow::bail!(
             "`ato://` is reserved for host routes and cannot be resolved as a capsule handle"
         );
+    }
+
+    if !input.starts_with("capsule://")
+        && !input.starts_with("github.com/")
+        && !input.contains('/')
+    {
+        if !input_is_existing_local_path(&input) {
+            if let Some(resolved) = resolve_sample_recipe_for_input(&input)? {
+                return Ok(NormalizedHandle {
+                    input,
+                    normalized_handle: resolved
+                        .canonical_handle
+                        .clone()
+                        .unwrap_or_else(|| format!("sample-recipe://{}", resolved.slug)),
+                    kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
+                    canonical: None,
+                    cli_ref: None,
+                    sample_recipe_slug: Some(resolved.slug),
+                });
+            }
+        }
     }
 
     match classify_surface_input(HandleInput {
@@ -715,6 +812,20 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
         SurfaceInput::Capsule { canonical } => {
             let normalized_handle = canonical.display_string();
             let cli_ref = canonical.to_cli_ref();
+
+            if let CanonicalHandle::GithubRepo { owner, repo, .. } = &canonical {
+                if let Some(resolved) = resolve_sample_recipe_for_github(owner, repo)? {
+                    return Ok(NormalizedHandle {
+                        input,
+                        normalized_handle,
+                        kind: NormalizedHandleKind::SampleRecipe(resolved.manifest_path),
+                        canonical: Some(canonical),
+                        cli_ref,
+                        sample_recipe_slug: Some(resolved.slug),
+                    });
+                }
+            }
+
             let kind = match &canonical {
                 CanonicalHandle::GithubRepo { .. } => NormalizedHandleKind::RemoteSourceRef,
                 CanonicalHandle::RegistryCapsule { .. } => NormalizedHandleKind::StoreCapsule,
@@ -728,6 +839,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
                 kind,
                 canonical: Some(canonical),
                 cli_ref,
+                sample_recipe_slug: None,
             })
         }
         SurfaceInput::HostRoute { .. } => {
@@ -739,6 +851,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
             kind: NormalizedHandleKind::WebUrl,
             canonical: None,
             cli_ref: None,
+            sample_recipe_slug: None,
         }),
         SurfaceInput::SearchQuery { .. } => {
             let normalized_handle = normalize_curated_store_alias(&input);
@@ -751,6 +864,7 @@ pub(super) fn normalize_handle(raw: &str) -> Result<NormalizedHandle> {
                 kind: NormalizedHandleKind::StoreCapsule,
                 canonical: Some(canonical),
                 cli_ref: Some(normalized_handle),
+                sample_recipe_slug: None,
             })
         }
     }
@@ -884,6 +998,7 @@ fn handle_kind_label(kind: &HandleKind) -> &'static str {
         HandleKind::LocalCapsule => "local_capsule",
         HandleKind::StoreCapsule => "store_capsule",
         HandleKind::RemoteSourceRef => "remote_source_ref",
+        HandleKind::SampleRecipe => "sample_recipe",
     }
 }
 
@@ -992,5 +1107,126 @@ run = "backend/mock-tauri""#,
                 .and_then(|target| target.driver.as_deref()),
             Some("tauri")
         );
+    }
+
+    #[test]
+    fn bare_alias_memos_resolves_through_sample_recipe() {
+        let normalized = normalize_handle("memos").expect("normalize memos");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
+            "expected SampleRecipe, got {:?}",
+            normalized.kind
+        );
+        assert_eq!(normalized.sample_recipe_slug.as_deref(), Some("memos"));
+    }
+
+    #[test]
+    fn bare_alias_uptime_kuma_resolves_through_sample_recipe() {
+        let normalized = normalize_handle("uptime-kuma").expect("normalize uptime-kuma");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
+            "expected SampleRecipe, got {:?}",
+            normalized.kind
+        );
+    }
+
+    #[test]
+    fn github_memos_resolves_through_sample_recipe() {
+        let normalized =
+            normalize_handle("capsule://github.com/usememos/memos").expect("normalize github memos");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::SampleRecipe(_)),
+            "expected SampleRecipe, got {:?}",
+            normalized.kind
+        );
+        assert_eq!(normalized.sample_recipe_slug.as_deref(), Some("memos"));
+        assert_eq!(
+            normalized.normalized_handle,
+            "capsule://github.com/usememos/memos"
+        );
+    }
+
+    #[test]
+    fn unknown_github_falls_back_to_remote_source_ref() {
+        let normalized =
+            normalize_handle("capsule://github.com/unknown/repo").expect("normalize unknown github");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::RemoteSourceRef),
+            "expected RemoteSourceRef, got {:?}",
+            normalized.kind
+        );
+        assert!(normalized.sample_recipe_slug.is_none());
+    }
+
+    #[test]
+    fn local_path_not_hijacked_by_sample_recipe() {
+        let temp = TempDir::new().expect("tempdir");
+        std::fs::write(temp.path().join("capsule.toml"), r#"schema_version = "0.3"
+name = "memos"
+version = "0.1.0"
+type = "app"
+runtime = "oci""#).expect("write");
+        let normalized = normalize_handle(temp.path().to_str().unwrap()).expect("normalize local");
+        assert!(
+            matches!(normalized.kind, NormalizedHandleKind::LocalPath(_)),
+            "expected LocalPath, got {:?}",
+            normalized.kind
+        );
+    }
+
+    #[test]
+    fn existing_local_dir_named_memos_not_hijacked_by_sample_recipe() {
+        let _guard = crate::tests::env_lock().lock().expect("env lock");
+        let parent = TempDir::new().expect("parent tempdir");
+        let memos_dir = parent.path().join("memos");
+        std::fs::create_dir(&memos_dir).expect("create memos dir");
+        std::fs::write(memos_dir.join("capsule.toml"), r#"schema_version = "0.3"
+name = "local-memos"
+version = "0.1.0"
+type = "app"
+runtime = "oci""#).expect("write");
+        let orig_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(parent.path()).expect("chdir to parent");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let normalized = normalize_handle("memos")
+                .expect("bare 'memos' with existing local dir should resolve");
+            assert!(
+                matches!(normalized.kind, NormalizedHandleKind::LocalPath(_)),
+                "expected LocalPath for existing local dir, got {:?}",
+                normalized.kind
+            );
+            assert!(normalized.sample_recipe_slug.is_none());
+        }));
+        let _ = std::env::set_current_dir(&orig_cwd);
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    fn build_sample_recipe_memos_has_oci_runtime() {
+        let resolution = build_resolution("memos", None, None).expect("resolve memos sample recipe");
+        assert_eq!(resolution.kind, HandleKind::SampleRecipe);
+        assert_eq!(resolution.source.as_deref(), Some("sample_recipe"));
+        let target = resolution.target.as_ref().expect("target");
+        assert_eq!(target.target_label, "app");
+        assert_eq!(target.runtime.as_deref(), Some("oci"));
+        assert_eq!(target.port, Some(5230));
+        assert!(resolution.notes.iter().any(|n| n.contains("bundled sample recipe")));
+    }
+
+    #[test]
+    fn build_github_memos_resolves_through_sample_recipe() {
+        let resolution =
+            build_resolution("capsule://github.com/usememos/memos", None, None)
+                .expect("resolve github memos via sample recipe");
+        assert_eq!(resolution.kind, HandleKind::SampleRecipe);
+        assert_eq!(resolution.source.as_deref(), Some("sample_recipe"));
+    }
+
+    #[test]
+    fn build_unknown_github_still_uses_fallback() {
+        let result = build_resolution("capsule://github.com/unknown/repo", None, None);
+        assert!(result.is_err(), "unknown GitHub repos should fail resolution (no network in tests)");
     }
 }
