@@ -161,7 +161,10 @@ pub fn open_settings_window(cx: &mut App) -> Result<()> {
         let webview = WebViewBuilder::new()
             .with_html(SETTINGS_HTML)
             .with_initialization_script(&init_script)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoSettings, queue.clone()))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoSettings,
+                queue.clone(),
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Settings WebView");

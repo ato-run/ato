@@ -300,7 +300,10 @@ pub fn open_card_switcher_window(cx: &mut App) -> Result<()> {
         let webview = WebViewBuilder::new()
             .with_html(SWITCHER_HTML)
             .with_initialization_script(init_script.as_str())
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoWindows, queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoWindows,
+                queue_for_ipc,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Card Switcher WebView");

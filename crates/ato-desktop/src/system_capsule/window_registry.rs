@@ -40,7 +40,10 @@ impl SystemCapsuleWindowRegistry {
     ///
     /// Idempotent: calling `register` twice with the same window is a no-op.
     pub fn register(&mut self, id: SystemCapsuleId, handle: AnyWindowHandle) {
-        self.windows.entry(id).or_default().insert(handle.window_id());
+        self.windows
+            .entry(id)
+            .or_default()
+            .insert(handle.window_id());
     }
 
     /// Remove `window_id` from every capsule's binding set.
