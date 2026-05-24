@@ -1893,6 +1893,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
             selected_target: "default".to_string(),
             runtime_model,
             state_source_overrides: std::collections::HashMap::new(),
+            ingress: None,
         }
     }
 }

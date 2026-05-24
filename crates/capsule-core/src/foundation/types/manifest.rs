@@ -770,6 +770,12 @@ pub enum IngressError {
     UpstreamPrefixWithoutStrip { route: String },
     #[error("ingress route '{route}' upstream_path_prefix '{prefix}' must start with '/'")]
     UpstreamPrefixMissingSlash { route: String, prefix: String },
+    #[error("ingress route '{route}' upstream_path_prefix '{prefix}' is invalid: {reason}")]
+    InvalidUpstreamPrefix {
+        route: String,
+        prefix: String,
+        reason: String,
+    },
     #[error("ingress env_inject target '{target}' does not reference a declared service")]
     EnvInjectTargetMissing { target: String },
     #[error("ingress env_inject template '{template}' references unknown route '{route_name}'")]
@@ -778,6 +784,13 @@ pub enum IngressError {
         env_name: String,
         route_name: String,
         template: String,
+    },
+    #[error("ingress env_inject template '{template}' has unsupported field '.{field}' (allowed: url, base_url, path, origin)")]
+    EnvInjectUnknownField {
+        target: String,
+        env_name: String,
+        template: String,
+        field: String,
     },
     #[error("ingress env_inject has invalid env var name '{name}'")]
     InvalidEnvVarName { name: String },
