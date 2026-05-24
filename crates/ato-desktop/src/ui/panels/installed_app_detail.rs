@@ -428,18 +428,16 @@ mod tests {
     ) -> Option<&'a InstalledAppDashboardItem> {
         selected_id
             .and_then(|id| items.iter().find(|item| item.installed_app_id == id))
-            .or_else(|| items.first())
+            .or_else(|| items.first().filter(|_| selected_id.is_none()))
     }
 
     fn resolve_selected_profile<'a>(
         item: &'a InstalledAppDashboardItem,
         selected_profile_id: Option<&str>,
-    ) -> &'a InstalledProfileDashboardItem {
+    ) -> Option<&'a InstalledProfileDashboardItem> {
         selected_profile_id
             .and_then(|pid| item.profiles.iter().find(|p| p.profile_id == pid))
-            .or_else(|| item.profiles.iter().find(|p| p.profile_id == "default"))
             .or_else(|| item.profiles.first())
-            .expect("item must have at least one profile")
     }
 
     #[test]
@@ -459,13 +457,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_selected_app_returns_fallback_for_missing() {
+    fn resolve_selected_app_returns_none_for_missing() {
         let items = vec![make_dummy_item("app_aaa")];
-        // When the selected ID doesn't match any item, the helper falls
-        // back to items.first() rather than returning None.
+        // Production: Some(missing) does NOT fall back to first item
         let result = resolve_selected_app(&items, Some("app_missing"));
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().installed_app_id, "app_aaa");
+        assert!(result.is_none());
     }
 
     #[test]
@@ -501,10 +497,10 @@ mod tests {
             running_sessions_hint: vec![],
         };
         let result = resolve_selected_profile(&item, None);
-        assert_eq!(result.profile_id, "default");
+        assert_eq!(result.map(|p| p.profile_id.as_str()), Some("default"));
 
         let result2 = resolve_selected_profile(&item, Some("prod"));
-        assert_eq!(result2.profile_id, "prod");
+        assert_eq!(result2.map(|p| p.profile_id.as_str()), Some("prod"));
     }
 
     #[test]
@@ -551,14 +547,14 @@ mod tests {
         };
         let result = resolve_selected_profile(&item, None);
         assert_eq!(
-            result.profile_id, "prod",
+            result.map(|p| p.profile_id.as_str()),
+            Some("prod"),
             "should fall back to first profile when no 'default' exists"
         );
     }
 
     #[test]
-    #[should_panic(expected = "item must have at least one profile")]
-    fn resolve_selected_profile_empty_list_panics() {
+    fn resolve_selected_profile_empty_returns_none() {
         let item = InstalledAppDashboardItem {
             installed_app_id: "app_test".to_string(),
             publisher: "acme".to_string(),
@@ -570,6 +566,7 @@ mod tests {
             profiles: vec![],
             running_sessions_hint: vec![],
         };
-        let _ = resolve_selected_profile(&item, None);
+        let result = resolve_selected_profile(&item, None);
+        assert!(result.is_none(), "empty profiles -> None (no panic)");
     }
 }

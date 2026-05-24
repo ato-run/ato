@@ -132,7 +132,7 @@ cargo run -p ato-cli -- stop --all
 
 ```bash
 # Install an app, then corrupt its revision log
-ATO_STORE="$ATO_HOME/apps/instances"
+ATO_STORE="$ATO_HOME/instances"
 # Find the revision_log and corrupt it
 find "$ATO_STORE" -name "revision_log.json" -exec sh -c 'echo "corrupt" > "$1"' _ {} \;
 ```
@@ -196,9 +196,10 @@ cargo test -p ato-desktop installed_app_detail -- --nocapture
 | installed_apps_ui_select_profile_ignores_mismatched_app | Different app_id rejected |
 | installed_apps_ui_select_profile_matching_app_succeeds | Same app_id updates profile |
 | installed_apps_ui_select_app_clears_error | detail_error reset on new selection |
-| resolve_selected_app_returns_selected | Selected app lookup |
+| resolve_selected_app_returns_selected | Selected app lookup by ID |
 | resolve_selected_app_falls_back_to_first | No selection → first item |
-| resolve_selected_app_returns_none_for_missing | Missing app returns None |
-| resolve_selected_profile_prefers_default | Default profile fallback |
+| resolve_selected_app_returns_none_for_missing | Missing selected ID → None (no fallback) |
+| resolve_selected_app_empty_returns_none | Empty items list → None |
+| resolve_selected_profile_prefers_default | Default profile preference |
 | resolve_selected_profile_falls_back_to_first_no_default | No default → first item |
-| resolve_selected_profile_empty_list_panics | Empty profiles → panic (documented) |
+| resolve_selected_profile_empty_returns_none | Empty profiles → None (no panic) |
