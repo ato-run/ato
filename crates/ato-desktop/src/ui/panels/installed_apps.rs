@@ -217,29 +217,19 @@ fn render_app_card(
                                         );
                                     DashboardCache::refresh();
                                     let _ = async_cx.update(|app| {
-                                        match result {
-                                            Ok(_) => {
-                                                DashboardCache::set_action_status(Some(
-                                                    InstalledAppsActionStatus::Success {
-                                                        message: format!(
-                                                            "Launched {ipk}"
-                                                        ),
-                                                    },
-                                                ));
-                                            }
+                                        DashboardCache::set_action_status(Some(match result {
+                                            Ok(_) => InstalledAppsActionStatus::Success {
+                                                message: format!("Launched {ipk}"),
+                                            },
                                             Err(e) => {
                                                 tracing::error!(
                                                     "launch installed app {ipk}: {e}"
                                                 );
-                                                DashboardCache::set_action_status(Some(
-                                                    InstalledAppsActionStatus::Error {
-                                                        message: format!(
-                                                            "Launch failed: {e}"
-                                                        ),
-                                                    },
-                                                ));
+                                                InstalledAppsActionStatus::Error {
+                                                    message: format!("Launch failed: {e}"),
+                                                }
                                             }
-                                        }
+                                        }));
                                         app.refresh_windows();
                                     });
                                 })
