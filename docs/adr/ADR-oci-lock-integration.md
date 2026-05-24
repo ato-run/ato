@@ -568,9 +568,12 @@ extensions to the existing `resolution` flat map.
 
 1. After OCI image resolution, write OCI image facts to `ato.lock.json` under
    `resolution.oci_images` and `resolution.oci_imports`.
-2. Leave `ato.oci.lock.json` untouched (do not delete, do not overwrite).
-   The sidecar is left intact only to avoid destructive migration, not to
-   preserve downgrade compatibility.
+2. Continue writing `ato.oci.lock.json` alongside the main lock for backward
+   compatibility. Phase 2 will remove the sidecar write.
+3. Each image entry gets a `resolved_ref` (canonical digest pull ref) computed
+   from the declared ref and resolved digest via
+   `construct_resolved_ref_from_sidecar`, and an `import_id` set to `"default"`
+   for import-derived images.
 
 **Dual-lock conflict behavior:**
 
@@ -730,7 +733,7 @@ resolved_digest changed:
 
 ## 12. Follow-up Implementation Plan
 
-### PR 1: Lock model fields + dual-read
+### PR 1 (PR #240): Lock model fields + dual-read ✅
 
 - Add `resolution.oci_images` and `resolution.oci_imports` typed accessors to
   `AtoLock` (within the existing `BTreeMap<String, Value>` flat map).
@@ -749,18 +752,19 @@ resolved_digest changed:
   - `resolved_ref_is_canonicalized_before_identity`
   - `source_path_is_project_relative_and_normalized`
 
-### PR 2: Write path migration + migrate command
+### PR 2 (PR #241): Write path in runners ✅
 
 - Update OCI runner write path: write OCI facts to `ato.lock.json` under
-  `resolution.oci_images` and `resolution.oci_imports`.
-- Add `ato lock migrate-oci` command: reads sidecar, writes to main lock,
-  recomputes `lock_id`.
+  `resolution.oci_images` and `resolution.oci_imports`, while preserving
+  sidecar write for backward compatibility.
+- Wiring: `oci_compose_runner.rs` and `install_sh_runner.rs` both call
+  `write_oci_facts_to_main_lock` after resolution, before the sidecar write.
+- Each runner uses `import_id: Some("default")` with appropriate `kind`
+  (`"compose"` or `"docker-run-script"`).
 - Tests:
-  - `migrated_lock_preserves_oci_execution_identity`
-  - `source_hash_change_without_launch_envelope_change_does_not_change_execution_id`
-  - `host_port_not_written_to_lock_identity_projection`
-  - `multiple_oci_imports_are_supported`
-  - `declared_targets_have_no_import_id`
+  - `compose_runner_writes_main_lock_oci_facts_alongside_sidecar`
+  - `compose_runner_main_lock_source_path_is_project_relative`
+  - `install_sh_runner_writes_main_lock_oci_facts_alongside_sidecar`
 
 ### PR 3: Deprecate sidecar write + update docs
 
