@@ -980,6 +980,15 @@ pub enum StateAttach {
     Explicit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StateSharing {
+    #[default]
+    Exclusive,
+    #[serde(alias = "same-capsule")]
+    SameCapsule,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateRequirement {
     pub kind: StateKind,
@@ -991,6 +1000,8 @@ pub struct StateRequirement {
     pub attach: StateAttach,
     #[serde(default)]
     pub schema_id: Option<String>,
+    #[serde(default)]
+    pub sharing: StateSharing,
 }
 
 /// Human-readable metadata
