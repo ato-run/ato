@@ -28,7 +28,6 @@ use anyhow::{Context, Result};
 use capsule_core::execution_plan::model::OciPolicyMode;
 use capsule_core::oci_compose_lock::{
     self, compute_compose_source_hash, OciComposeLock, OciImageLockEntry, OciImportMeta,
-    OciLockError,
 };
 use capsule_core::routing::importer::compose::{
     detect_compose_candidate, import_compose, ComposeImportInput, ComposeImportOutput,
@@ -121,18 +120,57 @@ pub(crate) async fn execute_compose_run(
 
     let provider = DefaultOciProviderSelector.select_provider();
 
-    // 5. Load existing lock (parse errors are non-fatal: we re-resolve from scratch).
-    let existing_lock = match oci_compose_lock::load_from_dir(project_dir) {
-        Ok(lock) => lock,
-        Err(OciLockError::ParseFailed(msg)) => {
-            reporter
-                .notify(format!(
-                    "⚠️  ato.oci.lock.json parse error, re-resolving: {msg}"
-                ))
-                .await?;
+    // 5. Load existing lock with dual-read: prefer ato.lock.json resolution.oci_images,
+    //    fall back to ato.oci.lock.json. Fail-closed on main lock parse/validation errors.
+    let existing_lock = {
+        let main_lock_path = project_dir.join("ato.lock.json");
+        let main_lock = if main_lock_path.exists() {
+            let lock = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path)
+                .map_err(|e| anyhow::anyhow!("failed to read ato.lock.json: {e}"))?;
+            Some(lock)
+        } else {
             None
+        };
+
+        let oci_read = match &main_lock {
+            Some(lock) => capsule_core::ato_lock::read_oci_lock(lock, project_dir)
+                .map_err(|e| anyhow::anyhow!("ato.lock.json OCI resolution is invalid: {e}"))?,
+            None => {
+                let empty = capsule_core::ato_lock::AtoLock::default();
+                capsule_core::ato_lock::read_oci_lock(&empty, project_dir)
+                    .map_err(|e| anyhow::anyhow!("failed to read OCI lock: {e}"))?
+            }
+        };
+
+        for warning in &oci_read.warnings {
+            reporter.notify(format!("⚠️  {warning}")).await?;
         }
-        Err(_) => None,
+
+        if oci_read.images.is_empty() {
+            None
+        } else {
+            let mut lock_images: BTreeMap<String, OciImageLockEntry> = BTreeMap::new();
+            for (name, entry) in &oci_read.images {
+                lock_images.insert(
+                    name.clone(),
+                    OciImageLockEntry {
+                        declared_ref: entry.declared_ref.clone(),
+                        resolved_digest: entry.resolved_digest.clone(),
+                        platform: entry.platform.clone(),
+                        provider_semantics: entry.provider_semantics.clone(),
+                    },
+                );
+            }
+            Some(OciComposeLock {
+                version: 1,
+                import: OciImportMeta {
+                    kind: "compose".to_string(),
+                    source_path: compose_rel_path.clone(),
+                    source_hash: source_hash.clone(),
+                },
+                images: lock_images,
+            })
+        }
     };
 
     // 6. Resolve image digests with lock replay.
