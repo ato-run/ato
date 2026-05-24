@@ -43,11 +43,11 @@ use crate::executors::target_runner;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, resolve_local_plan, HandleResolution};
+use super::resolve::{build_resolution, HandleResolution};
 use super::session::{
-    redirect_stdout_to_stderr, resolve_session_launch_plan, restore_stdout, start_guest_session,
-    start_orchestration_session_in_process, start_orchestration_session_supervisor,
-    start_runtime_session, SessionInfo,
+    redirect_stdout_to_stderr, resolve_local_plan_for_session_start, resolve_session_launch_plan,
+    restore_stdout, start_guest_session, start_orchestration_session_in_process,
+    start_orchestration_session_supervisor, start_runtime_session, SessionInfo,
 };
 
 /// Env var fence for the legacy opaque orchestration supervisor (#73 PR-C).
@@ -319,8 +319,18 @@ impl SessionStartPhaseRunner {
         resolution.restricted = record.restricted;
         resolution.snapshot = record.snapshot.clone();
 
-        let (plan, _guest, mut notes) =
-            resolve_local_plan(&manifest_path, Some(record.target_label.as_str()))?;
+        let sample_recipe_slug = record
+            .source
+            .as_deref()
+            .filter(|source| *source == "sample_recipe")
+            .and_then(|_| manifest_path.parent())
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str());
+        let (plan, _guest, mut notes) = resolve_local_plan_for_session_start(
+            &manifest_path,
+            Some(record.target_label.as_str()),
+            sample_recipe_slug,
+        )?;
         let expected_app_root = PathBuf::from(&record.app_root)
             .canonicalize()
             .with_context(|| format!("failed to resolve app root {}", record.app_root))?;

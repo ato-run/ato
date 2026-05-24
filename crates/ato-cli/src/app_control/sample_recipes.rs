@@ -80,8 +80,7 @@ fn materialize_recipe(binding: &SampleRecipeBinding) -> Result<PathBuf> {
 fn resolve_for_alias(input: &str) -> Option<&'static SampleRecipeBinding> {
     let normalized = input.trim().to_ascii_lowercase();
     SAMPLE_RECIPE_CATALOG.iter().find(|binding| {
-        binding.slug == normalized
-            || binding.aliases.iter().any(|alias| *alias == normalized)
+        binding.slug == normalized || binding.aliases.iter().any(|alias| *alias == normalized)
     })
 }
 
@@ -89,12 +88,9 @@ fn resolve_for_github(owner: &str, repo: &str) -> Option<&'static SampleRecipeBi
     let owner_lower = owner.to_ascii_lowercase();
     let repo_lower = repo.to_ascii_lowercase();
     SAMPLE_RECIPE_CATALOG.iter().find(|binding| {
-        binding
-            .github
-            .is_some_and(|(gh_owner, gh_repo)| {
-                gh_owner.eq_ignore_ascii_case(&owner_lower)
-                    && gh_repo.eq_ignore_ascii_case(&repo_lower)
-            })
+        binding.github.is_some_and(|(gh_owner, gh_repo)| {
+            gh_owner.eq_ignore_ascii_case(&owner_lower) && gh_repo.eq_ignore_ascii_case(&repo_lower)
+        })
     })
 }
 
@@ -114,7 +110,10 @@ pub fn resolve_sample_recipe_for_input(input: &str) -> Result<Option<ResolvedSam
     }))
 }
 
-pub fn resolve_sample_recipe_for_github(owner: &str, repo: &str) -> Result<Option<ResolvedSampleRecipe>> {
+pub fn resolve_sample_recipe_for_github(
+    owner: &str,
+    repo: &str,
+) -> Result<Option<ResolvedSampleRecipe>> {
     let binding = match resolve_for_github(owner, repo) {
         Some(b) => b,
         None => return Ok(None),
@@ -217,8 +216,12 @@ mod tests {
 
     #[test]
     fn case_insensitive_alias() {
-        assert!(resolve_sample_recipe_for_input("Memos").expect("no error").is_some());
-        assert!(resolve_sample_recipe_for_input("N8N").expect("no error").is_some());
+        assert!(resolve_sample_recipe_for_input("Memos")
+            .expect("no error")
+            .is_some());
+        assert!(resolve_sample_recipe_for_input("N8N")
+            .expect("no error")
+            .is_some());
     }
 
     #[test]
