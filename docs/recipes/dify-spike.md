@@ -169,6 +169,7 @@ Warm restart (images cached): ~3 min.
 Without nginx, the Dify web's browser-side `fetch` calls to `/console/api/*` resolve relative to the web container's origin. SSR pages render correctly but client-side interactions that call the API directly may fail because the Next.js app expects `CONSOLE_API_URL` to be set to an absolute URL.
 
 **Classification:** Ato architecture — no ingress/proxy layer in v0.3.
+**Status:** Ingress route model + identity landed (PR 1, `feat/ingress-route-model`); router runtime is next PR (PR 2).
 **Workaround:** Set `CONSOLE_API_URL=http://host-ip:PORT` with a pinned host port (requires static port mapping, not yet in Ato).
 **Follow-up:** Ingress/proxy layer, or static port assignment in recipe.
 
