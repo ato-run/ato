@@ -1379,6 +1379,16 @@ fn validate_ingress(
             }
             seen_aliases.insert(alias, route_name);
         } else if !route.root {
+            if !is_valid_ingress_alias(route_name) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidAlias {
+                        alias: route_name.clone(),
+                        reason: "route name used as fallback alias must be URL-safe (lowercase alphanumeric, hyphens, underscores; no '/', '..', '%2f', '%5c', or percent-encoded characters)"
+                            .to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
             if let Some(previous) = seen_aliases.get(route_name.as_str()) {
                 errors.push(ValidationError::InvalidTarget(
                     IngressError::DuplicateAlias {
@@ -1430,6 +1440,16 @@ fn validate_ingress(
                     .to_string(),
                 ));
             }
+            if let Some(reason) = validate_upstream_prefix_segments(prefix) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidUpstreamPrefix {
+                        route: route_name.clone(),
+                        prefix: prefix.to_string(),
+                        reason,
+                    }
+                    .to_string(),
+                ));
+            }
         }
     }
 
@@ -1465,6 +1485,17 @@ fn validate_ingress(
                         .to_string(),
                     ));
                 }
+            }
+            if let Some(field) = extract_invalid_template_field(template) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::EnvInjectUnknownField {
+                        target: target.clone(),
+                        env_name: env_name.clone(),
+                        template: template.clone(),
+                        field,
+                    }
+                    .to_string(),
+                ));
             }
         }
     }
@@ -1835,4 +1866,44 @@ fn detect_service_cycle(services: &HashMap<String, ServiceSpec>) -> Result<(), S
         visit(name, services, &mut visiting, &mut visited, &mut stack)?;
     }
     Ok(())
+}
+
+fn validate_upstream_prefix_segments(prefix: &str) -> Option<String> {
+    if prefix.contains("..") {
+        return Some("must not contain parent-traversal component '..'".to_string());
+    }
+    if prefix.contains('\\') {
+        return Some("must not contain backslash".to_string());
+    }
+    let lower = prefix.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return Some("must not contain percent-encoded slash or backslash".to_string());
+    }
+    if prefix.as_bytes().iter().any(|b| *b == b'%') {
+        return Some("must not contain percent-encoded characters".to_string());
+    }
+    None
+}
+
+fn extract_invalid_template_field(template: &str) -> Option<String> {
+    let allowed: &[&str] = &["url", "base_url", "path", "origin"];
+    let mut search_from = 0;
+    let prefix = "{{ingress.routes.";
+    while let Some(start) = template[search_from..].find(prefix) {
+        let abs_start = search_from + start;
+        let rest = &template[abs_start + prefix.len()..];
+        if let Some(end) = rest.find("}}") {
+            let full_ref = &rest[..end];
+            if let Some(dot_pos) = full_ref.find('.') {
+                let field = &full_ref[dot_pos + 1..];
+                if !allowed.contains(&field) {
+                    return Some(field.to_string());
+                }
+            }
+            search_from = abs_start + prefix.len() + end + 2;
+        } else {
+            break;
+        }
+    }
+    None
 }

@@ -10,8 +10,8 @@ use crate::lock_runtime::{self, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::orchestration;
 use crate::types::{
-    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, Mount, NamedTarget,
-    OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceNetwork,
+    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, IngressConfig, Mount,
+    NamedTarget, OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceNetwork,
     ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo, ServiceSpec,
     ValidationMode,
 };
@@ -300,6 +300,7 @@ pub struct ExecutionDescriptor {
     pub selected_target: String,
     pub runtime_model: ResolvedLockRuntimeModel,
     pub state_source_overrides: HashMap<String, String>,
+    pub ingress: Option<IngressConfig>,
 }
 
 pub type ManifestData = ExecutionDescriptor;
@@ -434,6 +435,12 @@ pub fn execution_descriptor_from_manifest_parts(
         (target, model)
     };
 
+    let ingress = manifest.get("ingress").and_then(|v| {
+        toml::to_string(v)
+            .ok()
+            .and_then(|s| toml::from_str::<IngressConfig>(&s).ok())
+    });
+
     Ok(ExecutionDescriptor {
         manifest: manifest.clone(),
         compat_manifest: CompatManifestBridge::from_manifest_value(&manifest).ok(),
@@ -446,6 +453,7 @@ pub fn execution_descriptor_from_manifest_parts(
         selected_target,
         runtime_model,
         state_source_overrides,
+        ingress,
     })
 }
 
@@ -485,6 +493,11 @@ pub fn route_lock_with_state_overrides(
     })?;
     let compat_manifest = CompatManifestBridge::from_lock(lock, &runtime_model)?;
     let manifest = compat_manifest.raw_value()?;
+    let ingress = manifest.get("ingress").and_then(|v| {
+        toml::to_string(v)
+            .ok()
+            .and_then(|s| toml::from_str::<IngressConfig>(&s).ok())
+    });
     let plan = ExecutionDescriptor {
         manifest,
         compat_manifest: Some(compat_manifest),
@@ -497,6 +510,7 @@ pub fn route_lock_with_state_overrides(
         selected_target: runtime_model.selected.target_label.clone(),
         runtime_model,
         state_source_overrides,
+        ingress,
     };
     Ok(RuntimeDecision {
         kind: chosen,
