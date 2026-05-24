@@ -4,6 +4,7 @@ use bollard::container::{
     StartContainerOptions, StatsOptions, StopContainerOptions, WaitContainerOptions,
 };
 use bollard::errors::Error as BollardError;
+use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::image::CreateImageOptions;
 use bollard::models::{EndpointSettings, HostConfig, PortBinding};
 use bollard::network::{ConnectNetworkOptions, CreateNetworkOptions};
@@ -83,6 +84,7 @@ pub trait OciRuntimeClient: Send + Sync {
         container_id: &str,
         follow: bool,
     ) -> Result<mpsc::Receiver<Result<OciLogChunk>>>;
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> Result<i64>;
     async fn wait_container(&self, container_id: &str) -> Result<i64>;
     async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()>;
     async fn remove_container(&self, container_id: &str, force: bool) -> Result<()>;
@@ -370,6 +372,51 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
             Some(Err(BollardError::DockerContainerWaitError { code, .. })) => Ok(code),
             Some(Err(err)) => Err(map_bollard_error(err)),
             None => Ok(1),
+        }
+    }
+
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> Result<i64> {
+        let exec = self
+            .docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    attach_stdin: Some(false),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    tty: Some(false),
+                    cmd: Some(cmd.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(map_bollard_error)?;
+
+        self.docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(map_bollard_error)?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let inspect = self
+                .docker
+                .inspect_exec(&exec.id)
+                .await
+                .map_err(map_bollard_error)?;
+            if !inspect.running.unwrap_or(false) {
+                return Ok(inspect.exit_code.unwrap_or(1));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(1);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 
