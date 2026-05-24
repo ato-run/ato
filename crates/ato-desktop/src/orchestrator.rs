@@ -1749,6 +1749,15 @@ pub fn resolve_ato_binary() -> Result<PathBuf> {
         return Ok(path);
     }
 
+    // Monorepo dev workflow: prefer the root-workspace `target/{profile}/ato`
+    // produced by ato-desktop's build.rs (see `rebuild_helpers`). This wins
+    // over `sibling_ato_binary` because a stale sibling could have been left
+    // by a prior bundle step, and over PATH because a globally-installed
+    // `ato` is almost always older than the working tree.
+    if let Some(path) = dev_workspace_binary("ato") {
+        return Ok(path);
+    }
+
     if let Some(path) = sibling_ato_binary()? {
         return Ok(path);
     }
@@ -1761,6 +1770,50 @@ pub fn resolve_ato_binary() -> Result<PathBuf> {
         "ato helper binary was not found. Bundle Helpers/ato, set {}, or install 'ato' on PATH.",
         ATO_BIN_ENV
     )
+}
+
+/// Resolve the `nacelle` sandbox helper binary.
+///
+/// Precedence mirrors `resolve_ato_binary`:
+///   1. `NACELLE_PATH` env var (explicit override).
+///   2. Monorepo dev target (`<root>/target/{profile}/nacelle`), kept fresh by
+///      this crate's build.rs.
+///   3. PATH lookup (globally installed `nacelle`).
+///
+/// Returning `None` means no helper was found anywhere; callers should
+/// surface a clear error rather than silently spawning a missing binary.
+pub fn resolve_nacelle_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("NACELLE_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    if let Some(path) = dev_workspace_binary("nacelle") {
+        return Some(path);
+    }
+
+    which_in_path("nacelle")
+}
+
+/// `target/{profile}/<name>` inside the root workspace that ships ato-cli
+/// and nacelle. The path is embedded by build.rs via `rustc-env=…` so it's
+/// only populated when ato-desktop was built from the monorepo.
+fn dev_workspace_binary(name: &str) -> Option<PathBuf> {
+    let target_root = option_env!("ATO_DESKTOP_DEV_HELPER_TARGET")?;
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let bin_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let candidate = PathBuf::from(target_root).join(profile).join(bin_name);
+    candidate.is_file().then_some(candidate)
 }
 
 fn bundled_ato_binary() -> Result<Option<PathBuf>> {
@@ -2857,7 +2910,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
             cols: 120,
             rows: 40,
         },
-        nacelle_path: std::env::var("NACELLE_PATH").ok().map(PathBuf::from),
+        nacelle_path: resolve_nacelle_binary(),
         ato_path: std::env::var("ATO_DESKTOP_ATO_BIN")
             .ok()
             .map(PathBuf::from)
@@ -3767,10 +3820,10 @@ pub fn spawn_terminal_session(
     cols: u16,
     rows: u16,
 ) -> Result<TerminalProcess> {
-    // Locate nacelle binary
-    let nacelle_bin = std::env::var("NACELLE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("nacelle"));
+    // Locate nacelle binary: NACELLE_PATH → dev workspace target → PATH.
+    let nacelle_bin = resolve_nacelle_binary().ok_or_else(|| {
+        anyhow!("nacelle helper binary was not found. Set NACELLE_PATH or install 'nacelle' on PATH.")
+    })?;
 
     // Write ExecEnvelope to a temp file so stdin stays free for TerminalCommands
     let tmp_dir = PathBuf::from(".tmp");
