@@ -199,6 +199,13 @@ fn render_app_card(
                             let ato_bin = match crate::orchestrator::resolve_ato_binary() {
                                 Ok(p) => p,
                                 Err(e) => {
+                                    DashboardCache::set_action_status(Some(
+                                        InstalledAppsActionStatus::Error {
+                                            message: format!(
+                                                "Launch failed: cannot resolve ato binary: {e}"
+                                            ),
+                                        },
+                                    ));
                                     tracing::error!("cannot resolve ato binary: {e}");
                                     return;
                                 }
