@@ -21,7 +21,7 @@ pub(crate) use ato_session_core::{
 };
 use capsule_core::ato_lock;
 use capsule_core::handle::{
-    normalize_capsule_handle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     TrustState,
 };
 use capsule_core::launch_spec::derive_launch_spec;
@@ -1776,6 +1776,54 @@ pub(super) fn resolve_session_launch_plan(
     capsule_core::launch_spec::LaunchSpec,
     Vec<String>,
 )> {
+    if !super::resolve::input_is_existing_local_path(handle) {
+        if let Some(resolved) =
+            super::sample_recipes::resolve_sample_recipe_for_input(handle)?
+        {
+            let manifest_path = resolved.manifest_path;
+            let mut notes = vec![format!(
+                "Resolved via bundled sample recipe '{}'.",
+                resolved.slug
+            )];
+            let (plan, _guest, plan_notes) =
+                resolve_local_plan(&manifest_path, target_label)?;
+            notes.extend(plan_notes);
+            let launch = derive_launch_spec(&plan).with_context(|| {
+                format!(
+                    "failed to derive launch spec for sample recipe '{}' at {}",
+                    resolved.slug,
+                    manifest_path.display()
+                )
+            })?;
+            return Ok((manifest_path, plan, launch, notes));
+        }
+    }
+
+    if let Ok(canonical) = normalize_capsule_handle(handle) {
+        if let CanonicalHandle::GithubRepo { ref owner, ref repo, .. } = canonical {
+            if let Some(resolved) =
+                super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
+            {
+                let manifest_path = resolved.manifest_path;
+                let mut notes = vec![format!(
+                    "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
+                    resolved.slug, owner, repo
+                )];
+                let (plan, _guest, plan_notes) =
+                    resolve_local_plan(&manifest_path, target_label)?;
+                notes.extend(plan_notes);
+                let launch = derive_launch_spec(&plan).with_context(|| {
+                    format!(
+                        "failed to derive launch spec for sample recipe '{}' at {}",
+                        resolved.slug,
+                        manifest_path.display()
+                    )
+                })?;
+                return Ok((manifest_path, plan, launch, notes));
+            }
+        }
+    }
+
     let resolved_path = match normalize_capsule_handle(handle) {
         Ok(canonical) => {
             let cli_ref = canonical

@@ -20,7 +20,8 @@ use crate::cli::{ModelTierArg, PrivacyModeArg, RepairActionArg};
 
 mod guest_contract;
 mod latest;
-mod resolve;
+pub(super) mod resolve;
+pub(crate) mod sample_recipes;
 pub(crate) mod session;
 pub(crate) mod session_runner;
 
