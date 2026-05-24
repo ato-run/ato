@@ -1046,8 +1046,12 @@ require lock replay.
 - Real Podman smoke for lock persistence remains opt-in only
   (`ATO_TEST_REAL_PODMAN=1`).
 - `install.sh` / `docker run` intent extractor remains PR 11.
-- Lock file is written only on the `--oci-compose` path; standard `ato run`
-  is unaffected.
+- Lock file is written only on the `--oci-compose` and `--oci-install-sh`
+  paths; standard `ato run` is unaffected.
+- Starting with PR 241, OCI resolution facts are written to both
+  `ato.lock.json` (resolution.oci_images / resolution.oci_imports) and the
+  sidecar `ato.oci.lock.json`. The dual-write preserves backward compatibility;
+  Phase 2 will remove the sidecar write.
 
 ### 13.12 Known pre-existing blocker (unchanged)
 
@@ -1170,10 +1174,14 @@ semantics established in PR 7.
 A warning is emitted when `--restart` is encountered so the user knows their
 script's intent was not translated.
 
-### 14.6 Lock persistence model (reuses PR 10.6)
+### 14.6 Lock persistence model (reuses PR 10.6, dual-write in PR 241)
 
-PR 11 reuses `OciComposeLock` from PR 10.6.  The only difference is
-`import.kind`:
+PR 11 reuses `OciComposeLock` from PR 10.6 for the sidecar format. Starting
+with PR 241, OCI resolution facts are also written to the main lock
+(`ato.lock.json` under `resolution.oci_images` and `resolution.oci_imports`),
+while the sidecar continues to be written for backward compatibility.
+
+The sidecar `OciComposeLock` format — only `import.kind` differs:
 
 ```json
 {
@@ -1240,7 +1248,8 @@ resolution pipeline and:
 2. Parses with `DockerRunScriptImporter` (pure, no I/O)
 3. Emits warnings for ignored/unsupported patterns
 4. Resolves or replays OCI image digests via `OciComposeLock`
-5. Writes/updates `ato.oci.lock.json`
+5. Writes/updates both `ato.lock.json` (resolution.oci_images/oci_imports)
+   and `ato.oci.lock.json` for backward compatibility
 6. Executes through the PR 8 multi-service Podman path
 
 No legacy Bollard route.  `--oci-compose` and `--oci-install-sh` are
@@ -1383,15 +1392,18 @@ Rationale for separation:
 Fields intentionally absent: container id, network id, volume id, allocated
 host port, secret values, Podman machine id.
 
-#### Future migration plan (not PR 11.5 scope)
+#### Migration status (PR 241 / Phase 2)
 
-When the OCI model is promoted from experimental to stable:
+**Current (Phase 1 complete):** OCI resolution facts are written to both
+`ato.lock.json` (resolution.oci_images / resolution.oci_imports) and the
+sidecar `ato.oci.lock.json`. The read path prefers the main lock and falls
+back to the sidecar. This dual-write preserves backward compatibility.
 
-1. The `images` section will move into `ato.lock.json` under an `oci_images` key.
-2. The `import` section will move to `ato.lock.json` under `oci_import`.
-3. `ato.oci.lock.json` will be deprecated and eventually removed.
-4. Migration rule: `ato.oci.lock.json` is an implementation detail, not a
-   stable public contract. Consumers should not parse it directly.
+**Phase 2 (planned):** Remove sidecar write. Write to `ato.lock.json` only.
+Emit a warning when a stale sidecar is present.
+
+**Phase 3 (planned):** Remove sidecar read support entirely. `ato.oci.lock.json`
+is fully deprecated and consumers should not parse it directly.
 
 **PR 11 reuse note**: install.sh and compose importers share the same
 `OciComposeLock` Rust type. The `import.kind` field (`compose` vs
@@ -1433,6 +1445,7 @@ After PR 11.5, the `--oci-install-sh` path prints:
 ♻️  [blinko-postgres] Reusing lock: postgres:14 → sha256:abc123...  ← lock replay
 ✅ [blinko-website] Resolved: sha256:def456...                       ← fresh resolve
 🔒 Lock written: ato.oci.lock.json
+🔒 Main lock updated with OCI facts                                 ← main lock write (PR 241)
 🌐 OCI service 'blinko-website' available at http://127.0.0.1:<port>/
 ```
 
