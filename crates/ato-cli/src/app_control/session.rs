@@ -21,8 +21,8 @@ pub(crate) use ato_session_core::{
 };
 use capsule_core::ato_lock;
 use capsule_core::handle::{
-    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
-    TrustState,
+    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
+    ResolvedSnapshot, TrustState,
 };
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
@@ -49,6 +49,7 @@ use crate::runtime::tree as runtime_tree;
 use crate::runtime::{overrides as runtime_overrides, port_manager::PortManager};
 use crate::ProviderToolchain;
 
+use super::guest_contract::GuestContract;
 use super::resolve::resolve_local_plan;
 
 /// Thread-local install lifecycle context set by `ato launch` before calling
@@ -1777,16 +1778,17 @@ pub(super) fn resolve_session_launch_plan(
     Vec<String>,
 )> {
     if !super::resolve::input_is_existing_local_path(handle) {
-        if let Some(resolved) =
-            super::sample_recipes::resolve_sample_recipe_for_input(handle)?
-        {
+        if let Some(resolved) = super::sample_recipes::resolve_sample_recipe_for_input(handle)? {
             let manifest_path = resolved.manifest_path;
             let mut notes = vec![format!(
                 "Resolved via bundled sample recipe '{}'.",
                 resolved.slug
             )];
-            let (plan, _guest, plan_notes) =
-                resolve_local_plan(&manifest_path, target_label)?;
+            let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+                &manifest_path,
+                target_label,
+                Some(resolved.slug.as_str()),
+            )?;
             notes.extend(plan_notes);
             let launch = derive_launch_spec(&plan).with_context(|| {
                 format!(
@@ -1800,7 +1802,12 @@ pub(super) fn resolve_session_launch_plan(
     }
 
     if let Ok(canonical) = normalize_capsule_handle(handle) {
-        if let CanonicalHandle::GithubRepo { ref owner, ref repo, .. } = canonical {
+        if let CanonicalHandle::GithubRepo {
+            ref owner,
+            ref repo,
+            ..
+        } = canonical
+        {
             if let Some(resolved) =
                 super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
             {
@@ -1809,8 +1816,11 @@ pub(super) fn resolve_session_launch_plan(
                     "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
                     resolved.slug, owner, repo
                 )];
-                let (plan, _guest, plan_notes) =
-                    resolve_local_plan(&manifest_path, target_label)?;
+                let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+                    &manifest_path,
+                    target_label,
+                    Some(resolved.slug.as_str()),
+                )?;
                 notes.extend(plan_notes);
                 let launch = derive_launch_spec(&plan).with_context(|| {
                     format!(
@@ -1868,6 +1878,65 @@ pub(super) fn resolve_session_launch_plan(
         )
     })?;
     Ok((manifest_path, plan, launch, notes))
+}
+
+pub(super) fn resolve_local_plan_for_session_start(
+    manifest_path: &Path,
+    target_label: Option<&str>,
+    sample_recipe_slug: Option<&str>,
+) -> Result<(
+    capsule_core::router::ManifestData,
+    Option<GuestContract>,
+    Vec<String>,
+)> {
+    let (mut plan, guest, mut notes) = resolve_local_plan(manifest_path, target_label)?;
+    if let Some(slug) = sample_recipe_slug {
+        let bindings = auto_state_bindings_for_sample_recipe_manifest(manifest_path, slug)?;
+        if !bindings.is_empty() {
+            plan.state_source_overrides = bindings;
+            notes.push(format!(
+                "Auto-bound persistent sample recipe state under ~/.ato/state/sample-recipes/{slug}."
+            ));
+        }
+    }
+    Ok((plan, guest, notes))
+}
+
+fn auto_state_bindings_for_sample_recipe_manifest(
+    manifest_path: &Path,
+    slug: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use capsule_core::types::StateDurability;
+
+    let raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let state_root = capsule_core::common::paths::ato_state_dir()
+        .join("sample-recipes")
+        .join(slug);
+    let mut bindings = std::collections::HashMap::new();
+    for (state_name, _requirement) in manifest
+        .state
+        .iter()
+        .filter(|(_, requirement)| requirement.durability == StateDurability::Persistent)
+    {
+        let path = state_root.join(state_name);
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "failed to create sample recipe state directory {}",
+                path.display()
+            )
+        })?;
+        bindings.insert(
+            state_name.clone(),
+            path.canonicalize()
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+    Ok(bindings)
 }
 
 /// Try to load `ato.lock.json` from the workspace root.
@@ -3828,6 +3897,48 @@ mod tests {
             canonical.registry_url_override(),
             Some("http://localhost:8787")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn sample_recipe_session_start_auto_binds_explicit_state() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("memos")
+            .expect("resolve sample recipe")
+            .expect("memos recipe");
+        let (plan, _guest, notes) = resolve_local_plan_for_session_start(
+            &resolved.manifest_path,
+            None,
+            Some(resolved.slug.as_str()),
+        )
+        .expect("resolve session plan");
+
+        let state_path = plan
+            .state_source_overrides
+            .get("data")
+            .expect("data state override");
+        assert!(
+            state_path.ends_with("/state/sample-recipes/memos/data"),
+            "unexpected state path: {state_path}"
+        );
+        assert!(std::path::Path::new(state_path).exists());
+        assert!(notes.iter().any(|note| note.contains("Auto-bound")));
+
+        let services = plan
+            .resolve_services()
+            .expect("explicit state should be bound");
+        let main = services.service("main").expect("main service");
+        assert!(main
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos"));
     }
 
     #[cfg(unix)]

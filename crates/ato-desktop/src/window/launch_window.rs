@@ -726,24 +726,16 @@ fn build_consent_preview(
             }
         }
         Err(err) => {
-            let preflight_failed = !is_non_blocking_remote_preflight_error(handle, &err);
-            if preflight_failed {
-                tracing::warn!(
-                    error = %err,
-                    "consent preflight failed — wizard shows error state"
-                );
-            } else {
-                tracing::warn!(
-                    handle,
-                    error = %err,
-                    "consent preflight unavailable for remote handle — continuing with launch fallback"
-                );
-            }
+            tracing::warn!(
+                handle,
+                error = %err,
+                "consent preflight failed — wizard shows error state"
+            );
             LaunchConsentPreview {
                 preview_id: preview_id.to_string(),
                 loading: false,
-                preflight_failed,
-                preflight_error: preflight_failed.then(|| format!("{err:#}")),
+                preflight_failed: true,
+                preflight_error: Some(format!("{err:#}")),
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: String::new(),
@@ -753,15 +745,6 @@ fn build_consent_preview(
             }
         }
     }
-}
-
-fn is_non_blocking_remote_preflight_error(handle: &str, err: &anyhow::Error) -> bool {
-    if !looks_like_remote_launch_handle(handle) {
-        return false;
-    }
-
-    let message = format!("{err:#}");
-    message.contains("manifest path does not exist")
 }
 
 /// Normalize a user-supplied GitHub repo input into the canonical
@@ -783,25 +766,6 @@ pub fn normalize_github_handle(repo: &str) -> String {
     } else {
         format!("github.com/{s}")
     }
-}
-
-fn looks_like_remote_launch_handle(handle: &str) -> bool {
-    let trimmed = handle.trim();
-    if trimmed.is_empty()
-        || trimmed.starts_with('/')
-        || trimmed.starts_with("~/")
-        || trimmed.starts_with("./")
-        || trimmed.starts_with("../")
-    {
-        return false;
-    }
-
-    trimmed.starts_with("github.com/")
-        || trimmed.starts_with("capsule://github.com/")
-        || trimmed.starts_with("capsule://ato.run/")
-        || trimmed.starts_with("capsule://localhost:")
-        || trimmed.starts_with("capsule://127.0.0.1:")
-        || trimmed.starts_with("capsule://[::1]:")
 }
 
 /// Internal helper: opens the consent wizard window and returns both the
@@ -1418,23 +1382,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_manifest_missing_preflight_is_non_blocking() {
+    fn remote_manifest_missing_preflight_blocks_approve() {
         let err = anyhow::anyhow!(
             "ato internal preflight failed: preflight collection failed: manifest path does not exist: github.com/owner/repo"
         );
-
-        assert!(is_non_blocking_remote_preflight_error(
+        let preview = build_consent_preview(
+            "Repo",
             "github.com/owner/repo",
-            &err
-        ));
-        assert!(is_non_blocking_remote_preflight_error(
-            "capsule://github.com/Koh0920/cupbear",
-            &err
-        ));
-        assert!(is_non_blocking_remote_preflight_error(
-            "capsule://ato.run/koh0920/byok-ai-chat",
-            &err
-        ));
+            "preview-1",
+            Err(err),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(preview.preflight_failed);
+        assert!(preview.preflight_error.is_some());
+        assert!(preview.requirements.is_empty());
+        assert!(preview.capsule_id.is_empty());
     }
 
     #[test]
@@ -1442,23 +1405,16 @@ mod tests {
         let err = anyhow::anyhow!(
             "ato internal preflight failed: preflight collection failed: manifest path does not exist: /missing/capsule.toml"
         );
-
-        assert!(!is_non_blocking_remote_preflight_error(
+        let preview = build_consent_preview(
+            "Local",
             "/missing/capsule.toml",
-            &err
-        ));
-        assert!(!is_non_blocking_remote_preflight_error(
-            "./samples/demo",
-            &err
-        ));
-        assert!(!is_non_blocking_remote_preflight_error(
-            "crates/ato-cli/samples/foo",
-            &err
-        ));
-        assert!(!is_non_blocking_remote_preflight_error(
-            "koh0920/flatnotes",
-            &err
-        ));
+            "preview-1",
+            Err(err),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(preview.preflight_failed);
+        assert!(preview.preflight_error.is_some());
     }
 
     #[test]
@@ -1466,11 +1422,38 @@ mod tests {
         let err = anyhow::anyhow!(
             "ato internal preflight failed: preflight collection failed: failed to route manifest"
         );
-
-        assert!(!is_non_blocking_remote_preflight_error(
+        let preview = build_consent_preview(
+            "Repo",
             "koh0920/flatnotes",
-            &err
-        ));
+            "preview-1",
+            Err(err),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(preview.preflight_failed);
+        assert!(preview.preflight_error.is_some());
+    }
+
+    #[test]
+    fn consent_preview_allows_successful_sample_recipe_preflight() {
+        let preview = build_consent_preview(
+            "Blinko",
+            "capsule://github.com/blinkospace/blinko",
+            "preview-1",
+            Ok(crate::orchestrator::ConsentPreflightData {
+                capsule_id: "blinko".to_string(),
+                capsule_version: "0.1.0".to_string(),
+                visited_targets: vec!["db".to_string(), "app".to_string()],
+                requirements: vec![],
+            }),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(!preview.preflight_failed);
+        assert!(preview.preflight_error.is_none());
+        assert_eq!(preview.capsule_id, "blinko");
+        assert_eq!(preview.capsule_version, "0.1.0");
+        assert_eq!(preview.visited_targets, vec!["db".to_string(), "app".to_string()]);
     }
 
     #[test]
