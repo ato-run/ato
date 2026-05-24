@@ -43,7 +43,10 @@ pub enum IpcResponse {
 
 impl IpcResponse {
     pub fn ok(request_id: Option<u64>, payload: serde_json::Value) -> Self {
-        Self::Ok { request_id, payload }
+        Self::Ok {
+            request_id,
+            payload,
+        }
     }
 
     pub fn error(
@@ -51,12 +54,20 @@ impl IpcResponse {
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self::Error { request_id, code: code.into(), message: message.into() }
+        Self::Error {
+            request_id,
+            code: code.into(),
+            message: message.into(),
+        }
     }
 
     /// Convenience: unknown command.
     pub fn unknown_command(request_id: Option<u64>, command: &str) -> Self {
-        Self::error(request_id, "unknown_command", format!("unknown command: {command}"))
+        Self::error(
+            request_id,
+            "unknown_command",
+            format!("unknown command: {command}"),
+        )
     }
 
     /// Convenience: access denied / capability not granted.
@@ -85,7 +96,13 @@ mod tests {
         let r = IpcResponse::ok(Some(1), serde_json::json!({ "foo": "bar" }));
         let json = serde_json::to_string(&r).unwrap();
         let back: IpcResponse = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, IpcResponse::Ok { request_id: Some(1), .. }));
+        assert!(matches!(
+            back,
+            IpcResponse::Ok {
+                request_id: Some(1),
+                ..
+            }
+        ));
     }
 
     #[test]
