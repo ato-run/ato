@@ -18,8 +18,8 @@ pub(crate) fn execute_rollback_command(args: RollbackArgs) -> Result<()> {
     let store = InstallInstanceStore::new(&store_root)
         .with_context(|| format!("open instance store at {}", store_root.display()))?;
 
-    let (app_id, profile_id) =
-        find_profile_by_key_ids(&store, &args.install_profile_key).with_context(|| {
+    let (app_id, profile_id) = find_profile_by_key_ids(&store, &args.install_profile_key)
+        .with_context(|| {
             format!(
                 "install profile key '{}' not found. Run `ato install` first.",
                 args.install_profile_key
@@ -157,7 +157,9 @@ mod tests {
         let rev3 = InstallRevisionId::new("rev_0000000000000000000000000000001c");
         for rev in &[&rev1, &rev2, &rev3] {
             store.scaffold_revision(rev).unwrap();
-            store.set_current_revision(&app_id, &profile_id, rev).unwrap();
+            store
+                .set_current_revision(&app_id, &profile_id, rev)
+                .unwrap();
         }
         let ipk = derive_install_profile_key(&app_id, &profile_id);
         (dir, store, app_id, profile_id, rev1, rev2, rev3, ipk)
@@ -174,22 +176,29 @@ mod tests {
         let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
         let app_id = InstalledAppId::new("app_test_rb_auto");
         let profile_id = ProfileId::new("default");
-        store.write_app_record(&AppRecord {
-            installed_app_id: app_id.clone(),
-            publisher: "acme".into(),
-            slug: "auto".into(),
-            capsule_handle: "acme/auto".into(),
-            version: "1.0.0".into(),
-            installed_at: "2025-01-01T00:00:00Z".into(),
-            updated_at: "2025-01-01T00:00:00Z".into(),
-        }).unwrap();
-        store.write_profile(&app_id, &LaunchProfile {
-            profile_id: profile_id.clone(),
-            port_policy: "auto".into(),
-            concurrency_policy: "single".into(),
-            isolation: "default".into(),
-            ..Default::default()
-        }).unwrap();
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app_id.clone(),
+                publisher: "acme".into(),
+                slug: "auto".into(),
+                capsule_handle: "acme/auto".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app_id,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    port_policy: "auto".into(),
+                    concurrency_policy: "single".into(),
+                    isolation: "default".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let rev1 = InstallRevisionId::new("rev_aaaa000000000000000000000000001a");
         let rev2 = InstallRevisionId::new("rev_aaaa000000000000000000000000001b");
         let rev3 = InstallRevisionId::new("rev_aaaa000000000000000000000000001c");
@@ -215,13 +224,11 @@ mod tests {
         );
     }
 
-
     /// `rollback <ipk> <unknown_rev>` must return an error.
     #[test]
     #[serial]
     fn rollback_explicit_unknown_rev_fails() {
-        let (dir, _store, _app_id, _profile_id, _rev1, _rev2, _rev3, ipk) =
-            make_store_three_revs();
+        let (dir, _store, _app_id, _profile_id, _rev1, _rev2, _rev3, ipk) = make_store_three_revs();
         std::env::set_var("ATO_HOME", dir.path());
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
@@ -243,8 +250,7 @@ mod tests {
     #[test]
     #[serial]
     fn rollback_explicit_known_rev_succeeds() {
-        let (dir, store, app_id, profile_id, rev1, _rev2, _rev3, ipk) =
-            make_store_three_revs();
+        let (dir, store, app_id, profile_id, rev1, _rev2, _rev3, ipk) = make_store_three_revs();
         std::env::set_var("ATO_HOME", dir.path());
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),

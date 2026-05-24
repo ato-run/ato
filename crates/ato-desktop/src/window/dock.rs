@@ -730,7 +730,10 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
                     }
                 }
             })
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoDock, bridge_queue.clone()))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoDock,
+                bridge_queue.clone(),
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Dock WebView");

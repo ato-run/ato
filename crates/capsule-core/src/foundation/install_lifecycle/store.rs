@@ -776,12 +776,22 @@ mod tests {
         store.scaffold_revision(&rev2).unwrap();
 
         // Install rev1, then update to rev2.
-        store.set_current_revision(&app, &profile_id, &rev1).unwrap();
-        store.set_current_revision(&app, &profile_id, &rev2).unwrap();
-        assert_eq!(store.current_revision(&app, &profile_id).unwrap(), rev2, "current should be rev2 after update");
+        store
+            .set_current_revision(&app, &profile_id, &rev1)
+            .unwrap();
+        store
+            .set_current_revision(&app, &profile_id, &rev2)
+            .unwrap();
+        assert_eq!(
+            store.current_revision(&app, &profile_id).unwrap(),
+            rev2,
+            "current should be rev2 after update"
+        );
 
         // Rollback to rev1 by swapping current_revision back.
-        store.set_current_revision(&app, &profile_id, &rev1).unwrap();
+        store
+            .set_current_revision(&app, &profile_id, &rev1)
+            .unwrap();
         assert_eq!(
             store.current_revision(&app, &profile_id).unwrap(),
             rev1,

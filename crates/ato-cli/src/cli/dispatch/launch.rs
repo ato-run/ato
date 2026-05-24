@@ -32,8 +32,8 @@ pub(crate) fn execute_launch_command(
     reporter: Arc<reporters::CliReporter>,
 ) -> Result<()> {
     let instances_root = ato_path_or_workspace_tmp("instances");
-    let store = InstallInstanceStore::new(&instances_root)
-        .context("open install instance store")?;
+    let store =
+        InstallInstanceStore::new(&instances_root).context("open install instance store")?;
 
     // Resolve profile key → (installed_app_id, profile_id, capsule_handle, rev_id).
     let (app_id, profile_id, capsule_handle, rev_id) =
@@ -162,21 +162,18 @@ fn find_profile_by_key(
             if candidate_key.as_str() == profile_key {
                 let rev_id = store.current_revision(app_id, profile_id).ok()?;
                 // Read the app record to get the capsule handle.
-                let capsule_handle = store
-                    .read_app_record(app_id)
-                    .ok()
-                    .and_then(|r| {
-                        if r.capsule_handle.is_empty() {
-                            // Fallback: reconstruct from publisher/slug.
-                            if r.publisher.is_empty() {
-                                None
-                            } else {
-                                Some(format!("{}/{}", r.publisher, r.slug))
-                            }
+                let capsule_handle = store.read_app_record(app_id).ok().and_then(|r| {
+                    if r.capsule_handle.is_empty() {
+                        // Fallback: reconstruct from publisher/slug.
+                        if r.publisher.is_empty() {
+                            None
                         } else {
-                            Some(r.capsule_handle)
+                            Some(format!("{}/{}", r.publisher, r.slug))
                         }
-                    })?;
+                    } else {
+                        Some(r.capsule_handle)
+                    }
+                })?;
                 return Some((app_id.clone(), profile_id.clone(), capsule_handle, rev_id));
             }
         }
@@ -274,7 +271,9 @@ mod tests {
             )
             .unwrap();
         store.scaffold_revision(rev_id).unwrap();
-        store.set_current_revision(app_id, profile_id, rev_id).unwrap();
+        store
+            .set_current_revision(app_id, profile_id, rev_id)
+            .unwrap();
     }
 
     /// `find_profile_by_key` returns None for an unknown key.
@@ -317,19 +316,25 @@ mod tests {
         scaffold_app_with_profile(&store, &app_id, &profile_id, &rev1);
         // Install rev2 (simulates update).
         store.scaffold_revision(&rev2).unwrap();
-        store.set_current_revision(&app_id, &profile_id, &rev2).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev2)
+            .unwrap();
 
         let ipk = derive_install_profile_key(&app_id, &profile_id);
 
         // Verify rev2 is current.
         let (_, _, _, rev) = find_profile_by_key(&store, ipk.as_str()).unwrap();
-        assert_eq!(rev, rev2, "before rollback, current revision should be rev_new");
+        assert_eq!(
+            rev, rev2,
+            "before rollback, current revision should be rev_new"
+        );
 
         // Rollback to rev1.
-        store.set_current_revision(&app_id, &profile_id, &rev1).unwrap();
+        store
+            .set_current_revision(&app_id, &profile_id, &rev1)
+            .unwrap();
 
-        let (_, _, _, rev_after_rollback) =
-            find_profile_by_key(&store, ipk.as_str()).unwrap();
+        let (_, _, _, rev_after_rollback) = find_profile_by_key(&store, ipk.as_str()).unwrap();
         assert_eq!(
             rev_after_rollback, rev1,
             "after rollback, ato launch must use rev_old, not rev_new"
@@ -348,7 +353,10 @@ mod tests {
 
         let (args, warning) = read_profile_launch_config(&store, &app_id, &profile_id);
         assert!(args.is_empty(), "default profile has no args");
-        assert!(warning.is_none(), "default profile should produce no warning");
+        assert!(
+            warning.is_none(),
+            "default profile should produce no warning"
+        );
     }
 
     /// `read_profile_launch_config` warns when unsupported profile fields are set.
@@ -393,4 +401,3 @@ mod tests {
         );
     }
 }
-

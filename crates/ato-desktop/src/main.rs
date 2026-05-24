@@ -1,7 +1,6 @@
 mod app;
 mod automation;
 mod bridge;
-mod ipc;
 mod cli_envelope;
 mod cli_install;
 mod config;
@@ -9,6 +8,7 @@ mod egress_policy;
 mod egress_proxy;
 mod github_manifest_draft;
 mod install_lifecycle_dashboard;
+mod ipc;
 mod localization;
 mod logging;
 mod orchestrator;

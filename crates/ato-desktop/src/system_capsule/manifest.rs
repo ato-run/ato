@@ -222,7 +222,9 @@ mod tests {
     fn onboarding_descriptor_grants_onboarding_complete() {
         let d = lookup(SystemCapsuleId::AtoOnboarding);
         assert_eq!(d.canonical_slug, "onboarding");
-        assert!(d.allowed_capabilities.contains(&Capability::OnboardingComplete));
+        assert!(d
+            .allowed_capabilities
+            .contains(&Capability::OnboardingComplete));
     }
 
     #[test]
@@ -237,10 +239,7 @@ mod tests {
 
     #[test]
     fn legacy_alias_resolves_to_canonical_id() {
-        assert_eq!(
-            lookup_by_slug("ato-store"),
-            Some(SystemCapsuleId::AtoStore)
-        );
+        assert_eq!(lookup_by_slug("ato-store"), Some(SystemCapsuleId::AtoStore));
         assert_eq!(
             lookup_by_slug("ato-onboarding"),
             Some(SystemCapsuleId::AtoOnboarding)

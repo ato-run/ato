@@ -28,6 +28,32 @@ use capsule_core::foundation::install_lifecycle::{
 };
 use serde::Serialize;
 
+// ── UI Selection State ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+pub struct InstalledAppsUiState {
+    pub selected_installed_app_id: Option<String>,
+    pub selected_profile_id: Option<String>,
+    pub detail_error: Option<String>,
+}
+
+impl InstalledAppsUiState {
+    pub fn select_app(&mut self, installed_app_id: String) {
+        self.selected_installed_app_id = Some(installed_app_id);
+        self.selected_profile_id = Some("default".to_string());
+        self.detail_error = None;
+    }
+
+    pub fn select_profile(&mut self, installed_app_id: &str, profile_id: &str) {
+        let current = self.selected_installed_app_id.as_deref();
+        if current.is_none() || current == Some(installed_app_id) {
+            self.selected_installed_app_id = Some(installed_app_id.to_string());
+            self.selected_profile_id = Some(profile_id.to_string());
+            self.detail_error = None;
+        }
+    }
+}
+
 // ── DTOs ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -427,25 +453,8 @@ fn build_profile_item(
         })?;
     let revisions_count = revisions.len();
 
-    let latest_finalized_at = revisions
-        .iter()
-        .rev()
-        .find_map(|rev| revision_finalized_at(store, rev).transpose())
-        .transpose()
-        .with_context(|| {
-            format!(
-                "read revision manifests for {}/{}",
-                app_id.as_str(),
-                profile_id.as_str()
-            )
-        })?;
-
-    let current_output_dir = current_rev.as_ref().map(|rev_id_str| {
-        let rev = InstallRevisionId::new(rev_id_str.as_str());
-        store.revision_output_dir(&rev).display().to_string()
-    });
-
     let current_rev_str = current_rev.as_deref().unwrap_or("");
+    let mut latest_finalized_at: Option<String> = None;
     let revision_items: Result<Vec<InstalledRevisionDashboardItem>> = revisions
         .iter()
         .map(|rev| {
@@ -459,6 +468,9 @@ fn build_profile_item(
                         .and_then(|s| s.as_str())
                         .map(String::from)
                 });
+            if finalized_at.is_some() {
+                latest_finalized_at = finalized_at.clone();
+            }
             let output_dir = store.revision_output_dir(rev).display().to_string();
             Ok(InstalledRevisionDashboardItem {
                 revision_id: rev.as_str().to_owned(),
@@ -469,6 +481,11 @@ fn build_profile_item(
             })
         })
         .collect();
+
+    let current_output_dir = current_rev.as_ref().map(|rev_id_str| {
+        let rev = InstallRevisionId::new(rev_id_str.as_str());
+        store.revision_output_dir(&rev).display().to_string()
+    });
 
     Ok(InstalledProfileDashboardItem {
         profile_id: profile_id.as_str().to_owned(),
@@ -737,5 +754,61 @@ mod tests {
 
         DashboardCache::reset_for_test();
         std::env::remove_var("ATO_HOME");
+    }
+
+    #[test]
+    fn installed_apps_ui_select_profile_when_app_id_is_none() {
+        let mut ui = super::InstalledAppsUiState::default();
+        assert!(ui.selected_installed_app_id.is_none());
+        assert!(ui.selected_profile_id.is_none());
+
+        ui.select_profile("app_aaa", "prod");
+
+        assert_eq!(ui.selected_installed_app_id.as_deref(), Some("app_aaa"));
+        assert_eq!(ui.selected_profile_id.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn installed_apps_ui_select_profile_ignores_mismatched_app() {
+        let mut ui = super::InstalledAppsUiState::default();
+        ui.select_app("app_bbb".into());
+        assert_eq!(ui.selected_installed_app_id.as_deref(), Some("app_bbb"));
+        assert_eq!(ui.selected_profile_id.as_deref(), Some("default"));
+
+        ui.select_profile("app_aaa", "prod");
+
+        assert_eq!(
+            ui.selected_installed_app_id.as_deref(),
+            Some("app_bbb"),
+            "selected app must not change on mismatch"
+        );
+        assert_eq!(
+            ui.selected_profile_id.as_deref(),
+            Some("default"),
+            "profile must not change on mismatch"
+        );
+    }
+
+    #[test]
+    fn installed_apps_ui_select_profile_matching_app_succeeds() {
+        let mut ui = super::InstalledAppsUiState::default();
+        ui.select_app("app_bbb".into());
+
+        ui.select_profile("app_bbb", "prod");
+
+        assert_eq!(ui.selected_installed_app_id.as_deref(), Some("app_bbb"));
+        assert_eq!(ui.selected_profile_id.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn installed_apps_ui_select_app_clears_error() {
+        let mut ui = super::InstalledAppsUiState {
+            detail_error: Some("corrupt".into()),
+            ..Default::default()
+        };
+
+        ui.select_app("app_aaa".into());
+
+        assert!(ui.detail_error.is_none());
     }
 }

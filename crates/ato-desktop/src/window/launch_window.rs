@@ -377,7 +377,10 @@ fn open_wizard(
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_ipc,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Launch wizard WebView");
@@ -847,7 +850,10 @@ fn open_consent_wizard_inner(
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the consent WebView");
@@ -979,7 +985,10 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the github_run WebView");
@@ -1374,7 +1383,10 @@ fn open_boot_wizard_inner(
             })
             .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoLaunch, queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the boot WebView");

@@ -26,13 +26,13 @@ pub(crate) fn execute_app_update_command(args: AppUpdateArgs) -> Result<()> {
     let store = InstallInstanceStore::new(&store_root)
         .with_context(|| format!("open instance store at {}", store_root.display()))?;
 
-    let (app_id, profile_id, capsule_handle) =
-        find_app_handle(&store, &args.install_profile_key).with_context(|| {
-            format!(
-                "install profile key '{}' not found. Run `ato install` first.",
-                args.install_profile_key
-            )
-        })?;
+    let (app_id, profile_id, capsule_handle) = find_app_handle(&store, &args.install_profile_key)
+        .with_context(|| {
+        format!(
+            "install profile key '{}' not found. Run `ato install` first.",
+            args.install_profile_key
+        )
+    })?;
 
     if profile_id.as_str() != "default" {
         anyhow::bail!(
@@ -106,26 +106,32 @@ mod tests {
     fn update_non_default_profile_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = InstallInstanceStore::new(&dir.path().join("instances")).unwrap();
-        let app_id = capsule_core::foundation::install_lifecycle::InstalledAppId::new(
-            "app_test_upd_nd",
-        );
+        let app_id =
+            capsule_core::foundation::install_lifecycle::InstalledAppId::new("app_test_upd_nd");
         let profile_id = capsule_core::foundation::install_lifecycle::ProfileId::new("staging");
-        store.write_app_record(&AppRecord {
-            installed_app_id: app_id.clone(),
-            publisher: "acme".into(),
-            slug: "upd".into(),
-            capsule_handle: "acme/upd".into(),
-            version: "1.0.0".into(),
-            installed_at: "2025-01-01T00:00:00Z".into(),
-            updated_at: "2025-01-01T00:00:00Z".into(),
-        }).unwrap();
-        store.write_profile(&app_id, &LaunchProfile {
-            profile_id: profile_id.clone(),
-            port_policy: "auto".into(),
-            concurrency_policy: "single".into(),
-            isolation: "default".into(),
-            ..Default::default()
-        }).unwrap();
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app_id.clone(),
+                publisher: "acme".into(),
+                slug: "upd".into(),
+                capsule_handle: "acme/upd".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app_id,
+                &LaunchProfile {
+                    profile_id: profile_id.clone(),
+                    port_policy: "auto".into(),
+                    concurrency_policy: "single".into(),
+                    isolation: "default".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let ipk = derive_install_profile_key(&app_id, &profile_id);
 
         std::env::set_var("ATO_HOME", dir.path());
@@ -136,7 +142,10 @@ mod tests {
         });
         std::env::remove_var("ATO_HOME");
 
-        assert!(result.is_err(), "expected error for non-default profile, got Ok");
+        assert!(
+            result.is_err(),
+            "expected error for non-default profile, got Ok"
+        );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(
             msg.contains("only supports the default profile"),
@@ -159,9 +168,6 @@ mod tests {
 
         assert!(result.is_err(), "expected error for unknown ipk, got Ok");
         let msg = format!("{:?}", result.unwrap_err());
-        assert!(
-            msg.contains("not found"),
-            "unexpected error: {msg}"
-        );
+        assert!(msg.contains("not found"), "unexpected error: {msg}");
     }
 }

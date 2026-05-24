@@ -1458,8 +1458,12 @@ fn complete_native_install_from_bytes(
         projection.performed,
     )?;
 
-    let install_lifecycle =
-        try_register_lifecycle(&scoped_ref.scoped_id, version.as_str(), computed_blake3, &output_path);
+    let install_lifecycle = try_register_lifecycle(
+        &scoped_ref.scoped_id,
+        version.as_str(),
+        computed_blake3,
+        &output_path,
+    );
 
     Ok(InstallResult {
         capsule_id,
@@ -1519,8 +1523,12 @@ fn complete_standard_install_from_bytes(
         keep_progressive_flow_open,
     )?;
 
-    let install_lifecycle =
-        try_register_lifecycle(&scoped_ref.scoped_id, version.as_str(), computed_blake3, &output_path);
+    let install_lifecycle = try_register_lifecycle(
+        &scoped_ref.scoped_id,
+        version.as_str(),
+        computed_blake3,
+        &output_path,
+    );
 
     Ok(InstallResult {
         capsule_id,

@@ -209,7 +209,10 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
         let webview = WebViewBuilder::new()
             .with_html(IMPORT_HTML)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(SystemCapsuleId::AtoImport, queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoImport,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Import window");
