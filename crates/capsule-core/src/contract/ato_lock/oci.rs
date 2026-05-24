@@ -1,8 +1,8 @@
 //! Typed accessors for OCI resolution facts in `ato.lock.json`.
 //!
-//! Implements Phase 1 of OCI lock migration: dual-read from main lock
-//! (`resolution.oci_images`) with transparent fallback to the sidecar
-//! (`ato.oci.lock.json`).
+//! Implements Phase 1 (read) and Phase 2 (write) of OCI lock migration.
+//! Read path: dual-read from main lock with transparent sidecar fallback.
+//! Write path: upsert OCI facts into ato.lock.json resolution section.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::AtoLock;
+use crate::error::CapsuleError;
 use crate::oci_compose_lock::{self, OciImageLockEntry as SidecarImageLockEntry};
 use crate::types::OciPlatform;
 
@@ -351,6 +352,56 @@ pub fn parse_platform_str(s: &str) -> OciPlatform {
     oci_compose_lock::parse_platform_str(s)
 }
 
+pub fn upsert_oci_lock_facts(
+    lock: &mut AtoLock,
+    images: BTreeMap<String, OciImageLockEntry>,
+    imports: BTreeMap<String, OciImportEntry>,
+) -> std::result::Result<(), OciMainLockError> {
+    for (target, entry) in &images {
+        validate_oci_image_entry(target, entry).map_err(OciMainLockError::ValidationFailed)?;
+    }
+    for (id, entry) in &imports {
+        validate_oci_import_entry(id, entry).map_err(OciMainLockError::ValidationFailed)?;
+    }
+
+    let images_value = serde_json::to_value(&images).map_err(|err| {
+        OciMainLockError::ParseFailed(format!("failed to serialize oci_images: {err}"))
+    })?;
+    let imports_value = serde_json::to_value(&imports).map_err(|err| {
+        OciMainLockError::ParseFailed(format!("failed to serialize oci_imports: {err}"))
+    })?;
+
+    lock.resolution
+        .entries
+        .insert("oci_images".to_string(), images_value);
+    lock.resolution
+        .entries
+        .insert("oci_imports".to_string(), imports_value);
+
+    Ok(())
+}
+
+pub fn write_oci_facts_to_main_lock(
+    project_dir: &Path,
+    images: BTreeMap<String, OciImageLockEntry>,
+    imports: BTreeMap<String, OciImportEntry>,
+) -> Result<(), CapsuleError> {
+    use super::{load_unvalidated_from_path, write_pretty_to_path};
+
+    let main_lock_path = project_dir.join("ato.lock.json");
+    let mut lock = if main_lock_path.exists() {
+        load_unvalidated_from_path(&main_lock_path)?
+    } else {
+        AtoLock::default()
+    };
+
+    upsert_oci_lock_facts(&mut lock, images, imports).map_err(|err| {
+        CapsuleError::Config(format!("failed to upsert OCI lock facts: {err}"))
+    })?;
+
+    write_pretty_to_path(&lock, &main_lock_path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -360,6 +411,8 @@ mod tests {
 
     use super::*;
     use crate::ato_lock::AtoLock;
+    use crate::ato_lock::{FeatureName, KnownFeature};
+    use crate::ato_lock;
     use crate::oci_compose_lock::{
         OciComposeLock, OciImageLockEntry as SidecarImageLockEntry, OciImportMeta,
         OCI_COMPOSE_LOCK_FILE_NAME,
@@ -835,5 +888,311 @@ mod tests {
         let s2 = w2.to_string();
         assert!(s2.contains("oci_sidecar_lock_parse_failed"));
         assert!(s2.contains("bad json"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Phase 2: Write path tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    fn sample_image_entries() -> BTreeMap<String, OciImageLockEntry> {
+        let mut images = BTreeMap::new();
+        images.insert(
+            "db".to_string(),
+            OciImageLockEntry {
+                declared_ref: "postgres:14".to_string(),
+                resolved_ref: format!("docker.io/library/postgres@{}", sha('a')),
+                resolved_digest: sha('a'),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+                import_id: Some("default".to_string()),
+            },
+        );
+        images.insert(
+            "app".to_string(),
+            OciImageLockEntry {
+                declared_ref: "example/myapp:1.0".to_string(),
+                resolved_ref: format!("example/myapp@{}", sha('f')),
+                resolved_digest: sha('f'),
+                platform: "linux/arm64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+                import_id: Some("default".to_string()),
+            },
+        );
+        images
+    }
+
+    fn sample_import_entries() -> BTreeMap<String, OciImportEntry> {
+        let mut imports = BTreeMap::new();
+        imports.insert(
+            "default".to_string(),
+            OciImportEntry {
+                kind: "compose".to_string(),
+                source_path: "docker-compose.yml".to_string(),
+                source_hash: sha('b'),
+            },
+        );
+        imports
+    }
+
+    #[test]
+    fn main_lock_write_creates_ato_lock_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_lock_path = dir.path().join("ato.lock.json");
+        assert!(!main_lock_path.exists());
+
+        write_oci_facts_to_main_lock(
+            dir.path(),
+            sample_image_entries(),
+            sample_import_entries(),
+        )
+        .expect("write_oci_facts_to_main_lock should create lock when missing");
+
+        assert!(main_lock_path.exists(), "ato.lock.json should be created");
+
+        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let images = oci_images_from_main_lock(&lock)
+            .unwrap()
+            .expect("oci_images should be present");
+        let imports = oci_imports_from_main_lock(&lock)
+            .unwrap()
+            .expect("oci_imports should be present");
+
+        assert!(images.contains_key("db"));
+        assert!(images.contains_key("app"));
+        assert_eq!(images["db"].declared_ref, "postgres:14");
+        assert_eq!(imports["default"].kind, "compose");
+    }
+
+    #[test]
+    fn main_lock_write_preserves_unrelated_resolution_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_lock_path = dir.path().join("ato.lock.json");
+
+        let mut preexisting = AtoLock::default();
+        preexisting
+            .resolution
+            .entries
+            .insert("runtime".to_string(), json!({"kind": "deno", "version": "2.1.3"}));
+        ato_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+
+        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        assert!(
+            lock.resolution.entries.contains_key("runtime"),
+            "existing runtime entry must be preserved"
+        );
+        assert!(
+            lock.resolution.entries.contains_key("oci_images"),
+            "oci_images must be added"
+        );
+        assert!(
+            lock.resolution.entries.contains_key("oci_imports"),
+            "oci_imports must be added"
+        );
+
+        let runtime = lock.resolution.entries.get("runtime").unwrap();
+        assert_eq!(runtime["kind"], "deno");
+    }
+
+    #[test]
+    fn main_lock_write_upserts_oci_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_lock_path = dir.path().join("ato.lock.json");
+
+        let initial_images = sample_image_entries();
+        let initial_imports = sample_import_entries();
+        write_oci_facts_to_main_lock(dir.path(), initial_images, initial_imports).unwrap();
+
+        let mut updated_images = sample_image_entries();
+        updated_images.insert(
+            "cache".to_string(),
+            OciImageLockEntry {
+                declared_ref: "redis:7".to_string(),
+                resolved_ref: format!("docker.io/library/redis@{}", sha('c')),
+                resolved_digest: sha('c'),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+                import_id: Some("default".to_string()),
+            },
+        );
+        write_oci_facts_to_main_lock(dir.path(), updated_images, sample_import_entries()).unwrap();
+
+        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let images = oci_images_from_main_lock(&lock)
+            .unwrap()
+            .expect("oci_images");
+        assert!(images.contains_key("db"));
+        assert!(images.contains_key("app"));
+        assert!(images.contains_key("cache"));
+        assert_eq!(images["cache"].declared_ref, "redis:7");
+    }
+
+    #[test]
+    fn main_lock_write_validates_resolved_ref_digest_match() {
+        let mut images = BTreeMap::new();
+        images.insert(
+            "db".to_string(),
+            OciImageLockEntry {
+                declared_ref: "postgres:14".to_string(),
+                resolved_ref: format!("docker.io/library/postgres@{}", sha('a')),
+                resolved_digest: sha('b'),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+                import_id: Some("default".to_string()),
+            },
+        );
+        let imports = BTreeMap::new();
+
+        let mut lock = AtoLock::default();
+        let err = upsert_oci_lock_facts(&mut lock, images, imports).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("validation"), "got: {msg}");
+    }
+
+    #[test]
+    fn main_lock_write_is_stable_across_repeated_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_lock_path = dir.path().join("ato.lock.json");
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+        let first = std::fs::read_to_string(&main_lock_path).unwrap();
+
+        std::fs::remove_file(&main_lock_path).unwrap();
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+        let second = std::fs::read_to_string(&main_lock_path).unwrap();
+
+        assert_eq!(
+            first, second,
+            "lock output should be stable across repeated writes"
+        );
+    }
+
+    #[test]
+    fn main_lock_write_preserves_lock_id_after_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_lock_path = dir.path().join("ato.lock.json");
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+        let first =
+            ato_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+        let second =
+            ato_lock::load_unvalidated_from_path(&main_lock_path).expect("second lock");
+
+        assert!(second.lock_id.is_some());
+        let images = oci_images_from_main_lock(&second)
+            .unwrap()
+            .expect("oci_images");
+        assert_eq!(images.len(), 2);
+    }
+
+    #[test]
+    fn upsert_oci_lock_facts_rejects_mismatched_digest() {
+        let mut images = BTreeMap::new();
+        images.insert(
+            "db".to_string(),
+            OciImageLockEntry {
+                declared_ref: "postgres:14".to_string(),
+                resolved_ref: format!("docker.io/library/postgres@{}", sha('a')),
+                resolved_digest: sha('c'),
+                platform: "linux/amd64".to_string(),
+                provider_semantics: "podman-rootless-native-v1".to_string(),
+                import_id: Some("default".to_string()),
+            },
+        );
+        let imports = BTreeMap::new();
+        let mut lock = AtoLock::default();
+        assert!(upsert_oci_lock_facts(&mut lock, images, imports).is_err());
+    }
+
+    #[test]
+    fn upsert_oci_lock_facts_rejects_invalid_import_path() {
+        let images = sample_image_entries();
+        let mut imports = BTreeMap::new();
+        imports.insert(
+            "bad".to_string(),
+            OciImportEntry {
+                kind: "compose".to_string(),
+                source_path: "/absolute/path.yml".to_string(),
+                source_hash: sha('a'),
+            },
+        );
+        let mut lock = AtoLock::default();
+        assert!(upsert_oci_lock_facts(&mut lock, images, imports).is_err());
+    }
+
+    #[test]
+    fn dual_read_after_main_write_uses_main_lock() {
+        let dir = tempfile::tempdir().unwrap();
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+
+        write_sidecar_lock(&dir, &sample_sidecar_lock());
+
+        let main_lock_path = dir.path().join("ato.lock.json");
+        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let result = read_oci_lock(&lock, dir.path()).unwrap();
+
+        assert!(
+            matches!(result.source, OciLockSource::MainLock),
+            "must use main lock even when sidecar exists"
+        );
+        assert!(result.images.contains_key("db"));
+        assert!(result.images.contains_key("app"));
+        assert_eq!(result.images["db"].resolved_digest, sha('a'));
+    }
+
+    #[test]
+    fn write_then_read_roundtrip_produces_valid_lock() {
+        let dir = tempfile::tempdir().unwrap();
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+
+        let main_lock_path = dir.path().join("ato.lock.json");
+
+        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        assert_eq!(lock.schema_version, crate::ato_lock::ATO_LOCK_SCHEMA_VERSION);
+
+        ato_lock::validate_structural_non_strict(&lock).unwrap();
+
+        let images = oci_images_from_main_lock(&lock)
+            .unwrap()
+            .expect("oci_images");
+        assert_eq!(images.len(), 2);
+        let imports = oci_imports_from_main_lock(&lock)
+            .unwrap()
+            .expect("oci_imports");
+        assert_eq!(imports.len(), 1);
+    }
+
+    #[test]
+    fn write_oci_facts_preserves_existing_contract_and_features() {
+        let dir = tempfile::tempdir().unwrap();
+        let main_lock_path = dir.path().join("ato.lock.json");
+
+        let mut preexisting = AtoLock::default();
+        preexisting.features.declared =
+            vec![FeatureName::Known(KnownFeature::ReadOnlyRootFs)];
+        preexisting
+            .contract
+            .entries
+            .insert("process".to_string(), json!({"driver": "deno"}));
+        ato_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .unwrap();
+
+        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        assert!(lock.contract.entries.contains_key("process"));
+        assert_eq!(lock.features.declared.len(), 1);
     }
 }
