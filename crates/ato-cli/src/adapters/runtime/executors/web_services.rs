@@ -23,7 +23,6 @@ use crate::runtime::overrides as runtime_overrides;
 
 use super::launch_context::RuntimeLaunchContext;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -447,7 +446,8 @@ fn wait_until_ready_in_state(
     service_name: &str,
     state: &Arc<Mutex<ServiceStartupState>>,
 ) -> Result<()> {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
+    let mut delay_applied = false;
+    let mut deadline: Option<Instant> = None;
     loop {
         let readiness = {
             let mut state_guard = state.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -487,6 +487,17 @@ fn wait_until_ready_in_state(
 
             (probe, port)
         };
+        if !delay_applied {
+            let initial_delay = readiness_initial_delay(&readiness.0);
+            if !initial_delay.is_zero() {
+                thread::sleep(initial_delay);
+            }
+            delay_applied = true;
+        }
+
+        let timeout = readiness_timeout(&readiness.0);
+        let interval = readiness_interval(&readiness.0);
+        let deadline = *deadline.get_or_insert_with(|| Instant::now() + timeout);
 
         if readiness_probe_ok(&readiness.0, readiness.1)? {
             state
@@ -502,7 +513,7 @@ fn wait_until_ready_in_state(
                 format!(
                     "service '{}' readiness check timed out after {}s",
                     service_name,
-                    READINESS_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 ),
                 Some("readiness_probe"),
                 Some(service_name),
@@ -510,8 +521,23 @@ fn wait_until_ready_in_state(
             .into());
         }
 
-        thread::sleep(READINESS_INTERVAL);
+        thread::sleep(interval);
     }
+}
+
+fn readiness_initial_delay(probe: &capsule_core::types::ReadinessProbe) -> Duration {
+    Duration::from_secs(probe.initial_delay_seconds as u64)
+}
+
+fn readiness_timeout(probe: &capsule_core::types::ReadinessProbe) -> Duration {
+    Duration::from_secs(probe.timeout_seconds.max(1) as u64)
+}
+
+fn readiness_interval(probe: &capsule_core::types::ReadinessProbe) -> Duration {
+    if probe.interval_seconds == 0 {
+        return READINESS_INTERVAL;
+    }
+    Duration::from_secs(probe.interval_seconds as u64)
 }
 
 fn resolve_probe_port(
@@ -536,26 +562,28 @@ fn resolve_probe_port(
         )
         .into());
     }
-    let value = env.get(key).ok_or_else(|| {
-        AtoExecutionError::execution_contract_invalid(
-            format!(
-                "services.{}.readiness_probe.port '{}' is not defined in service env",
-                service_name, key
-            ),
-            Some("services.<name>.readiness_probe.port"),
-            Some(service_name),
-        )
-    })?;
-    let port = value.parse::<u16>().map_err(|_| {
-        AtoExecutionError::execution_contract_invalid(
-            format!(
-                "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
-                service_name, key, value
-            ),
-            Some("services.<name>.readiness_probe.port"),
-            Some(service_name),
-        )
-    })?;
+    let port = match env.get(key) {
+        Some(value) => value.parse::<u16>().map_err(|_| {
+            AtoExecutionError::execution_contract_invalid(
+                format!(
+                    "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
+                    service_name, key, value
+                ),
+                Some("services.<name>.readiness_probe.port"),
+                Some(service_name),
+            )
+        })?,
+        None => key.parse::<u16>().map_err(|_| {
+            AtoExecutionError::execution_contract_invalid(
+                format!(
+                    "services.{}.readiness_probe.port '{}' is neither defined in service env nor a numeric port literal",
+                    service_name, key
+                ),
+                Some("services.<name>.readiness_probe.port"),
+                Some(service_name),
+            )
+        })?,
+    };
     Ok(Some(port))
 }
 
@@ -764,9 +792,56 @@ fn service_startup_order(services: &HashMap<String, ServiceSpec>) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::service_startup_order;
+    use super::{
+        readiness_initial_delay, readiness_interval, readiness_timeout, resolve_probe_port,
+        service_startup_order,
+    };
+    use capsule_core::types::ReadinessProbe;
     use capsule_core::types::ServiceSpec;
     use std::collections::HashMap;
+    use std::time::Duration;
+
+    fn http_probe(port: &str) -> ReadinessProbe {
+        ReadinessProbe {
+            http_get: Some("/".to_string()),
+            tcp_connect: None,
+            exec: None,
+            port: Some(port.to_string()),
+            initial_delay_seconds: 0,
+            timeout_seconds: 1,
+            interval_seconds: 1,
+        }
+    }
+
+    #[test]
+    fn readiness_timing_uses_manifest_probe_fields() {
+        let probe = ReadinessProbe {
+            initial_delay_seconds: 3,
+            timeout_seconds: 60,
+            interval_seconds: 2,
+            ..http_probe("3000")
+        };
+
+        assert_eq!(readiness_initial_delay(&probe), Duration::from_secs(3));
+        assert_eq!(readiness_timeout(&probe), Duration::from_secs(60));
+        assert_eq!(readiness_interval(&probe), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn resolve_probe_port_accepts_numeric_literal() {
+        let env = HashMap::new();
+        let port = resolve_probe_port(&env, &http_probe("3000"), "main")
+            .expect("literal port should resolve");
+        assert_eq!(port, Some(3000));
+    }
+
+    #[test]
+    fn resolve_probe_port_keeps_env_placeholder_precedence() {
+        let env = HashMap::from([("PORT".to_string(), "4173".to_string())]);
+        let port = resolve_probe_port(&env, &http_probe("PORT"), "main")
+            .expect("env placeholder should resolve");
+        assert_eq!(port, Some(4173));
+    }
 
     #[test]
     fn startup_order_respects_dependencies() {
