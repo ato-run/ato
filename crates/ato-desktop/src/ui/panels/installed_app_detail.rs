@@ -459,10 +459,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_selected_app_returns_none_for_missing() {
+    fn resolve_selected_app_returns_fallback_for_missing() {
         let items = vec![make_dummy_item("app_aaa")];
+        // When the selected ID doesn't match any item, the helper falls
+        // back to items.first() rather than returning None.
         let result = resolve_selected_app(&items, Some("app_missing"));
-        assert!(result.is_none());
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().installed_app_id, "app_aaa");
     }
 
     #[test]
@@ -502,5 +505,71 @@ mod tests {
 
         let result2 = resolve_selected_profile(&item, Some("prod"));
         assert_eq!(result2.profile_id, "prod");
+    }
+
+    #[test]
+    fn resolve_selected_app_empty_returns_none() {
+        let items: Vec<InstalledAppDashboardItem> = vec![];
+        let result = resolve_selected_app(&items, None);
+        assert!(result.is_none());
+
+        let result2 = resolve_selected_app(&items, Some("anything"));
+        assert!(result2.is_none());
+    }
+
+    #[test]
+    fn resolve_selected_profile_falls_back_to_first_no_default() {
+        let item = InstalledAppDashboardItem {
+            installed_app_id: "app_test".to_string(),
+            publisher: "acme".to_string(),
+            slug: "hello".to_string(),
+            capsule_handle: "acme/hello".to_string(),
+            version: "1.0.0".to_string(),
+            installed_at: "".to_string(),
+            updated_at: "".to_string(),
+            profiles: vec![
+                InstalledProfileDashboardItem {
+                    profile_id: "prod".to_string(),
+                    install_profile_key: "ipk_prod".to_string(),
+                    current_revision_id: None,
+                    revisions_count: 0,
+                    latest_finalized_at: None,
+                    current_output_dir: None,
+                    revisions: vec![],
+                },
+                InstalledProfileDashboardItem {
+                    profile_id: "staging".to_string(),
+                    install_profile_key: "ipk_staging".to_string(),
+                    current_revision_id: None,
+                    revisions_count: 0,
+                    latest_finalized_at: None,
+                    current_output_dir: None,
+                    revisions: vec![],
+                },
+            ],
+            running_sessions_hint: vec![],
+        };
+        let result = resolve_selected_profile(&item, None);
+        assert_eq!(
+            result.profile_id, "prod",
+            "should fall back to first profile when no 'default' exists"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "item must have at least one profile")]
+    fn resolve_selected_profile_empty_list_panics() {
+        let item = InstalledAppDashboardItem {
+            installed_app_id: "app_test".to_string(),
+            publisher: "acme".to_string(),
+            slug: "hello".to_string(),
+            capsule_handle: "acme/hello".to_string(),
+            version: "1.0.0".to_string(),
+            installed_at: "".to_string(),
+            updated_at: "".to_string(),
+            profiles: vec![],
+            running_sessions_hint: vec![],
+        };
+        let _ = resolve_selected_profile(&item, None);
     }
 }
