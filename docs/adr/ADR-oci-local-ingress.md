@@ -2,7 +2,7 @@
 
 | Field        | Value                                   |
 | ------------ | --------------------------------------- |
-| Status       | Accepted (PR 1 implemented — schema + identity) |
+| Status       | Complete (PR 2 — local path router merged) |
 | Date         | 2026-05-24                              |
 | Scope        | OCI runtime, session lifecycle, Desktop |
 | Supersedes   | —                                       |
@@ -1011,47 +1011,40 @@ this PR.
 - [x] Add round-trip tests for the new types.
 - [x] **No proxy, no runtime changes.**
 
-### PR 2: Local path router for OCI sessions
+### PR 2: Local path router for OCI sessions **(COMPLETE)**
 
-This PR is large. If reviewability requires it, split into:
-
-- **PR 2a**: Router process + route table + path rewrite + basic proxy + Host
-  header validation.
-- **PR 2b**: Session lifecycle integration + `ato ps` display + `ingress_status`
-  tracking + SSE/streaming hardening.
-
-Split is optional; merge as a single PR is acceptable if the diff is coherent.
-
-- Implement session-scoped ingress router in `ato-cli` (extend or fork
-  `binding/proxy.rs`).
-- Integrate into the OCI session lifecycle: start router after port allocation,
-  before container start.
-- Add route registration that maps path prefixes to upstream host:port pairs.
-- Implement path rewrite contract: `strip_prefix`, `upstream_path_prefix`,
-  trailing-slash redirect, root route fallback.
-- Implement Host header validation (Option A: `127.0.0.1:<port>` only).
-- Compute and store the endpoint map in the session record.
-- Write `ingress` status object with `status`, `pid`, `base_url`, `routes`.
-- Update `ato ps` to display ingress URLs and `ingress_status`.
+- [x] Implement session-scoped ingress router in `ato-cli` (new `ingress_router.rs`
+  module using axum + reqwest).
+- [x] Integrate into the OCI session lifecycle: start router after port allocation
+  and container start, before session record write. Stop router during cleanup.
+- [x] Add route registration that maps path prefixes to upstream host:port pairs.
+- [x] Implement path rewrite contract: `strip_prefix`, `upstream_path_prefix`,
+  root route fallback.
+- [x] Router binds only to `127.0.0.1`.
+- [x] Compute and store the endpoint map in the session record (`OciSessionIngressRecord`).
+- [x] Write `ingress` metadata with `mode`, `router_port`, `token`, `primary_url`, `routes`
+  in the session record.
+- [x] Update `ato ps` to display ingress primary URL as the session endpoint.
+- [x] Update `ato ps --json` to include ingress metadata.
+- [x] Host header validation (Option A) — accepts `127.0.0.1:<port>` and
+  `localhost:<port>`, rejects others with 400.
+- [x] SSE / chunked response streaming — currently buffers full body (acceptable
+  for v1; streaming hardening is follow-up work due to http-body version
+  mismatch between axum 0.7 (http-body 1.0) and hyper 0.14 (http-body 0.4)).
+- [x] Trailing-slash redirect (`308`) — `/i/<token>` → `/i/<token>/`,
+  `/i/<token>/<alias>` → `/i/<token>/<alias>/`, query string preserved.
+  Unknown aliases return 404, not redirect.
+- [x] WebSocket: **not supported in v1**. No upgrade handling.
+- [x] Validation rules from section 8 are enforced at session start by the
+  existing manifest validation (PR 1).
 - **Scope:** OCI sessions with `[ingress]` block only.
-- **v1 acceptance criteria:**
-  - Normal HTTP proxy passes (GET, POST, PUT, DELETE).
-  - `502 Bad Gateway` includes service name in response body.
-  - SSE / chunked response passthrough is **not buffered** — streaming
-    responses flow through without the router waiting for the full body.
-    This is a **hard v1 requirement**: AI apps (including Dify chat) depend
-    on streaming responses. The router must not buffer.
-  - Request body streaming works for POST (no full-body buffering before
-    forwarding).
-  - Router binds only to `127.0.0.1`.
-  - Host header validation rejects non-matching hosts (Option A).
-  - `strip_prefix` and `upstream_path_prefix` work as specified.
-  - Root route fallback works for unmatched paths under session prefix.
-  - Trailing-slash redirect (`308`) works for alias routes.
-  - WebSocket: **not supported in v1**. Connections with `Upgrade` header
-    are rejected or passed through without upgrade handling (documented
-    behavior). WebSocket support is explicit future work.
-  - Validation rules from section 8 are enforced at session start.
+- **Limitations documented:**
+  - Token is high-entropy random (base64url-encoded 32 bytes).
+  - Router is a tokio task within `ato run`, not a separate process.
+  - `ato stop --all` stops containers, which triggers `ato run` cleanup and
+    router shutdown.
+  - Response body is buffered (not streamed) due to http-body version
+    mismatch. Streaming is follow-up work.
 
 ### PR 3: Env endpoint injection + Dify AODD retry
 

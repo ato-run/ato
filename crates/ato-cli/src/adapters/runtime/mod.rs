@@ -1,5 +1,6 @@
 pub(crate) mod executors;
 pub(crate) mod external_capsule;
+pub(crate) mod ingress_router;
 pub(crate) mod manager;
 pub(crate) mod oci_provider;
 pub(crate) mod oci_session_store;

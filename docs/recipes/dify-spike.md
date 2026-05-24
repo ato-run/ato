@@ -238,3 +238,11 @@ ato run samples/recipes/dify \
 ```
 
 > ⚠️ Replace `SECRET_KEY` with a secure random value before use in any persistent environment.
+
+## Ingress Router Status
+
+Local path router runtime has landed in `feat/ingress-path-router`.
+Dify `CONSOLE_API_URL` env injection remains a separate PR (PR 3 in the
+ingress rollout plan). The router runtime provides the infrastructure but
+does not yet inject resolved URLs into containers. See
+`docs/adr/ADR-oci-local-ingress.md` for the full rollout plan.
