@@ -225,6 +225,19 @@ pub struct SelectSettingsTab {
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
+pub struct SelectInstalledApp {
+    pub installed_app_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct SelectInstalledProfile {
+    pub installed_app_id: String,
+    pub profile_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
 pub struct SelectRouteMetadataTab {
     pub tab: crate::state::CapsuleDetailTab,
 }

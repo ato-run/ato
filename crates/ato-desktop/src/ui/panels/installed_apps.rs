@@ -2,10 +2,12 @@ use gpui::prelude::*;
 use gpui::{div, hsla, px, AnyElement, FontWeight, IntoElement, MouseButton, Styled};
 
 use super::super::theme::Theme;
+use crate::app::SelectInstalledApp;
 use crate::install_lifecycle_dashboard::{DashboardCache, InstalledAppDashboardItem};
 
 pub(in crate::ui) fn render_installed_apps_section(
     items: &[InstalledAppDashboardItem],
+    selected_installed_app_id: Option<&str>,
     theme: &Theme,
 ) -> AnyElement {
     if items.is_empty() {
@@ -45,15 +47,20 @@ pub(in crate::ui) fn render_installed_apps_section(
         .children(
             items
                 .iter()
-                .map(|item| render_app_card(item, theme))
+                .map(|item| render_app_card(item, selected_installed_app_id, theme))
                 .collect::<Vec<_>>(),
         )
         .into_any_element()
 }
 
-fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div {
+fn render_app_card(
+    item: &InstalledAppDashboardItem,
+    selected_installed_app_id: Option<&str>,
+    theme: &Theme,
+) -> gpui::Div {
     let handle = item.capsule_handle.clone();
     let version = item.version.clone();
+    let installed_app_id = item.installed_app_id.clone();
     let profile_count = item.profiles.len();
     let profile_info = if profile_count == 1 {
         format!(
@@ -82,6 +89,8 @@ fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div
         ipk.clone()
     };
 
+    let is_selected = selected_installed_app_id == Some(installed_app_id.as_str());
+
     div()
         .flex()
         .flex_row()
@@ -90,6 +99,28 @@ fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div
         .px(px(10.0))
         .py(px(8.0))
         .rounded(px(8.0))
+        .when(is_selected, |this| {
+            this.bg(hsla(217.0 / 360.0, 0.75, 0.45, 0.12))
+        })
+        .cursor_pointer()
+        .hover(|style| {
+            if is_selected {
+                style.bg(hsla(217.0 / 360.0, 0.75, 0.45, 0.15))
+            } else {
+                style.bg(hsla(60.0 / 360.0, 0.05, 0.96, 1.0))
+            }
+        })
+        .on_mouse_down(MouseButton::Left, {
+            let installed_app_id = installed_app_id.clone();
+            move |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(SelectInstalledApp {
+                        installed_app_id: installed_app_id.clone(),
+                    }),
+                    cx,
+                );
+            }
+        })
         .child(
             div()
                 .w(px(32.0))
@@ -163,30 +194,23 @@ fn render_app_card(item: &InstalledAppDashboardItem, theme: &Theme) -> gpui::Div
                         .child("Launch")
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             let ipk = ipk.clone();
-                            let ato_bin =
-                                match crate::orchestrator::resolve_ato_binary() {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "cannot resolve ato binary: {e}"
-                                        );
-                                        return;
-                                    }
-                                };
+                            let ato_bin = match crate::orchestrator::resolve_ato_binary() {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::error!("cannot resolve ato binary: {e}");
+                                    return;
+                                }
+                            };
                             let async_cx = cx.to_async();
                             cx.foreground_executor()
                                 .spawn(async move {
-                                    let result =
-                                        crate::install_lifecycle_dashboard::spawn_launch(
-                                            &ato_bin,
-                                            &ipk,
-                                        );
+                                    let result = crate::install_lifecycle_dashboard::spawn_launch(
+                                        &ato_bin, &ipk,
+                                    );
                                     DashboardCache::refresh();
                                     let _ = async_cx.update(|app| {
                                         if let Err(e) = result {
-                                            tracing::error!(
-                                                "launch installed app {ipk}: {e}"
-                                            );
+                                            tracing::error!("launch installed app {ipk}: {e}");
                                         }
                                         app.refresh_windows();
                                     });
