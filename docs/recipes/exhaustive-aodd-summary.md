@@ -264,13 +264,13 @@ db (postgres) → redis → weaviate → api + worker → web (main)
 | `CONSOLE_API_URL` dynamic port (no ingress) | Ato architecture | medium — SSR works, browser API calls limited |
 | ~~`init_permissions` one-shot service missing~~ ✅ Resolved (lifecycle) | Lifecycle landed in `feat/runtime-oci-run-once`; full Dify wire-up still gated by shared-mutable-state (B4) | medium — file uploads unverified |
 | v0.3 cannot override Docker CMD | Ato missing feature | low for spike — affects Redis password config |
-| Shared mutable state (worker/api storage) | Ato design constraint | low for spike |
+| ~~Shared mutable state (worker/api storage)~~ | ✅ Policy landed — `sharing = "same-capsule"`; pending AODD confirmation |
 
 ### New runtime limitations discovered
 
 1. **`tcp_connect` probe requires placeholder name, not port number** — use exec probe for Redis instead.
 2. ~~**v0.3 rejects `cmd` in named OCI targets**~~ ✅ Resolved in `feat/runtime-oci-command-override` — `cmd = [...]` now allowed for OCI named targets.
 3. ~~**No `run_once`/one-shot service**~~ ✅ Resolved in `feat/runtime-oci-run-once` — `run_once = true` on OCI named targets gates dependents on exit-0. The `init_permissions` chown step itself still needs **#4 (shared mutable state)** to land cleanly in Dify because the chowned volume is shared with `worker`; the lifecycle hole is now closed in isolation.
-4. **Shared mutable state** — Worker and api share a volume in upstream; not expressible in Ato v0.3.
+4. ~~**Shared mutable state** — Worker and api share a volume in upstream; not expressible in Ato v0.3.~~ ✅ Resolved in `feat/runtime-shared-state-policy` via `sharing = "same-capsule"`.
 
 Full report: [docs/recipes/dify-spike.md](./dify-spike.md)
