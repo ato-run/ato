@@ -8,7 +8,9 @@ use gpui_component::scroll::ScrollableElement;
 
 use super::super::theme::Theme;
 use crate::app::{NavigateToUrl, OpenCloudDock, OpenLocalRegistry, ShowSettings, SignInToAtoRun};
-use crate::install_lifecycle_dashboard::{DashboardCache, InstalledAppDashboardItem};
+use crate::install_lifecycle_dashboard::{
+    DashboardCache, InstalledAppDashboardItem, InstalledAppsActionStatus,
+};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
 
 use super::installed_app_detail::render_installed_app_detail_panel;
@@ -623,7 +625,25 @@ fn render_installed_apps_section_wrapper(state: &AppState, theme: &Theme) -> gpu
                                 selected,
                                 selected_profile_id,
                                 theme,
-                            )),
+                            ))
+                            .when_some(DashboardCache::action_status(), |this, status| {
+                                let color = match &status {
+                                    InstalledAppsActionStatus::Error { .. } => {
+                                        hsla(0.0, 0.7, 0.5, 1.0)
+                                    }
+                                    InstalledAppsActionStatus::Success { .. } => {
+                                        hsla(130.0 / 360.0, 0.7, 0.5, 1.0)
+                                    }
+                                    _ => theme.text_tertiary,
+                                };
+                                this.child(
+                                    div()
+                                        .pt(px(8.0))
+                                        .text_size(px(10.0))
+                                        .text_color(color)
+                                        .child(status.display_text()),
+                                )
+                            }),
                     )
                     .into_any_element()
             }
@@ -651,12 +671,18 @@ fn render_refresh_button() -> gpui::AnyElement {
         .hover(|style| style.bg(hsla(217.0 / 360.0, 0.75, 0.45, 0.10)))
         .child("Refresh")
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            DashboardCache::set_action_status(Some(InstalledAppsActionStatus::Refreshing));
             let async_cx = cx.to_async();
             // GPUI's foreground_executor runs on a tokio multi-thread runtime (not the
             // UI thread), so blocking FS I/O here does not block rendering.
             cx.foreground_executor()
                 .spawn(async move {
                     DashboardCache::refresh();
+                    DashboardCache::set_action_status(Some(
+                        InstalledAppsActionStatus::Success {
+                            message: "Installed apps refreshed".to_string(),
+                        },
+                    ));
                     let _ = async_cx.update(|app| {
                         app.refresh_windows();
                     });
