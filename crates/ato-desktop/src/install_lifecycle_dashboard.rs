@@ -56,7 +56,6 @@ pub struct InstalledAppsUiState {
     pub selected_installed_app_id: Option<String>,
     pub selected_profile_id: Option<String>,
     pub detail_error: Option<String>,
-    pub action_status: Option<InstalledAppsActionStatus>,
 }
 
 impl InstalledAppsUiState {
@@ -64,7 +63,7 @@ impl InstalledAppsUiState {
         self.selected_installed_app_id = Some(installed_app_id);
         self.selected_profile_id = Some("default".to_string());
         self.detail_error = None;
-        DashboardCache::set_action_status(None);
+        DashboardCache::clear_action_status();
     }
 
     pub fn select_profile(&mut self, installed_app_id: &str, profile_id: &str) {
@@ -74,26 +73,6 @@ impl InstalledAppsUiState {
             self.selected_profile_id = Some(profile_id.to_string());
             self.detail_error = None;
         }
-    }
-
-    pub fn begin_refresh(&mut self) {
-        self.action_status = Some(InstalledAppsActionStatus::Refreshing);
-        self.detail_error = None;
-    }
-
-    pub fn begin_launch(&mut self, ipk: String) {
-        self.action_status = Some(InstalledAppsActionStatus::Launching {
-            install_profile_key: ipk,
-        });
-        self.detail_error = None;
-    }
-
-    pub fn finish_success(&mut self, message: String) {
-        self.action_status = Some(InstalledAppsActionStatus::Success { message });
-    }
-
-    pub fn finish_error(&mut self, message: String) {
-        self.action_status = Some(InstalledAppsActionStatus::Error { message });
     }
 }
 
@@ -184,9 +163,14 @@ impl DashboardCache {
         CACHE.lock().unwrap().action_status = status;
     }
 
+    pub fn clear_action_status() {
+        CACHE.lock().unwrap().action_status = None;
+    }
+
     /// Re-read the store + session records and update the cache.
-    /// Safe to call from any thread.
-    pub fn refresh() {
+    /// Safe to call from any thread.  Returns `Ok(())` on success or
+    /// `Err(message)` on failure; the cache is always updated either way.
+    pub fn refresh() -> Result<(), String> {
         let result = (|| -> Result<_> {
             let mut items = list_installed_apps_dashboard().context("list installed apps")?;
             attach_running_sessions(&mut items).context("attach running sessions")?;
@@ -194,10 +178,17 @@ impl DashboardCache {
         })();
 
         let mut guard = CACHE.lock().unwrap();
-        guard.items = match result {
-            Ok(items) => Ok(items),
-            Err(e) => Err(format!("{:#}", e)),
-        };
+        match result {
+            Ok(items) => {
+                guard.items = Ok(items);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("{:#}", e);
+                guard.items = Err(msg.clone());
+                Err(msg)
+            }
+        }
     }
 
     /// Reset the cache to empty.  Call between tests to avoid
@@ -784,7 +775,7 @@ mod tests {
         let initial = DashboardCache::get().unwrap();
         assert!(initial.is_empty());
 
-        DashboardCache::refresh();
+        let _ = DashboardCache::refresh();
         let after = DashboardCache::get().unwrap();
         assert_eq!(after.len(), 1);
 
@@ -867,58 +858,100 @@ mod tests {
     }
 
     #[test]
-    fn installed_apps_ui_begin_refresh_sets_refreshing() {
-        let mut ui = super::InstalledAppsUiState::default();
-        assert!(ui.action_status.is_none());
+    #[serial]
+    fn dashboard_cache_refresh_returns_ok_on_success() {
+        DashboardCache::reset_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
+        std::env::set_var("ATO_HOME", dir.path());
 
-        ui.begin_refresh();
+        let result = DashboardCache::refresh();
+        assert!(result.is_ok());
 
-        match ui.action_status {
-            Some(super::InstalledAppsActionStatus::Refreshing) => {}
-            _ => panic!("expected Refreshing"),
-        }
+        DashboardCache::reset_for_test();
+        std::env::remove_var("ATO_HOME");
     }
 
     #[test]
-    fn installed_apps_ui_begin_launch_sets_launching_with_ipk() {
-        let mut ui = super::InstalledAppsUiState::default();
+    #[serial]
+    fn dashboard_cache_refresh_returns_err_on_corrupt_store() {
+        DashboardCache::reset_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ATO_HOME", dir.path());
 
-        ui.begin_launch("ipk_test".to_string());
+        // Create a file where instances/ should be, so list_installed_apps fails
+        std::fs::write(dir.path().join("instances"), "not a directory").unwrap();
 
-        match &ui.action_status {
-            Some(super::InstalledAppsActionStatus::Launching {
-                install_profile_key,
-            }) => assert_eq!(install_profile_key, "ipk_test"),
-            _ => panic!("expected Launching with ipk"),
-        }
+        let result = DashboardCache::refresh();
+        assert!(result.is_err(), "expected Err, got Ok: {result:?}");
+
+        DashboardCache::reset_for_test();
+        std::env::remove_var("ATO_HOME");
     }
 
     #[test]
-    fn installed_apps_ui_finish_success_replaces_pending() {
-        let mut ui = super::InstalledAppsUiState::default();
-        ui.begin_refresh();
+    #[serial]
+    fn dashboard_cache_action_status_reflects_refresh_error() {
+        DashboardCache::reset_for_test();
+        DashboardCache::clear_action_status();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ATO_HOME", dir.path());
 
-        ui.finish_success("Done".to_string());
+        // Create a file where instances/ should be, so list_installed_apps fails
+        std::fs::write(dir.path().join("instances"), "not a directory").unwrap();
 
-        match &ui.action_status {
-            Some(super::InstalledAppsActionStatus::Success { message }) => {
-                assert_eq!(message, "Done")
-            }
-            _ => panic!("expected Success"),
-        }
-    }
+        let _ = DashboardCache::refresh();
+        let status = DashboardCache::action_status();
+        assert!(status.is_none(), "action_status is not set by refresh alone");
 
-    #[test]
-    fn installed_apps_ui_finish_error_records_message() {
-        let mut ui = super::InstalledAppsUiState::default();
+        // Simulate what the button handler does
+        DashboardCache::set_action_status(Some(super::InstalledAppsActionStatus::Refreshing));
+        let result = DashboardCache::refresh();
+        DashboardCache::set_action_status(Some(match result {
+            Ok(()) => super::InstalledAppsActionStatus::Success {
+                message: "ok".to_string(),
+            },
+            Err(e) => super::InstalledAppsActionStatus::Error {
+                message: format!("Refresh failed: {e}"),
+            },
+        }));
 
-        ui.finish_error("Something went wrong".to_string());
-
-        match &ui.action_status {
+        match DashboardCache::action_status() {
             Some(super::InstalledAppsActionStatus::Error { message }) => {
-                assert_eq!(message, "Something went wrong")
+                assert!(
+                    message.contains("Refresh failed"),
+                    "expected error message, got: {message}"
+                );
             }
-            _ => panic!("expected Error"),
+            other => panic!("expected Error, got {other:?}"),
         }
+
+        DashboardCache::reset_for_test();
+        std::env::remove_var("ATO_HOME");
+    }
+
+    #[test]
+    #[serial]
+    fn dashboard_cache_action_status_clear_by_select_app() {
+        DashboardCache::reset_for_test();
+        DashboardCache::clear_action_status();
+        let dir = tempfile::tempdir().unwrap();
+        let (_app_id, _profile_id, _ipk) = scaffold_one(&dir, 1);
+        std::env::set_var("ATO_HOME", dir.path());
+
+        // Set a pending status
+        DashboardCache::set_action_status(Some(super::InstalledAppsActionStatus::Refreshing));
+        assert!(DashboardCache::action_status().is_some());
+
+        // select_app clears it via DashboardCache::clear_action_status()
+        let mut ui = super::InstalledAppsUiState::default();
+        ui.select_app("test-app".to_string());
+        assert!(
+            DashboardCache::action_status().is_none(),
+            "select_app must clear DashboardCache action_status"
+        );
+
+        DashboardCache::reset_for_test();
+        std::env::remove_var("ATO_HOME");
     }
 }

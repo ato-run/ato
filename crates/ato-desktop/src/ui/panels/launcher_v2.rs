@@ -672,17 +672,22 @@ fn render_refresh_button() -> gpui::AnyElement {
         .child("Refresh")
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             DashboardCache::set_action_status(Some(InstalledAppsActionStatus::Refreshing));
+            // GPUI auto-repaints after event handler; pending status is visible
+            // on the next frame before the background work completes.
             let async_cx = cx.to_async();
             // GPUI's foreground_executor runs on a tokio multi-thread runtime (not the
             // UI thread), so blocking FS I/O here does not block rendering.
             cx.foreground_executor()
                 .spawn(async move {
-                    DashboardCache::refresh();
-                    DashboardCache::set_action_status(Some(
-                        InstalledAppsActionStatus::Success {
+                    let result = DashboardCache::refresh();
+                    DashboardCache::set_action_status(Some(match result {
+                        Ok(()) => InstalledAppsActionStatus::Success {
                             message: "Installed apps refreshed".to_string(),
                         },
-                    ));
+                        Err(e) => InstalledAppsActionStatus::Error {
+                            message: format!("Refresh failed: {e}"),
+                        },
+                    }));
                     let _ = async_cx.update(|app| {
                         app.refresh_windows();
                     });
