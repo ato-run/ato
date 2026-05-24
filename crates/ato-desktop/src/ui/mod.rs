@@ -37,10 +37,10 @@ use crate::app::{
     NativePaste, NativeRedo, NativeSelectAll, NativeUndo, NavigateToUrl, NewTab, NextTask,
     NextWorkspace, OpenAuthInBrowser, OpenCloudDock, OpenExternalLink, OpenLatestReleasePage,
     OpenLocalRegistry, OpenUrlBridge, PreviousTask, PreviousWorkspace, Quit, ResolutionFormBack,
-    ResolutionFormNext, ResumeAfterAuth, SaveConfigForm, SelectRouteMetadataTab, SelectSettingsTab,
-    SelectTask, ShowSettings, ShrinkSplit, SignInToAtoRun, SignOut, SplitPane,
-    SubmitResolutionForm, ToggleAutoDevtools, ToggleDevConsole, ToggleRouteMetadataPopover,
-    ToggleTheme,
+    ResolutionFormNext, ResumeAfterAuth, SaveConfigForm, SelectInstalledApp,
+    SelectInstalledProfile, SelectRouteMetadataTab, SelectSettingsTab, SelectTask, ShowSettings,
+    ShrinkSplit, SignInToAtoRun, SignOut, SplitPane, SubmitResolutionForm, ToggleAutoDevtools,
+    ToggleDevConsole, ToggleRouteMetadataPopover, ToggleTheme,
 };
 use crate::orchestrator::cleanup_stale_capsule_sessions;
 use crate::state::{
@@ -705,6 +705,37 @@ impl DesktopShell {
         crate::state::persistence::save_tabs(&self.state);
         self.sync_omnibar_with_state(window, cx, false);
         cx.notify();
+    }
+
+    fn on_select_installed_app(
+        &mut self,
+        action: &SelectInstalledApp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.installed_apps_ui.selected_installed_app_id =
+            Some(action.installed_app_id.clone());
+        self.state.installed_apps_ui.selected_profile_id = Some("default".to_string());
+        self.state.installed_apps_ui.detail_error = None;
+        cx.notify();
+    }
+
+    fn on_select_installed_profile(
+        &mut self,
+        action: &SelectInstalledProfile,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .state
+            .installed_apps_ui
+            .selected_installed_app_id
+            .as_deref()
+            == Some(&action.installed_app_id)
+        {
+            self.state.installed_apps_ui.selected_profile_id = Some(action.profile_id.clone());
+            cx.notify();
+        }
     }
 
     fn on_toggle_dev_console(
@@ -2085,6 +2116,8 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::on_focus_command_bar))
             .on_action(cx.listener(Self::on_show_settings))
             .on_action(cx.listener(Self::on_select_settings_tab))
+            .on_action(cx.listener(Self::on_select_installed_app))
+            .on_action(cx.listener(Self::on_select_installed_profile))
             .on_action(cx.listener(Self::on_select_route_metadata_tab))
             .on_action(cx.listener(Self::on_toggle_dev_console))
             .on_action(cx.listener(Self::on_new_tab))
