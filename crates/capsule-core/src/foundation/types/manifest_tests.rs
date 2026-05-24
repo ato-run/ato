@@ -2,7 +2,7 @@ use std::fs;
 
 use super::{
     is_kebab_case, is_semver, CapsuleManifest, CapsuleType, ConfigField, ConfigKind, RouteWeight,
-    RuntimeType, ValidationError, ValidationMode,
+    RuntimeType, StateSharing, ValidationError, ValidationMode,
 };
 
 const VALID_TOML: &str = r#"
@@ -2019,6 +2019,390 @@ network = { publish = true }
         ValidationError::InvalidService(name, message)
             if name == "service_binding_scope" && message.contains("cannot be empty")
     )));
+}
+
+// ── Shared state policy tests ────────────────────────────────────────────────
+
+#[test]
+fn exclusive_state_rejects_multiple_writers() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:app-uploads-v1"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::StateSharedRequiresPolicy { state, .. }
+                if state == "uploads"
+        )),
+        "expected StateSharedRequiresPolicy error, got: {errors:?}"
+    );
+
+    // Verify error message includes both service names for diagnostics.
+    let policy_error = errors
+        .iter()
+        .find(|e| matches!(e, ValidationError::StateSharedRequiresPolicy { .. }))
+        .unwrap();
+    let msg = format!("{policy_error}");
+    assert!(
+        msg.contains("app") && msg.contains("worker"),
+        "error message should include both service names, got: {msg}"
+    );
+}
+
+#[test]
+fn explicit_same_capsule_sharing_allows_multiple_writers() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:app-uploads-v1"
+sharing = "same-capsule"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(
+        manifest.validate().is_ok(),
+        "same-capsule sharing should allow multiple writers"
+    );
+}
+
+#[test]
+fn shared_state_requires_schema_id() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+sharing = "same-capsule"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::StateSharedRequiresSchemaId(name)
+                if name == "uploads"
+        )),
+        "expected StateSharedRequiresSchemaId error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn shared_state_rejects_undeclared_state_key() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.legitimate]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "data"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "undeclared-state"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "undeclared-state"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::StateKeyUndeclared(name)
+                if name == "undeclared-state"
+        )),
+        "expected StateKeyUndeclared error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn existing_single_service_state_behavior_unchanged() {
+    let toml = r#"
+schema_version = "0.3"
+name = "stateful-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "primary-data"
+attach = "explicit"
+schema_id = "vaultwarden/data/v1"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn same_service_binds_same_state_multiple_targets_still_allowed() {
+    let toml = r#"
+schema_version = "0.3"
+name = "stateful-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+[state.data]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "primary-data"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/etc/config"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidStateBinding(name, msg)
+                if name == "main" && msg.contains("bound more than once")
+        )),
+        "expected duplicate binding error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn shared_state_with_sharing_same_capsule_and_writable_defaults_true() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:app-uploads-v1"
+sharing = "same-capsule"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(manifest.validate().is_ok());
+    let req = manifest.state.get("uploads").unwrap();
+    assert_eq!(req.sharing, StateSharing::SameCapsule);
+}
+
+#[test]
+fn dify_recipe_validates_with_shared_state() {
+    let recipe_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/recipes/dify/capsule.toml"
+    );
+    let content = std::fs::read_to_string(recipe_path).expect("Dify recipe should be readable");
+    let manifest = CapsuleManifest::from_toml(&content).expect("Dify recipe should parse");
+    manifest
+        .validate()
+        .expect("Dify recipe with shared state should validate");
+}
+
+#[test]
+fn existing_batch_recipes_still_compile() {
+    let recipe_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/recipes");
+    let mut parsed = 0u32;
+    let mut failed = Vec::new();
+    for entry in std::fs::read_dir(recipe_dir).expect("recipes dir readable") {
+        let entry = entry.expect("entry readable");
+        let capsule_toml = entry.path().join("capsule.toml");
+        if !capsule_toml.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&capsule_toml) {
+            Ok(c) => c,
+            Err(e) => {
+                failed.push(format!("{}: {}", entry.file_name().to_string_lossy(), e));
+                continue;
+            }
+        };
+        match CapsuleManifest::from_toml(&content) {
+            Ok(_) => parsed += 1,
+            Err(e) => failed.push(format!(
+                "{}: parse: {}",
+                entry.file_name().to_string_lossy(),
+                e
+            )),
+        }
+    }
+    if !failed.is_empty() {
+        panic!(
+            "{}/{} recipes failed to parse:\n{}",
+            failed.len(),
+            parsed + failed.len() as u32,
+            failed.join("\n")
+        );
+    }
+    assert!(parsed > 0, "at least one recipe must parse");
 }
 
 #[test]

@@ -2098,6 +2098,117 @@ volumes:
         );
     }
 
+    /// Verify two services sharing same-capsule state receive the same mount locator.
+    #[tokio::test]
+    async fn shared_state_same_capsule_services_receive_same_mount() {
+        use capsule_core::types::Mount;
+
+        let mut provider = make_provider_with_unique_ids();
+        // Queue 3 container IDs: db, api, worker.
+        provider.create_container_queue.lock().unwrap().extend([
+            Ok("fake-db-id".to_string()),
+            Ok("fake-api-id".to_string()),
+            Ok("fake-worker-id".to_string()),
+        ]);
+        provider
+            .start_result_queue
+            .lock()
+            .unwrap()
+            .extend([Ok(()), Ok(()), Ok(())]);
+
+        let shared_source = "/var/lib/ato/state/shared-app/uploads";
+        let shared_target = "/app/storage";
+
+        let mut api_svc = make_service(
+            "api",
+            "api-image",
+            vec!["db".to_string()],
+            true,
+            Some(8080),
+            vec![ServiceConnectionInfo {
+                dependency: "db".to_string(),
+                host_env: "ATO_SERVICE_DB_HOST".to_string(),
+                port_env: "ATO_SERVICE_DB_PORT".to_string(),
+                container_port: Some(5432),
+                default_host: "db".to_string(),
+            }],
+        );
+        if let ResolvedServiceRuntime::Oci(ref mut rt) = api_svc.runtime {
+            rt.mounts = vec![Mount {
+                source: shared_source.to_string(),
+                target: shared_target.to_string(),
+                readonly: false,
+            }];
+        }
+
+        let mut worker_svc = make_service("worker", "worker-image", vec![], false, None, vec![]);
+        if let ResolvedServiceRuntime::Oci(ref mut rt) = worker_svc.runtime {
+            rt.mounts = vec![Mount {
+                source: shared_source.to_string(),
+                target: shared_target.to_string(),
+                readonly: false,
+            }];
+        }
+
+        let db = make_service("db", "postgres", vec![], false, Some(5432), vec![]);
+        let plan = OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "api".to_string(), "worker".to_string()],
+            services: vec![db, api_svc, worker_svc],
+        };
+
+        let mut images = HashMap::new();
+        images.insert("postgres".to_string(), make_image("postgres:14"));
+        images.insert("api-image".to_string(), make_image("example/api:1.0"));
+        images.insert("worker-image".to_string(), make_image("example/worker:1.0"));
+
+        let ephemeral: HashSet<String> = HashSet::new();
+        let result = execute_service_graph_with_provider(
+            &plan,
+            &images,
+            OciPolicyMode::Strict,
+            &[],
+            "shared-state-app",
+            &ephemeral,
+            &Arc::new(crate::reporters::CliReporter::new(false)),
+            &provider,
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "shared state plan must start: {result:?}");
+
+        let requests = provider.create_container_requests.lock().unwrap();
+        let api_req = requests
+            .iter()
+            .find(|r| r.name.contains("-api-"))
+            .expect("api container request must exist");
+        let worker_req = requests
+            .iter()
+            .find(|r| r.name.contains("-worker-"))
+            .expect("worker container request must exist");
+
+        let api_mount = api_req
+            .mounts
+            .iter()
+            .find(|m| m.target == shared_target)
+            .expect("api must mount shared target");
+        let worker_mount = worker_req
+            .mounts
+            .iter()
+            .find(|m| m.target == shared_target)
+            .expect("worker must mount shared target");
+
+        assert_eq!(
+            api_mount.source, worker_mount.source,
+            "shared state must use the same mount source for both services"
+        );
+        assert_eq!(api_mount.source, shared_source);
+        assert!(!api_mount.readonly, "shared state mount must be writable");
+        assert!(
+            !worker_mount.readonly,
+            "shared state mount must be writable"
+        );
+    }
+
     /// Process-wide mutex for the timeout test (env-var-dependent).
     fn run_once_test_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
