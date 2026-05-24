@@ -214,6 +214,47 @@ pub(crate) async fn execute_install_sh_run(
         .notify("🔒 Lock written: ato.oci.lock.json".to_string())
         .await?;
 
+    // Also write OCI facts into main ato.lock.json.
+    {
+        use capsule_core::ato_lock::oci::{
+            construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
+            OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
+        };
+        let main_images: BTreeMap<String, MainOciImageLockEntry> = new_lock
+            .images
+            .iter()
+            .map(|(name, entry)| {
+                let resolved_ref =
+                    construct_resolved_ref_from_sidecar(&entry.declared_ref, &entry.resolved_digest);
+                (
+                    name.clone(),
+                    MainOciImageLockEntry {
+                        declared_ref: entry.declared_ref.clone(),
+                        resolved_ref,
+                        resolved_digest: entry.resolved_digest.clone(),
+                        platform: entry.platform.clone(),
+                        provider_semantics: entry.provider_semantics.clone(),
+                        import_id: Some("default".to_string()),
+                    },
+                )
+            })
+            .collect();
+        let mut main_imports = BTreeMap::new();
+        main_imports.insert(
+            "default".to_string(),
+            OciImportEntry {
+                kind: "docker-run-script".to_string(),
+                source_path: script_rel_path.clone(),
+                source_hash: source_hash.clone(),
+            },
+        );
+        write_oci_facts_to_main_lock(project_dir, main_images, main_imports)
+            .map_err(|e| anyhow::anyhow!("main_lock_oci_write_failed: {e}"))?;
+    }
+    reporter
+        .notify("🔒 Main lock updated with OCI facts".to_string())
+        .await?;
+
     // 8. Execute.
     let project_name = script_path
         .parent()
@@ -904,6 +945,108 @@ echo "done"
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PR 241 / Phase 2 — Main lock OCI write tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn install_sh_runner_writes_main_lock_oci_facts_alongside_sidecar() {
+        let import_output = make_import(BLINKO_INSTALL_SH);
+        let source_hash = &import_output.source_hash;
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let (images, lock) = resolve_install_sh_images_with_lock_replay(
+            &import_output,
+            "install.sh",
+            source_hash,
+            None,
+            &provider,
+            &reporter,
+        )
+        .await
+        .unwrap();
+
+        // Sidecar write (existing behavior).
+        let tmp = tempfile::tempdir().unwrap();
+        capsule_core::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
+        assert!(tmp.path().join("ato.oci.lock.json").exists());
+
+        // Main lock write (Phase 2).
+        let main_images: BTreeMap<String, MainOciImageLockEntry> = lock
+            .images
+            .iter()
+            .map(|(name, entry)| {
+                let resolved_ref = capsule_core::ato_lock::construct_resolved_ref_from_sidecar(
+                    &entry.declared_ref,
+                    &entry.resolved_digest,
+                );
+                (
+                    name.clone(),
+                    MainOciImageLockEntry {
+                        declared_ref: entry.declared_ref.clone(),
+                        resolved_ref,
+                        resolved_digest: entry.resolved_digest.clone(),
+                        platform: entry.platform.clone(),
+                        provider_semantics: entry.provider_semantics.clone(),
+                        import_id: Some("default".to_string()),
+                    },
+                )
+            })
+            .collect();
+        let mut main_imports = BTreeMap::new();
+        main_imports.insert(
+            "default".to_string(),
+            OciImportEntry {
+                kind: "docker-run-script".to_string(),
+                source_path: "install.sh".to_string(),
+                source_hash: source_hash.clone(),
+            },
+        );
+        capsule_core::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+            .unwrap();
+
+        // Verify main lock.
+        let main_lock_path = tmp.path().join("ato.lock.json");
+        assert!(main_lock_path.exists(), "ato.lock.json must be created");
+        let loaded =
+            capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        assert_eq!(
+            oci_read.source,
+            capsule_core::ato_lock::OciLockSource::MainLock,
+            "read must prefer main lock when present"
+        );
+        assert!(
+            oci_read.images.contains_key("blinko-postgres"),
+            "must contain blinko-postgres"
+        );
+        assert!(
+            oci_read.images.contains_key("blinko-website"),
+            "must contain blinko-website"
+        );
+        assert_eq!(oci_read.imports.len(), 1);
+        let import = oci_read.imports.get("default").unwrap();
+        assert_eq!(import.kind, "docker-run-script");
+        assert_eq!(import.source_path, "install.sh");
+        for (_, entry) in &oci_read.images {
+            assert!(entry.resolved_ref.ends_with(&entry.resolved_digest));
+            assert_eq!(entry.import_id.as_deref(), Some("default"));
+        }
+
+        // Sidecar must remain readable (compatibility).
+        let sidecar_loaded = capsule_core::oci_compose_lock::load_from_dir(tmp.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(sidecar_loaded.images.len(), 2);
+
+        // Verify images map also has 2 entries (no data loss).
+        assert_eq!(images.len(), 2);
+    }
+
+    use capsule_core::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
+    use capsule_core::ato_lock::OciImportEntry;
 
     fn build_fresh_lock(
         source_hash: &str,

@@ -191,6 +191,47 @@ pub(crate) async fn execute_compose_run(
         .notify("🔒 Lock written: ato.oci.lock.json".to_string())
         .await?;
 
+    // Also write OCI facts into main ato.lock.json.
+    {
+        use capsule_core::ato_lock::oci::{
+            construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
+            OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
+        };
+        let main_images: BTreeMap<String, MainOciImageLockEntry> = new_lock
+            .images
+            .iter()
+            .map(|(name, entry)| {
+                let resolved_ref =
+                    construct_resolved_ref_from_sidecar(&entry.declared_ref, &entry.resolved_digest);
+                (
+                    name.clone(),
+                    MainOciImageLockEntry {
+                        declared_ref: entry.declared_ref.clone(),
+                        resolved_ref,
+                        resolved_digest: entry.resolved_digest.clone(),
+                        platform: entry.platform.clone(),
+                        provider_semantics: entry.provider_semantics.clone(),
+                        import_id: Some("default".to_string()),
+                    },
+                )
+            })
+            .collect();
+        let mut main_imports = BTreeMap::new();
+        main_imports.insert(
+            "default".to_string(),
+            OciImportEntry {
+                kind: "compose".to_string(),
+                source_path: compose_rel_path.clone(),
+                source_hash: source_hash.clone(),
+            },
+        );
+        write_oci_facts_to_main_lock(project_dir, main_images, main_imports)
+            .map_err(|e| anyhow::anyhow!("main_lock_oci_write_failed: {e}"))?;
+    }
+    reporter
+        .notify("🔒 Main lock updated with OCI facts".to_string())
+        .await?;
+
     // 8. Execute.
     let project_name = compose_path
         .parent()
@@ -1447,4 +1488,191 @@ services:
             .unwrap();
         assert_eq!(exit_code, 0, "Blinko compose replay must succeed");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PR 241 / Phase 2 — Main lock OCI write tests
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn compose_runner_writes_main_lock_oci_facts_alongside_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("docker-compose.yml"), SIMPLE_TWO_SERVICE_COMPOSE.as_bytes())
+            .unwrap();
+
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            tmp.path().join("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_images, lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "docker-compose.yml",
+                &source_hash,
+                None,
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        // Sidecar write (existing behavior).
+        capsule_core::oci_compose_lock::write_to_dir(tmp.path(), &lock).unwrap();
+        let sidecar_path = tmp.path().join("ato.oci.lock.json");
+        assert!(sidecar_path.exists(), "sidecar lock must still be written");
+
+        // Main lock write (Phase 2).
+        let main_images: BTreeMap<String, MainOciImageLockEntry> = lock
+            .images
+            .iter()
+            .map(|(name, entry)| {
+                let resolved_ref = capsule_core::ato_lock::construct_resolved_ref_from_sidecar(
+                    &entry.declared_ref,
+                    &entry.resolved_digest,
+                );
+                (
+                    name.clone(),
+                    MainOciImageLockEntry {
+                        declared_ref: entry.declared_ref.clone(),
+                        resolved_ref,
+                        resolved_digest: entry.resolved_digest.clone(),
+                        platform: entry.platform.clone(),
+                        provider_semantics: entry.provider_semantics.clone(),
+                        import_id: Some("default".to_string()),
+                    },
+                )
+            })
+            .collect();
+        let mut main_imports = BTreeMap::new();
+        main_imports.insert(
+            "default".to_string(),
+            OciImportEntry {
+                kind: "compose".to_string(),
+                source_path: "docker-compose.yml".to_string(),
+                source_hash: source_hash.clone(),
+            },
+        );
+        capsule_core::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+            .unwrap();
+
+        // Verify main lock.
+        let main_lock_path = tmp.path().join("ato.lock.json");
+        assert!(main_lock_path.exists(), "ato.lock.json must be created");
+        let loaded =
+            capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        assert_eq!(
+            oci_read.source,
+            capsule_core::ato_lock::OciLockSource::MainLock,
+            "read must prefer main lock when present"
+        );
+        assert_eq!(oci_read.images.len(), 2, "must contain both services");
+        assert!(oci_read.images.contains_key("db"));
+        assert!(oci_read.images.contains_key("app"));
+        assert_eq!(oci_read.imports.len(), 1);
+        let import = oci_read.imports.get("default").unwrap();
+        assert_eq!(import.kind, "compose");
+        assert_eq!(import.source_path, "docker-compose.yml");
+        for (_, entry) in &oci_read.images {
+            assert!(entry.resolved_ref.ends_with(&entry.resolved_digest));
+            assert_eq!(entry.import_id.as_deref(), Some("default"));
+        }
+
+        // Sidecar must remain readable (compatibility).
+        let sidecar_loaded = capsule_core::oci_compose_lock::load_from_dir(tmp.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(sidecar_loaded.images.len(), 2);
+    }
+
+    #[test]
+    fn compose_runner_main_lock_source_path_is_project_relative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("subdir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("docker-compose.yml"),
+            SIMPLE_TWO_SERVICE_COMPOSE.as_bytes(),
+        )
+        .unwrap();
+
+        let source_hash =
+            capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
+        let input = ComposeImportInput::new(
+            SIMPLE_TWO_SERVICE_COMPOSE.to_string(),
+            nested.join("docker-compose.yml"),
+        );
+        let import_output = import_compose(&input).unwrap();
+        let provider = FakeOciProvider::ready();
+        let reporter = fake_reporter();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (_images, lock) = rt
+            .block_on(resolve_images_with_lock_replay(
+                &import_output,
+                "subdir/docker-compose.yml",
+                &source_hash,
+                None,
+                &provider,
+                &reporter,
+            ))
+            .unwrap();
+
+        let main_images: BTreeMap<String, MainOciImageLockEntry> = lock
+            .images
+            .iter()
+            .map(|(name, entry)| {
+                let resolved_ref = capsule_core::ato_lock::construct_resolved_ref_from_sidecar(
+                    &entry.declared_ref,
+                    &entry.resolved_digest,
+                );
+                (
+                    name.clone(),
+                    MainOciImageLockEntry {
+                        declared_ref: entry.declared_ref.clone(),
+                        resolved_ref,
+                        resolved_digest: entry.resolved_digest.clone(),
+                        platform: entry.platform.clone(),
+                        provider_semantics: entry.provider_semantics.clone(),
+                        import_id: Some("default".to_string()),
+                    },
+                )
+            })
+            .collect();
+        let mut main_imports = BTreeMap::new();
+        main_imports.insert(
+            "default".to_string(),
+            OciImportEntry {
+                kind: "compose".to_string(),
+                source_path: "subdir/docker-compose.yml".to_string(),
+                source_hash: source_hash.clone(),
+            },
+        );
+        capsule_core::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+            .unwrap();
+
+        let loaded =
+            capsule_core::ato_lock::load_unvalidated_from_path(&tmp.path().join("ato.lock.json"))
+                .unwrap();
+        let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        let import = oci_read.imports.get("default").unwrap();
+        assert_eq!(
+            import.source_path, "subdir/docker-compose.yml",
+            "source_path must be project-relative, not absolute"
+        );
+        assert!(
+            !import.source_path.starts_with('/'),
+            "source_path must not be absolute"
+        );
+    }
+
+    // Re-declare main-lock OCI types for use in tests above.
+    // (Not re-exported from parent scope since the parent module uses the sidecar type.)
+    use capsule_core::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
+    use capsule_core::ato_lock::OciImportEntry;
 }
