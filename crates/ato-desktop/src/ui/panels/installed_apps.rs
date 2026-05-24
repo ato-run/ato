@@ -3,7 +3,9 @@ use gpui::{div, hsla, px, AnyElement, FontWeight, IntoElement, MouseButton, Styl
 
 use super::super::theme::Theme;
 use crate::app::SelectInstalledApp;
-use crate::install_lifecycle_dashboard::{DashboardCache, InstalledAppDashboardItem};
+use crate::install_lifecycle_dashboard::{
+    DashboardCache, InstalledAppDashboardItem, InstalledAppsActionStatus,
+};
 
 pub(in crate::ui) fn render_installed_apps_section(
     items: &[InstalledAppDashboardItem],
@@ -201,16 +203,42 @@ fn render_app_card(
                                     return;
                                 }
                             };
+                            DashboardCache::set_action_status(Some(
+                                InstalledAppsActionStatus::Launching {
+                                    install_profile_key: ipk.clone(),
+                                },
+                            ));
                             let async_cx = cx.to_async();
                             cx.foreground_executor()
                                 .spawn(async move {
-                                    let result = crate::install_lifecycle_dashboard::spawn_launch(
-                                        &ato_bin, &ipk,
-                                    );
+                                    let result =
+                                        crate::install_lifecycle_dashboard::spawn_launch(
+                                            &ato_bin, &ipk,
+                                        );
                                     DashboardCache::refresh();
                                     let _ = async_cx.update(|app| {
-                                        if let Err(e) = result {
-                                            tracing::error!("launch installed app {ipk}: {e}");
+                                        match result {
+                                            Ok(_) => {
+                                                DashboardCache::set_action_status(Some(
+                                                    InstalledAppsActionStatus::Success {
+                                                        message: format!(
+                                                            "Launched {ipk}"
+                                                        ),
+                                                    },
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "launch installed app {ipk}: {e}"
+                                                );
+                                                DashboardCache::set_action_status(Some(
+                                                    InstalledAppsActionStatus::Error {
+                                                        message: format!(
+                                                            "Launch failed: {e}"
+                                                        ),
+                                                    },
+                                                ));
+                                            }
                                         }
                                         app.refresh_windows();
                                     });

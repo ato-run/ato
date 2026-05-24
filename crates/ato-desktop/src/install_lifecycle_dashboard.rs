@@ -30,11 +30,33 @@ use serde::Serialize;
 
 // ── UI Selection State ──────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+pub enum InstalledAppsActionStatus {
+    Refreshing,
+    Launching { install_profile_key: String },
+    Success { message: String },
+    Error { message: String },
+}
+
+impl InstalledAppsActionStatus {
+    pub fn display_text(&self) -> String {
+        match self {
+            InstalledAppsActionStatus::Refreshing => "Refreshing installed apps...".to_string(),
+            InstalledAppsActionStatus::Launching { install_profile_key } => {
+                format!("Launching {install_profile_key}...")
+            }
+            InstalledAppsActionStatus::Success { message } => message.clone(),
+            InstalledAppsActionStatus::Error { message } => message.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InstalledAppsUiState {
     pub selected_installed_app_id: Option<String>,
     pub selected_profile_id: Option<String>,
     pub detail_error: Option<String>,
+    pub action_status: Option<InstalledAppsActionStatus>,
 }
 
 impl InstalledAppsUiState {
@@ -42,6 +64,7 @@ impl InstalledAppsUiState {
         self.selected_installed_app_id = Some(installed_app_id);
         self.selected_profile_id = Some("default".to_string());
         self.detail_error = None;
+        DashboardCache::set_action_status(None);
     }
 
     pub fn select_profile(&mut self, installed_app_id: &str, profile_id: &str) {
@@ -51,6 +74,26 @@ impl InstalledAppsUiState {
             self.selected_profile_id = Some(profile_id.to_string());
             self.detail_error = None;
         }
+    }
+
+    pub fn begin_refresh(&mut self) {
+        self.action_status = Some(InstalledAppsActionStatus::Refreshing);
+        self.detail_error = None;
+    }
+
+    pub fn begin_launch(&mut self, ipk: String) {
+        self.action_status = Some(InstalledAppsActionStatus::Launching {
+            install_profile_key: ipk,
+        });
+        self.detail_error = None;
+    }
+
+    pub fn finish_success(&mut self, message: String) {
+        self.action_status = Some(InstalledAppsActionStatus::Success { message });
+    }
+
+    pub fn finish_error(&mut self, message: String) {
+        self.action_status = Some(InstalledAppsActionStatus::Error { message });
     }
 }
 
@@ -114,12 +157,14 @@ pub struct InstalledAppSessionSummary {
 /// [`DashboardCache::refresh()`] from background tasks or action handlers.
 pub struct DashboardCache {
     items: Result<Vec<InstalledAppDashboardItem>, String>,
+    action_status: Option<InstalledAppsActionStatus>,
 }
 
 impl DashboardCache {
     fn empty() -> Self {
         Self {
             items: Ok(Vec::new()),
+            action_status: None,
         }
     }
 
@@ -129,6 +174,14 @@ impl DashboardCache {
             Ok(items) => Ok(items.clone()),
             Err(e) => Err(e.clone()),
         }
+    }
+
+    pub fn action_status() -> Option<InstalledAppsActionStatus> {
+        CACHE.lock().unwrap().action_status.clone()
+    }
+
+    pub fn set_action_status(status: Option<InstalledAppsActionStatus>) {
+        CACHE.lock().unwrap().action_status = status;
     }
 
     /// Re-read the store + session records and update the cache.
@@ -153,6 +206,7 @@ impl DashboardCache {
     pub fn reset_for_test() {
         let mut guard = CACHE.lock().unwrap();
         guard.items = Ok(Vec::new());
+        guard.action_status = None;
     }
 }
 
@@ -810,5 +864,61 @@ mod tests {
         ui.select_app("app_aaa".into());
 
         assert!(ui.detail_error.is_none());
+    }
+
+    #[test]
+    fn installed_apps_ui_begin_refresh_sets_refreshing() {
+        let mut ui = super::InstalledAppsUiState::default();
+        assert!(ui.action_status.is_none());
+
+        ui.begin_refresh();
+
+        match ui.action_status {
+            Some(super::InstalledAppsActionStatus::Refreshing) => {}
+            _ => panic!("expected Refreshing"),
+        }
+    }
+
+    #[test]
+    fn installed_apps_ui_begin_launch_sets_launching_with_ipk() {
+        let mut ui = super::InstalledAppsUiState::default();
+
+        ui.begin_launch("ipk_test".to_string());
+
+        match &ui.action_status {
+            Some(super::InstalledAppsActionStatus::Launching {
+                install_profile_key,
+            }) => assert_eq!(install_profile_key, "ipk_test"),
+            _ => panic!("expected Launching with ipk"),
+        }
+    }
+
+    #[test]
+    fn installed_apps_ui_finish_success_replaces_pending() {
+        let mut ui = super::InstalledAppsUiState::default();
+        ui.begin_refresh();
+
+        ui.finish_success("Done".to_string());
+
+        match &ui.action_status {
+            Some(super::InstalledAppsActionStatus::Success { message }) => {
+                assert_eq!(message, "Done")
+            }
+            _ => panic!("expected Success"),
+        }
+    }
+
+    #[test]
+    fn installed_apps_ui_finish_error_records_message() {
+        let mut ui = super::InstalledAppsUiState::default();
+
+        ui.finish_error("Something went wrong".to_string());
+
+        match &ui.action_status {
+            Some(super::InstalledAppsActionStatus::Error { message }) => {
+                assert_eq!(message, "Something went wrong")
+            }
+            _ => panic!("expected Error"),
+        }
     }
 }
