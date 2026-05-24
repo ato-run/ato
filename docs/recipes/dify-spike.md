@@ -209,7 +209,8 @@ These are new findings from this spike:
 | `tcp_connect` probe requires placeholder name, not port number | Minor — use exec probe for Redis instead |
 | ~~v0.3 rejects `cmd` in named OCI targets~~ | ✅ Resolved — `cmd` now allowed for OCI targets |
 | ~~No `run_once`/one-shot service~~ | ✅ Resolved — `run_once = true` on OCI targets gates dependents on exit-0 |
-| Shared mutable state not supported | Worker/api storage sharing is impossible |
+| ~~Shared mutable state not supported~~ | ✅ Policy support landed via `feat/runtime-shared-state-policy`; B4 pending AODD confirmation |
+| `CONSOLE_API_URL` dynamic port (no ingress) | Browser API client calls cannot reach dynamic API port |
 | `allow_emulation = true` required for amd64-only images | Works but adds ~30% overhead on arm64 |
 
 ---
@@ -217,6 +218,15 @@ These are new findings from this spike:
 ## Recipe
 
 See [`samples/recipes/dify/capsule.toml`](../../samples/recipes/dify/capsule.toml).
+
+`api-storage` now uses `sharing = "same-capsule"` so both `api` and `worker`
+services mount the same writable volume:
+
+```toml
+[state.api-storage]
+sharing = "same-capsule"
+schema_id = "sha256:dify-api-storage-v1"
+```
 
 Usage:
 ```bash

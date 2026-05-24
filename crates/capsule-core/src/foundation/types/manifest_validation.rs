@@ -1131,13 +1131,38 @@ impl CapsuleManifest {
                                 .insert(state_name.to_string(), service_name.clone())
                             {
                                 if previous_service != *service_name {
-                                    errors.push(ValidationError::InvalidStateBinding(
-                                        service_name.clone(),
-                                        format!(
-                                            "state '{}' is already bound by service '{}'; shared mutable state is not supported in this PoC",
-                                            state_name, previous_service
-                                        ),
-                                    ));
+                                    let state_requirement = self.state.get(state_name);
+                                    match state_requirement {
+                                        Some(req) if req.sharing == StateSharing::SameCapsule => {
+                                            if req
+                                                .schema_id
+                                                .as_deref()
+                                                .map(str::trim)
+                                                .filter(|v| !v.is_empty())
+                                                .is_none()
+                                            {
+                                                errors.push(
+                                                    ValidationError::StateSharedRequiresSchemaId(
+                                                        state_name.to_string(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        Some(_) => {
+                                            errors.push(
+                                                ValidationError::StateSharedRequiresPolicy {
+                                                    state: state_name.to_string(),
+                                                    first_service: previous_service,
+                                                    second_service: service_name.clone(),
+                                                },
+                                            );
+                                        }
+                                        None => {
+                                            errors.push(ValidationError::StateKeyUndeclared(
+                                                state_name.to_string(),
+                                            ));
+                                        }
+                                    }
                                 }
                             }
 
@@ -1439,6 +1464,22 @@ pub enum ValidationError {
     InvalidState(String, String),
     #[error("Invalid state binding for service '{0}': {1}")]
     InvalidStateBinding(String, String),
+    #[error("State '{state}' is bound by both service '{first_service}' and '{second_service}'; shared mutable state requires sharing=\"same-capsule\" on the state declaration")]
+    StateSharedRequiresPolicy {
+        state: String,
+        first_service: String,
+        second_service: String,
+    },
+    #[error("Shared state '{0}' requires schema_id to be set")]
+    StateSharedRequiresSchemaId(String),
+    #[error("Shared state '{0}' has conflicting mount modes across services")]
+    StateSharedConflictingMountMode(String),
+    #[error("Shared state across different capsules is forbidden: state '{0}'")]
+    StateSharedCrossCapsuleForbidden(String),
+    #[error("Shared state '{0}' cannot use absolute host path bind mounts")]
+    StateSharedHostBindForbidden(String),
+    #[error("State key '{0}' is not declared under [state]")]
+    StateKeyUndeclared(String),
     #[error("type='tool' capsule must declare at least one [platforms.<os>-<arch>] entry")]
     ToolMissingPlatforms,
     #[error(
