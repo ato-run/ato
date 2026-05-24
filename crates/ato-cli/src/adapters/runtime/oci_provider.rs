@@ -1895,6 +1895,14 @@ mod tests {
             Ok(rx)
         }
 
+        async fn exec_container(
+            &self,
+            _container_id: &str,
+            _cmd: &[String],
+        ) -> capsule_core::Result<i64> {
+            Ok(0)
+        }
+
         async fn wait_container(&self, _container_id: &str) -> capsule_core::Result<i64> {
             Ok(0)
         }
