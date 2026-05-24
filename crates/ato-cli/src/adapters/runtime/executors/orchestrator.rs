@@ -255,7 +255,15 @@ where
     C: OciRuntimeClient + Clone + Send + Sync + 'static,
 {
     let orchestration = plan.resolve_services()?;
-    let graph = ServiceGraphPlan::from_services(&plan.services())?;
+    // Build the layered start order from the resolved orchestration so that
+    // target-level `depends_on` (merged into ResolvedService.depends_on by the
+    // router) and any cross-service edges materialized as `connections` are
+    // both reflected. `from_services` would only see the raw [services.*]
+    // table, which is empty for recipes like AFFiNE that declare depends_on
+    // on targets — leaving sibling leaves (e.g. redis vs db for migration)
+    // in a single layer with alphabetic start order that races the
+    // connection-resolution check. See AODD PR #262.
+    let graph = ServiceGraphPlan::from_orchestration(&orchestration)?;
     let session_id = session_id(plan);
     let client = Arc::new(client);
     let network_name = if orchestration
