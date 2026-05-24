@@ -38,10 +38,19 @@ use crate::application::services::{
 use crate::reporters::CliReporter;
 use crate::runtime::overrides as runtime_overrides;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const OCI_STOP_TIMEOUT_SECS: i64 = 5;
+const RUN_ONCE_TIMEOUT_SECS_DEFAULT: u64 = 300;
+
+fn run_once_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(RUN_ONCE_TIMEOUT_SECS_DEFAULT),
+    )
+}
 
 /// Process-wide flag set by entry points that reserve stdout
 /// exclusively for a structured envelope (today: `ato app session
@@ -888,12 +897,30 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
         })?
     };
 
+    let mut completed_run_once = false;
     let result = async {
+        if service.service.run_once {
+            wait_run_once_service(service_name, &mut service, client).await?;
+            stop_service(&mut service, client)
+                .await
+                .with_context(|| format!("failed to clean up run_once service '{service_name}'"))?;
+            drain_service(&mut service);
+            completed_run_once = true;
+            return Ok(());
+        }
+
         let Some(probe) = service.service.readiness_probe.clone() else {
             return Ok(());
         };
 
-        let deadline = Instant::now() + READINESS_TIMEOUT;
+        let initial_delay = readiness_initial_delay(&probe);
+        if !initial_delay.is_zero() {
+            tokio::time::sleep(initial_delay).await;
+        }
+
+        let timeout = readiness_timeout(&probe);
+        let interval = readiness_interval(&probe);
+        let deadline = Instant::now() + timeout;
         loop {
             if let RunningHandle::Local(local) = &mut service.handle {
                 match poll_local_readiness_events(local)? {
@@ -918,7 +945,12 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
             }
 
             if !uses_event_driven_readiness(&service) {
-                if let Some(port) = resolve_probe_port(&service, &probe)? {
+                if let Some(cmd) = probe.exec.as_ref().filter(|cmd| !cmd.is_empty()) {
+                    let container_id = exec_readiness_container_id(&service)?;
+                    if exec_readiness_probe_ok(client, &container_id, cmd).await? {
+                        return Ok(());
+                    }
+                } else if let Some(port) = resolve_probe_port(&service, &probe)? {
                     if readiness_probe_ok(&probe, port)? {
                         return Ok(());
                     }
@@ -929,21 +961,55 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                 anyhow::bail!(
                     "service '{}' readiness check timed out after {}s",
                     service_name,
-                    READINESS_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 );
             }
 
-            tokio::time::sleep(READINESS_INTERVAL).await;
+            tokio::time::sleep(interval).await;
         }
     }
     .await;
 
     let mut state = state.lock().await;
-    state.running.insert(service_name.to_string(), service);
+    if !completed_run_once {
+        state.running.insert(service_name.to_string(), service);
+    }
     if result.is_ok() {
         state.ready.insert(service_name.to_string());
     }
     result
+}
+
+async fn wait_run_once_service<C: OciRuntimeClient>(
+    service_name: &str,
+    service: &mut RunningService,
+    client: &C,
+) -> Result<()> {
+    let timeout = run_once_timeout();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(exit_code) = try_wait(service, client).await? {
+            if exit_code == 0 {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "oci_run_once_failed: init container '{}' exited with non-zero status {}",
+                service_name,
+                exit_code
+            );
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "oci_run_once_timeout: init container '{}' did not complete within {}s",
+                service_name,
+                timeout.as_secs()
+            );
+        }
+
+        tokio::time::sleep(READINESS_INTERVAL).await;
+    }
 }
 
 async fn monitor_until_exit<C: OciRuntimeClient>(
@@ -1005,6 +1071,39 @@ fn uses_event_driven_readiness(service: &RunningService) -> bool {
         &service.handle,
         RunningHandle::Local(local) if local.event_rx.is_some()
     )
+}
+
+fn readiness_initial_delay(probe: &ReadinessProbe) -> Duration {
+    Duration::from_secs(probe.initial_delay_seconds as u64)
+}
+
+fn readiness_timeout(probe: &ReadinessProbe) -> Duration {
+    Duration::from_secs(probe.timeout_seconds.max(1) as u64)
+}
+
+fn readiness_interval(probe: &ReadinessProbe) -> Duration {
+    if probe.interval_seconds == 0 {
+        return READINESS_INTERVAL;
+    }
+    Duration::from_secs(probe.interval_seconds as u64)
+}
+
+fn exec_readiness_container_id(service: &RunningService) -> Result<String> {
+    match &service.handle {
+        RunningHandle::Oci(oci) => Ok(oci.container_id.clone()),
+        RunningHandle::Local(_) => anyhow::bail!(
+            "service '{}' uses readiness_probe.exec, which is only supported for OCI services",
+            service.service.name
+        ),
+    }
+}
+
+async fn exec_readiness_probe_ok<C: OciRuntimeClient>(
+    client: &C,
+    container_id: &str,
+    cmd: &[String],
+) -> Result<bool> {
+    Ok(client.exec_container(container_id, cmd).await? == 0)
 }
 
 fn poll_local_readiness_events(local: &mut RunningLocalService) -> Result<LocalReadinessState> {
@@ -1168,21 +1267,23 @@ fn resolve_probe_port(service: &RunningService, probe: &ReadinessProbe) -> Resul
             )
         })?;
 
-    let value = service.env.get(key).ok_or_else(|| {
-        anyhow::anyhow!(
-            "services.{}.readiness_probe.port '{}' is not defined in service env",
-            service.service.name,
-            key
-        )
-    })?;
-    let container_port = value.parse::<u16>().map_err(|_| {
-        anyhow::anyhow!(
-            "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
-            service.service.name,
-            key,
-            value
-        )
-    })?;
+    let container_port = match service.env.get(key) {
+        Some(value) => value.parse::<u16>().map_err(|_| {
+            anyhow::anyhow!(
+                "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
+                service.service.name,
+                key,
+                value
+            )
+        })?,
+        None => key.parse::<u16>().map_err(|_| {
+            anyhow::anyhow!(
+                "services.{}.readiness_probe.port '{}' is neither defined in service env nor a numeric port literal",
+                service.service.name,
+                key
+            )
+        })?,
+    };
 
     let host_port = match &service.handle {
         RunningHandle::Local(_) => container_port,
@@ -1523,6 +1624,7 @@ mod tests {
     use super::execute_with_client;
     use super::*;
     use capsule_core::runtime::oci::OciContainerInspect;
+    use capsule_core::types::ResolvedTargetRuntime;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -1585,7 +1687,11 @@ mod tests {
                 FakeState {
                     service: service.clone(),
                     running: false,
-                    exit_code: if service == "main" { 0 } else { 1 },
+                    exit_code: if matches!(service.as_str(), "main" | "migration") {
+                        0
+                    } else {
+                        1
+                    },
                     inspect_calls: 0,
                     host_ports: request
                         .ports
@@ -1625,7 +1731,7 @@ mod tests {
             let mut states = self.states.lock().unwrap();
             let state = states.get_mut(container_id).expect("state");
             state.inspect_calls += 1;
-            if state.service == "main" && state.inspect_calls > 1 {
+            if matches!(state.service.as_str(), "main" | "migration") && state.inspect_calls > 1 {
                 state.running = false;
             }
             Ok(OciContainerInspect {
@@ -1643,6 +1749,18 @@ mod tests {
         {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             Ok(rx)
+        }
+
+        async fn exec_container(
+            &self,
+            container_id: &str,
+            cmd: &[String],
+        ) -> capsule_core::Result<i64> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("container:exec:{container_id}:{}", cmd.join(" ")));
+            Ok(0)
         }
 
         async fn wait_container(&self, _container_id: &str) -> capsule_core::Result<i64> {
@@ -1687,6 +1805,89 @@ mod tests {
             HashMap::new(),
         )
         .expect("execution descriptor")
+    }
+
+    fn http_probe(port: &str) -> ReadinessProbe {
+        ReadinessProbe {
+            http_get: Some("/".to_string()),
+            tcp_connect: None,
+            exec: None,
+            port: Some(port.to_string()),
+            initial_delay_seconds: 0,
+            timeout_seconds: 1,
+            interval_seconds: 1,
+        }
+    }
+
+    #[test]
+    fn readiness_timing_uses_manifest_probe_fields() {
+        let probe = ReadinessProbe {
+            initial_delay_seconds: 3,
+            timeout_seconds: 60,
+            interval_seconds: 2,
+            ..http_probe("1111")
+        };
+
+        assert_eq!(readiness_initial_delay(&probe), Duration::from_secs(3));
+        assert_eq!(readiness_timeout(&probe), Duration::from_secs(60));
+        assert_eq!(readiness_interval(&probe), Duration::from_secs(2));
+    }
+
+    fn oci_running_service(
+        env: HashMap<String, String>,
+        host_ports: HashMap<u16, u16>,
+    ) -> RunningService {
+        RunningService {
+            service: ResolvedService {
+                name: "main".to_string(),
+                depends_on: Vec::new(),
+                connections: Vec::new(),
+                readiness_probe: None,
+                network: Default::default(),
+                run_once: false,
+                runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                    target: "app".to_string(),
+                    runtime: "oci".to_string(),
+                    driver: None,
+                    runtime_version: None,
+                    image: Some("example/app:latest".to_string()),
+                    entrypoint: String::new(),
+                    run_command: None,
+                    cmd: Vec::new(),
+                    env: HashMap::new(),
+                    working_dir: None,
+                    source_layout: None,
+                    port: Some(1111),
+                    required_env: Vec::new(),
+                    mounts: Vec::new(),
+                }),
+            },
+            env,
+            handle: RunningHandle::Oci(RunningOciService {
+                container_id: "container-main".to_string(),
+                log_task: None,
+                host_ports,
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_probe_port_accepts_numeric_literal_and_maps_to_oci_host_port() {
+        let service = oci_running_service(HashMap::new(), HashMap::from([(1111, 49111)]));
+        let port =
+            resolve_probe_port(&service, &http_probe("1111")).expect("literal port should resolve");
+        assert_eq!(port, Some(49111));
+    }
+
+    #[test]
+    fn resolve_probe_port_keeps_env_placeholder_precedence() {
+        let service = oci_running_service(
+            HashMap::from([("APP_PORT".to_string(), "1111".to_string())]),
+            HashMap::from([(1111, 49111)]),
+        );
+        let port = resolve_probe_port(&service, &http_probe("APP_PORT"))
+            .expect("env placeholder should resolve");
+        assert_eq!(port, Some(49111));
     }
 
     #[tokio::test]
@@ -1799,6 +2000,277 @@ target = "db"
                 false,
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_cleans_up_partial_oci_start_on_readiness_error() {
+        let plan = manifest_data(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16"
+port = 5432
+
+[services.main]
+target = "app"
+depends_on = ["db"]
+
+[services.db]
+target = "db"
+readiness_probe = { http_get = "/", port = "MISSING_PORT", timeout_seconds = 1 }
+"#,
+        );
+        let client = FakeClient::default();
+        let reporter = Arc::new(CliReporter::new(false));
+        let launch_ctx = RuntimeLaunchContext::empty();
+        let options = OrchestratorOptions {
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            nacelle: None,
+        };
+
+        let err = execute_with_client(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from("/tmp"),
+                effective_state: None,
+                execution_override: None,
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect_err("readiness error should fail startup");
+        assert!(
+            err.to_string().contains("MISSING_PORT"),
+            "unexpected error: {err}"
+        );
+
+        let events = client.events.lock().unwrap().clone();
+        let db_create = events
+            .iter()
+            .position(|event| event.contains("container:create:db"))
+            .expect("db create");
+        let db_stop = events
+            .iter()
+            .position(|event| event.contains("container:stop:") && event.contains("db"))
+            .expect("db stop");
+        let db_remove = events
+            .iter()
+            .position(|event| event.contains("container:remove:") && event.contains("db"))
+            .expect("db remove");
+        let network_remove = events
+            .iter()
+            .position(|event| event.starts_with("network:remove:"))
+            .expect("network remove");
+        assert!(db_create < db_stop);
+        assert!(db_stop < db_remove);
+        assert!(db_remove < network_remove);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_exec_readiness_probe_starts_dependent_service() {
+        let plan = manifest_data(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16"
+port = 5432
+
+[services.main]
+target = "app"
+depends_on = ["db"]
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"], timeout_seconds = 60, interval_seconds = 1 }
+"#,
+        );
+        let client = FakeClient::default();
+        let reporter = Arc::new(CliReporter::new(false));
+        let launch_ctx = RuntimeLaunchContext::empty();
+        let options = OrchestratorOptions {
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            nacelle: None,
+        };
+
+        let _handle = execute_until_ready_and_detach(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from("/tmp"),
+                effective_state: None,
+                execution_override: None,
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect("exec readiness should allow startup");
+
+        let events = client.events.lock().unwrap().clone();
+        let db_exec = events
+            .iter()
+            .position(|event| event.contains("container:exec:") && event.contains("pg_isready"))
+            .expect("db exec readiness probe");
+        let main_create = events
+            .iter()
+            .position(|event| event.contains("container:create:main"))
+            .expect("main create after db readiness");
+        assert!(db_exec < main_create);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_run_once_completion_starts_dependent_service() {
+        let plan = manifest_data(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16"
+port = 5432
+
+[targets.migration]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+run_once = true
+cmd = ["node", "./scripts/migrate.js"]
+
+[services.main]
+target = "app"
+depends_on = ["migration"]
+
+[services.db]
+target = "db"
+
+[services.migration]
+target = "migration"
+depends_on = ["db"]
+"#,
+        );
+        let client = FakeClient::default();
+        let reporter = Arc::new(CliReporter::new(false));
+        let launch_ctx = RuntimeLaunchContext::empty();
+        let options = OrchestratorOptions {
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            nacelle: None,
+        };
+
+        let handle = execute_until_ready_and_detach(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from(".tmp/orchestrator-run-once-test"),
+                effective_state: None,
+                execution_override: None,
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect("run_once completion should allow startup");
+
+        let events = client.events.lock().unwrap().clone();
+        let migration_create = events
+            .iter()
+            .position(|event| event.contains("container:create:migration"))
+            .expect("migration create");
+        let migration_remove = events
+            .iter()
+            .position(|event| event.contains("container:remove:") && event.contains("migration"))
+            .expect("migration remove");
+        let main_create = events
+            .iter()
+            .position(|event| event.contains("container:create:main"))
+            .expect("main create");
+
+        assert!(migration_create < migration_remove);
+        assert!(migration_remove < main_create);
+        assert!(
+            !handle
+                .services
+                .iter()
+                .any(|service| service.name == "migration"),
+            "completed run_once services must not be retained in detached session snapshot"
+        );
+        assert!(handle.services.iter().any(|service| service.name == "main"));
     }
 
     /// Regression for #106: `ato app session start --json` reserves

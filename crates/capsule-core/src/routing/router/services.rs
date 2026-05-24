@@ -182,11 +182,17 @@ impl ManifestData {
                 .iter()
                 .filter_map(|dependency| {
                     let dependency_service = services.get(dependency)?;
-                    let dependency_target = services
+                    let dependency_target_label = services
                         .get(dependency)
                         .and_then(|s| s.target.clone())
                         .filter(|t| !t.trim().is_empty())?;
-                    let dependency_port = self.target_port(&dependency_target);
+                    let dependency_target = self
+                        .target_named(dependency, &dependency_target_label)
+                        .ok()?;
+                    if dependency_target.run_once {
+                        return None;
+                    }
+                    let dependency_port = self.target_port(&dependency_target_label);
                     let dependency_network = dependency_service.network.as_ref();
                     let default_host = dependency_network
                         .and_then(|network| network.aliases.first())
