@@ -25,7 +25,7 @@ Consolidated report: [docs/recipes/initial-catalog-status.md](./initial-catalog-
 
 ### What is experimental
 
-- dify — partial-pass; 15-min cold startup, 6-service heavyweight
+- dify — partial-pass (B4 resolved); 15-min cold startup, 6-service heavyweight
 - open-webui — partial; first-run HuggingFace model downloads 3-4 min
 - langflow — pass but 360s startup; needs 420s readiness timeout
 - vikunja — partial; first-run DB migration may timeout
@@ -51,7 +51,7 @@ Consolidated report: [docs/recipes/initial-catalog-status.md](./initial-catalog-
 
 1. Private upstream images (twenty)
 2. No `run_once`/one-shot service (blocks init containers)
-3. Multi-service shared mutable state
+3. ~~Multi-service shared mutable state~~ ✅ Resolved — `sharing="same-capsule"` confirmed by Dify AODD (2026-05-24)
 4. No ingress/proxy layer
 5. Large image cold pull without per-target pull timeout
 
@@ -262,7 +262,7 @@ db (postgres) → redis → weaviate → api + worker → web (main)
 | Blocker | Classification | Severity |
 |---|---|---|
 | `CONSOLE_API_URL` dynamic port (no ingress) | Ato architecture | medium — SSR works, browser API calls limited |
-| ~~`init_permissions` one-shot service missing~~ ✅ Resolved (lifecycle) | Lifecycle landed in `feat/runtime-oci-run-once`; full Dify wire-up still gated by shared-mutable-state (B4) | medium — file uploads unverified |
+| ~~`init_permissions` one-shot service missing~~ ✅ Resolved (lifecycle) | Lifecycle landed in `feat/runtime-oci-run-once`; shared-state (B4) resolved but init_permissions + run_once + shared state combo not yet verified as end-to-end | medium — file uploads unverified |
 | v0.3 cannot override Docker CMD | Ato missing feature | low for spike — affects Redis password config |
 | ~~Shared mutable state (worker/api storage)~~ | ✅ Policy landed — `sharing = "same-capsule"`; pending AODD confirmation |
 
