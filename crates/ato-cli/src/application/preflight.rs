@@ -52,6 +52,9 @@ use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ExecutionProfile;
 use capsule_core::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode};
 
+use crate::app_control::sample_recipes::{
+    resolve_sample_recipe_for_github, resolve_sample_recipe_for_input,
+};
 use crate::application::auth::consent_store::{consent_summary, has_consent};
 use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
 
@@ -245,6 +248,9 @@ pub enum PreflightError {
 
     #[error("unsupported preflight target '{input}': {reason}")]
     UnsupportedTarget { input: String, reason: String },
+
+    #[error("failed to materialize bundled sample recipe for '{input}': {reason}")]
+    SampleRecipeMaterialize { input: String, reason: String },
 
     #[error("failed to load capsule manifest at {path}: {source}")]
     ManifestLoad {
@@ -549,7 +555,13 @@ pub fn collect_aggregate_requirements(
 ///
 /// Resolution policy:
 ///
-/// 1. **`capsule://github.com/<owner>/<repo>`**: look only under
+/// 1. **Existing local path**: directory inputs append `capsule.toml`; file
+///    inputs are used as-is. Local paths intentionally win over bundled sample
+///    recipe aliases with the same name.
+/// 2. **Bundled sample recipe alias / GitHub mapping**: materialize the embedded
+///    recipe manifest locally and use it for preflight. This write is
+///    deterministic and does not fetch from the network.
+/// 3. **`capsule://github.com/<owner>/<repo>`**: look only under
 ///    `${ATO_HOME}/external-capsules/github/<owner>/<repo>/*`. When the
 ///    repo segment is pinned as `repo@<sha>`, only the exact
 ///    `<sha>/capsule.toml` cache entry is valid; no mtime fallback is
@@ -558,39 +570,50 @@ pub fn collect_aggregate_requirements(
 ///    already cached the capsule once before — first-time fetching is
 ///    intentionally out of scope for this slice (avoiding new network/git
 ///    side effects in the preflight path is what makes preflight safe).
-/// 2. **`github.com/<owner>/<repo>`**: normalize it exactly the way
+/// 4. **`github.com/<owner>/<repo>`**: normalize it exactly the way
 ///    `ato run` does, then reuse the same cache lookup.
-/// 3. **Local directory**: append `capsule.toml`.
-/// 4. **Local file**: use as-is.
 /// 5. **Registry refs / provider refs**: rejected. Side-effect-free
 ///    preflight must not fetch from registries or materialize
 ///    provider-backed workspaces.
 fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError> {
+    let expanded = crate::local_input::expand_local_path(target);
+    if expanded.exists() {
+        return resolve_existing_local_manifest(expanded);
+    }
+
     if let Some(rest) = target.strip_prefix("capsule://github.com/") {
+        if let Some(manifest) = resolve_sample_recipe_manifest_for_github_rest(rest)? {
+            return Ok(manifest);
+        }
         return resolve_cached_github_capsule(rest);
     }
 
-    let expanded = crate::local_input::expand_local_path(target);
+    if let Some(resolved) = resolve_sample_recipe_for_input(target).map_err(|err| {
+        PreflightError::SampleRecipeMaterialize {
+            input: target.to_string(),
+            reason: err.to_string(),
+        }
+    })? {
+        return Ok(resolved.manifest_path);
+    }
+
     match crate::application::engine::install::provider_target::classify_run_target(target, &expanded)
     {
         Ok(crate::application::engine::install::provider_target::ParsedRunTarget::GitHubRepository(
             repository,
-        )) => resolve_cached_github_capsule(&repository),
+        )) => {
+            if let Some(manifest) = resolve_sample_recipe_manifest_for_github_rest(&repository)? {
+                return Ok(manifest);
+            }
+            resolve_cached_github_capsule(&repository)
+        }
         Ok(crate::application::engine::install::provider_target::ParsedRunTarget::LocalPath(_)) => {
             if !expanded.exists() {
                 return Err(PreflightError::ManifestMissing {
                     path: expanded.clone(),
                 });
             }
-            let manifest = if expanded.is_dir() {
-                expanded.join("capsule.toml")
-            } else {
-                expanded
-            };
-            if !manifest.exists() {
-                return Err(PreflightError::ManifestMissing { path: manifest });
-            }
-            Ok(manifest)
+            resolve_existing_local_manifest(expanded)
         }
         Ok(crate::application::engine::install::provider_target::ParsedRunTarget::Provider(
             provider_target,
@@ -614,6 +637,38 @@ fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError
             reason: err.to_string(),
         }),
     }
+}
+
+fn resolve_existing_local_manifest(path: PathBuf) -> Result<PathBuf, PreflightError> {
+    let manifest = if path.is_dir() {
+        path.join("capsule.toml")
+    } else {
+        path
+    };
+    if !manifest.exists() {
+        return Err(PreflightError::ManifestMissing { path: manifest });
+    }
+    Ok(manifest)
+}
+
+fn resolve_sample_recipe_manifest_for_github_rest(
+    rest: &str,
+) -> Result<Option<PathBuf>, PreflightError> {
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 2 {
+        return Ok(None);
+    }
+    let owner = parts[0];
+    let repo = parts[1];
+    if repo.contains('@') {
+        return Ok(None);
+    }
+    Ok(resolve_sample_recipe_for_github(owner, repo)
+        .map_err(|err| PreflightError::SampleRecipeMaterialize {
+            input: format!("github.com/{owner}/{repo}"),
+            reason: err.to_string(),
+        })?
+        .map(|resolved| resolved.manifest_path))
 }
 
 /// Resolve a `capsule://github.com/<owner>/<repo>` ref to a cached
@@ -1550,6 +1605,90 @@ contract = "service@1"
     }
 
     #[test]
+    #[serial_test::serial]
+    fn internal_preflight_resolves_sample_recipe_alias() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let resolved = resolve_offline_manifest_path("memos")
+            .expect("sample recipe alias should materialize for preflight");
+
+        assert!(resolved.ends_with("sample-recipes/memos/capsule.toml"));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_preflight_resolves_sample_recipe_github_handle() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let resolved = resolve_offline_manifest_path("capsule://github.com/usememos/memos")
+            .expect("sample recipe github handle should materialize for preflight");
+
+        assert!(resolved.ends_with("sample-recipes/memos/capsule.toml"));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_preflight_preserves_existing_local_path_precedence() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let parent = tempfile::TempDir::new().expect("parent");
+        let local = parent.path().join("memos");
+        std::fs::create_dir_all(&local).expect("create local alias dir");
+        std::fs::write(
+            local.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "local-memos"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "nginx:alpine"
+port = 80
+"#,
+        )
+        .expect("write local manifest");
+
+        let _ato_guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let _cwd_guard = CwdGuard::enter(parent.path());
+
+        let resolved =
+            resolve_offline_manifest_path("memos").expect("local dir should win over alias");
+
+        assert_eq!(resolved, PathBuf::from("memos").join("capsule.toml"));
+        let content = std::fs::read_to_string(&resolved).expect("read resolved local manifest");
+        assert!(content.contains("local-memos"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_preflight_does_not_fall_back_to_cached_github_when_sample_recipe_exists() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let cached = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join("usememos")
+            .join("memos")
+            .join("cached-sha");
+        std::fs::create_dir_all(&cached).expect("create cache");
+        std::fs::write(cached.join("capsule.toml"), "[package]\nname=\"cached\"\n")
+            .expect("write cached manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let resolved = resolve_offline_manifest_path("github.com/usememos/memos")
+            .expect("sample recipe should win over cached github snapshot");
+
+        assert!(resolved.ends_with("sample-recipes/memos/capsule.toml"));
+        assert_ne!(resolved, cached.join("capsule.toml"));
+    }
+
+    #[test]
     fn offline_manifest_resolver_rejects_registry_refs() {
         let err = resolve_offline_manifest_path("acme/demo").expect_err("registry ref must fail");
         match err {
@@ -1561,6 +1700,24 @@ contract = "service@1"
                 );
             }
             other => panic!("expected unsupported target error, got {other:?}"),
+        }
+    }
+
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
         }
     }
 }
