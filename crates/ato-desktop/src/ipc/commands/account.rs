@@ -7,7 +7,7 @@ use crate::system_capsule::broker::Capability;
 pub fn specs() -> Vec<IpcCommandSpec> {
     vec![
         spec("account.authStatus", SystemCapsule, &[]),
-        spec("account.login",      SystemCapsule, &[Capability::WebviewCreate]),
-        spec("account.logout",     SystemCapsule, &[]),
+        spec("account.login", SystemCapsule, &[Capability::WebviewCreate]),
+        spec("account.logout", SystemCapsule, &[]),
     ]
 }

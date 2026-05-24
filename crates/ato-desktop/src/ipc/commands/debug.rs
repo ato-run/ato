@@ -8,7 +8,5 @@ use super::{spec, IpcCommandSpec};
 use crate::ipc::policy::IpcVisibility::InternalOnly;
 
 pub fn specs() -> Vec<IpcCommandSpec> {
-    vec![
-        spec("debug.reloadSystemCapsule", InternalOnly, &[]),
-    ]
+    vec![spec("debug.reloadSystemCapsule", InternalOnly, &[])]
 }

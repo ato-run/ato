@@ -622,7 +622,11 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(hide = true, name = "self-update", about = "Update ato CLI to the latest version")]
+    #[command(
+        hide = true,
+        name = "self-update",
+        about = "Update ato CLI to the latest version"
+    )]
     SelfUpdate,
 
     #[command(

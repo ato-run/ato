@@ -313,15 +313,15 @@ fn spawn_drain_loop_inner(
                     if let (Some(rid), Some(cb)) = (request_id, response_cb.as_ref()) {
                         let response = match result {
                             Ok(()) => IpcResponse::ok(Some(rid), serde_json::Value::Null),
-                            Err(ref err) => IpcResponse::error(
-                                Some(rid),
-                                "dispatch_error",
-                                format!("{err:?}"),
-                            ),
+                            Err(ref err) => {
+                                IpcResponse::error(Some(rid), "dispatch_error", format!("{err:?}"))
+                            }
                         };
                         match serde_json::to_string(&response) {
                             Ok(json) => cb(cx, rid, json),
-                            Err(e) => tracing::warn!(?e, "system_capsule::ipc: response serialise failed"),
+                            Err(e) => {
+                                tracing::warn!(?e, "system_capsule::ipc: response serialise failed")
+                            }
                         }
                     } else if let Err(err) = result {
                         tracing::warn!(

@@ -713,10 +713,9 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.installed_apps_ui.selected_installed_app_id =
-            Some(action.installed_app_id.clone());
-        self.state.installed_apps_ui.selected_profile_id = Some("default".to_string());
-        self.state.installed_apps_ui.detail_error = None;
+        self.state
+            .installed_apps_ui
+            .select_app(action.installed_app_id.clone());
         cx.notify();
     }
 
@@ -726,16 +725,10 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .state
+        self.state
             .installed_apps_ui
-            .selected_installed_app_id
-            .as_deref()
-            == Some(&action.installed_app_id)
-        {
-            self.state.installed_apps_ui.selected_profile_id = Some(action.profile_id.clone());
-            cx.notify();
-        }
+            .select_profile(&action.installed_app_id, &action.profile_id);
+        cx.notify();
     }
 
     fn on_toggle_dev_console(

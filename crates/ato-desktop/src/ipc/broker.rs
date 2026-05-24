@@ -32,7 +32,10 @@ pub struct IpcBroker {
 
 impl IpcBroker {
     pub fn new(registry: IpcCommandRegistry) -> Self {
-        Self { registry, policy: super::policy::PolicyEngine }
+        Self {
+            registry,
+            policy: super::policy::PolicyEngine,
+        }
     }
 
     /// Dispatch a single IPC request from `principal`.
@@ -50,7 +53,10 @@ impl IpcBroker {
             return IpcResponse::unknown_command(request.id, &request.command);
         }
 
-        match self.policy.check(principal, spec.visibility, spec.required_capabilities) {
+        match self
+            .policy
+            .check(principal, spec.visibility, spec.required_capabilities)
+        {
             PolicyOutcome::Allow => {}
             PolicyOutcome::InternalOnlyCommand => {
                 return IpcResponse::unknown_command(request.id, &request.command);
@@ -87,7 +93,7 @@ mod tests {
     use super::*;
     use crate::ipc::policy::IpcVisibility;
     use crate::ipc::principal::IpcPrincipal;
-    use crate::ipc::registry::{IpcCommandSpec, IpcCommandRegistry, IpcHandler};
+    use crate::ipc::registry::{IpcCommandRegistry, IpcCommandSpec, IpcHandler};
     use crate::system_capsule::broker::{Capability, SystemCapsuleId};
 
     #[derive(Debug)]
@@ -147,7 +153,11 @@ mod tests {
     }
 
     fn req(command: &str) -> IpcRequest {
-        IpcRequest { id: Some(1), command: command.to_string(), params: serde_json::Value::Null }
+        IpcRequest {
+            id: Some(1),
+            command: command.to_string(),
+            params: serde_json::Value::Null,
+        }
     }
 
     #[test]
@@ -167,7 +177,10 @@ mod tests {
     #[test]
     fn system_capsule_can_call_session_start() {
         let broker = build_broker();
-        let r = broker.dispatch(&system_principal(SystemCapsuleId::AtoStore), &req("session.start"));
+        let r = broker.dispatch(
+            &system_principal(SystemCapsuleId::AtoStore),
+            &req("session.start"),
+        );
         assert!(matches!(r, IpcResponse::Ok { .. }));
     }
 
