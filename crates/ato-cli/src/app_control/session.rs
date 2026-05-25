@@ -1523,8 +1523,9 @@ pub(super) fn start_orchestration_session_supervisor(
 /// + frontend with `web depends_on main`), this is the user-facing UI.
 ///
 /// If multiple leaves exist, prefer one whose target driver is `node` /
-/// runtime is `web` (front-end candidates), then fall back to the
-/// alphabetically last name.
+/// runtime is `web` (front-end candidates), then prefer one with
+/// `network.publish = true` (the public-facing service, auto-set for `main`
+/// when it has a port), then fall back to the alphabetically last name.
 fn pick_orchestration_leaf_service(
     orchestration: &capsule_core::foundation::types::OrchestrationPlan,
 ) -> Result<&capsule_core::foundation::types::ResolvedService> {
@@ -1557,6 +1558,9 @@ fn pick_orchestration_leaf_service(
                     || target.runtime.eq_ignore_ascii_case("web")
             }) {
                 return Ok(*web_leaf);
+            }
+            if let Some(published_leaf) = leaves.iter().find(|service| service.network.publish) {
+                return Ok(*published_leaf);
             }
             Ok(*leaves
                 .iter()
@@ -5037,5 +5041,164 @@ mod tests {
             !has_ctx,
             "ScopedInstallLifecycleGuard must clear context on drop"
         );
+    }
+
+    // ── pick_orchestration_leaf_service ───────────────────────────────────────
+
+    fn make_leaf_service(
+        name: &str,
+        publish: bool,
+        port: Option<u16>,
+        depends_on: Vec<String>,
+    ) -> capsule_core::foundation::types::ResolvedService {
+        use capsule_core::foundation::types::{
+            ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
+        };
+        ResolvedService {
+            name: name.to_string(),
+            depends_on,
+            connections: vec![],
+            readiness_probe: None,
+            network: ResolvedServiceNetwork {
+                aliases: vec![name.to_string()],
+                publish,
+                allow_from: vec![],
+            },
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                target: name.to_string(),
+                runtime: "oci".to_string(),
+                driver: None,
+                runtime_version: None,
+                image: Some(format!("{}:latest", name)),
+                entrypoint: String::new(),
+                run_command: None,
+                cmd: vec![],
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port,
+                required_env: vec![],
+                mounts: vec![],
+            }),
+        }
+    }
+
+    /// Dify-shaped plan: `main` (published, port 3000) and `worker`
+    /// (unpublished, port 5001) are both leaves (neither is depended on).
+    /// Should pick `main`, not `worker` (alphabetically last).
+    #[test]
+    fn pick_leaf_prefers_published_over_alphabetically_last_for_dify_shape() {
+        use capsule_core::foundation::types::OrchestrationPlan;
+
+        let db = make_leaf_service("db", false, Some(5432), vec![]);
+        let redis = make_leaf_service("redis", false, Some(6379), vec![]);
+        let weaviate = make_leaf_service("weaviate", false, Some(8080), vec![]);
+        let api = make_leaf_service(
+            "api",
+            false,
+            Some(5001),
+            vec!["db".to_string(), "redis".to_string(), "weaviate".to_string()],
+        );
+        let worker = make_leaf_service(
+            "worker",
+            false,
+            Some(5001),
+            vec!["db".to_string(), "redis".to_string()],
+        );
+        // main: published (auto-set by resolve_services for `main` with a port)
+        let main = make_leaf_service("main", true, Some(3000), vec!["api".to_string()]);
+
+        let plan = OrchestrationPlan {
+            startup_order: vec![
+                "db".to_string(),
+                "redis".to_string(),
+                "weaviate".to_string(),
+                "api".to_string(),
+                "worker".to_string(),
+                "main".to_string(),
+            ],
+            services: vec![db, redis, weaviate, api, worker, main],
+        };
+
+        let leaf = pick_orchestration_leaf_service(&plan).expect("leaf service");
+        assert_eq!(
+            leaf.name, "main",
+            "published leaf `main` (port 3000) should be preferred over unpublished `worker` (port 5001)"
+        );
+    }
+
+    /// node/web runtime still wins over `network.publish`.
+    #[test]
+    fn pick_leaf_node_driver_beats_published_oci() {
+        use capsule_core::foundation::types::{
+            OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
+            ResolvedTargetRuntime,
+        };
+
+        let api = make_leaf_service("api", false, Some(5001), vec![]);
+        // published OCI leaf
+        let main_oci = make_leaf_service("main", true, Some(3000), vec![]);
+        // node-driver leaf (unpublished)
+        let frontend = ResolvedService {
+            name: "frontend".to_string(),
+            depends_on: vec![],
+            connections: vec![],
+            readiness_probe: None,
+            network: ResolvedServiceNetwork {
+                aliases: vec!["frontend".to_string()],
+                publish: false,
+                allow_from: vec![],
+            },
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Managed(ResolvedTargetRuntime {
+                target: "frontend".to_string(),
+                runtime: "web".to_string(),
+                driver: Some("node".to_string()),
+                runtime_version: None,
+                image: None,
+                entrypoint: "src/index.js".to_string(),
+                run_command: None,
+                cmd: vec![],
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port: Some(8080),
+                required_env: vec![],
+                mounts: vec![],
+            }),
+        };
+
+        let plan = OrchestrationPlan {
+            startup_order: vec![
+                "api".to_string(),
+                "main".to_string(),
+                "frontend".to_string(),
+            ],
+            services: vec![api, main_oci, frontend],
+        };
+
+        let leaf = pick_orchestration_leaf_service(&plan).expect("leaf service");
+        assert_eq!(
+            leaf.name, "frontend",
+            "node-driver leaf should be preferred over published OCI leaf"
+        );
+    }
+
+    /// Single leaf — trivial case is unchanged.
+    #[test]
+    fn pick_leaf_single_leaf_is_returned_directly() {
+        use capsule_core::foundation::types::OrchestrationPlan;
+
+        let db = make_leaf_service("db", false, Some(5432), vec![]);
+        let main = make_leaf_service("main", true, Some(3000), vec!["db".to_string()]);
+
+        let plan = OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "main".to_string()],
+            services: vec![db, main],
+        };
+
+        let leaf = pick_orchestration_leaf_service(&plan).expect("leaf service");
+        assert_eq!(leaf.name, "main");
     }
 }
