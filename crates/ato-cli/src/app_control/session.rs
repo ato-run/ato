@@ -1167,13 +1167,33 @@ pub(super) fn start_orchestration_session_in_process(
     timer.finish_ok();
 
     // Step 3: leaf service URL — ServicePhaseCoordinator already ran the
-    // per-service readiness probes, so the leaf is reachable. We only need
-    // the public URL for the session record.
-    let local_url = format!("http://127.0.0.1:{}/", leaf_port);
+    // per-service readiness probes, so the leaf is reachable. We bind the
+    // WebView to the *actual* published host port from the detached snapshot
+    // rather than the declared `leaf_port`. For OCI leaves these can differ
+    // (and for two recipes that both declare 8080, e.g. Open WebUI and
+    // Excalidraw, the declared port is not even unique). Local leaves don't
+    // populate `host_ports`, so we fall back to the declared port — that
+    // path's container_port and host_port are the same by construction.
+    let leaf_snapshot = detached
+        .services
+        .iter()
+        .find(|s| s.name == leaf_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "orchestration leaf service '{}' missing from detached snapshot",
+                leaf_name
+            )
+        })?;
+    let leaf_host_port = leaf_snapshot
+        .host_ports
+        .get(&leaf_port)
+        .copied()
+        .unwrap_or(leaf_port);
+    let local_url = format!("http://127.0.0.1:{leaf_host_port}/");
 
     notes.push(format!(
-        "Orchestration mode: launched in-process; WebView bound to leaf service '{}' (target='{}', port={}).",
-        leaf_name, leaf_target_label, leaf_port
+        "Orchestration mode: launched in-process; WebView bound to leaf service '{}' (target='{}', container_port={}, host_port={}).",
+        leaf_name, leaf_target_label, leaf_port, leaf_host_port
     ));
 
     let runtime_descriptor = CapsuleRuntimeDescriptor {
@@ -1181,7 +1201,7 @@ pub(super) fn start_orchestration_session_in_process(
         runtime: Some(leaf_runtime),
         driver: Some(leaf_driver.clone()),
         language: None,
-        port: Some(leaf_port),
+        port: Some(leaf_host_port),
     };
 
     // Surface the leaf process to ProcessManager so `stop_session` can find
@@ -1190,13 +1210,7 @@ pub(super) fn start_orchestration_session_in_process(
     // matches the legacy supervisor's behavior of using the spawned `ato run`
     // PID. PR-D wires the full materialized graph (including OCI container
     // ids) through SessionRecord.dependency_contracts.
-    let leaf_local_pid = detached
-        .services
-        .iter()
-        .find(|s| s.name == leaf_name)
-        .and_then(|s| s.local_pid)
-        .map(|pid| pid as i32)
-        .unwrap_or(0);
+    let leaf_local_pid = leaf_snapshot.local_pid.map(|pid| pid as i32).unwrap_or(0);
 
     let session_id_seed = if leaf_local_pid > 0 {
         leaf_local_pid as u32
