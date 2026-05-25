@@ -219,6 +219,11 @@ struct SessionStopEnvelope {
     action: &'static str,
     session_id: String,
     stopped: bool,
+    /// Set when network removal was attempted but failed. Includes the
+    /// network name and the last error seen so callers can retry cleanup
+    /// manually (`podman network rm <name>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1229,7 +1234,7 @@ pub(super) fn start_orchestration_session_in_process(
             provider_needs.as_ref(),
         );
     let orchestration_services =
-        orchestration_services_for_session_record(std::process::id() as i32, &detached.services);
+        orchestration_services_for_session_record(std::process::id() as i32, &detached.services, detached.network_name.clone());
     let graph =
         crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
             graph,
@@ -1583,9 +1588,14 @@ fn pick_orchestration_leaf_service(
 /// materialized the orchestration graph (`std::process::id()` at the
 /// call site). It is recorded so `stop_session` can defend against
 /// PID reuse when validating the record.
+///
+/// `network_name` is the Docker/Podman network created by the OCI
+/// orchestrator for this session, stored so `stop_session` can remove
+/// it after all containers stop (closes #273).
 fn orchestration_services_for_session_record(
     wrapper_pid: i32,
     snapshots: &[crate::executors::orchestrator::DetachedServiceSnapshot],
+    network_name: Option<String>,
 ) -> Option<StoredOrchestrationServices> {
     if snapshots.is_empty() {
         return None;
@@ -1604,6 +1614,7 @@ fn orchestration_services_for_session_record(
     Some(StoredOrchestrationServices {
         wrapper_pid,
         services,
+        network_name,
     })
 }
 
@@ -2439,6 +2450,7 @@ fn orchestration_services_from_graph(
     Some(StoredOrchestrationServices {
         wrapper_pid: record.pid,
         services: services.into_iter().map(|(_, service)| service).collect(),
+        network_name: None,
     })
 }
 
@@ -2785,6 +2797,34 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         }
     }
 
+    // Prune the OCI network created for this session (#273). Runs
+    // after all containers have been removed so the network is no
+    // longer in use. Returns an observable outcome so callers can
+    // surface failures rather than silently losing retryability.
+    let network_cleanup_warning: Option<String> = if stopped {
+        if let Some(network_name) = session_record
+            .as_ref()
+            .and_then(|r| r.orchestration_services.as_ref())
+            .and_then(|s| s.network_name.as_deref())
+        {
+            use crate::application::orchestration_teardown::{
+                NetworkRemovalOutcome, remove_network_if_present,
+            };
+            match remove_network_if_present(network_name) {
+                NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
+                NetworkRemovalOutcome::SkippedNotAtoManaged => None,
+                NetworkRemovalOutcome::Failed(err) => Some(format!(
+                    "network cleanup failed for {network_name}: {err}; \
+                     run `podman network rm {network_name}` to clean up manually"
+                )),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if stopped && session_path.exists() {
         fs::remove_file(&session_path)
             .with_context(|| format!("failed to remove session file {}", session_path.display()))?;
@@ -2799,6 +2839,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
                 action: SESSION_ACTION_STOP,
                 session_id: session_id.to_string(),
                 stopped,
+                network_cleanup_warning: network_cleanup_warning.clone(),
             })?
         );
         return Ok(());
@@ -2808,6 +2849,9 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         println!("Stopped session: {session_id}");
     } else {
         println!("Session was not active: {session_id}");
+    }
+    if let Some(warn) = &network_cleanup_warning {
+        eprintln!("ATO-WARN {warn}");
     }
     Ok(())
 }
@@ -4280,6 +4324,7 @@ mod tests {
                         published_port: None,
                     },
                 ],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -4442,6 +4487,7 @@ mod tests {
                             published_port: None,
                         },
                     ],
+                    network_name: None,
                 }),
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -4610,6 +4656,7 @@ mod tests {
                     host_ports: BTreeMap::new(),
                     published_port: Some(port),
                 }],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -4878,6 +4925,7 @@ mod tests {
                     host_ports: BTreeMap::new(),
                     published_port: Some(port),
                 }],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),

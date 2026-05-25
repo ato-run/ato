@@ -794,6 +794,7 @@ mod tests {
                 host_ports: Default::default(),
                 published_port: Some(3000),
             }],
+            network_name: None,
         };
 
         let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -842,6 +843,7 @@ mod tests {
                     published_port: Some(3000),
                 },
             ],
+            network_name: None,
         };
         let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
         service_deps.insert("web".to_string(), vec!["main".to_string()]);
@@ -960,6 +962,7 @@ mod tests {
                         host_ports: Default::default(),
                         published_port: None,
                     }],
+                    network_name: None,
                 }),
                 schema_version: None,
                 launch_digest: None,
@@ -1191,6 +1194,7 @@ mod tests {
                         published_port: None,
                     },
                 ],
+                network_name: None,
             }),
             schema_version: None,
             launch_digest: None,
@@ -1330,6 +1334,7 @@ mod tests {
                     host_ports: Default::default(),
                     published_port: None,
                 }],
+                network_name: None,
             }),
             schema_version: None,
             launch_digest: None,
