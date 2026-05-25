@@ -40,7 +40,7 @@
 | dify | 124 | 300s (timeout) | `ato-desktop-session-98384` | — | 307 (from Podman VM²) | 6 → stopped | ✅ |
 | excalidraw | 0 | 19s | `ato-desktop-session-99317` | ready | 200 :8080 | 1 | ✅ |
 
-**Final reach rate: 7 / 8 session-created; 6 / 8 host-HTTP-ready; 1 acceptable-with-documentation (open-webui); 1 degraded (dify)**
+**Final reach rate: 7 / 8 session-created; 6 / 8 host-HTTP-ready; open-webui acceptable-with-documentation; dify degraded (arm64 Podman emulation)**
 
 ---
 
