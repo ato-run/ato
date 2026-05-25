@@ -54,6 +54,27 @@ static SAMPLE_RECIPE_CATALOG: &[SampleRecipeBinding] = &[
         github: Some(("excalidraw", "excalidraw")),
         manifest_content: include_str!("../../../../samples/recipes/excalidraw/capsule.toml"),
     },
+    SampleRecipeBinding {
+        slug: "blinko",
+        display_name: "Blinko",
+        aliases: &["blinko"],
+        github: Some(("blinkospace", "blinko")),
+        manifest_content: include_str!("../../../../samples/recipes/blinko/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "affine",
+        display_name: "AFFiNE",
+        aliases: &["affine", "affine-pro"],
+        github: Some(("toeverything", "AFFiNE")),
+        manifest_content: include_str!("../../../../samples/recipes/affine/capsule.toml"),
+    },
+    SampleRecipeBinding {
+        slug: "dify",
+        display_name: "Dify",
+        aliases: &["dify"],
+        github: Some(("langgenius", "dify")),
+        manifest_content: include_str!("../../../../samples/recipes/dify/capsule.toml"),
+    },
 ];
 
 fn materialize_recipe(binding: &SampleRecipeBinding) -> Result<PathBuf> {
@@ -185,6 +206,32 @@ mod tests {
             .expect("no error")
             .expect("github open-webui");
         assert_eq!(result.slug, "open-webui");
+    }
+
+    #[test]
+    fn resolves_blinko_by_alias_and_github_handle() {
+        let alias = resolve_sample_recipe_for_input("blinko")
+            .expect("no error")
+            .expect("blinko alias");
+        assert_eq!(alias.slug, "blinko");
+
+        let github = resolve_sample_recipe_for_github("blinkospace", "blinko")
+            .expect("no error")
+            .expect("github blinko");
+        assert_eq!(github.slug, "blinko");
+    }
+
+    #[test]
+    fn resolves_affine_and_dify_by_github_handle() {
+        let affine = resolve_sample_recipe_for_github("toeverything", "AFFiNE")
+            .expect("no error")
+            .expect("github affine");
+        assert_eq!(affine.slug, "affine");
+
+        let dify = resolve_sample_recipe_for_github("langgenius", "dify")
+            .expect("no error")
+            .expect("github dify");
+        assert_eq!(dify.slug, "dify");
     }
 
     #[test]
