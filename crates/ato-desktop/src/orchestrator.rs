@@ -1273,7 +1273,11 @@ fn start_capsule(
 ) -> Result<SessionStartInfo, LaunchError> {
     let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
-    let mut cmd = Command::new(&ato_bin);
+    // Use ato_helper_command so ATO_HOME is forwarded to the subprocess.
+    // Without this, session records are written to ~/.ato/apps/ato-desktop/sessions/
+    // while stop_capsule_session (which uses run_ato_json/ato_helper_command) looks
+    // in the ATO_HOME-relative path, causing stop to return stopped=false.
+    let mut cmd = ato_helper_command(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
     let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
     cmd.arg("--run-config-hash").arg(&run_config_hash);
@@ -1334,7 +1338,8 @@ fn start_capsule_from_materialized_record(
         record_path = %record_path.display(),
         "spawning ato helper for materialized session start"
     );
-    let mut cmd = Command::new(&ato_bin);
+    // Use ato_helper_command so ATO_HOME is forwarded consistently with stop/query helpers.
+    let mut cmd = ato_helper_command(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
     cmd.arg("--from-materialized-record").arg(record_path);
     let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
@@ -1795,7 +1800,7 @@ fn spawn_background_receipt_refresh(handle: &str) {
             return;
         }
     };
-    let mut cmd = Command::new(&ato_bin);
+    let mut cmd = ato_helper_command(&ato_bin);
     cmd.arg("app")
         .arg("session")
         .arg("start")
