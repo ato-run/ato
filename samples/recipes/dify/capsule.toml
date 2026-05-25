@@ -8,7 +8,8 @@ homepage = "https://github.com/langgenius/dify"
 # Spike notes:
 # - Minimal service graph: db, redis, weaviate, api, worker, web(main)
 # - Omitted: sandbox, ssrf_proxy, plugin_daemon, nginx (require repo config file bind mounts not supported in recipes)
-# - Images are linux/amd64 only; allow_emulation = true required on arm64 hosts
+# - langgenius/dify-api and langgenius/dify-web publish linux/arm64 images; no emulation needed
+# - semitechnologies/weaviate also has linux/arm64; runs natively on arm64 hosts
 # - CONSOLE_API_URL is left empty; web app falls back to relative-URL routing (see docs)
 # - SECRET_KEY is a hardcoded demo value; MUST be replaced for production use
 # - Redis uses cmd override to enable requirepass; api/worker use REDIS_PASSWORD to match
@@ -42,7 +43,6 @@ env = { PERSISTENCE_DATA_PATH = "/var/lib/weaviate", QUERY_DEFAULTS_LIMIT = "25"
 runtime = "oci"
 image = "langgenius/dify-api:1.14.2"
 port = 5001
-allow_emulation = true
 depends_on = ["db", "redis", "weaviate"]
 env = { MODE = "api", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "difyai123456", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", MIGRATION_ENABLED = "true", DEPLOY_ENV = "PRODUCTION", LOG_LEVEL = "INFO", DIFY_PORT = "5001", CONSOLE_WEB_URL = "", CONSOLE_API_URL = "", APP_API_URL = "", FILES_URL = "" }
 
@@ -51,7 +51,6 @@ env = { MODE = "api", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only
 runtime = "oci"
 image = "langgenius/dify-api:1.14.2"
 port = 5001
-allow_emulation = true
 depends_on = ["db", "redis"]
 env = { MODE = "worker", SECRET_KEY = "sk-demo-changeme-not-for-production-use-only", DB_TYPE = "postgresql", DB_USERNAME = "postgres", DB_PASSWORD = "difyai123456", DB_HOST = "db", DB_PORT = "5432", DB_DATABASE = "dify", REDIS_HOST = "redis", REDIS_PORT = "6379", REDIS_PASSWORD = "difyai123456", REDIS_USE_SSL = "false", VECTOR_STORE = "weaviate", WEAVIATE_ENDPOINT = "http://weaviate:8080", WEAVIATE_API_KEY = "WVF5YThaHlkYwhGUSmCRgsX3tD5ngdN8pkih", STORAGE_TYPE = "local", STORAGE_LOCAL_PATH = "/app/api/storage", DEPLOY_ENV = "PRODUCTION" }
 
@@ -63,7 +62,6 @@ env = { MODE = "worker", SECRET_KEY = "sk-demo-changeme-not-for-production-use-o
 runtime = "oci"
 image = "langgenius/dify-web:1.14.2"
 port = 3000
-allow_emulation = true
 depends_on = ["api"]
 env = { CONSOLE_API_URL = "", APP_API_URL = "", NEXT_TELEMETRY_DISABLED = "1" }
 
