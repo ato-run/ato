@@ -365,6 +365,22 @@ impl PodmanProbePlatform {
     }
 }
 
+/// Render an [`OciPortSpec`] into the argument value passed after `-p` to
+/// `podman create`. Honors `host_ip` so the orchestrator's
+/// `Some("127.0.0.1")` request publishes to loopback rather than the
+/// engine-default bind, matching the prior bollard `HostBinding` behavior.
+///
+/// Podman's `-p` grammar: `[[ip:][hostPort]:]containerPort[/protocol]`.
+fn podman_publish_port_arg(port: &capsule_core::runtime::oci::OciPortSpec) -> String {
+    let suffix = format!("{}/{}", port.container_port, port.protocol);
+    match (port.host_ip.as_deref(), port.host_port) {
+        (Some(ip), Some(hp)) => format!("{ip}:{hp}:{suffix}"),
+        (Some(ip), None) => format!("{ip}::{suffix}"),
+        (None, Some(hp)) => format!("{hp}:{suffix}"),
+        (None, None) => suffix,
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PodmanProvider<R = SystemCommandRunner> {
     runner: R,
@@ -779,10 +795,7 @@ where
         }
         for port in &request.ports {
             args.push("-p".into());
-            match port.host_port {
-                Some(hp) => args.push(format!("{}:{}", hp, port.container_port)),
-                None => args.push(format!(":{}", port.container_port)),
-            }
+            args.push(podman_publish_port_arg(port));
         }
         if let Some(wd) = &request.working_dir {
             args.push("--workdir".into());
@@ -981,17 +994,11 @@ where
 #[async_trait]
 impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
     async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
-        let exists = tokio::process::Command::new("podman")
-            .args(["image", "exists", image])
-            .status()
-            .await
-            .map_err(|err| {
-                CapsuleError::ContainerEngine(format!("failed to run podman image exists: {err}"))
-            })?;
-        if exists.success() {
-            return Ok(());
-        }
-
+        // Always invoke `podman pull` so mutable tags (e.g. `:latest`) refresh
+        // against the registry, matching the prior bollard pull semantics.
+        // Skipping when `podman image exists` succeeds is unsafe here because
+        // session orchestration may pass an unresolved tag — the resolved-
+        // digest path lives on `OciProvider::pull_image(&OciImageResolution)`.
         let output = tokio::process::Command::new("podman")
             .args(["pull", image])
             .output()
@@ -2256,6 +2263,52 @@ mod tests {
             probe.semantics.substrate,
             OciProviderSubstrate::PodmanMachine
         );
+    }
+
+    #[test]
+    fn podman_publish_port_arg_honors_loopback_host_ip() {
+        use capsule_core::runtime::oci::OciPortSpec;
+
+        let fixed = OciPortSpec {
+            container_port: 8080,
+            host_port: Some(45678),
+            protocol: "tcp".to_string(),
+            host_ip: Some("127.0.0.1".to_string()),
+        };
+        assert_eq!(
+            super::podman_publish_port_arg(&fixed),
+            "127.0.0.1:45678:8080/tcp"
+        );
+
+        let dynamic = OciPortSpec {
+            container_port: 8080,
+            host_port: None,
+            protocol: "tcp".to_string(),
+            host_ip: Some("127.0.0.1".to_string()),
+        };
+        assert_eq!(
+            super::podman_publish_port_arg(&dynamic),
+            "127.0.0.1::8080/tcp"
+        );
+
+        let host_port_only = OciPortSpec {
+            container_port: 8080,
+            host_port: Some(45678),
+            protocol: "tcp".to_string(),
+            host_ip: None,
+        };
+        assert_eq!(
+            super::podman_publish_port_arg(&host_port_only),
+            "45678:8080/tcp"
+        );
+
+        let neither = OciPortSpec {
+            container_port: 8080,
+            host_port: None,
+            protocol: "udp".to_string(),
+            host_ip: None,
+        };
+        assert_eq!(super::podman_publish_port_arg(&neither), "8080/udp");
     }
 
     #[test]
