@@ -28,6 +28,10 @@ function submitQuery(value: string) {
   postIpc({ capsule: 'start', command: { kind: 'open_query', value: trimmed } });
 }
 
+function openFeaturedApp(handle: string) {
+  submitQuery(handle);
+}
+
 export default function App() {
   const [query, setQuery] = React.useState('');
   return (
@@ -238,7 +242,7 @@ export default function App() {
             
             <div className="grid grid-cols-3 gap-4">
               {/* AFFINE */}
-              <div className="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm flex gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm flex gap-3 hover:shadow-md transition-shadow cursor-pointer" onClick={() => openFeaturedApp('affine')}>
                 <div className="w-[72px] h-[72px] rounded-2xl bg-gradient-to-br from-rose-400 to-rose-600 flex items-center justify-center shrink-0 shadow-inner relative overflow-hidden">
                   {/* AFFINE SVG mock */}
                   <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinejoin="round" className="w-8 h-8 opacity-90">
@@ -262,7 +266,13 @@ export default function App() {
                       <span className="opacity-40 px-0.5">•</span>
                       <span className="flex items-center gap-0.5"><Users size={9}/> 2.1k</span>
                     </div>
-                    <button className="flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90">
+                    <button
+                      className="flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openFeaturedApp('affine');
+                      }}
+                    >
                       <Play size={8} className="fill-current" /> Launch
                     </button>
                   </div>
@@ -270,7 +280,7 @@ export default function App() {
               </div>
 
               {/* Open WebUI */}
-              <div className="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm flex gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm flex gap-3 hover:shadow-md transition-shadow cursor-pointer" onClick={() => openFeaturedApp('open-webui')}>
                 <div className="w-[72px] h-[72px] rounded-2xl bg-[#0F172A] flex items-center justify-center shrink-0 shadow-inner">
                   <div className="text-white font-bold text-[28px] tracking-tighter leading-none">OI</div>
                 </div>
@@ -287,7 +297,13 @@ export default function App() {
                       <span className="opacity-40 px-0.5">•</span>
                       <span className="flex items-center gap-0.5"><Users size={9}/> 3.3k</span>
                     </div>
-                    <button className="flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90">
+                    <button
+                      className="flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openFeaturedApp('open-webui');
+                      }}
+                    >
                       <Play size={8} className="fill-current" /> Launch
                     </button>
                   </div>
@@ -295,7 +311,7 @@ export default function App() {
               </div>
 
               {/* Excalidraw */}
-              <div className="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm flex gap-3 hover:shadow-md transition-shadow cursor-pointer">
+              <div className="p-4 rounded-2xl border border-slate-100 bg-white shadow-sm flex gap-3 hover:shadow-md transition-shadow cursor-pointer" onClick={() => openFeaturedApp('excalidraw')}>
                 <div className="w-[72px] h-[72px] rounded-2xl bg-gradient-to-br from-pink-400 to-rose-500 flex items-center justify-center shrink-0 shadow-inner">
                   <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="w-8 h-8 opacity-90">
                     <rect x="5" y="5" width="14" height="14" rx="2" transform="rotate(45 12 12)" />
@@ -315,7 +331,13 @@ export default function App() {
                       <span className="opacity-40 px-0.5">•</span>
                       <span className="flex items-center gap-0.5"><Users size={9}/> 1.6k</span>
                     </div>
-                    <button className="flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90">
+                    <button
+                      className="flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openFeaturedApp('excalidraw');
+                      }}
+                    >
                       <Play size={8} className="fill-current" /> Launch
                     </button>
                   </div>
