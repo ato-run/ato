@@ -1038,6 +1038,15 @@ impl WebViewManager {
                     })));
                     continue;
                 }
+                RestartActiveSession => {
+                    // In standard (non-Focus) WebView mode, restart is not yet
+                    // implemented. Return a typed error so callers can distinguish
+                    // this from a generic failure and fall back to stop + reopen.
+                    req.send(Err(
+                        "restart_active_session is only supported in Focus mode".to_string(),
+                    ));
+                    continue;
+                }
                 HostDispatchAction { action, .. } => {
                     // Push onto the queue; `DesktopShell::render` drains
                     // it on the next paint and invokes the matching
@@ -4869,6 +4878,7 @@ pub(crate) fn dispatch_automation_command(
         | SetCapsuleSecrets { .. }
         | ApproveExecutionPlanConsent { .. }
         | StopActiveSession
+        | RestartActiveSession
         | HostDispatchAction { .. }
         | ListSessions
         | AuthStatus => {
