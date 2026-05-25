@@ -28,7 +28,9 @@ use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
-use crate::adapters::runtime::oci_provider::{DefaultOciProviderSelector, OciProviderSelector};
+use crate::adapters::runtime::oci_provider::{
+    DefaultOciProviderSelector, OciProvider, OciProviderSelector,
+};
 #[cfg(unix)]
 use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::application::pipeline::phases::run::{
@@ -1137,6 +1139,18 @@ pub(super) fn start_orchestration_session_in_process(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
     let oci_provider = DefaultOciProviderSelector.select_provider();
+    // Readiness preflight: surface "podman binary missing", "podman machine
+    // stopped", or "unsupported platform" as a typed error *before* we start
+    // creating networks, pulling images, or running `podman create`. Without
+    // this gate, those conditions only become visible as partial-setup
+    // failures deep inside `execute_until_ready_and_detach`, which is exactly
+    // the "hang from a half-built session" regression #289 is trying to avoid.
+    runtime_handle
+        .block_on(async { oci_provider.probe().await?.require_ready().map(|_| ()) })
+        .map_err(|err| {
+            anyhow::Error::from(err)
+                .context("OCI provider readiness probe failed before session start")
+        })?;
     let detached = runtime_handle
         .block_on(
             crate::executors::orchestrator::execute_until_ready_and_detach(
