@@ -14,18 +14,22 @@
   </div>
 
   <div class="grid grid-cols-3 gap-4">
-    <div class="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm flex gap-3 hover:shadow-md hover:border-slate-300 transition-shadow cursor-pointer featured-card" data-action="open_capsule" data-handle="capsule://github.com/usememos/memos">
-      <div class="w-[72px] h-[72px] rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shrink-0 shadow-inner relative overflow-hidden">
-        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-8 h-8 opacity-90">
-          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+    <div class="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm flex gap-3 hover:shadow-md hover:border-slate-300 transition-shadow cursor-pointer featured-card" data-action="open_query" data-query="affine">
+      <div class="w-[72px] h-[72px] rounded-2xl bg-gradient-to-br from-rose-400 to-rose-600 flex items-center justify-center shrink-0 shadow-inner relative overflow-hidden">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linejoin="round" class="w-8 h-8 opacity-90">
+          <path d="M12 2L2 20h20L12 2z" />
+          <path d="M12 10l-4 7h8l-4-7z" />
+          <circle cx="12" cy="5" r="1.5" fill="white" stroke="none" />
+          <circle cx="5" cy="18" r="1.5" fill="white" stroke="none" />
+          <circle cx="19" cy="18" r="1.5" fill="white" stroke="none" />
         </svg>
       </div>
       <div class="flex flex-col flex-1 h-full py-0.5">
         <div class="flex items-center gap-2 mb-0.5">
-          <h4 class="font-bold text-[#0F172A] text-[13px]">Memos</h4>
-          <span class="text-[9px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded-md">Recipe</span>
+          <h4 class="font-bold text-[#0F172A] text-[13px]">AFFiNE</h4>
+          <span class="text-[9px] font-bold text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded-md">Store</span>
         </div>
-        <p class="text-[10px] text-slate-500 leading-[1.35] mb-auto">Lightweight, self-hosted memo hub for fast note capture.</p>
+        <p class="text-[10px] text-slate-500 leading-[1.35] mb-auto">The open-source workspace for note-taking and knowledge.</p>
         <div class="flex items-center justify-between mt-2">
           <div class="flex items-center gap-1 text-[10px] text-slate-500 font-medium">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="#FBBF24" stroke="#FBBF24" stroke-width="1" class="shrink-0"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
@@ -33,7 +37,7 @@
             <span class="opacity-40 px-0.5">&#8226;</span>
             <span class="flex items-center gap-0.5">
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-              3.2k
+              2.1k
             </span>
           </div>
           <button class="featured-launch flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90">
@@ -44,18 +48,16 @@
       </div>
     </div>
 
-    <div class="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm flex gap-3 hover:shadow-md hover:border-slate-300 transition-shadow cursor-pointer featured-card" data-action="open_capsule" data-handle="capsule://github.com/louislam/uptime-kuma">
-      <div class="w-[72px] h-[72px] rounded-2xl bg-gradient-to-br from-emerald-400 to-green-600 flex items-center justify-center shrink-0 shadow-inner">
-        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-8 h-8 opacity-90">
-          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-        </svg>
+    <div class="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm flex gap-3 hover:shadow-md hover:border-slate-300 transition-shadow cursor-pointer featured-card" data-action="open_query" data-query="open-webui">
+      <div class="w-[72px] h-[72px] rounded-2xl bg-[#0F172A] flex items-center justify-center shrink-0 shadow-inner">
+        <div class="text-white font-bold text-[28px] tracking-tighter leading-none">OI</div>
       </div>
       <div class="flex flex-col flex-1 h-full py-0.5">
         <div class="flex items-center gap-2 mb-0.5">
-          <h4 class="font-bold text-[#0F172A] text-[13px]">Uptime Kuma</h4>
-          <span class="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md">Recipe</span>
+          <h4 class="font-bold text-[#0F172A] text-[13px]">Open WebUI</h4>
+          <span class="text-[9px] font-bold text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded-md">Store</span>
         </div>
-        <p class="text-[10px] text-slate-500 leading-[1.35] mb-auto">Self-hosted monitoring for websites, APIs, and services.</p>
+        <p class="text-[10px] text-slate-500 leading-[1.35] mb-auto">Self-hosted AI interface for LLMs that just works.</p>
         <div class="flex items-center justify-between mt-2">
           <div class="flex items-center gap-1 text-[10px] text-slate-500 font-medium">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="#FBBF24" stroke="#FBBF24" stroke-width="1" class="shrink-0"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
@@ -63,7 +65,7 @@
             <span class="opacity-40 px-0.5">&#8226;</span>
             <span class="flex items-center gap-0.5">
               <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-              5.8k
+              3.3k
             </span>
           </div>
           <button class="featured-launch flex items-center gap-1 bg-gradient-to-r from-[#FF905A] to-[#F43F5E] text-white px-2.5 py-1.5 rounded-lg text-[10px] font-bold shadow-sm hover:opacity-90">
@@ -74,7 +76,7 @@
       </div>
     </div>
 
-    <div class="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm flex gap-3 hover:shadow-md hover:border-slate-300 transition-shadow cursor-pointer featured-card" data-action="open_capsule" data-handle="capsule://github.com/excalidraw/excalidraw">
+    <div class="p-4 rounded-2xl border border-slate-200 bg-white shadow-sm flex gap-3 hover:shadow-md hover:border-slate-300 transition-shadow cursor-pointer featured-card" data-action="open_query" data-query="excalidraw">
       <div class="w-[72px] h-[72px] rounded-2xl bg-gradient-to-br from-pink-400 to-rose-500 flex items-center justify-center shrink-0 shadow-inner">
         <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-8 h-8 opacity-90">
           <rect x="5" y="5" width="14" height="14" rx="2" transform="rotate(45 12 12)" />
@@ -84,7 +86,7 @@
       <div class="flex flex-col flex-1 h-full py-0.5">
         <div class="flex items-center gap-2 mb-0.5">
           <h4 class="font-bold text-[#0F172A] text-[13px]">Excalidraw</h4>
-          <span class="text-[9px] font-bold text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded-md">Recipe</span>
+          <span class="text-[9px] font-bold text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded-md">Store</span>
         </div>
         <p class="text-[10px] text-slate-500 leading-[1.35] mb-auto">Virtual whiteboard for sketching diagrams and ideas.</p>
         <div class="flex items-center justify-between mt-2">
