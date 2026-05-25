@@ -282,7 +282,8 @@ where
                 name: network_name.clone(),
                 labels: session_labels(plan, &session_id),
             })
-            .await?;
+            .await
+            .with_context(|| format!("failed to create OCI network '{network_name}'"))?;
     }
 
     let runtime = OrchestratorStartupRuntime::new(
@@ -546,7 +547,10 @@ async fn launch_service<C: OciRuntimeClient>(
                     anyhow::anyhow!("service '{}' is missing OCI image", service.name)
                 })?;
 
-            client.pull_image(&image).await?;
+            client
+                .pull_image(&image)
+                .await
+                .with_context(|| format!("failed to pull image for service '{}'", service.name))?;
 
             let publish_mode = determine_publish_mode(orchestration, service);
             let host_port = if matches!(publish_mode, PublishMode::Fixed) {
@@ -589,8 +593,16 @@ async fn launch_service<C: OciRuntimeClient>(
                     aliases: service.network.aliases.clone(),
                     platform: None,
                 })
-                .await?;
-            client.start_container(&container_id).await?;
+                .await
+                .with_context(|| {
+                    format!("failed to create container for service '{}'", service.name)
+                })?;
+            client
+                .start_container(&container_id)
+                .await
+                .with_context(|| {
+                    format!("failed to start container for service '{}'", service.name)
+                })?;
 
             let inspect = client
                 .inspect_container(&container_id)

@@ -9,6 +9,7 @@ use capsule_core::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
     OciProviderSubstrate,
 };
+use capsule_core::CapsuleError;
 use std::process::Command;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -364,6 +365,23 @@ impl PodmanProbePlatform {
     }
 }
 
+/// Render an [`OciPortSpec`] into the argument value passed after `-p` to
+/// `podman create`. Honors `host_ip` so the orchestrator's
+/// `Some("127.0.0.1")` request publishes to loopback rather than the
+/// engine-default bind, matching the prior bollard `HostBinding` behavior.
+///
+/// Podman's `-p` grammar: `[[ip:][hostPort]:]containerPort[/protocol]`.
+fn podman_publish_port_arg(port: &capsule_core::runtime::oci::OciPortSpec) -> String {
+    let suffix = format!("{}/{}", port.container_port, port.protocol);
+    match (port.host_ip.as_deref(), port.host_port) {
+        (Some(ip), Some(hp)) => format!("{ip}:{hp}:{suffix}"),
+        (Some(ip), None) => format!("{ip}::{suffix}"),
+        (None, Some(hp)) => format!("{hp}:{suffix}"),
+        (None, None) => suffix,
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct PodmanProvider<R = SystemCommandRunner> {
     runner: R,
     platform: PodmanProbePlatform,
@@ -777,10 +795,7 @@ where
         }
         for port in &request.ports {
             args.push("-p".into());
-            match port.host_port {
-                Some(hp) => args.push(format!("{}:{}", hp, port.container_port)),
-                None => args.push(format!(":{}", port.container_port)),
-            }
+            args.push(podman_publish_port_arg(port));
         }
         if let Some(wd) = &request.working_dir {
             args.push("--workdir".into());
@@ -973,6 +988,126 @@ where
             });
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
+    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+        // Always invoke `podman pull` so mutable tags (e.g. `:latest`) refresh
+        // against the registry, matching the prior bollard pull semantics.
+        // Skipping when `podman image exists` succeeds is unsafe here because
+        // session orchestration may pass an unresolved tag — the resolved-
+        // digest path lives on `OciProvider::pull_image(&OciImageResolution)`.
+        let output = tokio::process::Command::new("podman")
+            .args(["pull", image])
+            .output()
+            .await
+            .map_err(|err| {
+                CapsuleError::ContainerEngine(format!("failed to run podman pull: {err}"))
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(CapsuleError::Runtime(format!(
+            "podman pull failed for '{}': {}",
+            image,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+        <Self as OciProvider>::create_network(self, request)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+        <Self as OciProvider>::remove_network(self, network_name)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> capsule_core::Result<String> {
+        <Self as OciProvider>::create_container(self, request)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+        <Self as OciProvider>::start_container(self, container_id)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> capsule_core::Result<OciContainerInspect> {
+        <Self as OciProvider>::inspect_container(self, container_id)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+        <Self as OciProvider>::logs(self, container_id, follow)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn exec_container(
+        &self,
+        container_id: &str,
+        cmd: &[String],
+    ) -> capsule_core::Result<i64> {
+        let output = tokio::process::Command::new("podman")
+            .arg("exec")
+            .arg(container_id)
+            .args(cmd)
+            .output()
+            .await
+            .map_err(|err| {
+                CapsuleError::ContainerEngine(format!("failed to run podman exec: {err}"))
+            })?;
+        Ok(output.status.code().unwrap_or(1) as i64)
+    }
+
+    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+        <Self as OciProvider>::wait_container(self, container_id)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> capsule_core::Result<()> {
+        <Self as OciProvider>::stop_container(self, container_id, timeout_secs)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+        <Self as OciProvider>::remove_container(self, container_id, force)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+}
+
+fn provider_error_to_capsule_error(error: OciProviderError) -> CapsuleError {
+    match error {
+        OciProviderError::Missing { .. } | OciProviderError::NotReady { .. } => {
+            CapsuleError::ContainerEngine(error.to_string())
+        }
+        _ => CapsuleError::Runtime(error.to_string()),
     }
 }
 
@@ -2128,6 +2263,52 @@ mod tests {
             probe.semantics.substrate,
             OciProviderSubstrate::PodmanMachine
         );
+    }
+
+    #[test]
+    fn podman_publish_port_arg_honors_loopback_host_ip() {
+        use capsule_core::runtime::oci::OciPortSpec;
+
+        let fixed = OciPortSpec {
+            container_port: 8080,
+            host_port: Some(45678),
+            protocol: "tcp".to_string(),
+            host_ip: Some("127.0.0.1".to_string()),
+        };
+        assert_eq!(
+            super::podman_publish_port_arg(&fixed),
+            "127.0.0.1:45678:8080/tcp"
+        );
+
+        let dynamic = OciPortSpec {
+            container_port: 8080,
+            host_port: None,
+            protocol: "tcp".to_string(),
+            host_ip: Some("127.0.0.1".to_string()),
+        };
+        assert_eq!(
+            super::podman_publish_port_arg(&dynamic),
+            "127.0.0.1::8080/tcp"
+        );
+
+        let host_port_only = OciPortSpec {
+            container_port: 8080,
+            host_port: Some(45678),
+            protocol: "tcp".to_string(),
+            host_ip: None,
+        };
+        assert_eq!(
+            super::podman_publish_port_arg(&host_port_only),
+            "45678:8080/tcp"
+        );
+
+        let neither = OciPortSpec {
+            container_port: 8080,
+            host_port: None,
+            protocol: "udp".to_string(),
+            host_ip: None,
+        };
+        assert_eq!(super::podman_publish_port_arg(&neither), "8080/udp");
     }
 
     #[test]
