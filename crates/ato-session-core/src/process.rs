@@ -66,6 +66,41 @@ pub fn pid_is_alive(_pid: u32) -> bool {
     false
 }
 
+/// Returns `true` when the given OCI container ID is currently running.
+///
+/// Tries the container runtimes (`podman`, then `docker`) in order.
+/// Uses `--format '{{.State.Running}}'` from `inspect` to avoid
+/// parsing full JSON output. Falls back to `true` (preserve) if
+/// neither runtime is available — it is safer to retain a possibly-
+/// stale record than to prematurely delete an active session.
+///
+/// `DOCKER_HOST` from the environment is inherited automatically by
+/// the child process.
+pub fn oci_container_is_running(container_id: &str) -> bool {
+    if container_id.is_empty() {
+        return false;
+    }
+    for runtime in ["podman", "docker"] {
+        let result = std::process::Command::new(runtime)
+            .args(["inspect", "--format", "{{.State.Running}}", container_id])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return stdout.trim() == "true";
+            }
+            // Non-zero exit usually means the container does not exist → treat as stopped.
+            Ok(_) => return false,
+            // Command not found → try the next runtime.
+            Err(_) => continue,
+        }
+    }
+    // Neither podman nor docker found: preserve the record conservatively.
+    true
+}
+
 /// Best-effort process creation time (milliseconds since UNIX epoch).
 ///
 /// Returns `None` when the platform is unsupported or the OS rejects
