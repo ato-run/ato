@@ -2305,8 +2305,16 @@ fn web_served_by(plan: &capsule_core::router::ManifestData) -> String {
 // parent's exit, so detached children continue logging normally.
 
 fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(_) => {
+            return None;
+        }
+    };
+    match serde_json::from_slice::<StoredSessionInfo>(&bytes) {
+        Ok(record) => Some(record),
+        Err(_) => None,
+    }
 }
 
 /// Tear down the `[services]` graph subset persisted on the session record
@@ -2777,7 +2785,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         }
     }
 
-    if session_path.exists() {
+    if stopped && session_path.exists() {
         fs::remove_file(&session_path)
             .with_context(|| format!("failed to remove session file {}", session_path.display()))?;
     }
@@ -2841,6 +2849,11 @@ fn maybe_spawn_parent_death_watcher(session_id: &str) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Forward ATO_HOME so the watcher subprocess resolves session files
+    // from the same root as the caller.
+    if let Ok(ato_home) = std::env::var("ATO_HOME") {
+        command.env("ATO_HOME", ato_home);
+    }
     if let Some(start_time) = parent_start_time {
         command
             .arg("--parent-start-time-unix-ms")
