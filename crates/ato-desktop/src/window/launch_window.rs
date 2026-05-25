@@ -1453,7 +1453,10 @@ mod tests {
         assert!(preview.preflight_error.is_none());
         assert_eq!(preview.capsule_id, "blinko");
         assert_eq!(preview.capsule_version, "0.1.0");
-        assert_eq!(preview.visited_targets, vec!["db".to_string(), "app".to_string()]);
+        assert_eq!(
+            preview.visited_targets,
+            vec!["db".to_string(), "app".to_string()]
+        );
     }
 
     #[test]
