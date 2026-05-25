@@ -395,9 +395,8 @@ pub fn write_oci_facts_to_main_lock(
         AtoLock::default()
     };
 
-    upsert_oci_lock_facts(&mut lock, images, imports).map_err(|err| {
-        CapsuleError::Config(format!("failed to upsert OCI lock facts: {err}"))
-    })?;
+    upsert_oci_lock_facts(&mut lock, images, imports)
+        .map_err(|err| CapsuleError::Config(format!("failed to upsert OCI lock facts: {err}")))?;
 
     write_pretty_to_path(&lock, &main_lock_path)
 }
@@ -410,9 +409,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::ato_lock;
     use crate::ato_lock::AtoLock;
     use crate::ato_lock::{FeatureName, KnownFeature};
-    use crate::ato_lock;
     use crate::oci_compose_lock::{
         OciComposeLock, OciImageLockEntry as SidecarImageLockEntry, OciImportMeta,
         OCI_COMPOSE_LOCK_FILE_NAME,
@@ -940,12 +939,8 @@ mod tests {
         let main_lock_path = dir.path().join("ato.lock.json");
         assert!(!main_lock_path.exists());
 
-        write_oci_facts_to_main_lock(
-            dir.path(),
-            sample_image_entries(),
-            sample_import_entries(),
-        )
-        .expect("write_oci_facts_to_main_lock should create lock when missing");
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .expect("write_oci_facts_to_main_lock should create lock when missing");
 
         assert!(main_lock_path.exists(), "ato.lock.json should be created");
 
@@ -969,10 +964,10 @@ mod tests {
         let main_lock_path = dir.path().join("ato.lock.json");
 
         let mut preexisting = AtoLock::default();
-        preexisting
-            .resolution
-            .entries
-            .insert("runtime".to_string(), json!({"kind": "deno", "version": "2.1.3"}));
+        preexisting.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "deno", "version": "2.1.3"}),
+        );
         ato_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
@@ -1078,13 +1073,11 @@ mod tests {
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
-        let first =
-            ato_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
+        let first = ato_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
-        let second =
-            ato_lock::load_unvalidated_from_path(&main_lock_path).expect("second lock");
+        let second = ato_lock::load_unvalidated_from_path(&main_lock_path).expect("second lock");
 
         assert!(second.lock_id.is_some());
         let images = oci_images_from_main_lock(&second)
@@ -1160,7 +1153,10 @@ mod tests {
         let main_lock_path = dir.path().join("ato.lock.json");
 
         let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
-        assert_eq!(lock.schema_version, crate::ato_lock::ATO_LOCK_SCHEMA_VERSION);
+        assert_eq!(
+            lock.schema_version,
+            crate::ato_lock::ATO_LOCK_SCHEMA_VERSION
+        );
 
         ato_lock::validate_structural_non_strict(&lock).unwrap();
 
@@ -1180,8 +1176,7 @@ mod tests {
         let main_lock_path = dir.path().join("ato.lock.json");
 
         let mut preexisting = AtoLock::default();
-        preexisting.features.declared =
-            vec![FeatureName::Known(KnownFeature::ReadOnlyRootFs)];
+        preexisting.features.declared = vec![FeatureName::Known(KnownFeature::ReadOnlyRootFs)];
         preexisting
             .contract
             .entries

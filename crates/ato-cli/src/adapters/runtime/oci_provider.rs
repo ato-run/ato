@@ -9,6 +9,7 @@ use capsule_core::types::{
     OciImageResolution, OciPlatform, OciProviderKind, OciProviderMode, OciProviderSemantics,
     OciProviderSubstrate,
 };
+use capsule_core::CapsuleError;
 use std::process::Command;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -364,6 +365,7 @@ impl PodmanProbePlatform {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct PodmanProvider<R = SystemCommandRunner> {
     runner: R,
     platform: PodmanProbePlatform,
@@ -973,6 +975,132 @@ where
             });
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
+    async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
+        let exists = tokio::process::Command::new("podman")
+            .args(["image", "exists", image])
+            .status()
+            .await
+            .map_err(|err| {
+                CapsuleError::ContainerEngine(format!("failed to run podman image exists: {err}"))
+            })?;
+        if exists.success() {
+            return Ok(());
+        }
+
+        let output = tokio::process::Command::new("podman")
+            .args(["pull", image])
+            .output()
+            .await
+            .map_err(|err| {
+                CapsuleError::ContainerEngine(format!("failed to run podman pull: {err}"))
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(CapsuleError::Runtime(format!(
+            "podman pull failed for '{}': {}",
+            image,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+
+    async fn create_network(&self, request: &OciNetworkRequest) -> capsule_core::Result<String> {
+        <Self as OciProvider>::create_network(self, request)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn remove_network(&self, network_name: &str) -> capsule_core::Result<()> {
+        <Self as OciProvider>::remove_network(self, network_name)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn create_container(
+        &self,
+        request: &OciContainerRequest,
+    ) -> capsule_core::Result<String> {
+        <Self as OciProvider>::create_container(self, request)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn start_container(&self, container_id: &str) -> capsule_core::Result<()> {
+        <Self as OciProvider>::start_container(self, container_id)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn inspect_container(
+        &self,
+        container_id: &str,
+    ) -> capsule_core::Result<OciContainerInspect> {
+        <Self as OciProvider>::inspect_container(self, container_id)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn logs(
+        &self,
+        container_id: &str,
+        follow: bool,
+    ) -> capsule_core::Result<mpsc::Receiver<capsule_core::Result<OciLogChunk>>> {
+        <Self as OciProvider>::logs(self, container_id, follow)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn exec_container(
+        &self,
+        container_id: &str,
+        cmd: &[String],
+    ) -> capsule_core::Result<i64> {
+        let output = tokio::process::Command::new("podman")
+            .arg("exec")
+            .arg(container_id)
+            .args(cmd)
+            .output()
+            .await
+            .map_err(|err| {
+                CapsuleError::ContainerEngine(format!("failed to run podman exec: {err}"))
+            })?;
+        Ok(output.status.code().unwrap_or(1) as i64)
+    }
+
+    async fn wait_container(&self, container_id: &str) -> capsule_core::Result<i64> {
+        <Self as OciProvider>::wait_container(self, container_id)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn stop_container(
+        &self,
+        container_id: &str,
+        timeout_secs: i64,
+    ) -> capsule_core::Result<()> {
+        <Self as OciProvider>::stop_container(self, container_id, timeout_secs)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+
+    async fn remove_container(&self, container_id: &str, force: bool) -> capsule_core::Result<()> {
+        <Self as OciProvider>::remove_container(self, container_id, force)
+            .await
+            .map_err(provider_error_to_capsule_error)
+    }
+}
+
+fn provider_error_to_capsule_error(error: OciProviderError) -> CapsuleError {
+    match error {
+        OciProviderError::Missing { .. } | OciProviderError::NotReady { .. } => {
+            CapsuleError::ContainerEngine(error.to_string())
+        }
+        _ => CapsuleError::Runtime(error.to_string()),
     }
 }
 

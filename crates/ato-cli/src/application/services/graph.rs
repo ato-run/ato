@@ -434,7 +434,11 @@ mod tests {
         let layers = graph.layers();
         assert_eq!(
             layers[0],
-            vec!["db".to_string(), "redis".to_string(), "weaviate".to_string()]
+            vec![
+                "db".to_string(),
+                "redis".to_string(),
+                "weaviate".to_string()
+            ]
         );
         assert_eq!(layers[1], vec!["api".to_string(), "worker".to_string()]);
         assert_eq!(layers[2], vec!["main".to_string()]);
@@ -468,10 +472,7 @@ mod tests {
     fn from_orchestration_preserves_blinko_single_leaf_shape() {
         let plan = OrchestrationPlan {
             startup_order: vec!["db".to_string(), "main".to_string()],
-            services: vec![
-                resolved("db", &[], &[]),
-                resolved("main", &["db"], &["db"]),
-            ],
+            services: vec![resolved("db", &[], &[]), resolved("main", &["db"], &["db"])],
         };
 
         let graph = ServiceGraphPlan::from_orchestration(&plan).expect("layered plan");
