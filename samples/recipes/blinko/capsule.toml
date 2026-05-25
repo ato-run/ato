@@ -1,0 +1,51 @@
+schema_version = "0.3"
+name = "blinko"
+version = "0.1.0"
+type = "app"
+description = "Open-source, self-hosted personal AI note tool"
+homepage = "https://github.com/blinkospace/blinko"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:14"
+port = 5432
+env = { POSTGRES_DB = "blinko", POSTGRES_USER = "blinko", POSTGRES_PASSWORD = "blinko-demo-password" }
+
+[targets.app]
+runtime = "oci"
+image = "blinkospace/blinko:latest"
+port = 1111
+depends_on = ["db"]
+env = { NODE_ENV = "production", NEXTAUTH_URL = "http://localhost:1111", NEXT_PUBLIC_BASE_URL = "http://localhost:1111", NEXTAUTH_SECRET = "blinko-demo-nextauth-secret", DATABASE_URL = "postgresql://blinko:blinko-demo-password@db:5432/blinko" }
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Blinko PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:blinko-pgdata-v1"
+
+[state.app-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Blinko uploads and app-local data"
+attach = "explicit"
+schema_id = "sha256:blinko-appdata-v1"
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "blinko", "-d", "blinko"], port = "5432", initial_delay_seconds = 3, timeout_seconds = 60 }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "1111", initial_delay_seconds = 10, timeout_seconds = 180 }
+
+[[services.db.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+
+[[services.main.state_bindings]]
+state = "app-data"
+target = "/app/.blinko"
