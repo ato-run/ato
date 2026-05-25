@@ -57,7 +57,7 @@ pub(crate) fn stop_orchestration_service_record(
             // tokio runtime + client for this call. The runtime is
             // cheap (current-thread) and only constructed when a
             // container_id is actually present.
-            match stop_container_via_bollard(container_id, &service.name, grace) {
+            match stop_container_via_provider_cli(container_id, &service.name, grace) {
                 Ok(true) => signalled = true,
                 Ok(false) => {}
                 Err(err) => {
@@ -413,51 +413,55 @@ pub(crate) fn listener_pids_on_port(port: u16) -> Result<Vec<u32>> {
     Ok(pids)
 }
 
-/// Stop + remove an OCI container by id via bollard. Builds a
-/// current-thread tokio runtime locally; cheap when only called for
-/// services that actually have a `container_id`. Returns true if the
-/// stop call succeeded.
-fn stop_container_via_bollard(
+/// Stop + remove an OCI container by id via the provider CLI. Session
+/// orchestration uses the Podman provider, so teardown must not route
+/// through a stale Docker-compatible socket and hang before cleanup.
+fn stop_container_via_provider_cli(
     container_id: &str,
     service_name: &str,
     grace: Duration,
 ) -> Result<bool> {
-    use capsule_core::runtime::oci::OciRuntimeClient as _;
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .with_context(|| "failed to build tokio runtime for OCI teardown")?;
-    let client = capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default()
-        .with_context(|| "failed to connect to OCI engine for container stop")?;
-
-    // Stop timeout matches the orchestrator's
-    // `OCI_STOP_TIMEOUT_SECS` constant when force; otherwise honor
-    // the caller's grace window (clamped to a u16 second value).
-    let stop_timeout_secs: u16 = if grace == Duration::ZERO {
+    let stop_timeout_secs = if grace == Duration::ZERO {
         0
     } else {
         grace.as_secs().min(u16::MAX as u64) as u16
     };
-    let stop_result = rt.block_on(client.stop_container(container_id, stop_timeout_secs.into()));
-    let stopped = match stop_result {
-        Ok(()) => true,
-        Err(err) => {
+
+    let stop = Command::new("podman")
+        .args([
+            "stop",
+            "--time",
+            &stop_timeout_secs.to_string(),
+            container_id,
+        ])
+        .output()
+        .with_context(|| "failed to run podman stop for OCI teardown")?;
+    let stopped = if stop.status.success() {
+        true
+    } else {
+        let stderr = String::from_utf8_lossy(&stop.stderr);
+        if !is_container_not_found(&stderr) {
             eprintln!(
-                "ATO-WARN OCI stop_container({}) for service '{}' failed: {}",
-                container_id, service_name, err
+                "ATO-WARN podman stop({}) for service '{}' failed: {}",
+                container_id,
+                service_name,
+                stderr.trim()
             );
-            false
         }
+        false
     };
 
-    // Always attempt remove (force=true when grace=0) — leftover
-    // containers occupy port mappings and complicate next-launch.
-    let force_remove = grace == Duration::ZERO;
-    if let Err(err) = rt.block_on(client.remove_container(container_id, force_remove)) {
+    let remove = Command::new("podman")
+        .args(["rm", "--force", container_id])
+        .output()
+        .with_context(|| "failed to run podman rm for OCI teardown")?;
+    if !remove.status.success() {
+        let stderr = String::from_utf8_lossy(&remove.stderr);
         eprintln!(
-            "ATO-WARN OCI remove_container({}) for service '{}' failed: {}",
-            container_id, service_name, err
+            "ATO-WARN podman rm({}) for service '{}' failed: {}",
+            container_id,
+            service_name,
+            stderr.trim()
         );
     }
 
@@ -498,6 +502,14 @@ fn is_network_not_found(msg: &str) -> bool {
         || lower.contains("network not found")
 }
 
+fn is_container_not_found(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("no such container")
+        || lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("container not known")
+}
+
 /// Remove a Docker/Podman network by name after all containers in the
 /// session have been stopped.
 ///
@@ -509,43 +521,11 @@ fn is_network_not_found(msg: &str) -> bool {
 /// * Tries bollard first (consistent with container stop), then falls back
 ///   to a subprocess call (`podman network rm` / `docker network rm`).
 pub(crate) fn remove_network_if_present(network_name: &str) -> NetworkRemovalOutcome {
-    use capsule_core::runtime::oci::OciRuntimeClient as _;
-
     if network_name.is_empty() || !is_ato_managed_network(network_name) {
         return NetworkRemovalOutcome::SkippedNotAtoManaged;
     }
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build();
-    let Ok(rt) = rt else {
-        return try_remove_network_subprocess(network_name);
-    };
-
-    let client = capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default();
-    match client {
-        Ok(client) => match rt.block_on(client.remove_network(network_name)) {
-            Ok(()) => NetworkRemovalOutcome::Removed,
-            Err(err) => {
-                let msg = err.to_string();
-                if is_network_not_found(&msg) {
-                    return NetworkRemovalOutcome::AlreadyGone;
-                }
-                // bollard failed for a non-"not found" reason — retry via subprocess
-                let sub = try_remove_network_subprocess(network_name);
-                if sub == NetworkRemovalOutcome::Removed || sub == NetworkRemovalOutcome::AlreadyGone
-                {
-                    sub
-                } else {
-                    NetworkRemovalOutcome::Failed(format!("bollard: {msg}"))
-                }
-            }
-        },
-        Err(_) => {
-            // bollard unavailable — go straight to subprocess
-            try_remove_network_subprocess(network_name)
-        }
-    }
+    try_remove_network_subprocess(network_name)
 }
 
 fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
