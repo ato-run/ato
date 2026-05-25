@@ -1,0 +1,92 @@
+schema_version = "0.3"
+name = "affine"
+version = "0.26.0"
+type = "app"
+description = "Self-hosted AFFiNE knowledge base and whiteboard workspace"
+homepage = "https://github.com/toeverything/AFFiNE"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "pgvector/pgvector:pg16"
+port = 5432
+env = { POSTGRES_DB = "affine", POSTGRES_USER = "affine", POSTGRES_PASSWORD = "affine-demo-password", POSTGRES_HOST_AUTH_METHOD = "trust", POSTGRES_INITDB_ARGS = "--data-checksums" }
+
+[targets.redis]
+runtime = "oci"
+image = "redis:7-alpine"
+port = 6379
+
+[targets.migration]
+runtime = "oci"
+image = "ghcr.io/toeverything/affine:stable"
+cmd = ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
+run_once = true
+depends_on = ["db", "redis"]
+env = { REDIS_SERVER_HOST = "redis", DATABASE_URL = "postgresql://affine:affine-demo-password@db:5432/affine", AFFINE_INDEXER_ENABLED = "false" }
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/toeverything/affine:stable"
+port = 3010
+depends_on = ["migration"]
+env = { REDIS_SERVER_HOST = "redis", DATABASE_URL = "postgresql://affine:affine-demo-password@db:5432/affine", AFFINE_INDEXER_ENABLED = "false" }
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "AFFiNE PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:affine-pgdata-v1"
+
+[state.storage]
+kind = "filesystem"
+durability = "persistent"
+purpose = "AFFiNE uploads and blob storage"
+attach = "explicit"
+schema_id = "sha256:affine-storage-v1"
+sharing = "same-capsule"
+
+[state.config]
+kind = "filesystem"
+durability = "persistent"
+purpose = "AFFiNE self-host configuration"
+attach = "explicit"
+schema_id = "sha256:affine-config-v1"
+sharing = "same-capsule"
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "affine", "-d", "affine"], port = "5432", initial_delay_seconds = 3, timeout_seconds = 90 }
+
+[services.redis]
+target = "redis"
+readiness_probe = { exec = ["redis-cli", "--raw", "incr", "ping"], port = "6379", initial_delay_seconds = 2, timeout_seconds = 60 }
+
+[services.migration]
+target = "migration"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3010", initial_delay_seconds = 15, timeout_seconds = 240 }
+
+[[services.db.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+
+[[services.migration.state_bindings]]
+state = "storage"
+target = "/root/.affine/storage"
+
+[[services.migration.state_bindings]]
+state = "config"
+target = "/root/.affine/config"
+
+[[services.main.state_bindings]]
+state = "storage"
+target = "/root/.affine/storage"
+
+[[services.main.state_bindings]]
+state = "config"
+target = "/root/.affine/config"
