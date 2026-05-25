@@ -3,7 +3,7 @@
 **usecase:** AODD automation can stop an active Focus-mode capsule session via Desktop MCP without native UI intervention.
 **actor:** AODD automation agent using Desktop MCP stdio server.
 **goal:** `stop_active_session` MCP returns `stopped: true`; the capsule's containers stop; the root Focus View window stays open; cleanup leaves zero orphan containers.
-**result:** complete (fix verified through unit tests and manual sweep verification)
+**result:** complete (fix verified through unit tests and end-to-end CLI stop test)
 
 ---
 
@@ -90,43 +90,54 @@ cargo test -p ato-session-core
 → 50/50 pass (all sweep tests pass)
 ```
 
-### Manual sweep verification
+### End-to-end CLI stop test
 
-**Scenario 1: running OCI session preserved**
+**Scenario: start real OCI session → stop_session → stopped: true**
 
 ```bash
+export DOCKER_HOST="unix:///var/folders/.../podman-machine-default-api.sock"
 export ATO_HOME=$(mktemp -d)
-# Write session record with container_id = e98a809afa89 (excalidraw, actually running)
-cat > $ATO_HOME/apps/ato-desktop/sessions/excalidraw-ad4fe71f-81568.json << 'EOF'
+
+# Start excalidraw session (writes full StoredSessionInfo JSON)
+./target/debug/ato app session start excalidraw --json
+# → session_id: ato-desktop-session-8759
+# → status: ready
+# → http://127.0.0.1:8080/ reachable (HTTP 200)
+
+# Container is running:
+podman ps
+# → ato-excalidraw-c9c4bed3-main: Up 19 seconds
+
+# Stop session
+./target/debug/ato app session stop ato-desktop-session-8759 --json
+```
+
+Result:
+```json
 {
-  "session_id": "excalidraw-ad4fe71f-81568",
-  "pid": 0,
-  "orchestration_services": {
-    "services": [{"service_name": "main", "container_id": "e98a809afa89", ...}]
-  }
+  "schema_version": "ccp/v1",
+  "package_id": "ato/ato-desktop",
+  "action": "session_stop",
+  "session_id": "ato-desktop-session-8759",
+  "stopped": true
 }
-EOF
-
-./target/debug/ato --help > /dev/null  # triggers sweep
-ls $ATO_HOME/apps/ato-desktop/sessions/
 ```
 
-Result: `excalidraw-ad4fe71f-81568.json` **preserved** ✅  
-(Before fix: would have been deleted because `pid=0`)
+Post-stop state:
+- `podman ps` → **empty** (zero orphan containers) ✅
+- Session JSON deleted from `$ATO_HOME/apps/ato-desktop/sessions/` ✅
+- HTTP 200 on `:8080` → **connection refused** (container stopped) ✅
 
-**Scenario 2: podman inspect for live container**
+**Before fix**: sweep deleted the session JSON before stop could read it; `stop_session` returned `stopped: false`, container kept running.  
+**After fix**: sweep preserves the OCI session record (container confirmed running via `podman inspect`); `stop_session` reads the record, stops the container, returns `stopped: true`.
+
+**Podman inspect check (sweep gate):**
 ```bash
-podman inspect --format '{{.State.Running}}' e98a809afa89
-# → true ✅
+podman inspect --format '{{.State.Running}}' <container_id>
+# running container → "true"   → session record preserved
+# non-existent container → exit 125 → conservative preserve
+# stopped container → "false"  → sweep allowed to delete
 ```
-
-**Scenario 3: non-zero exit for non-existent container**
-```bash
-podman inspect --format '{{.State.Running}}' deadbeef000000
-# → exit 125 (container not found)
-```
-
-New behavior: `continue` to next runtime, then conservative `true` (record preserved until container runtime confirms absence). Correct — no false-negative deletes.
 
 ### CI
 
