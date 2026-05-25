@@ -1229,7 +1229,7 @@ pub(super) fn start_orchestration_session_in_process(
             provider_needs.as_ref(),
         );
     let orchestration_services =
-        orchestration_services_for_session_record(std::process::id() as i32, &detached.services);
+        orchestration_services_for_session_record(std::process::id() as i32, &detached.services, detached.network_name.clone());
     let graph =
         crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
             graph,
@@ -1583,9 +1583,14 @@ fn pick_orchestration_leaf_service(
 /// materialized the orchestration graph (`std::process::id()` at the
 /// call site). It is recorded so `stop_session` can defend against
 /// PID reuse when validating the record.
+///
+/// `network_name` is the Docker/Podman network created by the OCI
+/// orchestrator for this session, stored so `stop_session` can remove
+/// it after all containers stop (closes #273).
 fn orchestration_services_for_session_record(
     wrapper_pid: i32,
     snapshots: &[crate::executors::orchestrator::DetachedServiceSnapshot],
+    network_name: Option<String>,
 ) -> Option<StoredOrchestrationServices> {
     if snapshots.is_empty() {
         return None;
@@ -1604,6 +1609,7 @@ fn orchestration_services_for_session_record(
     Some(StoredOrchestrationServices {
         wrapper_pid,
         services,
+        network_name,
     })
 }
 
@@ -2439,6 +2445,7 @@ fn orchestration_services_from_graph(
     Some(StoredOrchestrationServices {
         wrapper_pid: record.pid,
         services: services.into_iter().map(|(_, service)| service).collect(),
+        network_name: None,
     })
 }
 
@@ -2782,6 +2789,20 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     if let Some(err) = stop_error {
         if !stopped {
             return Err(err);
+        }
+    }
+
+    // Prune the OCI network created for this session (#273). Runs
+    // after all containers have been removed so the network is no
+    // longer in use. Non-fatal: a missing or already-removed network
+    // is soft-warned only.
+    if stopped {
+        if let Some(network_name) = session_record
+            .as_ref()
+            .and_then(|r| r.orchestration_services.as_ref())
+            .and_then(|s| s.network_name.as_deref())
+        {
+            crate::application::orchestration_teardown::remove_network_if_present(network_name);
         }
     }
 
@@ -4280,6 +4301,7 @@ mod tests {
                         published_port: None,
                     },
                 ],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -4442,6 +4464,7 @@ mod tests {
                             published_port: None,
                         },
                     ],
+                    network_name: None,
                 }),
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
@@ -4610,6 +4633,7 @@ mod tests {
                     host_ports: BTreeMap::new(),
                     published_port: Some(port),
                 }],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
@@ -4878,6 +4902,7 @@ mod tests {
                     host_ports: BTreeMap::new(),
                     published_port: Some(port),
                 }],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),

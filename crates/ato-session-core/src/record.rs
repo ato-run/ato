@@ -215,6 +215,13 @@ pub struct StoredOrchestrationServices {
     /// Services in topological start order.
     #[serde(default)]
     pub services: Vec<StoredOrchestrationService>,
+    /// Docker/Podman network created by the OCI orchestrator for this
+    /// session. Stored so `stop_session` can remove it after all
+    /// containers have stopped (closes #273). `None` for sessions that
+    /// did not create a custom network (non-OCI, single-service, or
+    /// records written before this field was added).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +508,7 @@ mod tests {
                         published_port: Some(5173),
                     },
                 ],
+                network_name: Some("ato-orch-abc12345-7777".to_string()),
             }),
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("b".repeat(64)),
@@ -530,6 +538,30 @@ mod tests {
         assert_eq!(services.services[1].container_id, None);
 
         assert!(parsed.dependency_contracts.is_none());
+        // #273: network_name round-trips through serde.
+        assert_eq!(
+            services.network_name.as_deref(),
+            Some("ato-orch-abc12345-7777")
+        );
+        // Verify network_name is included in the serialized JSON.
+        assert!(json.contains("network_name"));
+    }
+
+    /// #273: `network_name: None` must be omitted from JSON
+    /// (`skip_serializing_if`), and a record without the field must
+    /// deserialize cleanly with `network_name = None`.
+    #[test]
+    fn orchestration_services_network_name_omitted_when_none() {
+        use std::collections::BTreeMap;
+        let services = StoredOrchestrationServices {
+            wrapper_pid: 42,
+            services: vec![],
+            network_name: None,
+        };
+        let json = serde_json::to_string(&services).expect("serialize");
+        assert!(!json.contains("network_name"), "None must be omitted");
+        let parsed: StoredOrchestrationServices = serde_json::from_str(&json).expect("parse");
+        assert!(parsed.network_name.is_none());
     }
 
     /// A schema=1 record with orchestration_services explicitly set to null
