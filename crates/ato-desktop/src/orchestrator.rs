@@ -1460,13 +1460,8 @@ fn run_session_start_command(
         // failed; both are worth a noisy entry.
         error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            extract_json_error_message(&stdout).unwrap_or(stdout)
-        } else {
-            format!("exit status {}", output.status)
-        };
+        let detail = extract_user_facing_error(&stderr, &stdout)
+            .unwrap_or_else(|| format!("exit status {}", output.status));
         return Err(LaunchError::Other(format!(
             "ato session start failed: {detail}"
         )));
@@ -1693,6 +1688,93 @@ fn extract_json_error_message(stdout: &str) -> Option<String> {
         (true, true) => return None,
     };
     Some(combined)
+}
+
+/// Extract a user-facing error message from CLI output, filtering tracing/debug
+/// noise so Desktop launch errors show the actual cause rather than internal
+/// diagnostic lines like "Provision command path diagnostics phase=run runtime=oci".
+///
+/// Priority:
+/// 1. JSON error envelope from stdout (structured, intentional)
+/// 2. Actionable error lines from stderr (filtered for noise)
+/// 3. Last few non-noise lines from stderr as a tail
+/// 4. None — caller should fall back to exit status or a generic message
+fn extract_user_facing_error(stderr: &str, stdout: &str) -> Option<String> {
+    // 1. JSON envelope on stdout takes priority — it is structured and intentional.
+    if let Some(msg) = extract_json_error_message(stdout) {
+        return Some(msg);
+    }
+
+    // 2. Filter tracing noise from stderr and look for actionable lines.
+    let non_noise: Vec<&str> = stderr
+        .lines()
+        .filter(|l| !is_tracing_noise_line(l))
+        .collect();
+
+    if !non_noise.is_empty() {
+        // Prefer lines that contain recognisable error indicators.
+        let error_lines: Vec<&str> = non_noise
+            .iter()
+            .copied()
+            .filter(|l| is_actionable_error_line(l))
+            .collect();
+        if let Some(last) = error_lines.last() {
+            return Some((*last).to_string());
+        }
+        // No error-specific line; surface the last few non-noise lines as context.
+        let tail_start = non_noise.len().saturating_sub(3);
+        return Some(non_noise[tail_start..].join("\n"));
+    }
+
+    // 3. All stderr was tracing noise — let the caller fall back to exit status.
+    None
+}
+
+/// Returns true when a line is pure tracing/logging diagnostic output that
+/// carries no user-facing information (DEBUG, TRACE, or INFO level records).
+fn is_tracing_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // The specific "Provision command path diagnostics" event is always noise
+    // regardless of level — it is only useful to ato-cli developers.
+    if trimmed.contains("Provision command path diagnostics") {
+        return true;
+    }
+    // tracing_subscriber formats:
+    //   "YYYY-MM-DDTHH:MM:SS.ffffffZ DEBUG target: message key=val"
+    //   "  DEBUG target: message key=val"   (compact without timestamp)
+    // Strip the optional ISO-8601 timestamp so the level keyword is first.
+    let without_ts = strip_tracing_timestamp(trimmed);
+    matches!(
+        without_ts.split_whitespace().next(),
+        Some("DEBUG") | Some("TRACE") | Some("INFO")
+    )
+}
+
+/// Returns true for lines that contain user-actionable error information.
+fn is_actionable_error_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("timeout")
+        || lower.contains("readiness")
+        || lower.contains("fatal")
+        || lower.contains("panic")
+}
+
+/// Strip a leading ISO-8601 timestamp from a tracing output line so the level
+/// keyword can be checked at position 0.  Timestamps end with 'Z' followed by
+/// a space; if the prefix does not match that shape the line is returned as-is.
+fn strip_tracing_timestamp(line: &str) -> &str {
+    if let Some(idx) = line.find('Z') {
+        if idx > 10 && line.as_bytes().get(idx + 1) == Some(&b' ') {
+            return &line[idx + 2..];
+        }
+    }
+    line
 }
 
 /// Fire-and-forget: spawn `ato app session start <handle> --json` in the
@@ -3822,7 +3904,9 @@ pub fn spawn_terminal_session(
 ) -> Result<TerminalProcess> {
     // Locate nacelle binary: NACELLE_PATH → dev workspace target → PATH.
     let nacelle_bin = resolve_nacelle_binary().ok_or_else(|| {
-        anyhow!("nacelle helper binary was not found. Set NACELLE_PATH or install 'nacelle' on PATH.")
+        anyhow!(
+            "nacelle helper binary was not found. Set NACELLE_PATH or install 'nacelle' on PATH."
+        )
     })?;
 
     // Write ExecEnvelope to a temp file so stdin stays free for TerminalCommands
@@ -5505,5 +5589,133 @@ mod fast_path_tests {
 
         assert!(!rendered.contains("private-value"));
         assert!(!rendered.contains("do-not-render"));
+    }
+}
+
+#[cfg(test)]
+mod launch_error_display_tests {
+    use super::*;
+
+    // Helper to make a tracing-formatted DEBUG line.
+    fn debug_line(msg: &str) -> String {
+        format!(
+            "2024-01-01T12:00:00.000000Z DEBUG ato_cli::commands::run::preflight: {msg} phase=\"run\" runtime=\"oci\""
+        )
+    }
+
+    #[test]
+    fn extract_launch_error_ignores_debug_provision_diagnostics() {
+        let stderr = debug_line("Provision command path diagnostics");
+        let result = extract_user_facing_error(&stderr, "");
+        // All stderr is noise; no stdout either — should return None.
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn extract_launch_error_ignores_all_debug_lines_no_signal() {
+        let stderr = [
+            debug_line("Provision command path diagnostics"),
+            debug_line("another debug event key=val"),
+            "  INFO ato_cli::run: starting provisioner".to_string(),
+        ]
+        .join("\n");
+        assert_eq!(extract_user_facing_error(&stderr, ""), None);
+    }
+
+    #[test]
+    fn extract_launch_error_prefers_final_failure_line() {
+        let stderr = [
+            debug_line("Provision command path diagnostics"),
+            "ERROR ato_cli::run: docker-compose: command not found".to_string(),
+        ]
+        .join("\n");
+        let result = extract_user_facing_error(&stderr, "");
+        assert_eq!(
+            result.as_deref(),
+            Some("ERROR ato_cli::run: docker-compose: command not found")
+        );
+    }
+
+    #[test]
+    fn extract_launch_error_surfaces_timeout_line() {
+        let stderr = [
+            debug_line("some debug event"),
+            "readiness check timed out after 120s for service web".to_string(),
+        ]
+        .join("\n");
+        let result = extract_user_facing_error(&stderr, "");
+        assert!(result.unwrap().contains("readiness check timed out"));
+    }
+
+    #[test]
+    fn extract_launch_error_includes_tail_when_no_typed_error() {
+        let stderr = [
+            "some plain output line 1".to_string(),
+            "some plain output line 2".to_string(),
+            "some plain output line 3".to_string(),
+            "some plain output line 4".to_string(),
+        ]
+        .join("\n");
+        let result = extract_user_facing_error(&stderr, "");
+        let msg = result.unwrap();
+        // Should contain the last lines, not all four.
+        assert!(msg.contains("line 2"));
+        assert!(msg.contains("line 3"));
+        assert!(msg.contains("line 4"));
+    }
+
+    #[test]
+    fn extract_launch_error_prefers_stdout_json_envelope() {
+        let stderr = debug_line("Provision command path diagnostics");
+        let stdout = r#"{"error":{"code":"E103","message":"OPENAI_API_KEY is not set"}}"#;
+        let result = extract_user_facing_error(&stderr, stdout);
+        assert_eq!(result.as_deref(), Some("E103: OPENAI_API_KEY is not set"));
+    }
+
+    #[test]
+    fn desktop_launch_failure_shows_actionable_error_not_debug_line() {
+        // Simulate the exact problem: stderr is only a DEBUG provision line,
+        // stdout is empty. The result should be None (not the debug line).
+        let stderr =
+            "  DEBUG ato_cli::commands::run::preflight: Provision command path diagnostics phase=\"run\" runtime=\"oci\" driver=\"docker-compose\"";
+        let result = extract_user_facing_error(stderr, "");
+        assert!(
+            result.is_none(),
+            "debug-only stderr should yield None, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn strip_tracing_timestamp_removes_iso8601_prefix() {
+        let line = "2024-06-15T08:23:45.123456Z DEBUG target: message";
+        assert_eq!(strip_tracing_timestamp(line), "DEBUG target: message");
+    }
+
+    #[test]
+    fn strip_tracing_timestamp_leaves_line_without_timestamp() {
+        let line = "plain error message";
+        assert_eq!(strip_tracing_timestamp(line), "plain error message");
+    }
+
+    #[test]
+    fn is_tracing_noise_line_detects_debug() {
+        assert!(is_tracing_noise_line(
+            "2024-01-01T00:00:00.000000Z DEBUG ato_cli: some message"
+        ));
+        assert!(is_tracing_noise_line("  DEBUG ato_cli: some message"));
+        assert!(is_tracing_noise_line("TRACE ato_cli: fine grained"));
+        assert!(is_tracing_noise_line(
+            "INFO ato_cli: informational only"
+        ));
+    }
+
+    #[test]
+    fn is_tracing_noise_line_keeps_error_and_warn() {
+        assert!(!is_tracing_noise_line("ERROR ato_cli: something failed"));
+        assert!(!is_tracing_noise_line(
+            "2024-01-01T00:00:00.000000Z ERROR ato_cli: bad"
+        ));
+        assert!(!is_tracing_noise_line("docker-compose: command not found"));
     }
 }

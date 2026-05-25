@@ -218,10 +218,9 @@ fn render_app_card(
                             let async_cx = cx.to_async();
                             cx.foreground_executor()
                                 .spawn(async move {
-                                    let result =
-                                        crate::install_lifecycle_dashboard::spawn_launch(
-                                            &ato_bin, &ipk,
-                                        );
+                                    let result = crate::install_lifecycle_dashboard::spawn_launch(
+                                        &ato_bin, &ipk,
+                                    );
                                     DashboardCache::refresh();
                                     let _ = async_cx.update(|app| {
                                         DashboardCache::set_action_status(Some(match result {
@@ -229,9 +228,7 @@ fn render_app_card(
                                                 message: format!("Launched {ipk}"),
                                             },
                                             Err(e) => {
-                                                tracing::error!(
-                                                    "launch installed app {ipk}: {e}"
-                                                );
+                                                tracing::error!("launch installed app {ipk}: {e}");
                                                 InstalledAppsActionStatus::Error {
                                                     message: format!("Launch failed: {e}"),
                                                 }
