@@ -219,6 +219,11 @@ struct SessionStopEnvelope {
     action: &'static str,
     session_id: String,
     stopped: bool,
+    /// Set when network removal was attempted but failed. Includes the
+    /// network name and the last error seen so callers can retry cleanup
+    /// manually (`podman network rm <name>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2794,17 +2799,31 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
 
     // Prune the OCI network created for this session (#273). Runs
     // after all containers have been removed so the network is no
-    // longer in use. Non-fatal: a missing or already-removed network
-    // is soft-warned only.
-    if stopped {
+    // longer in use. Returns an observable outcome so callers can
+    // surface failures rather than silently losing retryability.
+    let network_cleanup_warning: Option<String> = if stopped {
         if let Some(network_name) = session_record
             .as_ref()
             .and_then(|r| r.orchestration_services.as_ref())
             .and_then(|s| s.network_name.as_deref())
         {
-            crate::application::orchestration_teardown::remove_network_if_present(network_name);
+            use crate::application::orchestration_teardown::{
+                NetworkRemovalOutcome, remove_network_if_present,
+            };
+            match remove_network_if_present(network_name) {
+                NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
+                NetworkRemovalOutcome::SkippedNotAtoManaged => None,
+                NetworkRemovalOutcome::Failed(err) => Some(format!(
+                    "network cleanup failed for {network_name}: {err}; \
+                     run `podman network rm {network_name}` to clean up manually"
+                )),
+            }
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     if stopped && session_path.exists() {
         fs::remove_file(&session_path)
@@ -2820,6 +2839,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
                 action: SESSION_ACTION_STOP,
                 session_id: session_id.to_string(),
                 stopped,
+                network_cleanup_warning: network_cleanup_warning.clone(),
             })?
         );
         return Ok(());
@@ -2829,6 +2849,9 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         println!("Stopped session: {session_id}");
     } else {
         println!("Session was not active: {session_id}");
+    }
+    if let Some(warn) = &network_cleanup_warning {
+        eprintln!("ATO-WARN {warn}");
     }
     Ok(())
 }
