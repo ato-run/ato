@@ -92,6 +92,7 @@ pub enum QueryIntent {
 /// - `capsule://...` or `github.com/...` → `CapsuleHandle`
 /// - `http://...` or `https://...` → `ExternalUrl`
 /// - `~/...` or an absolute `/...` path → `LocalPath`
+/// - known featured sample aliases → `CapsuleHandle`
 /// - Anything else → `Invalid`
 pub fn classify_query(value: &str) -> QueryIntent {
     let v = value.trim();
@@ -101,9 +102,15 @@ pub fn classify_query(value: &str) -> QueryIntent {
         QueryIntent::ExternalUrl(v.to_string())
     } else if v.starts_with("~/") || v.starts_with('/') {
         QueryIntent::LocalPath(v.to_string())
+    } else if is_featured_sample_alias(v) {
+        QueryIntent::CapsuleHandle(v.to_string())
     } else {
         QueryIntent::Invalid(format!("'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。", v))
     }
+}
+
+fn is_featured_sample_alias(value: &str) -> bool {
+    matches!(value, "affine" | "open-webui" | "excalidraw")
 }
 
 // ─── StartPageHistoryStore ───────────────────────────────────────────────────
@@ -623,6 +630,22 @@ mod tests {
         assert_eq!(
             classify_query("/Users/alice/dev/capsule"),
             QueryIntent::LocalPath("/Users/alice/dev/capsule".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_featured_sample_aliases() {
+        assert_eq!(
+            classify_query("affine"),
+            QueryIntent::CapsuleHandle("affine".to_string())
+        );
+        assert_eq!(
+            classify_query("open-webui"),
+            QueryIntent::CapsuleHandle("open-webui".to_string())
+        );
+        assert_eq!(
+            classify_query("excalidraw"),
+            QueryIntent::CapsuleHandle("excalidraw".to_string())
         );
     }
 
