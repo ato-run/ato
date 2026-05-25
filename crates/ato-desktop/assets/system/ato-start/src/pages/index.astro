@@ -181,15 +181,15 @@ import FeaturedApps from "../components/FeaturedApps.astro";
 
       document.querySelectorAll('.featured-card').forEach(function (card) {
         card.addEventListener('click', function () {
-          var handle = this.dataset.handle;
-          if (handle) ipc({ kind: 'open_capsule', handle: handle });
+          var query = this.dataset.query;
+          if (query) ipc({ kind: 'open_query', value: query });
         });
         var launchBtn = card.querySelector('.featured-launch');
         if (launchBtn) {
           launchBtn.addEventListener('click', function (e) {
             e.stopPropagation();
-            var handle = card.dataset.handle;
-            if (handle) ipc({ kind: 'open_capsule', handle: handle });
+            var query = card.dataset.query;
+            if (query) ipc({ kind: 'open_query', value: query });
           });
         }
       });
