@@ -22,6 +22,7 @@ use crate::app::{
 use crate::automation::command::AutomationCommand;
 use crate::automation::AutomationHost;
 use crate::state::session::SessionRegistry;
+use crate::state::GuestRoute;
 use crate::system_capsule::ato_onboarding::{OnboardingCommand, ONBOARDING_VERSION};
 use crate::webview::{dispatch_automation_command, DOCK_AUTOMATION_PANE_ID};
 use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
@@ -548,6 +549,100 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                 "api_base_url": "https://api.ato.run",
                                 "account_hint": serde_json::Value::Null,
                             }))),
+                        };
+                    }
+                    AutomationCommand::StopActiveSession => {
+                        // Snapshot session metadata first; stop_guest_session
+                        // is fire-and-forget (non-blocking) so the UI thread
+                        // is never parked. on_window_closed will call
+                        // stop_session_once for the same session when the
+                        // content window closes — that call is idempotent.
+                        let stop_result: Result<serde_json::Value, String> =
+                            async_app_for_loop.update(|cx| {
+                                let active = cx
+                                    .global::<OpenContentWindows>()
+                                    .mru_order()
+                                    .into_iter()
+                                    .find(|e| {
+                                        matches!(
+                                            &e.kind,
+                                            ContentWindowKind::AppWindow {
+                                                route: GuestRoute::CapsuleHandle { .. }
+                                                    | GuestRoute::CapsuleUrl { .. }
+                                                    | GuestRoute::Capsule { .. }
+                                                    | GuestRoute::Terminal { .. }
+                                            }
+                                        )
+                                    });
+
+                                let Some(entry) = active else {
+                                    tracing::info!(
+                                        "Focus StopActiveSession: no active capsule window"
+                                    );
+                                    return Ok(serde_json::json!({
+                                        "ok": true,
+                                        "stopped": false,
+                                        "had_active_session": false,
+                                        "session_id": serde_json::Value::Null,
+                                        "handle": serde_json::Value::Null,
+                                    }));
+                                };
+
+                                let session_id =
+                                    entry.capsule.as_ref().and_then(|c| c.session_id.clone());
+                                let handle_str = entry
+                                    .capsule
+                                    .as_ref()
+                                    .map(|c| c.active_handle().to_string());
+
+                                let stopped = if let Some(ref sid) = session_id {
+                                    match crate::orchestrator::stop_guest_session(sid) {
+                                        Ok(true) => {
+                                            tracing::info!(
+                                                session_id = %sid,
+                                                "Focus StopActiveSession: stop dispatched"
+                                            );
+                                            true
+                                        }
+                                        Ok(false) => {
+                                            tracing::warn!(
+                                                session_id = %sid,
+                                                "Focus StopActiveSession: stop_guest_session returned false (not running?)"
+                                            );
+                                            false
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                error = %err,
+                                                session_id = %sid,
+                                                "Focus StopActiveSession: stop_guest_session failed"
+                                            );
+                                            false
+                                        }
+                                    }
+                                } else {
+                                    false
+                                };
+
+                                // Close the content window regardless of the
+                                // stop outcome so the Focus View can be
+                                // re-used for a fresh launch.
+                                let _ = entry
+                                    .handle
+                                    .update(cx, |_, window, _| window.remove_window());
+
+                                Ok(serde_json::json!({
+                                    "ok": true,
+                                    "stopped": stopped,
+                                    "had_active_session": session_id.is_some(),
+                                    "session_id": session_id,
+                                    "handle": handle_str,
+                                }))
+                            });
+
+                        match stop_result {
+                            Ok(json) => req.send(Ok(json)),
+                            Err(msg) => req.send(Err(msg)),
                         };
                     }
                     other => {
