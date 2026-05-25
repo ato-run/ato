@@ -42,7 +42,9 @@ impl InstalledAppsActionStatus {
     pub fn display_text(&self) -> String {
         match self {
             InstalledAppsActionStatus::Refreshing => "Refreshing installed apps...".to_string(),
-            InstalledAppsActionStatus::Launching { install_profile_key } => {
+            InstalledAppsActionStatus::Launching {
+                install_profile_key,
+            } => {
                 format!("Launching {install_profile_key}...")
             }
             InstalledAppsActionStatus::Success { message } => message.clone(),
@@ -902,7 +904,10 @@ mod tests {
 
         let _ = DashboardCache::refresh();
         let status = DashboardCache::action_status();
-        assert!(status.is_none(), "action_status is not set by refresh alone");
+        assert!(
+            status.is_none(),
+            "action_status is not set by refresh alone"
+        );
 
         // Simulate what the button handler does
         DashboardCache::set_action_status(Some(super::InstalledAppsActionStatus::Refreshing));
