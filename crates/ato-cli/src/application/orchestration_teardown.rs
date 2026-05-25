@@ -464,6 +464,76 @@ fn stop_container_via_bollard(
     Ok(stopped)
 }
 
+/// Remove a Docker/Podman network by name after all containers in the
+/// session have been stopped. Non-fatal — a warning is emitted on
+/// failure so a missing or already-removed network doesn't block
+/// session cleanup.
+///
+/// Tries bollard first (consistent with container stop), then falls
+/// back to a subprocess call (`podman network rm` / `docker network rm`)
+/// in case the bollard socket is unavailable.
+pub(crate) fn remove_network_if_present(network_name: &str) {
+    use capsule_core::runtime::oci::OciRuntimeClient as _;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    let Ok(rt) = rt else {
+        eprintln!(
+            "ATO-WARN failed to build tokio runtime for network removal ({})",
+            network_name
+        );
+        return;
+    };
+    let client = capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default();
+    let Ok(client) = client else {
+        // bollard unavailable — fall through to subprocess
+        try_remove_network_subprocess(network_name);
+        return;
+    };
+    match rt.block_on(client.remove_network(network_name)) {
+        Ok(()) => {}
+        Err(err) => {
+            // bollard may return an error for an already-removed network;
+            // fall through to subprocess for a second attempt.
+            eprintln!(
+                "ATO-WARN bollard remove_network({}) failed: {}; retrying via subprocess",
+                network_name, err
+            );
+            try_remove_network_subprocess(network_name);
+        }
+    }
+}
+
+fn try_remove_network_subprocess(network_name: &str) {
+    // Try podman first, then docker. Errors are soft-warned only.
+    for cmd in &["podman", "docker"] {
+        let result = Command::new(cmd)
+            .args(["network", "rm", network_name])
+            .output();
+        match result {
+            Ok(out) if out.status.success() => return,
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.trim().is_empty() {
+                    eprintln!(
+                        "ATO-WARN {} network rm {} failed: {}",
+                        cmd,
+                        network_name,
+                        stderr.trim()
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "ATO-WARN failed to invoke {} network rm {}: {}",
+                    cmd, network_name, err
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
