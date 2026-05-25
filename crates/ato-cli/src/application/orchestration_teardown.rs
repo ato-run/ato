@@ -464,73 +464,119 @@ fn stop_container_via_bollard(
     Ok(stopped)
 }
 
+/// Outcome of a `remove_network_if_present` call. Returned to the
+/// caller so `stop_session` can surface failures in its output
+/// rather than silently losing the cleanup result.
+#[derive(Debug, PartialEq)]
+pub(crate) enum NetworkRemovalOutcome {
+    /// Network was found and removed successfully.
+    Removed,
+    /// Network was not found — already gone (no-op, counts as success).
+    AlreadyGone,
+    /// Network name did not match the `ato-` prefix; removal skipped
+    /// to avoid accidentally removing unrelated user networks.
+    SkippedNotAtoManaged,
+    /// Removal was attempted but failed. The contained string
+    /// describes the last error seen across bollard + subprocess attempts.
+    Failed(String),
+}
+
+/// Returns `true` when `name` looks like an Ato-managed OCI network.
+/// Ato orchestrator always names networks `ato-{sanitize(name)}-{hash8}-{pid}`,
+/// so an `ato-` prefix is a sufficient guard.
+pub(crate) fn is_ato_managed_network(name: &str) -> bool {
+    name.starts_with("ato-")
+}
+
+/// Returns `true` when `msg` indicates the network is already gone
+/// (not present) rather than a real removal failure.
+fn is_network_not_found(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("no such network")
+        || lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("network not found")
+}
+
 /// Remove a Docker/Podman network by name after all containers in the
-/// session have been stopped. Non-fatal — a warning is emitted on
-/// failure so a missing or already-removed network doesn't block
-/// session cleanup.
+/// session have been stopped.
 ///
-/// Tries bollard first (consistent with container stop), then falls
-/// back to a subprocess call (`podman network rm` / `docker network rm`)
-/// in case the bollard socket is unavailable.
-pub(crate) fn remove_network_if_present(network_name: &str) {
+/// Returns a [`NetworkRemovalOutcome`] so the caller can decide
+/// whether to surface the failure to the user.
+///
+/// * Only removes networks whose name starts with `ato-` (guard against
+///   accidentally removing unrelated user networks).
+/// * Tries bollard first (consistent with container stop), then falls back
+///   to a subprocess call (`podman network rm` / `docker network rm`).
+pub(crate) fn remove_network_if_present(network_name: &str) -> NetworkRemovalOutcome {
     use capsule_core::runtime::oci::OciRuntimeClient as _;
+
+    if network_name.is_empty() || !is_ato_managed_network(network_name) {
+        return NetworkRemovalOutcome::SkippedNotAtoManaged;
+    }
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build();
     let Ok(rt) = rt else {
-        eprintln!(
-            "ATO-WARN failed to build tokio runtime for network removal ({})",
-            network_name
-        );
-        return;
+        return try_remove_network_subprocess(network_name);
     };
+
     let client = capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default();
-    let Ok(client) = client else {
-        // bollard unavailable — fall through to subprocess
-        try_remove_network_subprocess(network_name);
-        return;
-    };
-    match rt.block_on(client.remove_network(network_name)) {
-        Ok(()) => {}
-        Err(err) => {
-            // bollard may return an error for an already-removed network;
-            // fall through to subprocess for a second attempt.
-            eprintln!(
-                "ATO-WARN bollard remove_network({}) failed: {}; retrying via subprocess",
-                network_name, err
-            );
-            try_remove_network_subprocess(network_name);
+    match client {
+        Ok(client) => match rt.block_on(client.remove_network(network_name)) {
+            Ok(()) => NetworkRemovalOutcome::Removed,
+            Err(err) => {
+                let msg = err.to_string();
+                if is_network_not_found(&msg) {
+                    return NetworkRemovalOutcome::AlreadyGone;
+                }
+                // bollard failed for a non-"not found" reason — retry via subprocess
+                let sub = try_remove_network_subprocess(network_name);
+                if sub == NetworkRemovalOutcome::Removed || sub == NetworkRemovalOutcome::AlreadyGone
+                {
+                    sub
+                } else {
+                    NetworkRemovalOutcome::Failed(format!("bollard: {msg}"))
+                }
+            }
+        },
+        Err(_) => {
+            // bollard unavailable — go straight to subprocess
+            try_remove_network_subprocess(network_name)
         }
     }
 }
 
-fn try_remove_network_subprocess(network_name: &str) {
-    // Try podman first, then docker. Errors are soft-warned only.
+fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
+    let mut last_error = String::new();
+    // Try podman first, then docker.
     for cmd in &["podman", "docker"] {
         let result = Command::new(cmd)
             .args(["network", "rm", network_name])
             .output();
         match result {
-            Ok(out) if out.status.success() => return,
+            Ok(out) if out.status.success() => return NetworkRemovalOutcome::Removed,
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                if !stderr.trim().is_empty() {
-                    eprintln!(
-                        "ATO-WARN {} network rm {} failed: {}",
-                        cmd,
-                        network_name,
-                        stderr.trim()
-                    );
+                let msg = stderr.trim().to_string();
+                if is_network_not_found(&msg) {
+                    return NetworkRemovalOutcome::AlreadyGone;
+                }
+                if !msg.is_empty() {
+                    last_error = format!("{cmd} network rm: {msg}");
                 }
             }
             Err(err) => {
-                eprintln!(
-                    "ATO-WARN failed to invoke {} network rm {}: {}",
-                    cmd, network_name, err
-                );
+                // binary not found — record and try next
+                last_error = format!("{cmd}: {err}");
             }
         }
+    }
+    if last_error.is_empty() {
+        NetworkRemovalOutcome::Failed("unknown error".to_string())
+    } else {
+        NetworkRemovalOutcome::Failed(last_error)
     }
 }
 
@@ -569,5 +615,46 @@ mod tests {
         let signalled =
             stop_orchestration_service_record(&service, Duration::from_secs(0)).expect("ok");
         assert!(!signalled);
+    }
+
+    // --- #273 network guard tests ---
+
+    #[test]
+    fn is_ato_managed_network_accepts_orchestrator_names() {
+        assert!(is_ato_managed_network("ato-excalidraw-ad4fe71f-81568"));
+        assert!(is_ato_managed_network("ato-affine-12345678-99999"));
+        assert!(is_ato_managed_network("ato-dify-abcdef00-12345"));
+        assert!(is_ato_managed_network("ato-"));
+    }
+
+    #[test]
+    fn is_ato_managed_network_rejects_non_ato_names() {
+        assert!(!is_ato_managed_network("default"));
+        assert!(!is_ato_managed_network("bridge"));
+        assert!(!is_ato_managed_network("host"));
+        assert!(!is_ato_managed_network("my-random-network"));
+        assert!(!is_ato_managed_network(""));
+    }
+
+    #[test]
+    fn remove_network_skips_non_ato_managed() {
+        let outcome = remove_network_if_present("my-random-network");
+        assert_eq!(outcome, NetworkRemovalOutcome::SkippedNotAtoManaged);
+    }
+
+    #[test]
+    fn remove_network_skips_empty_name() {
+        let outcome = remove_network_if_present("");
+        assert_eq!(outcome, NetworkRemovalOutcome::SkippedNotAtoManaged);
+    }
+
+    #[test]
+    fn is_network_not_found_detects_common_messages() {
+        assert!(is_network_not_found("Error: no such network: foo"));
+        assert!(is_network_not_found("network not found"));
+        assert!(is_network_not_found("Network does not exist"));
+        assert!(is_network_not_found("Error response: not found"));
+        assert!(!is_network_not_found("permission denied"));
+        assert!(!is_network_not_found(""));
     }
 }
