@@ -7,7 +7,7 @@ use capsule_core::execution_plan::error::{
     AtoErrorClassification, AtoExecutionError, ManifestSuggestion,
 };
 use capsule_core::router::ManifestData;
-use capsule_core::types::ServiceSpec;
+use capsule_core::types::{OrchestrationPlan, ServiceSpec};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceGraphPlan {
@@ -56,6 +56,37 @@ impl ServiceGraphPlan {
             startup_order,
             layers,
         })
+    }
+
+    /// Build the start-order graph from a resolved [`OrchestrationPlan`] so the
+    /// layered scheduler considers target-level `depends_on` (merged into
+    /// `ResolvedService.depends_on` by the router) and any cross-service
+    /// dependency edges materialized as `ResolvedService.connections`.
+    ///
+    /// `from_services` looks only at the raw `[services.*]` table and misses
+    /// dependencies declared on `[targets.*]`, which is how AFFiNE / Dify /
+    /// most multi-service recipes wire their compose-shaped graphs. Use this
+    /// constructor whenever the caller already has the resolved plan handy.
+    pub(crate) fn from_orchestration(orchestration: &OrchestrationPlan) -> Result<Self> {
+        let mut services: HashMap<String, ServiceSpec> = HashMap::new();
+        for resolved in &orchestration.services {
+            let mut deps: Vec<String> = resolved.depends_on.clone();
+            for connection in &resolved.connections {
+                if !deps.contains(&connection.dependency) {
+                    deps.push(connection.dependency.clone());
+                }
+            }
+            let depends_on = if deps.is_empty() { None } else { Some(deps) };
+            services.insert(
+                resolved.name.clone(),
+                ServiceSpec {
+                    depends_on,
+                    readiness_probe: resolved.readiness_probe.clone(),
+                    ..ServiceSpec::default()
+                },
+            );
+        }
+        Self::from_services(&services)
     }
 
     pub(crate) fn services(&self) -> &HashMap<String, ServiceSpec> {
@@ -229,7 +260,10 @@ mod tests {
     use std::collections::HashMap;
 
     use super::ServiceGraphPlan;
-    use capsule_core::types::ServiceSpec;
+    use capsule_core::types::{
+        OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
+        ResolvedTargetRuntime, ServiceConnectionInfo, ServiceSpec,
+    };
 
     fn service(entrypoint: &str, depends_on: Option<Vec<&str>>) -> ServiceSpec {
         ServiceSpec {
@@ -242,6 +276,42 @@ mod tests {
             state_bindings: Vec::new(),
             readiness_probe: None,
             network: None,
+        }
+    }
+
+    fn resolved(name: &str, depends_on: &[&str], connections: &[&str]) -> ResolvedService {
+        ResolvedService {
+            name: name.to_string(),
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            connections: connections
+                .iter()
+                .map(|dep| ServiceConnectionInfo {
+                    dependency: dep.to_string(),
+                    host_env: format!("{}_HOST", dep.to_ascii_uppercase()),
+                    port_env: format!("{}_PORT", dep.to_ascii_uppercase()),
+                    container_port: None,
+                    default_host: dep.to_string(),
+                })
+                .collect(),
+            readiness_probe: None,
+            network: ResolvedServiceNetwork::default(),
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                target: name.to_string(),
+                runtime: "oci".to_string(),
+                driver: None,
+                runtime_version: None,
+                image: Some(format!("test/{}:latest", name)),
+                entrypoint: String::new(),
+                run_command: None,
+                cmd: Vec::new(),
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port: None,
+                required_env: Vec::new(),
+                mounts: Vec::new(),
+            }),
         }
     }
 
@@ -298,5 +368,116 @@ mod tests {
 
         let err = ServiceGraphPlan::from_services(&services).unwrap_err();
         assert!(err.to_string().contains("unknown service"));
+    }
+
+    /// AFFiNE-shape: db and redis are leaf sibling deps of migration, which is
+    /// the sole dep of main. Verifies `from_orchestration` puts db + redis in
+    /// the same leaf layer so the coordinator starts both before scheduling
+    /// migration (the failure mode AODD PR #262 surfaced).
+    #[test]
+    fn from_orchestration_groups_affine_shape_sibling_leaves() {
+        let plan = OrchestrationPlan {
+            startup_order: vec![
+                "db".to_string(),
+                "redis".to_string(),
+                "migration".to_string(),
+                "main".to_string(),
+            ],
+            services: vec![
+                resolved("db", &[], &[]),
+                resolved("redis", &[], &[]),
+                resolved("migration", &["db", "redis"], &["db", "redis"]),
+                resolved("main", &["migration"], &["migration"]),
+            ],
+        };
+
+        let graph = ServiceGraphPlan::from_orchestration(&plan).expect("layered plan");
+        let layers = graph.layers();
+        assert_eq!(layers.len(), 3, "expected 3 layers, got {:?}", layers);
+        assert_eq!(layers[0], vec!["db".to_string(), "redis".to_string()]);
+        assert_eq!(layers[1], vec!["migration".to_string()]);
+        assert_eq!(layers[2], vec!["main".to_string()]);
+    }
+
+    /// Dify-shape: api depends on db + redis + weaviate (3 sibling leaves).
+    /// All three should land in the same leaf layer.
+    #[test]
+    fn from_orchestration_groups_dify_shape_three_sibling_leaves() {
+        let plan = OrchestrationPlan {
+            startup_order: vec![
+                "db".to_string(),
+                "redis".to_string(),
+                "weaviate".to_string(),
+                "api".to_string(),
+                "worker".to_string(),
+                "main".to_string(),
+            ],
+            services: vec![
+                resolved("db", &[], &[]),
+                resolved("redis", &[], &[]),
+                resolved("weaviate", &[], &[]),
+                resolved(
+                    "api",
+                    &["db", "redis", "weaviate"],
+                    &["db", "redis", "weaviate"],
+                ),
+                resolved(
+                    "worker",
+                    &["db", "redis", "weaviate"],
+                    &["db", "redis", "weaviate"],
+                ),
+                resolved("main", &["api"], &["api"]),
+            ],
+        };
+
+        let graph = ServiceGraphPlan::from_orchestration(&plan).expect("layered plan");
+        let layers = graph.layers();
+        assert_eq!(
+            layers[0],
+            vec!["db".to_string(), "redis".to_string(), "weaviate".to_string()]
+        );
+        assert_eq!(layers[1], vec!["api".to_string(), "worker".to_string()]);
+        assert_eq!(layers[2], vec!["main".to_string()]);
+    }
+
+    /// Defense-in-depth: even when a recipe declares cross-service edges only
+    /// through `service.connections[].dependency` (not via `depends_on`), the
+    /// graph builder must still infer the layer boundary. Mirrors the spec's
+    /// `layers_include_connection_edges` requirement.
+    #[test]
+    fn from_orchestration_includes_connection_edges() {
+        let plan = OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "main".to_string()],
+            services: vec![
+                resolved("db", &[], &[]),
+                // No depends_on, but a connection to db.
+                resolved("main", &[], &["db"]),
+            ],
+        };
+
+        let graph = ServiceGraphPlan::from_orchestration(&plan).expect("layered plan");
+        let layers = graph.layers();
+        assert_eq!(layers.len(), 2, "expected 2 layers, got {:?}", layers);
+        assert_eq!(layers[0], vec!["db".to_string()]);
+        assert_eq!(layers[1], vec!["main".to_string()]);
+    }
+
+    /// Regression: Blinko-shape (single-service-with-db) keeps its existing
+    /// layered behavior — db in layer 0, main in layer 1.
+    #[test]
+    fn from_orchestration_preserves_blinko_single_leaf_shape() {
+        let plan = OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "main".to_string()],
+            services: vec![
+                resolved("db", &[], &[]),
+                resolved("main", &["db"], &["db"]),
+            ],
+        };
+
+        let graph = ServiceGraphPlan::from_orchestration(&plan).expect("layered plan");
+        assert_eq!(
+            graph.layers(),
+            &[vec!["db".to_string()], vec!["main".to_string()]]
+        );
     }
 }
