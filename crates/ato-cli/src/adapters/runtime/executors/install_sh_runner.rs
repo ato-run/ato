@@ -224,8 +224,10 @@ pub(crate) async fn execute_install_sh_run(
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref =
-                    construct_resolved_ref_from_sidecar(&entry.declared_ref, &entry.resolved_digest);
+                let resolved_ref = construct_resolved_ref_from_sidecar(
+                    &entry.declared_ref,
+                    &entry.resolved_digest,
+                );
                 (
                     name.clone(),
                     MainOciImageLockEntry {
@@ -1011,8 +1013,7 @@ echo "done"
         // Verify main lock.
         let main_lock_path = tmp.path().join("ato.lock.json");
         assert!(main_lock_path.exists(), "ato.lock.json must be created");
-        let loaded =
-            capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let loaded = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         assert_eq!(
             oci_read.source,

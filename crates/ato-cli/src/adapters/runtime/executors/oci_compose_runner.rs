@@ -201,8 +201,10 @@ pub(crate) async fn execute_compose_run(
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref =
-                    construct_resolved_ref_from_sidecar(&entry.declared_ref, &entry.resolved_digest);
+                let resolved_ref = construct_resolved_ref_from_sidecar(
+                    &entry.declared_ref,
+                    &entry.resolved_digest,
+                );
                 (
                     name.clone(),
                     MainOciImageLockEntry {
@@ -1497,8 +1499,11 @@ services:
     #[test]
     fn compose_runner_writes_main_lock_oci_facts_alongside_sidecar() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("docker-compose.yml"), SIMPLE_TWO_SERVICE_COMPOSE.as_bytes())
-            .unwrap();
+        std::fs::write(
+            tmp.path().join("docker-compose.yml"),
+            SIMPLE_TWO_SERVICE_COMPOSE.as_bytes(),
+        )
+        .unwrap();
 
         let source_hash =
             capsule_core::oci_compose_lock::compute_compose_source_hash(SIMPLE_TWO_SERVICE_COMPOSE);
@@ -1564,8 +1569,7 @@ services:
         // Verify main lock.
         let main_lock_path = tmp.path().join("ato.lock.json");
         assert!(main_lock_path.exists(), "ato.lock.json must be created");
-        let loaded =
-            capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let loaded = capsule_core::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         let oci_read = capsule_core::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         assert_eq!(
             oci_read.source,

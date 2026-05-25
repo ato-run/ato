@@ -9,7 +9,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::debug;
 
-use crate::process::{current_user_owns_process, oci_container_is_running, pid_is_alive, process_start_time_unix_ms};
+use crate::process::{
+    current_user_owns_process, oci_container_is_running, pid_is_alive, process_start_time_unix_ms,
+};
 use crate::record::StoredSessionInfo;
 use crate::store::session_root;
 
