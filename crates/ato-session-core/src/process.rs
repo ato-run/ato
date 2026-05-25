@@ -88,16 +88,18 @@ pub fn oci_container_is_running(container_id: &str) -> bool {
             .output();
         match result {
             Ok(output) if output.status.success() => {
+                // Definitive answer from this runtime: "true" or "false".
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 return stdout.trim() == "true";
             }
-            // Non-zero exit usually means the container does not exist → treat as stopped.
-            Ok(_) => return false,
-            // Command not found → try the next runtime.
-            Err(_) => continue,
+            // Non-zero exit: the container may not exist in *this* runtime
+            // (e.g., it's in Docker not Podman), or the daemon is unavailable.
+            // Do not treat as a definitive "stopped" — try the next runtime.
+            Ok(_) | Err(_) => continue,
         }
     }
-    // Neither podman nor docker found: preserve the record conservatively.
+    // No runtime gave a definitive answer (both absent/unavailable).
+    // Preserve the record conservatively to avoid false-negative deletes.
     true
 }
 
