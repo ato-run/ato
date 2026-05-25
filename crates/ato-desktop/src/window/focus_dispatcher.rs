@@ -645,6 +645,124 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                             Err(msg) => req.send(Err(msg)),
                         };
                     }
+                    AutomationCommand::RestartActiveSession => {
+                        let result: Result<serde_json::Value, String> =
+                            async_app_for_loop.update(|cx| {
+                                let active = cx
+                                    .global::<OpenContentWindows>()
+                                    .mru_order()
+                                    .into_iter()
+                                    .find(|e| {
+                                        matches!(
+                                            &e.kind,
+                                            ContentWindowKind::AppWindow {
+                                                route: GuestRoute::CapsuleHandle { .. }
+                                                    | GuestRoute::CapsuleUrl { .. }
+                                            }
+                                        )
+                                    });
+
+                                let Some(entry) = active else {
+                                    tracing::info!(
+                                        "Focus RestartActiveSession: no restartable capsule window"
+                                    );
+                                    return Ok(serde_json::json!({
+                                        "ok": true,
+                                        "restarted": false,
+                                        "had_active_session": false,
+                                        "session_id": serde_json::Value::Null,
+                                        "handle": serde_json::Value::Null,
+                                    }));
+                                };
+
+                                let session_id =
+                                    entry.capsule.as_ref().and_then(|c| c.session_id.clone());
+                                let handle_str = entry
+                                    .capsule
+                                    .as_ref()
+                                    .map(|c| c.active_handle().to_string());
+                                let ContentWindowKind::AppWindow { route } = entry.kind.clone()
+                                else {
+                                    return Ok(serde_json::json!({
+                                        "ok": true,
+                                        "restarted": false,
+                                        "had_active_session": false,
+                                        "session_id": serde_json::Value::Null,
+                                        "handle": serde_json::Value::Null,
+                                    }));
+                                };
+
+                                let launch_configs = session_id
+                                    .as_deref()
+                                    .and_then(|sid| {
+                                        cx.global::<crate::state::session::SessionRegistry>()
+                                            .get_session(sid)
+                                            .map(|s| s.launch_context.launch_configs.clone())
+                                    })
+                                    .unwrap_or_default();
+
+                                let materialized_record_path =
+                                    session_id.as_deref().and_then(|sid| {
+                                        match &route {
+                                            crate::state::GuestRoute::CapsuleHandle { .. }
+                                            | crate::state::GuestRoute::CapsuleUrl { .. } => {
+                                                crate::orchestrator::materialized_record_path_for_session(sid).ok()
+                                            }
+                                            _ => None,
+                                        }
+                                    });
+
+                                if let Some(ref sid) = session_id {
+                                    if let Err(err) =
+                                        crate::orchestrator::stop_guest_session_and_wait(
+                                            sid,
+                                            std::time::Duration::from_secs(3),
+                                        )
+                                    {
+                                        return Err(format!(
+                                            "Focus RestartActiveSession: stop failed: {err}"
+                                        ));
+                                    }
+                                }
+
+                                let _ = entry
+                                    .handle
+                                    .update(cx, |_, window, _| window.remove_window());
+
+                                let open_result =
+                                    if let Some(record_path) = materialized_record_path {
+                                        crate::window::orchestrator::open_app_window_from_materialized_record_with_configs(
+                                            cx,
+                                            route.clone(),
+                                            record_path,
+                                            launch_configs,
+                                        )
+                                    } else {
+                                        crate::window::orchestrator::open_app_window_with_configs(
+                                            cx,
+                                            route.clone(),
+                                            launch_configs,
+                                        )
+                                    };
+                                if let Err(err) = open_result {
+                                    return Err(format!(
+                                        "Focus RestartActiveSession: reopen failed: {err}"
+                                    ));
+                                }
+
+                                Ok(serde_json::json!({
+                                    "ok": true,
+                                    "restarted": true,
+                                    "had_active_session": session_id.is_some(),
+                                    "session_id": session_id,
+                                    "handle": handle_str,
+                                }))
+                            });
+                        match result {
+                            Ok(json) => req.send(Ok(json)),
+                            Err(msg) => req.send(Err(msg)),
+                        };
+                    }
                     other => {
                         // Non-dock browser_* and other commands with no
                         // consumer in Focus mode. Returning an explicit
