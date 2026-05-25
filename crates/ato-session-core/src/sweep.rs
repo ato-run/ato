@@ -895,6 +895,7 @@ mod tests {
                     host_ports: std::collections::BTreeMap::new(),
                     published_port: Some(5173),
                 }],
+                network_name: None,
             }),
             schema_version: None,
             launch_digest: None,
