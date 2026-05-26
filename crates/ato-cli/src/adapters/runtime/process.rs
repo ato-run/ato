@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime};
 const PID_FILE_EXT: &str = ".pid";
 const RUN_SESSIONS_DIR_NAME: &str = "run-sessions";
 const DEPENDENCY_SESSION_FILE: &str = "graph.json";
+const IMPORT_PREVIEW_SESSIONS_DIR_NAME: &str = "import-preview-sessions";
+const IMPORT_PREVIEW_SESSION_FILE: &str = "session.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessInfo {
@@ -72,6 +74,54 @@ pub struct DependencyContractSessionSnapshot {
     pub consumer_pid: i32,
     #[serde(default)]
     pub providers: Vec<DependencyContractProcessInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPreviewSession {
+    pub run_session_id: String,
+    pub owner_kind: String,
+    pub owner_pid: i32,
+    pub owner_process_start_time_unix_ms: Option<u64>,
+    pub ato_run_pid: i32,
+    pub ato_run_process_start_time_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub process_group_ids: Vec<i32>,
+    pub primary_port: Option<u16>,
+    pub primary_url: Option<String>,
+    pub shadow_dir: PathBuf,
+    pub log_path: PathBuf,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    #[serde(default)]
+    pub expires_at_unix_ms: Option<u64>,
+    pub readiness_state: String,
+    pub cleanup_policy: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportPreviewStopStatus {
+    Stopped,
+    AlreadyGone,
+    NotAtoOwned,
+    Failed,
+}
+
+impl std::fmt::Display for ImportPreviewStopStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportPreviewStopStatus::Stopped => write!(f, "Stopped"),
+            ImportPreviewStopStatus::AlreadyGone => write!(f, "AlreadyGone"),
+            ImportPreviewStopStatus::NotAtoOwned => write!(f, "NotAtoOwned"),
+            ImportPreviewStopStatus::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportPreviewStopResult {
+    pub session: ImportPreviewSession,
+    pub status: ImportPreviewStopStatus,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +191,22 @@ impl ProcessManager {
             .unwrap_or_else(|| self.run_dir.join(RUN_SESSIONS_DIR_NAME))
     }
 
+    fn import_preview_sessions_dir(&self) -> PathBuf {
+        self.run_dir
+            .parent()
+            .map(|parent| parent.join(IMPORT_PREVIEW_SESSIONS_DIR_NAME))
+            .unwrap_or_else(|| self.run_dir.join(IMPORT_PREVIEW_SESSIONS_DIR_NAME))
+    }
+
+    fn import_preview_session_dir(&self, id: &str) -> PathBuf {
+        self.import_preview_sessions_dir().join(id)
+    }
+
+    fn import_preview_session_path(&self, id: &str) -> PathBuf {
+        self.import_preview_session_dir(id)
+            .join(IMPORT_PREVIEW_SESSION_FILE)
+    }
+
     fn dependency_session_dir(&self, id: &str) -> PathBuf {
         self.run_sessions_dir().join(id)
     }
@@ -203,6 +269,74 @@ impl ProcessManager {
             fs::remove_dir_all(&session_dir).with_context(|| {
                 format!(
                     "Failed to remove dependency session directory: {}",
+                    session_dir.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn write_import_preview_session(&self, session: &ImportPreviewSession) -> Result<PathBuf> {
+        let session_dir = self.import_preview_session_dir(&session.run_session_id);
+        fs::create_dir_all(&session_dir).with_context(|| {
+            format!(
+                "Failed to create import preview session directory: {}",
+                session_dir.display()
+            )
+        })?;
+        let path = session_dir.join(IMPORT_PREVIEW_SESSION_FILE);
+        let content = serde_json::to_string_pretty(session)
+            .with_context(|| "Failed to serialize import preview session")?;
+        fs::write(&path, content).with_context(|| {
+            format!("Failed to write import preview session: {}", path.display())
+        })?;
+        Ok(path)
+    }
+
+    pub fn read_import_preview_session(&self, id: &str) -> Result<Option<ImportPreviewSession>> {
+        let path = self.import_preview_session_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path).with_context(|| {
+            format!("Failed to read import preview session: {}", path.display())
+        })?;
+        let session = serde_json::from_str(&content).with_context(|| {
+            format!("Failed to parse import preview session: {}", path.display())
+        })?;
+        Ok(Some(session))
+    }
+
+    pub fn list_import_preview_sessions(&self) -> Result<Vec<ImportPreviewSession>> {
+        let root = self.import_preview_sessions_dir();
+        let mut sessions = Vec::new();
+        if !root.exists() {
+            return Ok(sessions);
+        }
+        for entry in fs::read_dir(&root).with_context(|| {
+            format!("Failed to read import preview sessions: {}", root.display())
+        })? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = entry.path().join(IMPORT_PREVIEW_SESSION_FILE);
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Ok(session) = serde_json::from_str::<ImportPreviewSession>(&content) {
+                sessions.push(session);
+            }
+        }
+        Ok(sessions)
+    }
+
+    pub fn delete_import_preview_session(&self, id: &str) -> Result<()> {
+        let session_dir = self.import_preview_session_dir(id);
+        if session_dir.exists() {
+            fs::remove_dir_all(&session_dir).with_context(|| {
+                format!(
+                    "Failed to remove import preview session directory: {}",
                     session_dir.display()
                 )
             })?;
@@ -414,6 +548,39 @@ impl ProcessManager {
             self.delete_pid(id)?;
             Ok(stopped_deps)
         }
+    }
+
+    pub fn stop_import_preview_session(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> Result<Option<ImportPreviewStopResult>> {
+        let Some(session) = self.read_import_preview_session(id)? else {
+            return Ok(None);
+        };
+        let result = stop_import_preview_session_record(&session, force);
+        if matches!(
+            result.status,
+            ImportPreviewStopStatus::Stopped | ImportPreviewStopStatus::AlreadyGone
+        ) {
+            let _ = self.delete_import_preview_session(id);
+        }
+        Ok(Some(result))
+    }
+
+    pub fn stop_all_import_preview_sessions(
+        &self,
+        force: bool,
+    ) -> Result<Vec<ImportPreviewStopResult>> {
+        let mut results = Vec::new();
+        for session in self.list_import_preview_sessions()? {
+            if let Some(result) =
+                self.stop_import_preview_session(&session.run_session_id, force)?
+            {
+                results.push(result);
+            }
+        }
+        Ok(results)
     }
 
     fn stop_process_tree(&self, info: &ProcessInfo, force: bool) -> Result<bool> {
@@ -729,8 +896,13 @@ fn errno() -> i32 {
 }
 
 fn process_info_is_alive(info: &ProcessInfo) -> bool {
-    (is_process_alive(info.pid) && process_identity_matches(info))
-        || info.workload_pid.is_some_and(is_process_alive)
+    (is_process_alive(info.pid)
+        && process_identity_matches(info)
+        && process_start_time_matches(info.pid, info.os_start_time_unix_ms))
+        || info.workload_pid.is_some_and(|pid| {
+            is_process_alive(pid)
+                && process_start_time_matches(pid, info.workload_os_start_time_unix_ms)
+        })
 }
 
 fn process_identity_matches(info: &ProcessInfo) -> bool {
@@ -747,6 +919,88 @@ fn runtime_identity_matches(runtime: &str, commandline: Option<&str>) -> bool {
     };
 
     is_expected_nacelle_commandline(commandline)
+}
+
+fn process_start_time_matches(pid: i32, expected_start_time_unix_ms: Option<u64>) -> bool {
+    let Some(expected) = expected_start_time_unix_ms else {
+        return true;
+    };
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    ato_session_core::process::process_start_time_unix_ms(pid) == Some(expected)
+}
+
+fn stop_import_preview_session_record(
+    session: &ImportPreviewSession,
+    force: bool,
+) -> ImportPreviewStopResult {
+    if is_process_alive(session.ato_run_pid)
+        && !process_start_time_matches(
+            session.ato_run_pid,
+            session.ato_run_process_start_time_unix_ms,
+        )
+    {
+        return ImportPreviewStopResult {
+            session: session.clone(),
+            status: ImportPreviewStopStatus::NotAtoOwned,
+            error: Some("recorded ato run pid is alive but its start time does not match".into()),
+        };
+    }
+
+    let mut stopped = false;
+    let mut errors = Vec::new();
+    let grace = if force {
+        Duration::from_millis(0)
+    } else {
+        Duration::from_secs(3)
+    };
+
+    #[cfg(unix)]
+    {
+        let mut pgids: std::collections::BTreeSet<i32> =
+            session.process_group_ids.iter().copied().collect();
+        pgids.insert(session.ato_run_pid);
+        for pgid in pgids.into_iter().filter(|pgid| *pgid > 0) {
+            if terminate_process_group_id_with_escalation(pgid, grace) {
+                stopped = true;
+            }
+        }
+    }
+
+    if is_process_alive(session.ato_run_pid)
+        && process_start_time_matches(
+            session.ato_run_pid,
+            session.ato_run_process_start_time_unix_ms,
+        )
+    {
+        match terminate_process(session.ato_run_pid, force) {
+            Ok(true) => {
+                let _ = wait_for_process_exit(session.ato_run_pid, 10);
+                stopped = true;
+            }
+            Ok(false) => {}
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+
+    if !errors.is_empty() {
+        return ImportPreviewStopResult {
+            session: session.clone(),
+            status: ImportPreviewStopStatus::Failed,
+            error: Some(errors.join("; ")),
+        };
+    }
+
+    ImportPreviewStopResult {
+        session: session.clone(),
+        status: if stopped {
+            ImportPreviewStopStatus::Stopped
+        } else {
+            ImportPreviewStopStatus::AlreadyGone
+        },
+        error: None,
+    }
 }
 
 fn is_expected_nacelle_commandline(commandline: &str) -> bool {
@@ -894,6 +1148,29 @@ fn terminate_pgroup_with_escalation(pid: i32, term_grace: Duration) {
     if is_process_alive(pid) {
         let _ = signal_group_or_pid(pid, libc::SIGKILL);
     }
+}
+
+#[cfg(unix)]
+fn terminate_process_group_id_with_escalation(pgid: i32, term_grace: Duration) -> bool {
+    if pgid <= 0 {
+        return false;
+    }
+
+    let signal_group = |signal| unsafe { libc::kill(-pgid, signal) == 0 };
+    let mut signaled = signal_group(libc::SIGTERM);
+    if term_grace.is_zero() {
+        return signal_group(libc::SIGKILL) || signaled;
+    }
+
+    let deadline = std::time::Instant::now() + term_grace;
+    while std::time::Instant::now() < deadline {
+        if unsafe { libc::kill(-pgid, 0) != 0 } {
+            return signaled;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    signaled |= signal_group(libc::SIGKILL);
+    signaled
 }
 
 #[cfg(not(unix))]
