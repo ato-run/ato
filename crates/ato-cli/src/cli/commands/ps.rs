@@ -40,6 +40,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
         let _ = binding::cleanup_service_bindings_for_process_info(process);
     }
     let mut processes = pm.list_processes()?;
+    let import_previews = pm.list_import_preview_sessions().unwrap_or_default();
 
     if !args.all {
         processes.retain(|p| p.status.is_active());
@@ -117,6 +118,29 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             })
             .collect();
         let mut combined = json_output;
+        let import_preview_json: Vec<serde_json::Value> = import_previews
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "kind": "import_preview",
+                    "id": s.run_session_id,
+                    "run_session_id": s.run_session_id,
+                    "pid": s.ato_run_pid,
+                    "process_group_ids": s.process_group_ids,
+                    "primary_port": s.primary_port,
+                    "primary_url": s.primary_url,
+                    "shadow_dir": s.shadow_dir.display().to_string(),
+                    "log_path": s.log_path.display().to_string(),
+                    "readiness_state": s.readiness_state,
+                    "cleanup_policy": s.cleanup_policy,
+                    "owner_kind": s.owner_kind,
+                    "owner_pid": s.owner_pid,
+                    "created_at_unix_ms": s.created_at_unix_ms,
+                    "updated_at_unix_ms": s.updated_at_unix_ms,
+                })
+            })
+            .collect();
+        combined.extend(import_preview_json);
         combined.extend(oci_json);
 
         let output = serde_json::to_string_pretty(&combined)?;
@@ -134,7 +158,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .filter(|s| args.all || s.status == OciSessionStatus::Running)
             .collect();
 
-        if processes.is_empty() && oci_visible.is_empty() {
+        if processes.is_empty() && import_previews.is_empty() && oci_visible.is_empty() {
             futures::executor::block_on(reporter.notify("No capsules found.".to_string()))?;
             return Ok(());
         }
@@ -188,6 +212,23 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             }
         }
 
+        for s in &import_previews {
+            let id = if s.run_session_id.len() > 8 {
+                &s.run_session_id[..8]
+            } else {
+                &s.run_session_id
+            };
+            futures::executor::block_on(reporter.notify(format!(
+                "{:>8} {:>8} {:>12} {:>15} {:>34} {}",
+                s.ato_run_pid,
+                id,
+                "import",
+                "🟢 preview",
+                "source/import-preview",
+                s.primary_url.as_deref().unwrap_or("-")
+            )))?;
+        }
+
         // Show OCI sessions as a separate section.
         for s in &oci_visible {
             let status_icon = if s.status == OciSessionStatus::Running {
@@ -215,7 +256,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
         futures::executor::block_on(reporter.notify("-".repeat(100)))?;
         futures::executor::block_on(reporter.notify(format!(
             "Total: {} capsule(s) ({} OCI)",
-            processes.len() + oci_visible.len(),
+            processes.len() + import_previews.len() + oci_visible.len(),
             oci_visible.len()
         )))?;
     }
