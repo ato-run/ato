@@ -32,7 +32,7 @@ pub(crate) struct ImportRecipe {
     pub(crate) recipe_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ImportRun {
     pub(crate) status: String,
     pub(crate) phase: Option<String>,
@@ -44,6 +44,28 @@ pub(crate) struct ImportRun {
     pub(crate) requires_host_shell: Option<bool>,
     #[serde(default)]
     pub(crate) shell_kind: Option<String>,
+    #[serde(default)]
+    pub(crate) cleanup_status: Option<String>,
+    #[serde(default)]
+    pub(crate) cleanup_error: Option<String>,
+    #[serde(default)]
+    pub(crate) log_path: Option<String>,
+    #[serde(default)]
+    pub(crate) run_session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) pid: Option<i32>,
+    #[serde(default)]
+    pub(crate) process_group_ids: Vec<i32>,
+    #[serde(default)]
+    pub(crate) primary_port: Option<u16>,
+    #[serde(default)]
+    pub(crate) primary_url: Option<String>,
+    #[serde(default)]
+    pub(crate) shadow_dir: Option<String>,
+    #[serde(default)]
+    pub(crate) readiness_state: Option<String>,
+    #[serde(default)]
+    pub(crate) cleanup_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -304,6 +326,14 @@ impl GitHubImportSession {
                 self.state = GitHubImportSessionState::Verified;
                 Ok(())
             }
+            "running" if run.readiness_state.as_deref() == Some("ready") => {
+                self.source = Some(source);
+                self.recipe = Some(recipe);
+                self.last_run = Some(run);
+                self.submit_enabled = true;
+                self.state = GitHubImportSessionState::Verified;
+                Ok(())
+            }
             "failed" => {
                 self.source = Some(source);
                 self.recipe = Some(recipe);
@@ -374,6 +404,10 @@ impl GitHubImportSession {
 
     pub(crate) fn submit_enabled(&self) -> bool {
         self.submit_enabled
+    }
+
+    pub(crate) fn active_run_session_id(&self) -> Option<&str> {
+        self.last_run.as_ref()?.run_session_id.as_deref()
     }
 
     pub(crate) fn editable_recipe_toml(&self) -> Option<&str> {
@@ -662,6 +696,7 @@ mod tests {
                 command_mode: None,
                 requires_host_shell: None,
                 shell_kind: None,
+                ..ImportRun::default()
             },
             recipe_resolution: None,
         }
@@ -679,6 +714,7 @@ mod tests {
                 command_mode: None,
                 requires_host_shell: None,
                 shell_kind: None,
+                ..ImportRun::default()
             },
             recipe_resolution: None,
         }
@@ -696,6 +732,7 @@ mod tests {
                 command_mode: None,
                 requires_host_shell: None,
                 shell_kind: None,
+                ..ImportRun::default()
             },
             recipe_resolution: None,
         }
@@ -968,6 +1005,7 @@ mod tests {
                     command_mode: None,
                     requires_host_shell: None,
                     shell_kind: None,
+                    ..ImportRun::default()
                 },
                 recipe_resolution: None,
             })
@@ -1031,6 +1069,7 @@ mod tests {
                     command_mode: None,
                     requires_host_shell: None,
                     shell_kind: None,
+                    ..ImportRun::default()
                 },
                 recipe_resolution: None,
             })
@@ -1039,6 +1078,32 @@ mod tests {
         session.apply_run_result(output).expect("apply");
         assert_eq!(session.state(), GitHubImportSessionState::Verified);
         assert!(session.submit_enabled());
+    }
+
+    #[test]
+    fn cli_keep_alive_ready_json_drives_verified_state_and_session_id() {
+        let mut output = passed_output();
+        output.run.status = "running".to_string();
+        output.run.phase = Some("readiness".to_string());
+        output.run.run_session_id = Some("preview-owner-repo-123".to_string());
+        output.run.readiness_state = Some("ready".to_string());
+        output.run.cleanup_policy = Some("keep_until_explicit_stop".to_string());
+        output.run.primary_url = Some("http://127.0.0.1:1111/".to_string());
+
+        let mut session = GitHubImportSession::default();
+        session.begin_resolve("blinkospace/blinko").expect("source");
+        session
+            .apply_inferred_output(inferred_output())
+            .expect("apply inferred");
+        session.start_run().expect("run starts");
+        session.apply_run_result(output).expect("apply");
+
+        assert_eq!(session.state(), GitHubImportSessionState::Verified);
+        assert!(session.submit_enabled());
+        assert_eq!(
+            session.active_run_session_id(),
+            Some("preview-owner-repo-123")
+        );
     }
 
     #[test]
@@ -1506,6 +1571,7 @@ mod tests {
                 command_mode: None,
                 requires_host_shell: None,
                 shell_kind: None,
+                ..ImportRun::default()
             },
             recipe_resolution: Some(remote_recipe_resolution()),
         };
