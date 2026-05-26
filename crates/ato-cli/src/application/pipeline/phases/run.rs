@@ -3057,6 +3057,12 @@ where
                 dangerously_skip_permissions: request.dangerously_skip_permissions,
                 assume_yes: request.assume_yes,
                 nacelle: request.nacelle.clone(),
+                // Foreground `ato run` keeps the historical fixed-host-port
+                // publish for `services.main` so external tools (CLI users,
+                // shells, browser bookmarks) reach the recipe on the declared
+                // port. Sessions that own the only consumer (e.g. Desktop's
+                // WebView) opt into EphemeralMainService instead.
+                publish_policy: crate::executors::orchestrator::PublishPolicy::ExternalDefault,
             },
             attempt.as_deref_mut(),
         )
