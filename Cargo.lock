@@ -469,6 +469,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ato-net"
+version = "0.5.2"
+dependencies = [
+ "capsule-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "ato-netd"
+version = "0.5.2"
+dependencies = [
+ "ato-net",
+ "capsule-core",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ato-session-core"
 version = "0.1.0"
 dependencies = [

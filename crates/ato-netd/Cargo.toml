@@ -1,0 +1,37 @@
+[package]
+name = "ato-netd"
+version = "0.5.2"
+edition = "2021"
+rust-version = "1.82"
+license = "MPL-2.0"
+description = "ato network broker — session-scoped sidecar that hosts DNS resolution, proxy policy, and ingress / egress for ato sessions. Slice A ships the daemon skeleton; ingress / DNS / egress land in follow-up slices per #294."
+repository = "https://github.com/ato-run/ato"
+homepage = "https://ato.run"
+authors = ["Koh0920"]
+keywords = ["network", "dns", "proxy", "ato", "daemon"]
+categories = ["network-programming", "command-line-utilities"]
+
+[[bin]]
+name = "ato-netd"
+path = "src/main.rs"
+
+[dependencies]
+# Shared types live in ato-net; depending on it keeps client/server in
+# lockstep on the wire protocol (Request / Response enums).
+ato-net = { path = "../ato-net", version = "0.5.2" }
+# Path resolution for the canonical control socket location under
+# ${ATO_HOME}/run/. Same resolver every other ato crate uses.
+capsule-core = { path = "../capsule-core", version = "0.11.0" }
+
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+ato-net = { path = "../ato-net", version = "0.5.2" }
+tempfile = "3.8"
+tokio = { version = "1", features = ["full"] }
