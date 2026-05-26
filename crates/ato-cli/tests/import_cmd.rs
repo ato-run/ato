@@ -1,7 +1,8 @@
 use std::fs;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -71,6 +72,207 @@ run = "true"
     Ok(())
 }
 
+#[test]
+fn import_run_emit_json_tears_down_ready_server() -> Result<()> {
+    if !python3_available() {
+        return Ok(());
+    }
+
+    let root = test_root("teardown-ready-server")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    fs::write(source.join("index.html"), "ready\n")?;
+    let port = free_port()?;
+    fs::write(
+        &recipe,
+        format!(
+            r#"schema_version = "0.3"
+name = "shadow-import-server"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "python3 -m http.server {port} --bind 127.0.0.1"
+port = {port}
+"#,
+        ),
+    )?;
+
+    let output = run_import(&root, &source, Some(&recipe))?;
+    assert_eq!(output["run"]["status"].as_str(), Some("passed"));
+    assert_eq!(output["run"]["phase"].as_str(), Some("readiness"));
+    assert!(
+        matches!(
+            output["run"]["cleanup_status"].as_str(),
+            Some("terminated") | Some("killed")
+        ),
+        "unexpected cleanup status: {}",
+        output["run"]["cleanup_status"]
+    );
+    assert!(
+        TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse()?,
+            Duration::from_millis(200),
+        )
+        .is_err(),
+        "import probe server must be stopped before JSON returns"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn import_run_cleanup_kills_detached_shadow_process() -> Result<()> {
+    if !python3_available() {
+        return Ok(());
+    }
+
+    let root = test_root("teardown-detached-server")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    fs::write(
+        source.join("spawn_detached.py"),
+        r#"import os
+import socket
+import subprocess
+import sys
+import time
+
+port = sys.argv[1]
+subprocess.Popen(
+    [
+        sys.executable,
+        "-m",
+        "http.server",
+        port,
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        os.getcwd(),
+    ],
+    start_new_session=True,
+)
+deadline = time.time() + 5
+while time.time() < deadline:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.1):
+            break
+    except OSError:
+        time.sleep(0.05)
+"#,
+    )?;
+    let port = free_port()?;
+    fs::write(
+        &recipe,
+        format!(
+            r#"schema_version = "0.3"
+name = "shadow-import-detached"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "python3 spawn_detached.py {port}"
+port = {port}
+"#,
+        ),
+    )?;
+
+    let output = run_import(&root, &source, Some(&recipe))?;
+    assert_eq!(output["run"]["status"].as_str(), Some("passed"));
+    assert_eq!(output["run"]["phase"].as_str(), Some("readiness"));
+    assert!(
+        matches!(
+            output["run"]["cleanup_status"].as_str(),
+            Some("terminated") | Some("killed")
+        ),
+        "unexpected cleanup status: {}",
+        output["run"]["cleanup_status"]
+    );
+    assert_port_closed(port)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn import_run_cleanup_escalates_when_server_ignores_term() -> Result<()> {
+    if !python3_available() {
+        return Ok(());
+    }
+
+    let root = test_root("teardown-ignore-term")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    fs::write(
+        source.join("ignore_term_server.py"),
+        r#"import http.server
+import signal
+import socketserver
+import sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+port = int(sys.argv[1])
+with socketserver.TCPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler) as httpd:
+    httpd.serve_forever()
+"#,
+    )?;
+    let port = free_port()?;
+    fs::write(
+        &recipe,
+        format!(
+            r#"schema_version = "0.3"
+name = "shadow-import-ignore-term"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "python3 ignore_term_server.py {port}"
+port = {port}
+"#,
+        ),
+    )?;
+
+    let output = run_import(&root, &source, Some(&recipe))?;
+    assert_eq!(output["run"]["status"].as_str(), Some("passed"));
+    assert_eq!(output["run"]["cleanup_status"].as_str(), Some("killed"));
+    assert_port_closed(port)?;
+    Ok(())
+}
+
+#[test]
+fn import_run_declared_port_exits_before_readiness_fails() -> Result<()> {
+    let root = test_root("exited-before-readiness")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    let port = free_port()?;
+    fs::write(
+        &recipe,
+        format!(
+            r#"schema_version = "0.3"
+name = "shadow-import-exits"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "true"
+port = {port}
+"#,
+        ),
+    )?;
+
+    let output = run_import(&root, &source, Some(&recipe))?;
+    assert_eq!(output["run"]["status"].as_str(), Some("failed"));
+    assert_eq!(
+        output["run"]["error_class"].as_str(),
+        Some("exited_before_readiness")
+    );
+    assert_port_closed(port)?;
+    Ok(())
+}
+
 fn run_import(root: &Path, source: &Path, recipe: Option<&Path>) -> Result<Value> {
     let home = root.join("home");
     fs::create_dir_all(&home)?;
@@ -106,6 +308,27 @@ fn run_import(root: &Path, source: &Path, recipe: Option<&Path>) -> Result<Value
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+fn free_port() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
+fn python3_available() -> bool {
+    Command::new("python3").arg("--version").output().is_ok()
+}
+
+fn assert_port_closed(port: u16) -> Result<()> {
+    assert!(
+        TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse()?,
+            Duration::from_millis(200),
+        )
+        .is_err(),
+        "import probe server on port {port} must be stopped before JSON returns"
+    );
+    Ok(())
 }
 
 fn test_root(name: &str) -> Result<PathBuf> {
