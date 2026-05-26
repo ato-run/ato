@@ -1135,6 +1135,13 @@ pub(super) fn start_orchestration_session_in_process(
         dangerously_skip_permissions: allow_unsafe,
         assume_yes: true,
         nacelle: None,
+        // Desktop sessions consume the leaf via their own WebView only, so
+        // they want podman to pick a free host port instead of grabbing the
+        // recipe's declared port. Without this, two recipes that both declare
+        // `[services.main]` with the same port (e.g. Open WebUI + Excalidraw
+        // both at 8080) collide on host:8080 and the second session's WebView
+        // ends up rendering whichever container still owns the port (#289).
+        publish_policy: crate::executors::orchestrator::PublishPolicy::EphemeralMainService,
     };
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
