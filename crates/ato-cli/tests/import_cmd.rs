@@ -343,7 +343,55 @@ port = {port}
         "keep-alive import preview server should survive command return"
     );
 
-    stop_keep_alive_run(&output)?;
+    let run_session_id = output["run"]["run_session_id"]
+        .as_str()
+        .context("missing run_session_id")?;
+    run_stop(&root, run_session_id)?;
+    assert_port_closed(port)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn import_run_keep_alive_stop_all_stops_session() -> Result<()> {
+    if !python3_available() {
+        return Ok(());
+    }
+
+    let root = test_root("keep-alive-stop-all")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    fs::write(
+        source.join("server.py"),
+        r#"import http.server
+import socketserver
+import sys
+
+port = int(sys.argv[1])
+with socketserver.TCPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler) as httpd:
+    httpd.serve_forever()
+"#,
+    )?;
+    let port = free_port()?;
+    fs::write(
+        &recipe,
+        format!(
+            r#"schema_version = "0.3"
+name = "shadow-import-keep-alive-all"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "python3 server.py {port}"
+port = {port}
+"#,
+        ),
+    )?;
+
+    let output = run_import_with_args(&root, &source, Some(&recipe), &["--keep-alive"])?;
+    assert_eq!(output["run"]["status"].as_str(), Some("running"));
+    run_stop_all(&root)?;
     assert_port_closed(port)?;
     Ok(())
 }
@@ -395,21 +443,30 @@ fn run_import_with_args(
     })
 }
 
-#[cfg(unix)]
-fn stop_keep_alive_run(output: &Value) -> Result<()> {
-    let pgids = output["run"]["process_group_ids"]
-        .as_array()
-        .context("missing process_group_ids")?;
-    for signal in [libc::SIGTERM, libc::SIGKILL] {
-        for pgid in pgids.iter().filter_map(|value| value.as_i64()) {
-            if pgid > 0 {
-                unsafe {
-                    libc::kill(-(pgid as libc::pid_t), signal);
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
+fn run_stop(root: &Path, session_id: &str) -> Result<()> {
+    run_stop_args(root, &[session_id])
+}
+
+fn run_stop_all(root: &Path) -> Result<()> {
+    run_stop_args(root, &["--all"])
+}
+
+fn run_stop_args(root: &Path, args: &[&str]) -> Result<()> {
+    let home = root.join("home");
+    let output = Command::new(assert_cmd::cargo::cargo_bin("ato"))
+        .arg("stop")
+        .args(args)
+        .arg("--force")
+        .env("HOME", &home)
+        .current_dir(root)
+        .output()
+        .context("failed to run ato stop")?;
+    assert!(
+        output.status.success(),
+        "ato stop failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
