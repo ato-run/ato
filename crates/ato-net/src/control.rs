@@ -378,6 +378,121 @@ impl Client {
     }
 }
 
+/// Synchronous (blocking) client for the `ato-netd` control plane.
+///
+/// Identical wire protocol to [`Client`] but uses
+/// [`std::os::unix::net::UnixStream`] (blocking I/O) so it can be called
+/// from non-async contexts such as the GPUI event loop in `ato-desktop`.
+///
+/// Each [`SyncClient`] owns one UDS connection. Construct a new client for
+/// each request sequence; the daemon accepts many concurrent connections.
+///
+/// Unix-only in slice **C**. The TCP fallback tracked in #294 would add a
+/// symmetric implementation for non-Unix hosts.
+#[cfg(unix)]
+pub struct SyncClient {
+    socket_path: PathBuf,
+    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+    writer: std::os::unix::net::UnixStream,
+}
+
+#[cfg(unix)]
+impl std::fmt::Debug for SyncClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncClient")
+            .field("socket_path", &self.socket_path)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(unix)]
+impl SyncClient {
+    /// Connect to the default control socket ([`default_socket_path`]).
+    pub fn connect_default() -> Result<Self, Error> {
+        let path = default_socket_path()?;
+        Self::connect(&path)
+    }
+
+    /// Connect to a control socket at the given path.
+    pub fn connect(socket_path: &Path) -> Result<Self, Error> {
+        use std::os::unix::net::UnixStream;
+        let stream = UnixStream::connect(socket_path).map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                Error::NotRunning {
+                    path: socket_path.to_path_buf(),
+                    source: err,
+                }
+            }
+            std::io::ErrorKind::PermissionDenied => Error::PermissionDenied {
+                path: socket_path.to_path_buf(),
+                source: err,
+            },
+            _ => Error::Io(err),
+        })?;
+        let writer = stream.try_clone().map_err(Error::Io)?;
+        Ok(Self {
+            socket_path: socket_path.to_path_buf(),
+            reader: std::io::BufReader::new(stream),
+            writer,
+        })
+    }
+
+    /// Register (or idempotently re-register) an ingress route.
+    ///
+    /// Same `key` → same stable port returned, upstream updated.
+    pub fn register_ingress(
+        &mut self,
+        key: &str,
+        upstream_url: &str,
+    ) -> Result<IngressInfo, Error> {
+        match self.call(Request::RegisterIngress {
+            key: key.to_string(),
+            upstream_url: upstream_url.to_string(),
+        })? {
+            ResponseResult::IngressRegistered(info) => Ok(info),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected IngressRegistered, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Remove a previously-registered ingress route. Idempotent.
+    pub fn deregister_ingress(&mut self, key: &str) -> Result<(), Error> {
+        match self.call(Request::DeregisterIngress {
+            key: key.to_string(),
+        })? {
+            ResponseResult::Empty {} => Ok(()),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected Empty, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Low-level request/response helper.
+    pub fn call(&mut self, request: Request) -> Result<ResponseResult, Error> {
+        use std::io::{BufRead, Write};
+        let mut line = serde_json::to_string(&request)?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).map_err(Error::Io)?;
+        self.writer.flush().map_err(Error::Io)?;
+        let mut buf = String::new();
+        let n = self.reader.read_line(&mut buf).map_err(Error::Io)?;
+        if n == 0 {
+            return Err(Error::PrematureClose);
+        }
+        let parsed: Response = serde_json::from_str(buf.trim_end())?;
+        match parsed {
+            Response::Ok { result } => Ok(result),
+            Response::Error { error } => Err(Error::DaemonError {
+                code: error.code,
+                message: error.message,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +564,109 @@ mod tests {
                 result: ResponseResult::Empty {}
             }
         ));
+    }
+
+    #[cfg(unix)]
+    mod sync_client_tests {
+        use super::*;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        /// Spawn a minimal fake daemon that reads one newline-delimited JSON
+        /// request and writes back a single JSON response, then exits.
+        fn spawn_fake_daemon(
+            socket_path: &std::path::Path,
+            respond_with: Response,
+        ) -> std::thread::JoinHandle<()> {
+            let listener = UnixListener::bind(socket_path)
+                .expect("bind failed in test");
+            let respond_with = serde_json::to_string(&respond_with).unwrap();
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept failed in test");
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                // Drop the parsed request — we just need to consume it.
+                let _: Request = serde_json::from_str(line.trim()).unwrap();
+                writer
+                    .write_all((respond_with + "\n").as_bytes())
+                    .unwrap();
+            })
+        }
+
+        #[test]
+        fn sync_client_status_round_trip() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test-status.sock");
+            let resp = Response::Ok {
+                result: ResponseResult::Status(StatusReport {
+                    version: "0.5.2".into(),
+                    pid: 99,
+                    uptime_secs: 3,
+                    listeners: vec![],
+                }),
+            };
+            let handle = spawn_fake_daemon(&path, resp);
+            let mut client = SyncClient::connect(&path).unwrap();
+            let result = client.call(Request::Status).unwrap();
+            handle.join().unwrap();
+            match result {
+                ResponseResult::Status(s) => {
+                    assert_eq!(s.version, "0.5.2");
+                    assert_eq!(s.pid, 99);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn sync_client_register_ingress_round_trip() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test-register.sock");
+            let resp = Response::Ok {
+                result: ResponseResult::IngressRegistered(IngressInfo {
+                    port: 19000,
+                }),
+            };
+            let handle = spawn_fake_daemon(&path, resp);
+            let mut client = SyncClient::connect(&path).unwrap();
+            let info = client
+                .register_ingress("handle:test/demo@1.0.0", "http://127.0.0.1:8080")
+                .unwrap();
+            handle.join().unwrap();
+            assert_eq!(info.port, 19000);
+        }
+
+        #[test]
+        fn sync_client_daemon_error_maps_to_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test-error.sock");
+            let resp = Response::Error {
+                error: ErrorPayload {
+                    code: "ingress_register_failed".into(),
+                    message: "port 19001 is already claimed by key \"other:key\"".into(),
+                },
+            };
+            let handle = spawn_fake_daemon(&path, resp);
+            let mut client = SyncClient::connect(&path).unwrap();
+            let err = client.call(Request::Status).unwrap_err();
+            handle.join().unwrap();
+            match err {
+                Error::DaemonError { code, .. } => assert_eq!(code, "ingress_register_failed"),
+                other => panic!("unexpected error: {other}"),
+            }
+        }
+
+        #[test]
+        fn sync_client_connect_missing_socket_returns_not_running() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("nonexistent.sock");
+            let err = SyncClient::connect(&path).unwrap_err();
+            assert!(
+                matches!(err, Error::NotRunning { .. }),
+                "expected NotRunning, got {err}"
+            );
+        }
     }
 }

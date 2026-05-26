@@ -89,6 +89,23 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Construct the stable logical key for a capsule identified by its handle.
+///
+/// The returned key is the canonical form used in
+/// `${ATO_HOME}/state/netd/stable_origin_ports.json`. Changing this
+/// function invalidates all persisted port assignments.
+pub fn logical_key_for_handle(handle: &str) -> String {
+    format!("handle:{handle}")
+}
+
+/// Construct the stable logical key for an ephemeral capsule session ID.
+///
+/// Used for `GuestRoute::Capsule { session, .. }` routes where the
+/// identity is the session ID rather than the handle.
+pub fn logical_key_for_session(session_id: &str) -> String {
+    format!("session:{session_id}")
+}
+
 /// Check whether `label` is a valid DNS label per RFC 1035 §2.3.4.
 ///
 /// Public so callers can validate host labels they receive on the wire
@@ -142,5 +159,32 @@ mod tests {
         let a = stable_host_label_for_key("handle:org/a@1.0.0");
         let b = stable_host_label_for_key("handle:org/b@1.0.0");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn logical_key_for_handle_formats_correctly() {
+        assert_eq!(
+            logical_key_for_handle("capsule://org/demo@1.0.0"),
+            "handle:capsule://org/demo@1.0.0"
+        );
+        assert_eq!(logical_key_for_handle(""), "handle:");
+    }
+
+    #[test]
+    fn logical_key_for_session_formats_correctly() {
+        assert_eq!(
+            logical_key_for_session("abc-def-0123"),
+            "session:abc-def-0123"
+        );
+        assert_eq!(logical_key_for_session(""), "session:");
+    }
+
+    #[test]
+    fn logical_key_for_handle_and_session_do_not_collide() {
+        let same_suffix = "abc";
+        assert_ne!(
+            logical_key_for_handle(same_suffix),
+            logical_key_for_session(same_suffix),
+        );
     }
 }
