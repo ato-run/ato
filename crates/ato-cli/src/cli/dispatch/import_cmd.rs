@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::cli::ImportArgs;
+use crate::runtime::process::{ImportPreviewSession, ProcessManager};
 use capsule_core::foundation::types::command_spec::contains_shell_operators;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
@@ -985,8 +986,68 @@ fn run_shadow_workspace_keep_alive(
     }
 
     observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+    let now = now_unix_ms()?;
+    let session = ImportPreviewSession {
+        run_session_id,
+        owner_kind: import_preview_owner_kind(),
+        owner_pid: std::process::id() as i32,
+        owner_process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            std::process::id(),
+        ),
+        ato_run_pid: pid,
+        ato_run_process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            child.id(),
+        ),
+        process_group_ids: observed_pgids.into_iter().collect(),
+        primary_port: Some(actual_port),
+        primary_url: Some(primary_url),
+        shadow_dir: materialized.shadow_dir.clone(),
+        log_path: log_path.clone(),
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        expires_at_unix_ms: None,
+        readiness_state,
+        cleanup_policy: "keep_until_explicit_stop".to_string(),
+    };
+    let process_manager = ProcessManager::new()?;
+    if let Err(error) = process_manager.write_import_preview_session(&session) {
+        let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+        cleanup.observed_pgids = session.process_group_ids.iter().copied().collect();
+        let cleanup_outcome = cleanup.cleanup();
+        return Ok(import_run_with_cleanup(
+            ImportRun {
+                status: "failed".to_string(),
+                phase: Some("session_store".to_string()),
+                error_class: Some("session_store_write_failed".to_string()),
+                error_excerpt: Some(redact_error_excerpt(&error.to_string())),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: None,
+                run_session_id: Some(session.run_session_id),
+                pid: Some(session.ato_run_pid),
+                process_group_ids: session.process_group_ids,
+                primary_port: session.primary_port,
+                primary_url: session.primary_url,
+                shadow_dir: Some(session.shadow_dir.display().to_string()),
+                readiness_state: Some(session.readiness_state),
+                cleanup_policy: Some("failed_session_store_teardown".to_string()),
+            },
+            cleanup_outcome,
+            &log_path,
+        ));
+    }
+    let stored_session = process_manager
+        .read_import_preview_session(&session.run_session_id)?
+        .context("import preview session missing after store write")?;
     materialized._workspace.keep = true;
-    Ok(ImportRun {
+    Ok(import_run_from_import_preview_session(&stored_session))
+}
+
+fn import_run_from_import_preview_session(session: &ImportPreviewSession) -> ImportRun {
+    ImportRun {
         status: "running".to_string(),
         phase: Some("readiness".to_string()),
         error_class: None,
@@ -996,16 +1057,33 @@ fn run_shadow_workspace_keep_alive(
         shell_kind: None,
         cleanup_status: None,
         cleanup_error: None,
-        log_path: Some(log_path.display().to_string()),
-        run_session_id: Some(run_session_id),
-        pid: Some(pid),
-        process_group_ids: observed_pgids.into_iter().collect(),
-        primary_port: Some(actual_port),
-        primary_url: Some(primary_url),
-        shadow_dir: Some(materialized.shadow_dir.display().to_string()),
-        readiness_state: Some(readiness_state),
-        cleanup_policy: Some("keep_until_explicit_stop".to_string()),
-    })
+        log_path: Some(session.log_path.display().to_string()),
+        run_session_id: Some(session.run_session_id.clone()),
+        pid: Some(session.ato_run_pid),
+        process_group_ids: session.process_group_ids.clone(),
+        primary_port: session.primary_port,
+        primary_url: session.primary_url.clone(),
+        shadow_dir: Some(session.shadow_dir.display().to_string()),
+        readiness_state: Some(session.readiness_state.clone()),
+        cleanup_policy: Some(session.cleanup_policy.clone()),
+    }
+}
+
+fn import_preview_owner_kind() -> String {
+    if std::env::var_os("ATO_DESKTOP_SESSION_ROOT").is_some()
+        || std::env::var_os("ATO_DESKTOP_PARENT_PID").is_some()
+    {
+        "desktop".to_string()
+    } else {
+        "cli".to_string()
+    }
+}
+
+fn now_unix_ms() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_millis() as u64)
 }
 
 #[derive(Debug, Clone)]
