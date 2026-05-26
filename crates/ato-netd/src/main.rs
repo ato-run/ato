@@ -23,6 +23,8 @@ use clap::Parser;
 mod server;
 #[cfg(unix)]
 mod state;
+#[cfg(unix)]
+mod ingress;
 
 /// Command-line surface. Same binary handles two callers:
 ///
@@ -203,7 +205,17 @@ async fn run_daemon(override_path: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    let daemon = match server::Daemon::start(socket).await {
+    // Derive ATO_HOME from capsule-core's path resolver so that
+    // `ato-netd` and every other ato binary agree on the root.
+    let ato_home = match capsule_core::common::paths::nacelle_home_dir() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("ato-netd: cannot resolve ATO_HOME: {err}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let daemon = match server::Daemon::start(socket, ato_home).await {
         Ok(d) => d,
         Err(server::StartError::AlreadyRunning { pid, path }) => {
             // Typed failure so a wrapping process can observe the

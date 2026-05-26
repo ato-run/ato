@@ -124,16 +124,16 @@ pub struct StatusReport {
     pub listeners: Vec<ListenerInfo>,
 }
 
-/// Description of a listener owned by the running daemon. Slice **A**
-/// never produces any (no listeners exist yet); the type is shipped now
-/// so the wire format does not need a breaking change when **B** adds
-/// the first listener.
+/// Description of an ingress listener owned by the running daemon.
+/// Slice **A** never produces any (no listeners exist yet); slice **B**
+/// adds the first ones.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ListenerInfo {
-    /// Stable short name (e.g. `"ingress"`, `"egress-connect"`).
-    pub name: String,
-    /// `host:port` or path form, suitable for human display only.
-    pub address: String,
+    /// Stable logical key for this route (opaque string, same as the
+    /// `key` passed to `RegisterIngress`).
+    pub key: String,
+    /// `127.0.0.1` port the daemon is listening on for this route.
+    pub port: u16,
 }
 
 /// Tagged-enum request envelope. New verbs added in follow-up slices
@@ -148,6 +148,32 @@ pub enum Request {
     /// **before** beginning shutdown so clients can observe a successful
     /// reply even though the socket closes shortly after.
     Shutdown,
+    /// Register (or idempotently re-register) an ingress reverse-proxy
+    /// route. Same `key` → same stable port returned; the upstream is
+    /// updated to `upstream_url`. This is the "register-or-swap"
+    /// semantic: stable identity is preserved across upstream restarts.
+    ///
+    /// The daemon binds `127.0.0.1:<port>` and proxies all HTTP,
+    /// SSE, long-poll, and WebSocket traffic to `upstream_url`. The
+    /// assigned port is persisted to
+    /// `${ATO_HOME}/state/netd/stable_origin_ports.json` so that the
+    /// same key always gets the same port across daemon restarts.
+    RegisterIngress {
+        /// Opaque string that identifies this route persistently. Same
+        /// key always maps to the same stable port for the lifetime of
+        /// the daemon installation.
+        key: String,
+        /// Upstream base URL. Must be `http://` or `https://`. The proxy
+        /// forwards requests to this origin, rewriting `Host` and
+        /// `X-Forwarded-*` headers.
+        upstream_url: String,
+    },
+    /// Remove a previously-registered ingress route. Idempotent:
+    /// deregistering an unknown key is a no-op success.
+    DeregisterIngress {
+        /// Key previously passed to `RegisterIngress`.
+        key: String,
+    },
 }
 
 /// Tagged-enum response envelope mirroring [`Request`].
@@ -162,9 +188,22 @@ pub enum Response {
 #[serde(untagged)]
 pub enum ResponseResult {
     Status(StatusReport),
+    /// Result from `RegisterIngress`. Contains the stable port on
+    /// `127.0.0.1` that the daemon is listening on for this route.
+    IngressRegistered(IngressInfo),
     /// Empty `{}` body, used for verbs whose only useful signal is
-    /// "succeeded" (e.g. `Shutdown`).
+    /// "succeeded" (e.g. `Shutdown`, `DeregisterIngress`).
     Empty {},
+}
+
+/// Information about a registered ingress route, returned by
+/// `RegisterIngress`. The port is stable: same key always maps to the
+/// same port across daemon restarts (persisted to
+/// `${ATO_HOME}/state/netd/stable_origin_ports.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressInfo {
+    /// The `127.0.0.1` port the daemon is listening on for this route.
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,9 +300,9 @@ impl Client {
     pub async fn status(&mut self) -> Result<StatusReport, Error> {
         match self.call(Request::Status).await? {
             ResponseResult::Status(s) => Ok(s),
-            ResponseResult::Empty {} => Err(Error::DaemonError {
-                code: "unexpected_empty_response".into(),
-                message: "daemon returned empty result for status".into(),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected StatusReport, got: {other:?}"),
             }),
         }
     }
@@ -273,6 +312,46 @@ impl Client {
     pub async fn shutdown(mut self) -> Result<(), Error> {
         let _ = self.call(Request::Shutdown).await?;
         Ok(())
+    }
+
+    /// Register (or idempotently re-register) an ingress route.
+    ///
+    /// Same `key` → same stable port returned, upstream updated.
+    /// Returns [`IngressInfo`] with the assigned port.
+    pub async fn register_ingress(
+        &mut self,
+        key: &str,
+        upstream_url: &str,
+    ) -> Result<IngressInfo, Error> {
+        match self
+            .call(Request::RegisterIngress {
+                key: key.to_string(),
+                upstream_url: upstream_url.to_string(),
+            })
+            .await?
+        {
+            ResponseResult::IngressRegistered(info) => Ok(info),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected IngressRegistered, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Remove a previously-registered ingress route. Idempotent.
+    pub async fn deregister_ingress(&mut self, key: &str) -> Result<(), Error> {
+        match self
+            .call(Request::DeregisterIngress {
+                key: key.to_string(),
+            })
+            .await?
+        {
+            ResponseResult::Empty {} => Ok(()),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected Empty, got: {other:?}"),
+            }),
+        }
     }
 
     /// Low-level request/response helper. Public for tests and future

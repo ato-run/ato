@@ -38,11 +38,39 @@ clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
+anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Ingress reverse proxy (slice B, #297)
+# hyper v1 for HTTP/1.1 streaming proxy + WebSocket upgrade tunneling.
+hyper = { version = "1", features = ["full"] }
+# hyper-util: TokioIo adapter and higher-level utilities.
+hyper-util = { version = "0.1", features = ["full"] }
+# http-body-util: BodyExt trait, BoxBody, Empty, Full for response bodies.
+http-body-util = "0.1"
+# http: Request/Response/HeaderMap types used directly in ingress/hop_by_hop.
+http = "1"
+# tokio-tungstenite: WebSocket upgrade relay via tokio::io::copy_bidirectional.
+tokio-tungstenite = "0.28"
+# url: Url parsing for upstream_url in RegisterIngress.
+url = "2"
+# bytes: Bytes type used in BoxBody.
+bytes = "1"
+# socket2: SO_REUSEADDR on ingress listener binds (avoids TIME_WAIT port conflicts on restart).
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 ato-net = { path = "../ato-net", version = "0.5.2" }
 tempfile = "3.8"
 tokio = { version = "1", features = ["full"] }
+# For test HTTP clients in ingress acceptance tests.
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+http = "1"
+tokio-tungstenite = "0.28"
+bytes = "1"
+futures-util = "0.3"
+serial_test = "3"

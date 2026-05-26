@@ -478,22 +478,34 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "url",
 ]
 
 [[package]]
 name = "ato-netd"
 version = "0.5.2"
 dependencies = [
+ "anyhow",
  "ato-net",
+ "bytes",
  "capsule-core",
  "clap",
+ "futures-util",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
  "serde",
  "serde_json",
+ "serial_test",
+ "socket2 0.5.10",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -3160,6 +3172,7 @@ dependencies = [
  "socket2 0.6.3",
  "system-configuration 0.7.0",
  "tokio",
+ "tower-layer",
  "tower-service",
  "tracing",
  "windows-registry",
@@ -7264,8 +7277,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
 dependencies = [
  "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
  "log",
  "rand 0.9.4",
+ "sha1",
  "thiserror 2.0.18",
  "utf-8",
 ]
