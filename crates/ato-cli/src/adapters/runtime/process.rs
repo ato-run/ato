@@ -951,6 +951,7 @@ fn stop_import_preview_session_record(
 
     let mut stopped = false;
     let mut errors = Vec::new();
+    let mut live_unverified_pgids = Vec::new();
     let grace = if force {
         Duration::from_millis(0)
     } else {
@@ -962,11 +963,6 @@ fn stop_import_preview_session_record(
         let processes = unix_ps_processes();
         let verified_pgids =
             verified_import_preview_process_groups(session, ato_run_owned, &processes);
-        let live_unverified_pgids = live_unverified_import_preview_process_groups(
-            session,
-            &verified_pgids,
-            &processes,
-        );
         for pgid in verified_pgids {
             if terminate_process_group_id_with_escalation(pgid, grace) {
                 stopped = true;
@@ -974,19 +970,6 @@ fn stop_import_preview_session_record(
         }
         if stopped {
             let _ = wait_for_process_exit(session.ato_run_pid, 10);
-        } else if !live_unverified_pgids.is_empty() {
-            return ImportPreviewStopResult {
-                session: session.clone(),
-                status: ImportPreviewStopStatus::NotAtoOwned,
-                error: Some(format!(
-                    "recorded process groups could not be verified as Ato-owned: {}",
-                    live_unverified_pgids
-                        .iter()
-                        .map(i32::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            };
         }
     }
 
@@ -1001,11 +984,43 @@ fn stop_import_preview_session_record(
         }
     }
 
+    #[cfg(unix)]
+    {
+        let processes = unix_ps_processes();
+        let verified_pgids =
+            verified_import_preview_process_groups(session, ato_run_owned, &processes);
+        live_unverified_pgids =
+            live_unverified_import_preview_process_groups(session, &verified_pgids, &processes);
+    }
+
     if !errors.is_empty() {
         return ImportPreviewStopResult {
             session: session.clone(),
             status: ImportPreviewStopStatus::Failed,
             error: Some(errors.join("; ")),
+        };
+    }
+
+    import_preview_stop_outcome(session, stopped, &live_unverified_pgids)
+}
+
+fn import_preview_stop_outcome(
+    session: &ImportPreviewSession,
+    stopped: bool,
+    live_unverified_pgids: &[i32],
+) -> ImportPreviewStopResult {
+    if !live_unverified_pgids.is_empty() {
+        return ImportPreviewStopResult {
+            session: session.clone(),
+            status: ImportPreviewStopStatus::NotAtoOwned,
+            error: Some(format!(
+                "recorded process groups could not be verified as Ato-owned: {}",
+                live_unverified_pgids
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         };
     }
 
@@ -1568,6 +1583,18 @@ mod tests {
 
         let verified = verified_import_preview_process_groups(&session, false, &processes);
         assert_eq!(verified.into_iter().collect::<Vec<_>>(), vec![888]);
+    }
+
+    #[test]
+    fn import_preview_stop_outcome_prefers_unverified_groups_over_stopped() {
+        let session = test_import_preview_session("preview-stop-outcome", i32::MAX, i32::MAX, false);
+        let result = import_preview_stop_outcome(&session, true, &[777, 888]);
+
+        assert_eq!(result.status, ImportPreviewStopStatus::NotAtoOwned);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("recorded process groups could not be verified as Ato-owned: 777, 888")
+        );
     }
 
     fn test_import_preview_session(
