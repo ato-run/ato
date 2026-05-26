@@ -40,6 +40,9 @@ tokio = { version = "1", features = ["net", "io-util", "rt", "macros"] }
 # Error::NotRunning vs Error::DaemonError without string parsing.
 thiserror = "1.0"
 
+# URL validation for upstream_url in RegisterIngress control request.
+url = "2"
+
 [dev-dependencies]
 tempfile = "3.8"
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "rt-multi-thread", "time", "process"] }
