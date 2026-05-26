@@ -530,8 +530,12 @@ pub(crate) fn remove_network_if_present(network_name: &str) -> NetworkRemovalOut
 
 fn try_remove_network_subprocess(network_name: &str) -> NetworkRemovalOutcome {
     let mut last_error = String::new();
-    // Try podman first, then docker.
-    for cmd in &["podman", "docker"] {
+    // Try podman first, then docker — but only consult docker when the
+    // user has explicitly opted in (`ATO_ENABLE_DOCKER=1`). On podman-only
+    // hosts where the docker CLI is installed but its daemon is down,
+    // `docker network rm` hangs on the unix socket with no internal
+    // timeout, blocking session teardown indefinitely.
+    for cmd in ato_session_core::process::oci_probe_runtimes() {
         let result = Command::new(cmd)
             .args(["network", "rm", network_name])
             .output();
