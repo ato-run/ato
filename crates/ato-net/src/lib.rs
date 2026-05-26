@@ -25,9 +25,7 @@
 
 pub mod control;
 
-pub mod resolver {
-    //! DNS resolver abstraction. Filled in by slice **D** (#299).
-}
+pub mod resolver;
 
 pub mod policy {
     //! Hostname / CIDR policy matcher. Filled in by slice **E** (#300).
@@ -38,10 +36,7 @@ pub mod proxy_core {
     //! (#297) and **E** (#300).
 }
 
-pub mod receipt {
-    //! Typed network-receipt event structs. Filled in by slice **D**
-    //! (#299).
-}
+pub mod receipt;
 
 /// Stable-origin key derivation — pure functions, no I/O.
 ///
