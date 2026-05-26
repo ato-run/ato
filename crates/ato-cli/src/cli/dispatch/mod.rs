@@ -611,13 +611,14 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         ),
 
         Commands::Stop {
+            target,
             id,
             name,
             all,
             force,
         } => commands::close::execute(
             commands::close::CloseArgs {
-                id,
+                id: id.or(target),
                 name,
                 all,
                 force,
