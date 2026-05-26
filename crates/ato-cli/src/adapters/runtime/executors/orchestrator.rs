@@ -86,6 +86,46 @@ fn service_stdout_should_route_to_stderr() -> bool {
     REDIRECT_SERVICE_STDOUT_TO_STDERR.load(Ordering::Relaxed)
 }
 
+/// Caller-driven policy for how the `services.main` leaf publishes its port
+/// to the host. Policy is selected by the *caller context*, not by the
+/// recipe or app — recipes still declare a port and `network.publish`, but
+/// the caller decides whether the historical "main → fixed host port"
+/// special case applies for this run.
+///
+/// Historically the orchestrator special-cases `service.name == "main"` to
+/// `PublishMode::Fixed` so `ato run` exposes the recipe's declared port to
+/// the host for CLI users and external tools. That model breaks any caller
+/// that owns the only consumer and runs multiple sessions concurrently:
+/// two recipes both declaring `[services.main]` with `port = 8080` (e.g.
+/// Open WebUI and Excalidraw) compete for host:8080, and the second
+/// session's caller ends up pointed at the first session's still-running
+/// container.
+///
+/// `EphemeralMainService` opts the leaf out of the fixed-port special case
+/// so the OCI runtime assigns a free host port per session. Callers that
+/// pick this policy are responsible for reading the resolved host port
+/// back from the runtime (e.g. `DetachedServiceSnapshot.host_ports`) when
+/// they construct any user-facing URL.
+///
+/// `network.publish = true` on an individual service is a recipe-level
+/// explicit override and wins regardless of policy — the author asked for
+/// a stable host address on purpose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PublishPolicy {
+    /// `ato run` / CLI default. `services.main` publishes to the declared
+    /// host port so external consumers (shells, browsers, scripts) can
+    /// reach the recipe on a stable address.
+    #[default]
+    ExternalDefault,
+    /// `services.main` publishes to an ephemeral host port chosen by the
+    /// OCI runtime. Eliminates the cross-session host-port collision
+    /// (#289) for callers that own the only consumer and may run multiple
+    /// sessions concurrently. Currently used by the Desktop session path;
+    /// the name is caller-agnostic so any future caller with the same
+    /// shape (single consumer, concurrent sessions) can opt in.
+    EphemeralMainService,
+}
+
 #[derive(Debug, Clone)]
 pub struct OrchestratorOptions {
     pub enforcement: String,
@@ -93,6 +133,7 @@ pub struct OrchestratorOptions {
     pub dangerously_skip_permissions: bool,
     pub assume_yes: bool,
     pub nacelle: Option<PathBuf>,
+    pub publish_policy: PublishPolicy,
 }
 
 impl OrchestratorOptions {
@@ -552,7 +593,8 @@ async fn launch_service<C: OciRuntimeClient>(
                 .await
                 .with_context(|| format!("failed to pull image for service '{}'", service.name))?;
 
-            let publish_mode = determine_publish_mode(orchestration, service);
+            let publish_mode =
+                determine_publish_mode(orchestration, service, options.publish_policy);
             let host_port = if matches!(publish_mode, PublishMode::Fixed) {
                 runtime.port
             } else {
@@ -1332,9 +1374,24 @@ fn resolve_host_port(service: &RunningService, container_port: u16) -> Result<u1
 fn determine_publish_mode(
     orchestration: &OrchestrationPlan,
     service: &ResolvedService,
+    publish_policy: PublishPolicy,
 ) -> PublishMode {
-    if service.name == "main" || service.network.publish {
+    // Explicit recipe-level `network.publish = true` always wins. The author
+    // asked for a host-stable port on purpose; the session policy doesn't
+    // override an explicit request.
+    if service.network.publish {
         return PublishMode::Fixed;
+    }
+
+    // `services.main` is the leaf consumers reach. CLI / external use wants
+    // it on the declared host port; Desktop session WebViews want an
+    // ephemeral host port so two sessions whose recipes both declare 8080
+    // (e.g. Open WebUI vs Excalidraw) don't collide on host:8080 (#289).
+    if service.name == "main" {
+        return match publish_policy {
+            PublishPolicy::ExternalDefault => PublishMode::Fixed,
+            PublishPolicy::EphemeralMainService => PublishMode::Ephemeral,
+        };
     }
 
     if service.readiness_probe.is_some() {
@@ -1354,7 +1411,7 @@ fn determine_publish_mode(
     PublishMode::None
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishMode {
     None,
     Fixed,
@@ -1956,6 +2013,7 @@ target = "db"
             dangerously_skip_permissions: false,
             assume_yes: true,
             nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
         };
 
         let exit = execute_with_client(
@@ -2061,6 +2119,7 @@ readiness_probe = { http_get = "/", port = "MISSING_PORT", timeout_seconds = 1 }
             dangerously_skip_permissions: false,
             assume_yes: true,
             nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
         };
 
         let err = execute_with_client(
@@ -2153,6 +2212,7 @@ readiness_probe = { exec = ["pg_isready", "-U", "postgres"], timeout_seconds = 6
             dangerously_skip_permissions: false,
             assume_yes: true,
             nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
         };
 
         let _handle = execute_until_ready_and_detach(
@@ -2240,6 +2300,7 @@ depends_on = ["db"]
             dangerously_skip_permissions: false,
             assume_yes: true,
             nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
         };
 
         let handle = execute_until_ready_and_detach(
@@ -2309,6 +2370,72 @@ depends_on = ["db"]
     /// pumper requires a `Read` stream + thread join and is covered
     /// end-to-end by the #92 verification harness on a clean
     /// `ATO_HOME`.
+    #[test]
+    fn determine_publish_mode_respects_ephemeral_main_service_policy() {
+        use capsule_core::types::{
+            OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
+            ResolvedTargetRuntime,
+        };
+
+        // Minimal `[services.main]` shaped like Open WebUI / Excalidraw:
+        // OCI runtime, declared port 8080, no readiness_probe, no explicit
+        // `network.publish`. The bug under #289 is that this shape always
+        // bound host:8080 under PublishMode::Fixed regardless of caller.
+        let service = ResolvedService {
+            name: "main".to_string(),
+            depends_on: Vec::new(),
+            connections: Vec::new(),
+            readiness_probe: None,
+            network: ResolvedServiceNetwork::default(),
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                target: "app".to_string(),
+                runtime: "oci".to_string(),
+                driver: None,
+                runtime_version: None,
+                image: Some("ghcr.io/example/app:latest".to_string()),
+                entrypoint: String::new(),
+                run_command: None,
+                cmd: Vec::new(),
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port: Some(8080),
+                required_env: Vec::new(),
+                mounts: Vec::new(),
+            }),
+        };
+        let plan = OrchestrationPlan {
+            startup_order: vec!["main".to_string()],
+            services: vec![service.clone()],
+        };
+
+        assert_eq!(
+            super::determine_publish_mode(&plan, &service, PublishPolicy::ExternalDefault),
+            super::PublishMode::Fixed,
+            "ato run / CLI path must keep main on the declared host port"
+        );
+        assert_eq!(
+            super::determine_publish_mode(&plan, &service, PublishPolicy::EphemeralMainService),
+            super::PublishMode::Ephemeral,
+            "EphemeralMainService must hand main an ephemeral host port so two recipes sharing port 8080 do not collide (#289)"
+        );
+
+        // Explicit `network.publish = true` opts back into Fixed regardless
+        // of caller — author asked for a stable host address on purpose.
+        let mut explicit_publish = service.clone();
+        explicit_publish.network.publish = true;
+        assert_eq!(
+            super::determine_publish_mode(
+                &plan,
+                &explicit_publish,
+                PublishPolicy::EphemeralMainService
+            ),
+            super::PublishMode::Fixed,
+            "network.publish=true is an explicit recipe-level override and must win over the session policy"
+        );
+    }
+
     #[test]
     fn envelope_mode_flag_round_trips() {
         // The flag is process-wide; serialize the test against itself
