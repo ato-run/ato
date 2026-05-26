@@ -606,3 +606,63 @@ async fn reregister_same_key_updates_upstream() {
     shutdown_daemon(client, child).await;
 }
 
+/// Test 9: deregister stops the listener but keeps the port reserved in the
+/// persistent allocator. Re-registering the same key within the same daemon
+/// session must return the identical port, preserving WebView origin and
+/// browser storage (IndexedDB, localStorage, Service Workers) across
+/// session stop/restart cycles.
+#[serial]
+#[tokio::test]
+async fn deregister_keeps_port_in_allocator() {
+    let (upstream_listener, upstream_addr) = free_listener().await;
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = upstream_listener.accept().await {
+            let io = TokioIo::new(stream);
+            tokio::spawn(
+                hyper::server::conn::http1::Builder::new().serve_connection(
+                    io,
+                    service_fn(|_req: Request<Incoming>| async {
+                        Ok::<_, hyper::Error>(http::Response::new(Full::new(Bytes::from("ok"))))
+                    }),
+                ),
+            );
+        }
+    });
+
+    let ato_home = TempDir::new().unwrap();
+    let (child, socket_path) = spawn_daemon(&ato_home);
+    let mut client = wait_for_daemon(&socket_path, 3000).await;
+
+    // First registration — gets initial port.
+    let IngressInfo { port: port1 } = client
+        .register_ingress("session-key", &format!("http://{upstream_addr}"))
+        .await
+        .unwrap();
+
+    // Deregister simulates session stop.
+    client.deregister_ingress("session-key").await.unwrap();
+
+    // Brief pause to let the listener fully drain.
+    sleep(Duration::from_millis(200)).await;
+
+    // Re-register simulates session restart — must return the same port.
+    let IngressInfo { port: port2 } = client
+        .register_ingress("session-key", &format!("http://{upstream_addr}"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        port1, port2,
+        "deregister must not remove the port from the allocator; \
+         re-registering the same key must yield the same stable port"
+    );
+
+    // Verify the route is actually serving traffic after re-registration.
+    sleep(Duration::from_millis(150)).await;
+    let resp = http_get(&format!("http://127.0.0.1:{port2}/")).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.body, b"ok");
+
+    shutdown_daemon(client, child).await;
+}
+
