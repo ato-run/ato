@@ -274,6 +274,58 @@ port = {port}
 }
 
 #[test]
+fn import_run_keep_alive_requires_emit_json() -> Result<()> {
+    let root = test_root("keep-alive-requires-json")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    fs::write(
+        &recipe,
+        r#"schema_version = "0.3"
+name = "shadow-import-keep-alive-requires-json"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "true"
+"#,
+    )?;
+
+    let home = root.join("home");
+    fs::create_dir_all(&home)?;
+    let output = Command::new(assert_cmd::cargo::cargo_bin("ato"))
+        .arg("import")
+        .arg("github.com/ato-run/shadow-import")
+        .arg("--run")
+        .arg("--keep-alive")
+        .arg("--recipe")
+        .arg(&recipe)
+        .env("ATO_IMPORT_LOCAL_SOURCE_OVERRIDE", &source)
+        .env(
+            "ATO_IMPORT_LOCAL_REVISION_ID",
+            "1111111111111111111111111111111111111111",
+        )
+        .env("ATO_IMPORT_LOCAL_TREE_HASH", "blake3:test-tree")
+        .env("HOME", &home)
+        .env("CAPSULE_ALLOW_UNSAFE", "1")
+        .current_dir(&root)
+        .output()
+        .context("failed to run ato import")?;
+    assert!(
+        !output.status.success(),
+        "ato import unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--keep-alive requires --emit-json"),
+        "unexpected stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 #[cfg(unix)]
 fn import_run_keep_alive_returns_session_and_leaves_server_running() -> Result<()> {
     if !python3_available() {
