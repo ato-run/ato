@@ -1042,9 +1042,21 @@ fn run_shadow_workspace_keep_alive(
             &log_path,
         ));
     }
-    let stored_session = process_manager
-        .read_import_preview_session(&session.run_session_id)?
-        .context("import preview session missing after store write")?;
+    let stored_session = match process_manager.read_import_preview_session(&session.run_session_id) {
+        Ok(Some(stored_session)) => stored_session,
+        Ok(None) => {
+            let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+            cleanup.observed_pgids = session.process_group_ids.iter().copied().collect();
+            let _ = cleanup.cleanup();
+            anyhow::bail!("import preview session missing after store write");
+        }
+        Err(error) => {
+            let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+            cleanup.observed_pgids = session.process_group_ids.iter().copied().collect();
+            let _ = cleanup.cleanup();
+            return Err(error);
+        }
+    };
     materialized._workspace.keep = true;
     Ok(import_run_from_import_preview_session(&stored_session))
 }
