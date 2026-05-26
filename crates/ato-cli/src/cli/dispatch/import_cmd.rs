@@ -189,8 +189,30 @@ impl Drop for ImportWorkspace {
         if self.keep || std::env::var_os(KEEP_WORKSPACE_ENV).is_some() {
             return;
         }
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup_import_workspace_root(&self.root);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportWorkspaceCleanupOutcome {
+    Removed,
+    SkippedActive { run_session_id: String },
+    AlreadyGone,
+}
+
+fn cleanup_import_workspace_root(root: &Path) -> Result<ImportWorkspaceCleanupOutcome> {
+    if !root.exists() {
+        return Ok(ImportWorkspaceCleanupOutcome::AlreadyGone);
+    }
+    if let Ok(process_manager) = ProcessManager::new() {
+        if let Some(session) = process_manager.active_import_preview_session_for_workspace(root)? {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedActive {
+                run_session_id: session.run_session_id,
+            });
+        }
+    }
+    fs::remove_dir_all(root).with_context(|| format!("failed to remove {}", root.display()))?;
+    Ok(ImportWorkspaceCleanupOutcome::Removed)
 }
 
 pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
