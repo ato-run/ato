@@ -273,7 +273,91 @@ port = {port}
     Ok(())
 }
 
+#[test]
+#[cfg(unix)]
+fn import_run_keep_alive_returns_session_and_leaves_server_running() -> Result<()> {
+    if !python3_available() {
+        return Ok(());
+    }
+
+    let root = test_root("keep-alive-session")?;
+    let _cleanup = Cleanup(root.clone());
+    let source = root.join("source");
+    let recipe = root.join("recipe.toml");
+    fs::create_dir_all(&source)?;
+    fs::write(
+        source.join("keep_alive_server.py"),
+        r#"import http.server
+import socketserver
+import sys
+
+port = int(sys.argv[1])
+with socketserver.TCPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler) as httpd:
+    httpd.serve_forever()
+"#,
+    )?;
+    let port = free_port()?;
+    fs::write(
+        &recipe,
+        format!(
+            r#"schema_version = "0.3"
+name = "shadow-import-keep-alive"
+version = "0.1.0"
+type = "app"
+runtime = "source/native"
+run = "python3 keep_alive_server.py {port}"
+port = {port}
+"#,
+        ),
+    )?;
+
+    let output = run_import_with_args(&root, &source, Some(&recipe), &["--keep-alive"])?;
+    assert_eq!(output["run"]["status"].as_str(), Some("running"));
+    assert_eq!(output["run"]["phase"].as_str(), Some("readiness"));
+    assert_eq!(output["run"]["readiness_state"].as_str(), Some("ready"));
+    assert_eq!(
+        output["run"]["cleanup_policy"].as_str(),
+        Some("keep_until_explicit_stop")
+    );
+    assert!(output["run"]["cleanup_status"].is_null());
+    assert!(output["run"]["run_session_id"].as_str().is_some());
+    assert_eq!(output["run"]["primary_port"].as_u64(), Some(port as u64));
+    let primary_url = format!("http://127.0.0.1:{port}/");
+    assert_eq!(
+        output["run"]["primary_url"].as_str(),
+        Some(primary_url.as_str())
+    );
+    assert!(
+        output["run"]["process_group_ids"]
+            .as_array()
+            .is_some_and(|pgids| !pgids.is_empty()),
+        "keep-alive output must include process groups: {}",
+        output["run"]
+    );
+    assert!(
+        TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse()?,
+            Duration::from_millis(500),
+        )
+        .is_ok(),
+        "keep-alive import preview server should survive command return"
+    );
+
+    stop_keep_alive_run(&output)?;
+    assert_port_closed(port)?;
+    Ok(())
+}
+
 fn run_import(root: &Path, source: &Path, recipe: Option<&Path>) -> Result<Value> {
+    run_import_with_args(root, source, recipe, &[])
+}
+
+fn run_import_with_args(
+    root: &Path,
+    source: &Path,
+    recipe: Option<&Path>,
+    extra_args: &[&str],
+) -> Result<Value> {
     let home = root.join("home");
     fs::create_dir_all(&home)?;
     let mut command = Command::new(assert_cmd::cargo::cargo_bin("ato"));
@@ -294,6 +378,7 @@ fn run_import(root: &Path, source: &Path, recipe: Option<&Path>) -> Result<Value
     if let Some(recipe) = recipe {
         command.arg("--recipe").arg(recipe);
     }
+    command.args(extra_args);
     let output = command.output().context("failed to run ato import")?;
     assert!(
         output.status.success(),
@@ -308,6 +393,24 @@ fn run_import(root: &Path, source: &Path, recipe: Option<&Path>) -> Result<Value
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+#[cfg(unix)]
+fn stop_keep_alive_run(output: &Value) -> Result<()> {
+    let pgids = output["run"]["process_group_ids"]
+        .as_array()
+        .context("missing process_group_ids")?;
+    for signal in [libc::SIGTERM, libc::SIGKILL] {
+        for pgid in pgids.iter().filter_map(|value| value.as_i64()) {
+            if pgid > 0 {
+                unsafe {
+                    libc::kill(-(pgid as libc::pid_t), signal);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Ok(())
 }
 
 fn free_port() -> Result<u16> {
