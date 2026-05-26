@@ -28,6 +28,10 @@ pub enum StartError {
     /// unlink-on-bind sequencing).
     #[error("control socket setup failed: {0}")]
     Io(#[from] std::io::Error),
+    /// Daemon state initialization failed (e.g., loading the port
+    /// allocator from disk).
+    #[error("daemon state init failed: {0}")]
+    State(#[from] anyhow::Error),
 }
 
 pub struct Daemon {
@@ -43,7 +47,11 @@ pub struct Daemon {
 
 impl Daemon {
     /// Bind the control socket and return a runnable daemon handle.
-    pub async fn start(socket_path: PathBuf) -> Result<Self, StartError> {
+    ///
+    /// `ato_home` is used to derive the path for the port allocator's
+    /// JSON persistence file:
+    /// `${ato_home}/state/netd/stable_origin_ports.json`.
+    pub async fn start(socket_path: PathBuf, ato_home: PathBuf) -> Result<Self, StartError> {
         if let Some(parent) = socket_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -76,7 +84,7 @@ impl Daemon {
         let listener = UnixListener::bind(&socket_path)?;
         info!(socket = %socket_path.display(), "ato-netd: control socket bound");
 
-        let state = DaemonState::new();
+        let state = DaemonState::new(ato_home).await?;
         Ok(Self {
             listener,
             socket_path: socket_path.clone(),
@@ -121,6 +129,9 @@ impl Daemon {
                 }
             }
         }
+
+        // Gracefully drain all ingress connections before exit.
+        state.shutdown_ingress().await;
 
         info!(socket = %socket_path.display(), "ato-netd: daemon exiting cleanly");
         // _socket_guard is dropped here → unlink.
@@ -191,11 +202,34 @@ async fn dispatch(request: Request, state: &DaemonState) -> Response {
         Request::Shutdown => Response::Ok {
             result: ResponseResult::Empty {},
         },
+        Request::RegisterIngress { key, upstream_url } => {
+            match state.ingress().lock().await.register_or_swap(&key, &upstream_url).await {
+                Ok(info) => Response::Ok {
+                    result: ResponseResult::IngressRegistered(info),
+                },
+                Err(e) => Response::Error {
+                    error: ErrorPayload {
+                        code: "ingress_register_failed".into(),
+                        message: e.to_string(),
+                    },
+                },
+            }
+        }
+        Request::DeregisterIngress { key } => {
+            state.ingress().lock().await.deregister(&key).await;
+            Response::Ok {
+                result: ResponseResult::Empty {},
+            }
+        }
     }
 }
 
 async fn build_status_report(state: &DaemonState) -> StatusReport {
-    let listeners: Vec<ListenerInfo> = state.listeners().await;
+    let listener_infos = state.listener_infos().await;
+    let listeners: Vec<ListenerInfo> = listener_infos
+        .into_iter()
+        .map(|(key, port)| ListenerInfo { key, port })
+        .collect();
     StatusReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         pid: std::process::id(),

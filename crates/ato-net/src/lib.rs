@@ -43,8 +43,9 @@ pub mod receipt {
     //! (#299).
 }
 
-pub mod stable_origin {
-    //! `stable_origin_key` derivation, shared by `ato-desktop` (when
-    //! opening a WebView) and `ato-netd` (when registering an ingress
-    //! route). Filled in by slice **B** / **C** (#297 + #298).
-}
+/// Stable-origin key derivation — pure functions, no I/O.
+///
+/// Slice **B** (#297) fills this in with `stable_host_label_for_key`.
+/// Slice **C** (#298) will add the `logical_capsule_key_for_stable_origin`
+/// migration from `ato-desktop::stable_origin_proxy`.
+pub mod stable_origin;

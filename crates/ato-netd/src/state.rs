@@ -1,13 +1,16 @@
 //! Daemon runtime state. Slice **A** ships only the bookkeeping needed
 //! to answer the `status` verb (start time, listener inventory).
-//! Subsequent slices grow this with the ingress route table (**B**),
-//! the resolver cache (**D**), the egress policy (**E**), etc.
+//! Slice **B** (#297) adds `IngressManager` for the ingress reverse proxy.
+//! Subsequent slices grow this with the resolver cache (**D**), the
+//! egress policy (**E**), etc.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ato_net::control::ListenerInfo;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex};
+
+use crate::ingress::IngressManager;
 
 /// Shared, cheaply-cloneable handle into the daemon's runtime state.
 #[derive(Clone)]
@@ -17,7 +20,10 @@ pub struct DaemonState {
 
 struct DaemonStateInner {
     started_at: Instant,
-    listeners: RwLock<Vec<ListenerInfo>>,
+    /// All active ingress routes. Replaces the old `listeners: RwLock<Vec<ListenerInfo>>`
+    /// placeholder from slice A — listener info is now derived from the
+    /// ingress manager.
+    ingress: Mutex<IngressManager>,
     /// Non-lossy shutdown signal.
     ///
     /// The previous skeleton used `tokio::sync::Notify::notify_waiters`,
@@ -36,15 +42,18 @@ struct DaemonStateInner {
 }
 
 impl DaemonState {
-    pub fn new() -> Self {
+    /// Create a new `DaemonState`.  Loads the port allocator from
+    /// `${ato_home}/state/netd/stable_origin_ports.json`.
+    pub async fn new(ato_home: PathBuf) -> anyhow::Result<Self> {
+        let ingress = IngressManager::new(&ato_home).await?;
         let (shutdown_tx, _) = watch::channel(false);
-        Self {
+        Ok(Self {
             inner: Arc::new(DaemonStateInner {
                 started_at: Instant::now(),
-                listeners: RwLock::new(Vec::new()),
+                ingress: Mutex::new(ingress),
                 shutdown_tx,
             }),
-        }
+        })
     }
 
     /// Seconds elapsed since [`Self::new`].
@@ -52,11 +61,15 @@ impl DaemonState {
         self.inner.started_at.elapsed().as_secs()
     }
 
-    /// Snapshot the currently-registered listeners. Slice **A** never
-    /// pushes one; the inventory exists so the wire format is stable
-    /// when **B** does.
-    pub async fn listeners(&self) -> Vec<ListenerInfo> {
-        self.inner.listeners.read().await.clone()
+    /// Snapshot the currently-registered ingress routes as
+    /// `(key, port)` pairs.
+    pub async fn listener_infos(&self) -> Vec<(String, u16)> {
+        self.inner.ingress.lock().await.listener_infos()
+    }
+
+    /// Lock the ingress manager for mutation (register / deregister).
+    pub fn ingress(&self) -> &Mutex<IngressManager> {
+        &self.inner.ingress
     }
 
     /// Mark the daemon as shutting down. Safe to call from any task
@@ -89,24 +102,30 @@ impl DaemonState {
         // treat it as a shutdown signal too.
         let _ = rx.changed().await;
     }
-}
 
-impl Default for DaemonState {
-    fn default() -> Self {
-        Self::new()
+    /// Shut down all ingress accept loops and await active connections.
+    /// Called by the main loop once `wait_for_shutdown` resolves.
+    pub async fn shutdown_ingress(&self) {
+        self.inner.ingress.lock().await.shutdown_all().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    async fn make_state() -> DaemonState {
+        let dir = tempdir().unwrap();
+        DaemonState::new(dir.path().to_path_buf()).await.unwrap()
+    }
 
     #[tokio::test]
     async fn wait_for_shutdown_observes_signal_after_subscribe() {
         // On-time case: subscriber registers first, signal arrives.
         // Notify-based code already handled this; the test guards
         // against a regression introducing a new ordering bug.
-        let state = DaemonState::new();
+        let state = make_state().await;
         let waiter = state.clone();
         let task = tokio::spawn(async move { waiter.wait_for_shutdown().await });
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -124,7 +143,7 @@ mod tests {
         // fired *before* the waiter subscribed was silently lost. With
         // `watch::channel<bool>` the sticky value lets a late
         // subscriber observe the signal immediately.
-        let state = DaemonState::new();
+        let state = make_state().await;
         state.signal_shutdown();
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
