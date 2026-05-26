@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST};
+use http::header::{CONTENT_TYPE, COOKIE};
 use http::{HeaderMap, HeaderValue};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -46,7 +46,6 @@ use crate::orchestrator::{
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
     LaunchError, SpawnKind, SpawnSpec,
 };
-use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::state::{
     session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
     AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
@@ -195,7 +194,6 @@ pub struct WebViewManager {
     /// Whether the dock window is currently open. Used by `ListPanes`
     /// to expose the dock pane to automation callers.
     dock_is_open: bool,
-    stable_origin_routes: StableOriginRouteTable,
 }
 
 /// Reserved pane ID for the dock window's WebView.
@@ -213,6 +211,12 @@ struct ManagedWebView {
     route_key: String,
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
+    /// The stable ingress key registered with `ato-netd` for this WebView.
+    /// Set on successful registration; `None` when the route did not go
+    /// through `ato-netd` (e.g. external URL, terminal, or fallback).
+    /// Used by `stop_launched_session` and `stop_active_session` to
+    /// deregister the route on session teardown.
+    stable_ingress_key: Option<String>,
     webview: WebView,
     #[cfg(target_os = "macos")]
     frame_host: Option<Retained<NSView>>,
@@ -454,7 +458,6 @@ impl WebViewManager {
             webview_retention: WebViewRetentionTable::with_defaults(),
             handle_to_session: HashMap::new(),
             dock_is_open: false,
-            stable_origin_routes: StableOriginRouteTable::default(),
         }
     }
 
@@ -2032,6 +2035,7 @@ impl WebViewManager {
         let mut inject_window_ready_signal = false;
 
         let pane_binding = Arc::new(AtomicUsize::new(pane.pane_id));
+        let mut ingress_key: Option<String> = None;
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
                 session,
@@ -2115,7 +2119,6 @@ impl WebViewManager {
                 // we inject a minimal window.onload script + dedicated IPC handler so SessionReady
                 // only fires after all scripts have run and the page has actually rendered.
                 if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    let mut use_stable_origin_proxy = false;
                     build_flags = BuildFlags {
                         inject_bridge: false,
                         enable_ipc: false,
@@ -2127,37 +2130,39 @@ impl WebViewManager {
                     let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    let url = match stable_origin_url_for_capsule_web_url(
-                        &pane.route,
-                        &scheme,
-                        &local_url,
-                        &self.stable_origin_routes,
-                    ) {
-                        Ok(Some(stable_url)) => {
-                            use_stable_origin_proxy = true;
-                            stable_url
-                        }
-                        Ok(None) => local_url,
-                        Err(error) => {
-                            warn!(
-                                route = %pane.route,
-                                session_id = %session.session_id,
-                                error = %error,
-                                "failed to configure stable-origin proxy route; falling back to direct local_url"
-                            );
+                    let url =
+                        if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
+                            match crate::netd::register_stable_ingress(&key, &local_url) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd ingress route"
+                                    );
+                                    ingress_key = Some(key);
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register ato-netd ingress route; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
+                            }
+                        } else {
                             local_url
-                        }
-                    };
-                    build_flags.enable_custom_protocol = use_stable_origin_proxy;
+                        };
                     (
                         url,
                         None,
                         Vec::new(),
-                        if use_stable_origin_proxy {
-                            RouteContent::StableOriginProxy(self.stable_origin_routes.clone())
-                        } else {
-                            RouteContent::External
-                        },
+                        RouteContent::External,
                         None,
                     )
                 } else {
@@ -2537,6 +2542,7 @@ impl WebViewManager {
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
             launched_session,
+            stable_ingress_key: ingress_key,
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
@@ -2827,7 +2833,10 @@ impl WebViewManager {
         // lets the launch re-arm — that is exactly what the user's
         // omnibar entry / `browser_navigate` MCP call does, and it is
         // what #112 needs from this fix.
-        if let Some(_previous) = self.views.remove(&active_pane_id) {
+        if let Some(previous) = self.views.remove(&active_pane_id) {
+            if let Some(key) = previous.stable_ingress_key.as_deref() {
+                crate::netd::deregister_stable_ingress(key);
+            }
             self.automation.fail_requests_for_pane(active_pane_id);
             self.automation.mark_page_unloaded(active_pane_id);
             tracing::debug!(
@@ -2939,6 +2948,11 @@ impl WebViewManager {
     }
 
     fn stop_launched_session(&mut self, webview: &ManagedWebView, state: &mut AppState) {
+        // Deregister the ato-netd ingress route before stopping the session.
+        if let Some(key) = webview.stable_ingress_key.as_deref() {
+            crate::netd::deregister_stable_ingress(key);
+        }
+
         let Some(session) = &webview.launched_session else {
             return;
         };
@@ -3683,7 +3697,6 @@ enum RouteContent {
     GuestAssets(GuestLaunchSession),
     External,
     TerminalAssets,
-    StableOriginProxy(StableOriginRouteTable),
 }
 
 impl ProtocolRouter {
@@ -3699,19 +3712,6 @@ impl ProtocolRouter {
     ) {
         let host = request.uri().host().unwrap_or("welcome").to_string();
         let path = request.uri().path().to_string();
-
-        if let RouteContent::StableOriginProxy(routes) = &content {
-            let response =
-                handle_stable_origin_proxy_request(request, routes).unwrap_or_else(|error| {
-                    Response::builder()
-                        .status(500)
-                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .body(Cow::Owned(error.to_string().into_bytes()))
-                        .expect("stable-origin proxy error response should build")
-                });
-            responder.respond(response);
-            return;
-        }
 
         // Bridge RPC is routed separately from asset serving because it carries structured host messages.
         if path == "/__ato/bridge" {
@@ -3766,11 +3766,6 @@ impl ProtocolRouter {
                 "text/plain; charset=utf-8",
             ),
             RouteContent::TerminalAssets => serve_terminal_asset(path),
-            RouteContent::StableOriginProxy(_) => build_plain_response(
-                500,
-                "stable-origin proxy should be handled in async request path".to_string(),
-                "text/plain; charset=utf-8",
-            ),
         }
     }
 
@@ -3894,95 +3889,6 @@ fn serve_terminal_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
         )
         .body(Cow::Borrowed(body))
         .context("failed to build terminal asset response")
-}
-
-fn stable_origin_url_for_capsule_web_url(
-    route: &GuestRoute,
-    scheme: &str,
-    local_url: &str,
-    stable_routes: &StableOriginRouteTable,
-) -> Result<Option<String>> {
-    let Some(logical_key) = logical_capsule_key_for_stable_origin(route) else {
-        return Ok(None);
-    };
-
-    let upstream = url::Url::parse(local_url)
-        .with_context(|| format!("invalid local_url for stable-origin proxy: {local_url}"))?;
-    let route = stable_routes
-        .register_or_swap(logical_key, upstream.clone())
-        .with_context(|| format!("failed to register stable-origin proxy route for {upstream}"))?;
-
-    let mut stable_url = url::Url::parse(&format!("{scheme}://{}/", route.stable_host_label))
-        .context("failed to build stable-origin URL")?;
-    stable_url.set_path(upstream.path());
-    stable_url.set_query(upstream.query());
-    Ok(Some(stable_url.to_string()))
-}
-
-fn handle_stable_origin_proxy_request(
-    request: Request<Vec<u8>>,
-    routes: &StableOriginRouteTable,
-) -> Result<Response<Cow<'static, [u8]>>> {
-    let host = request
-        .uri()
-        .host()
-        .ok_or_else(|| anyhow::anyhow!("stable-origin request is missing host"))?;
-    let resolved = routes.validate_and_resolve_host(host)?;
-    let target_url = stable_origin_proxy_target_url(&resolved.upstream, request.uri())?;
-
-    let mut upstream_request = ureq::request(request.method().as_str(), target_url.as_str());
-    for (name, value) in request.headers() {
-        if name == HOST || name == CONTENT_LENGTH {
-            continue;
-        }
-        if let Ok(value) = value.to_str() {
-            upstream_request = upstream_request.set(name.as_str(), value);
-        }
-    }
-
-    let upstream_response = if request.body().is_empty() {
-        upstream_request.call()
-    } else {
-        upstream_request.send_bytes(request.body())
-    };
-
-    let (status, response) = match upstream_response {
-        Ok(response) => (response.status(), response),
-        Err(ureq::Error::Status(status, response)) => (status, response),
-        Err(ureq::Error::Transport(error)) => {
-            return build_plain_response(
-                502,
-                format!("stable-origin upstream transport error: {error}"),
-                "text/plain; charset=utf-8",
-            );
-        }
-    };
-
-    let content_type = response
-        .header("content-type")
-        .map(str::to_string)
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let mut reader = response.into_reader();
-    let mut body = Vec::new();
-    reader
-        .read_to_end(&mut body)
-        .context("failed to read stable-origin upstream response body")?;
-
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, content_type)
-        .body(Cow::Owned(body))
-        .context("failed to build stable-origin proxy response")
-}
-
-fn stable_origin_proxy_target_url(
-    upstream: &url::Url,
-    request_uri: &http::Uri,
-) -> Result<url::Url> {
-    let mut target = upstream.clone();
-    target.set_path(request_uri.path());
-    target.set_query(request_uri.query());
-    Ok(target)
 }
 
 fn build_plain_response(
@@ -4304,7 +4210,7 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
 fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(format!("handle:{handle}")),
-        GuestRoute::CapsuleUrl { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::CapsuleUrl { handle, .. } => Some(format!("url:{handle}")),
         GuestRoute::LocalManifest(local) => Some(format!("handle:{}", local.source_handle)),
         GuestRoute::Capsule { session, .. } => Some(format!("session:{session}")),
         GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => None,
@@ -5219,9 +5125,10 @@ mod tests {
             stable_origin_key_for_route(&handle_route),
             Some("handle:capsule://org/demo@1.0.0".to_string())
         );
+        // CapsuleUrl uses "url:" prefix to avoid collision with CapsuleHandle
         assert_eq!(
             stable_origin_key_for_route(&url_route),
-            Some("handle:capsule://org/demo@1.0.0".to_string())
+            Some("url:capsule://org/demo@1.0.0".to_string())
         );
     }
 
@@ -5235,66 +5142,6 @@ mod tests {
 
         assert_eq!(stable_origin_key_for_route(&external), None);
         assert_eq!(stable_origin_key_for_route(&terminal), None);
-    }
-
-    #[test]
-    fn stable_origin_web_url_is_created_for_capsule_handle_routes() {
-        let route = GuestRoute::CapsuleHandle {
-            handle: "capsule://org/demo@1.0.0".to_string(),
-            label: "demo".to_string(),
-        };
-        let table = StableOriginRouteTable::default();
-
-        let stable_url = stable_origin_url_for_capsule_web_url(
-            &route,
-            "capsuletest",
-            "http://127.0.0.1:4173/app?mode=dev",
-            &table,
-        )
-        .expect("stable origin URL should resolve")
-        .expect("capsule route should be in stable-origin scope");
-
-        let parsed = url::Url::parse(&stable_url).expect("stable URL should parse");
-        let expected_host = crate::stable_origin_proxy::stable_host_label_for_key(
-            "handle:capsule://org/demo@1.0.0",
-        );
-        assert_eq!(parsed.scheme(), "capsuletest");
-        assert_eq!(parsed.path(), "/app");
-        assert_eq!(parsed.query(), Some("mode=dev"));
-        assert_eq!(parsed.host_str(), Some(expected_host.as_str()));
-    }
-
-    #[test]
-    fn stable_origin_web_url_scope_excludes_capsule_url_and_external_routes() {
-        let capsule_url_route = GuestRoute::CapsuleUrl {
-            handle: "capsule://org/demo@1.0.0".to_string(),
-            label: "demo".to_string(),
-            url: url::Url::parse("http://127.0.0.1:4173/app").expect("url"),
-        };
-        let external_route =
-            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
-        let table = StableOriginRouteTable::default();
-
-        assert_eq!(
-            stable_origin_url_for_capsule_web_url(
-                &capsule_url_route,
-                "capsuletest",
-                "http://127.0.0.1:4173/app",
-                &table,
-            )
-            .expect("capsule url route should return Ok(None)"),
-            None
-        );
-        assert_eq!(
-            stable_origin_url_for_capsule_web_url(
-                &external_route,
-                "capsuletest",
-                "https://example.com",
-                &table,
-            )
-            .expect("external route should return Ok(None)"),
-            None
-        );
     }
 
     #[test]
