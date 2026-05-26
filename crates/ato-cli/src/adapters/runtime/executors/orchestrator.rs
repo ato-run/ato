@@ -107,9 +107,12 @@ fn service_stdout_should_route_to_stderr() -> bool {
 /// back from the runtime (e.g. `DetachedServiceSnapshot.host_ports`) when
 /// they construct any user-facing URL.
 ///
-/// `network.publish = true` on an individual service is a recipe-level
-/// explicit override and wins regardless of policy — the author asked for
-/// a stable host address on purpose.
+/// For *non-main* services, `network.publish = true` is an explicit
+/// recipe-level request for a stable host port and wins over this policy
+/// (e.g. a sidecar API a recipe wants externally addressable). For the
+/// `services.main` leaf, this policy decides exclusively — the router
+/// auto-sets `network.publish = true` for every main with a port, so it
+/// cannot be used as a per-recipe escape hatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PublishPolicy {
     /// `ato run` / CLI default. `services.main` publishes to the declared
@@ -1376,22 +1379,29 @@ fn determine_publish_mode(
     service: &ResolvedService,
     publish_policy: PublishPolicy,
 ) -> PublishMode {
-    // Explicit recipe-level `network.publish = true` always wins. The author
-    // asked for a host-stable port on purpose; the session policy doesn't
-    // override an explicit request.
-    if service.network.publish {
-        return PublishMode::Fixed;
-    }
-
-    // `services.main` is the leaf consumers reach. CLI / external use wants
-    // it on the declared host port; Desktop session WebViews want an
-    // ephemeral host port so two sessions whose recipes both declare 8080
-    // (e.g. Open WebUI vs Excalidraw) don't collide on host:8080 (#289).
+    // `services.main` is the leaf consumers reach. The caller's session
+    // policy decides exclusively here — the router auto-sets
+    // `network.publish = true` for every main service with a port
+    // (see `routing/router/services.rs::resolve_services`), so checking
+    // `network.publish` first would short-circuit the policy and force
+    // Fixed for every recipe. CLI / external callers (`ExternalDefault`)
+    // still get the historical fixed-host-port behavior; Desktop sessions
+    // (`EphemeralMainService`) get a podman-assigned ephemeral host port
+    // so two recipes both declaring `[services.main]` with the same port
+    // (e.g. Open WebUI vs Excalidraw at 8080) don't collide on host:8080
+    // (#289).
     if service.name == "main" {
         return match publish_policy {
             PublishPolicy::ExternalDefault => PublishMode::Fixed,
             PublishPolicy::EphemeralMainService => PublishMode::Ephemeral,
         };
+    }
+
+    // For non-main services, `network.publish = true` is an explicit
+    // recipe-level request for a host-stable port (e.g. a sidecar API the
+    // recipe wants exposed). Honor it regardless of the session policy.
+    if service.network.publish {
+        return PublishMode::Fixed;
     }
 
     if service.readiness_probe.is_some() {
@@ -2421,18 +2431,36 @@ depends_on = ["db"]
             "EphemeralMainService must hand main an ephemeral host port so two recipes sharing port 8080 do not collide (#289)"
         );
 
-        // Explicit `network.publish = true` opts back into Fixed regardless
-        // of caller — author asked for a stable host address on purpose.
-        let mut explicit_publish = service.clone();
-        explicit_publish.network.publish = true;
+        // For non-main services, `network.publish = true` is an explicit
+        // recipe-level request for a stable host port and must win over the
+        // policy. (For `main` services the policy decides exclusively — see
+        // the comment in `determine_publish_mode`. The router auto-sets
+        // `network.publish = true` for every main with a port, so honoring
+        // it on main would defeat the policy.)
+        let sidecar = ResolvedService {
+            name: "api".to_string(),
+            depends_on: Vec::new(),
+            connections: Vec::new(),
+            readiness_probe: None,
+            network: ResolvedServiceNetwork {
+                publish: true,
+                ..Default::default()
+            },
+            run_once: false,
+            runtime: service.runtime.clone(),
+        };
+        let plan_with_sidecar = OrchestrationPlan {
+            startup_order: vec!["main".to_string(), "api".to_string()],
+            services: vec![service.clone(), sidecar.clone()],
+        };
         assert_eq!(
             super::determine_publish_mode(
-                &plan,
-                &explicit_publish,
+                &plan_with_sidecar,
+                &sidecar,
                 PublishPolicy::EphemeralMainService
             ),
             super::PublishMode::Fixed,
-            "network.publish=true is an explicit recipe-level override and must win over the session policy"
+            "non-main service with explicit network.publish=true must keep the recipe-level fixed host port even under EphemeralMainService"
         );
     }
 
