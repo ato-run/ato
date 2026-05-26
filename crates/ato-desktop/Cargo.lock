@@ -529,6 +529,7 @@ name = "ato-desktop"
 version = "0.5.2"
 dependencies = [
  "anyhow",
+ "ato-net",
  "ato-session-core",
  "base64 0.22.1",
  "blake3",
@@ -572,6 +573,18 @@ dependencies = [
  "url",
  "usvg",
  "wry",
+]
+
+[[package]]
+name = "ato-net"
+version = "0.5.2"
+dependencies = [
+ "capsule-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
 ]
 
 [[package]]
