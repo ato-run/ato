@@ -24,8 +24,7 @@ pub(crate) struct ImportArgs {
     #[arg(long = "no-remote-recipe", default_value_t = false)]
     pub(crate) no_remote_recipe: bool,
 
-    /// Run and exit after readiness probe passes, leaving the server
-    /// running in the background.
+    /// Run as a readiness probe and tear down the shadow runtime before returning.
     #[arg(long = "readiness-only", default_value_t = false)]
     pub(crate) readiness_only: bool,
 }
