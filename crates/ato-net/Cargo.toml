@@ -10,6 +10,12 @@ homepage = "https://ato.run"
 authors = ["Koh0920"]
 keywords = ["network", "dns", "proxy", "ato"]
 categories = ["network-programming"]
+# Internal library for now. release-plz / cargo-dist should not see it
+# until follow-up slices are ready to ship a stable public API.
+publish = false
+
+[package.metadata.dist]
+dist = false
 
 [lib]
 name = "ato_net"

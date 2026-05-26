@@ -3,10 +3,20 @@
 //!
 //! Per #296 the wire protocol lives here so that the daemon
 //! (`ato-netd`) and every consumer use the same types — no client-side
-//! re-implementation. The transport is newline-delimited JSON over a
-//! Unix domain socket at `${ATO_HOME}/run/netd.sock`.
+//! re-implementation.
 //!
-//! Slice **A** ships the minimal verb set:
+//! ## Transport
+//!
+//! Slice **A** uses **newline-delimited JSON over a Unix domain
+//! socket** at `${ATO_HOME}/run/netd.sock`. The wire types
+//! ([`Request`], [`Response`], [`StatusReport`], [`Error`], etc.) are
+//! cross-platform — they are just data structures — but the [`Client`]
+//! itself and [`default_socket_path`] are `#[cfg(unix)]`. The "UDS
+//! where supported, fallback to `127.0.0.1:<ephemeral>`" behavior #296
+//! mentions for non-Unix hosts lands in a follow-up before Windows
+//! support is real; tracked under umbrella issue #294.
+//!
+//! ## Verbs in slice A
 //!
 //! - `status` — read-only liveness query. Returns the daemon's
 //!   `{version, pid, uptime_secs, listeners}`.
@@ -18,16 +28,27 @@
 //! serialize via `serde_json` tagged enums; older clients ignore new
 //! variants.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+#[cfg(unix)]
+use std::path::Path;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 /// Default path of the `ato-netd` control socket inside the user's
 /// `ATO_HOME` tree. The same path is computed by the daemon when it
 /// binds, so clients constructed via [`Client::connect_default`] and
 /// daemons started without an explicit override always meet.
+///
+/// Unix-only in slice A. On non-Unix targets the function would have
+/// to resolve a TCP fallback (`127.0.0.1:<ephemeral>` plus a discovery
+/// file); that work is tracked under umbrella issue #294 and is
+/// intentionally not in this slice.
+#[cfg(unix)]
 pub fn default_socket_path() -> Result<PathBuf, Error> {
     capsule_core::common::paths::ato_path("run/netd.sock").map_err(|err| Error::PathResolve {
         message: err.to_string(),
@@ -36,10 +57,40 @@ pub fn default_socket_path() -> Result<PathBuf, Error> {
 
 /// Typed errors returned by [`Client`]. Matchable; consumers should
 /// pattern-match (do not parse messages).
+///
+/// The variants are cross-platform even though [`Client`] itself is
+/// Unix-only in slice A — keeping the error surface stable lets
+/// consumers write portable error-handling code today.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Control socket exists / does not exist but no daemon is
+    /// answering. Surfaced for `NotFound` (socket file absent — daemon
+    /// never started or cleaned up cleanly) and `ConnectionRefused`
+    /// (socket file present but no listener — daemon crashed leaving
+    /// a stale file). Consumers branch on this to print
+    /// `{"status":"not_running"}` without inspecting kernel error
+    /// codes.
+    ///
+    /// Note: `PermissionDenied` is **not** folded into this variant —
+    /// "daemon running but I cannot reach it" is a meaningfully
+    /// different operator condition (typically a uid/gid mismatch
+    /// against a daemon spawned by another user) and gets its own
+    /// [`PermissionDenied`](Self::PermissionDenied) variant so
+    /// Desktop / CLI diagnostics can surface an actionable hint.
     #[error("ato-netd is not running (control socket {path} unreachable: {source})")]
     NotRunning {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Control socket is reachable but the OS denied access (UDS
+    /// permissions / ACL / SELinux). The daemon is likely running —
+    /// the issue is the caller's credentials. Distinct from
+    /// [`NotRunning`](Self::NotRunning) so consumers can present a
+    /// `chmod` / wrong-user hint instead of a "start the daemon"
+    /// hint.
+    #[error("control socket {path} refused access (daemon may be running as a different user): {source}")]
+    PermissionDenied {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -128,6 +179,10 @@ pub struct ErrorPayload {
 /// because the connection is single-threaded request/response —
 /// consumers that need concurrent access should construct multiple
 /// clients (the daemon accepts many concurrent connections).
+///
+/// Unix-only in slice **A**. See the module docs for the rationale and
+/// the planned TCP fallback path.
+#[cfg(unix)]
 pub struct Client {
     /// Path the client connected to. Recorded so error messages can
     /// surface the path the consumer actually used.
@@ -136,6 +191,7 @@ pub struct Client {
     writer: tokio::net::unix::OwnedWriteHalf,
 }
 
+#[cfg(unix)]
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
@@ -144,6 +200,7 @@ impl std::fmt::Debug for Client {
     }
 }
 
+#[cfg(unix)]
 impl Client {
     /// Connect to the default control socket ([`default_socket_path`]).
     pub async fn connect_default() -> Result<Self, Error> {
@@ -153,26 +210,37 @@ impl Client {
 
     /// Connect to a control socket at the given path. Returns
     /// [`Error::NotRunning`] when the socket is absent or refuses
-    /// connections — consumers can branch on that variant to print
-    /// `{"status":"not_running"}` without needing to inspect kernel
-    /// error codes.
+    /// connections (daemon not running or stale socket file);
+    /// [`Error::PermissionDenied`] when the OS denied access while the
+    /// daemon is likely running. Consumers branch on these variants
+    /// to print actionable hints without inspecting kernel error
+    /// codes.
     pub async fn connect(socket_path: &Path) -> Result<Self, Error> {
         let stream = UnixStream::connect(socket_path).await.map_err(|err| {
-            // ENOENT, ECONNREFUSED, and "permission denied" all map to
-            // "daemon not running from this consumer's perspective":
-            // the consumer cannot reach a daemon at the canonical path,
-            // and that is exactly the user-facing meaning of
-            // not_running. Other I/O errors (EMFILE etc.) are passed
-            // through as the generic Io variant by the std::io::Error
-            // construction below — but `connect()` failure on UDS is
-            // overwhelmingly one of the not-running shapes.
             match err.kind() {
-                std::io::ErrorKind::NotFound
-                | std::io::ErrorKind::ConnectionRefused
-                | std::io::ErrorKind::PermissionDenied => Error::NotRunning {
+                // ENOENT: socket file absent — daemon never started or
+                // cleaned up cleanly.
+                // ECONNREFUSED: socket file present but no listener —
+                // daemon crashed leaving a stale file.
+                // Both map to NotRunning for the consumer's purposes.
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                    Error::NotRunning {
+                        path: socket_path.to_path_buf(),
+                        source: err,
+                    }
+                }
+                // EACCES / EPERM: the daemon is likely running but the
+                // caller's credentials cannot reach it. Keep this
+                // distinct from NotRunning so Desktop / CLI can render
+                // a "running as another user / check ATO_HOME perms"
+                // hint instead of a "start the daemon" hint.
+                std::io::ErrorKind::PermissionDenied => Error::PermissionDenied {
                     path: socket_path.to_path_buf(),
                     source: err,
                 },
+                // Anything else (EMFILE, etc.) surfaces as generic Io
+                // — these are environmental failures the consumer
+                // should log verbatim.
                 _ => Error::Io(err),
             }
         })?;

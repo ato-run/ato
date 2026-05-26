@@ -10,6 +10,17 @@ homepage = "https://ato.run"
 authors = ["Koh0920"]
 keywords = ["network", "dns", "proxy", "ato", "daemon"]
 categories = ["network-programming", "command-line-utilities"]
+# Internal crate for now — release workflow wiring is explicitly out of
+# scope for #296 (slice A). `publish = false` keeps it off crates.io;
+# the `[package.metadata.dist] dist = false` below tells cargo-dist not
+# to include it in tag-driven release artifacts (otherwise the `plan`
+# step demands WiX GUIDs we don't have yet for an MSI we don't ship).
+# Drop both flags when slice **G** — or a dedicated release-wiring PR —
+# starts shipping `ato-netd` alongside `ato-cli` / `nacelle`.
+publish = false
+
+[package.metadata.dist]
+dist = false
 
 [[bin]]
 name = "ato-netd"
