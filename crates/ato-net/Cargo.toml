@@ -21,6 +21,13 @@ dist = false
 name = "ato_net"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Enable DNS-over-HTTPS support in DohResolver (requires TLS stack).
+# Not enabled by default — DohResolver struct always exists but DoH
+# protocol is only active with this feature.
+doh = ["hickory-resolver/dns-over-https-rustls"]
+
 [dependencies]
 # Path resolution for the default control socket location
 # (${ATO_HOME}/run/netd.sock). Reusing capsule-core's resolver keeps
@@ -34,7 +41,7 @@ serde_json = "1.0"
 # Async I/O — Client connects to the daemon's UDS and exchanges JSON.
 # Feature-minimized: ato-net never needs a full Tokio runtime, only the
 # pieces a consumer like ato-cli already has available.
-tokio = { version = "1", features = ["net", "io-util", "rt", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time"] }
 
 # Typed errors at the API boundary so consumers can match on
 # Error::NotRunning vs Error::DaemonError without string parsing.
@@ -42,6 +49,15 @@ thiserror = "1.0"
 
 # URL validation for upstream_url in RegisterIngress control request.
 url = "2"
+
+# Async trait support for object-safe Resolver trait (consistent with
+# rest of workspace: ato-cli, capsule-core, nacelle all use async-trait).
+async-trait = "0.1"
+
+# DNS resolver — Slice D baseline. Hickory (formerly trust-dns-resolver)
+# provides structured CNAME chain, per-record TTL, and typed errors that
+# tokio::net::lookup_host cannot expose.
+hickory-resolver = "0.24"
 
 [dev-dependencies]
 tempfile = "3.8"
