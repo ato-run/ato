@@ -12,7 +12,10 @@
 //!    - If the key already exists the upstream `Url` is swapped in-place
 //!      (the listener keeps running, port unchanged).
 //!
-//! 2. `deregister(key)` cancels the accept loop and removes the route.
+//! 2. `deregister(key)` cancels the accept loop and stops the listener, but
+//!    keeps the port assignment in the persistent allocator so the next
+//!    `register_or_swap` for the same key re-uses the same port.
+//!    Use `purge(key)` to fully remove the port allocation (e.g., uninstall).
 //!
 //! 3. `shutdown_all()` cancels every accept loop and awaits all tasks.
 
@@ -164,6 +167,15 @@ impl IngressManager {
     }
 
     /// Deregister a route. No-op if key is unknown.
+    ///
+    /// Stops the listener and drains active connections, but deliberately
+    /// keeps the port assignment in the persistent allocator. This means
+    /// calling `register` again for the same key will re-use the exact same
+    /// port, preserving WebView origin and browser storage (IndexedDB,
+    /// localStorage, Service Workers) across session stop/restart cycles.
+    ///
+    /// Use `purge` if you need to completely remove the port assignment
+    /// (e.g., on app uninstall).
     pub async fn deregister(&mut self, key: &str) {
         if let Some(handle) = self.routes.remove(key) {
             // Cancel the accept loop.
@@ -171,10 +183,23 @@ impl IngressManager {
             // Wait for all active proxy connections on this route.
             let mut js = handle.join_set.lock().await;
             while js.join_next().await.is_some() {}
-            // Remove from persistent allocator.
-            if let Err(e) = self.alloc.remove(key).await {
-                warn!("failed to remove key {key:?} from allocator: {e}");
-            }
+            // Intentionally do NOT remove from allocator: the port stays
+            // reserved in stable_origin_ports.json so the next register
+            // call for this key returns the same port.
+        }
+    }
+
+    /// Permanently remove a route and release its port allocation.
+    /// Use only for app uninstall; prefer `deregister` for session stop.
+    #[allow(dead_code)]
+    pub async fn purge(&mut self, key: &str) {
+        if let Some(handle) = self.routes.remove(key) {
+            let _ = handle.cancel_tx.send(true);
+            let mut js = handle.join_set.lock().await;
+            while js.join_next().await.is_some() {}
+        }
+        if let Err(e) = self.alloc.remove(key).await {
+            warn!("failed to remove key {key:?} from allocator: {e}");
         }
     }
 

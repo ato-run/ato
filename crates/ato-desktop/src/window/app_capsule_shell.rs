@@ -31,6 +31,8 @@ use gpui::{
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
+use capsule_wire::handle::CapsuleDisplayStrategy;
+
 use crate::orchestrator::{DesktopLaunchInput, GuestLaunchSession, LaunchError};
 use crate::state::session::{
     CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession, SessionClient, SessionClientId,
@@ -89,6 +91,9 @@ pub struct AppCapsuleShell {
     /// immediately stopped rather than displayed.
     abort_flag: Arc<AtomicBool>,
     pub paste: WebViewPasteSupport,
+    /// ato-netd stable ingress key registered for this shell's WebUrl session,
+    /// if any. Deregistered on Drop.
+    stable_ingress_key: Option<String>,
 }
 
 impl_focusable_via_paste!(AppCapsuleShell, paste);
@@ -293,6 +298,7 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag,
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -406,6 +412,7 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag,
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -574,6 +581,7 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag,
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -595,6 +603,7 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag: Arc::new(AtomicBool::new(false)),
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -645,11 +654,39 @@ impl AppCapsuleShell {
                 registry.attach_client(client);
 
                 let url = session_current_url(&session);
+                // For WebUrl sessions, register a stable ato-netd ingress route
+                // so the WebView URL is stable across backend restarts.
+                let effective_url = if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    let key = ato_net::stable_origin::logical_key_for_handle(&self.handle);
+                    match crate::netd::register_stable_ingress(&key, &url) {
+                        Ok(port) => {
+                            self.stable_ingress_key = Some(key);
+                            let after_scheme = url
+                                .trim_start_matches("http://")
+                                .trim_start_matches("https://");
+                            let path = after_scheme
+                                .find('/')
+                                .map(|i| &after_scheme[i..])
+                                .unwrap_or("/");
+                            format!("http://127.0.0.1:{port}{path}")
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                handle = %self.handle,
+                                error = %err,
+                                "AppCapsuleShell: netd ingress registration failed, using direct URL"
+                            );
+                            url
+                        }
+                    }
+                } else {
+                    url
+                };
                 let win_size = window.bounds().size;
                 let w = f32::from(win_size.width) as u32;
                 let h = f32::from(win_size.height) as u32;
                 match WebViewBuilder::new()
-                    .with_url(&url)
+                    .with_url(&effective_url)
                     .with_bounds(Rect {
                         position: LogicalPosition::new(0i32, 0i32).into(),
                         size: LogicalSize::new(w, h).into(),
@@ -659,7 +696,7 @@ impl AppCapsuleShell {
                     Ok(webview) => {
                         tracing::info!(
                             handle = %self.handle,
-                            url = %url,
+                            url = %effective_url,
                             session_id = %session.session_id,
                             "AppCapsuleShell: WebView created for running session"
                         );
@@ -718,6 +755,11 @@ impl Drop for AppCapsuleShell {
         // Signal the background thread to not display the session if it
         // arrives after the entity is gone.
         self.abort_flag.store(true, Ordering::Release);
+
+        // Deregister stable ingress route if one was registered.
+        if let Some(key) = self.stable_ingress_key.take() {
+            crate::netd::deregister_stable_ingress(&key);
+        }
 
         // Session lifecycle is now owned by the SessionRegistry.
         // on_window_closed in app.rs handles detach_client / stop_session_once
