@@ -19,6 +19,8 @@ const LOCAL_SOURCE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_SOURCE_OVERRIDE";
 const LOCAL_REVISION_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_REVISION_ID";
 const LOCAL_TREE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_TREE_HASH";
 const KEEP_WORKSPACE_ENV: &str = "ATO_IMPORT_KEEP_WORKSPACE";
+const IMPORT_PROBE_ID_ENV: &str = "ATO_IMPORT_PROBE_ID";
+const IMPORT_SESSION_ID_ENV: &str = "ATO_IMPORT_SESSION_ID";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NormalizedGitHubInput {
@@ -73,6 +75,22 @@ struct ImportRun {
     /// Runtime log path for probe-mode shadow runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     log_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    process_group_ids: Vec<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shadow_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readiness_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_policy: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -162,11 +180,12 @@ struct MaterializedSource {
 #[derive(Debug)]
 struct ImportWorkspace {
     root: PathBuf,
+    keep: bool,
 }
 
 impl Drop for ImportWorkspace {
     fn drop(&mut self) {
-        if std::env::var_os(KEEP_WORKSPACE_ENV).is_some() {
+        if self.keep || std::env::var_os(KEEP_WORKSPACE_ENV).is_some() {
             return;
         }
         let _ = fs::remove_dir_all(&self.root);
@@ -174,8 +193,12 @@ impl Drop for ImportWorkspace {
 }
 
 pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
+    if args.keep_alive && !args.run {
+        bail!("--keep-alive requires --run");
+    }
+
     let input = normalize_github_import_input(&args.repo)?;
-    let materialized = materialize_source(&input)?;
+    let mut materialized = materialize_source(&input)?;
 
     // Try remote recipe binding resolution before falling back to local inference.
     let mut recipe_resolution: Option<RecipeResolution> = None;
@@ -224,7 +247,9 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
     };
     let recipe_hash = blake3_label(recipe_toml.as_bytes());
     let target_label = infer_target_label(&recipe_toml);
-    let mut run = if args.run && (args.readiness_only || args.emit_json) {
+    let mut run = if args.run && args.keep_alive {
+        run_shadow_workspace_keep_alive(&mut materialized, &recipe_toml)?
+    } else if args.run && (args.readiness_only || args.emit_json) {
         run_shadow_workspace_readiness_only(&materialized, &recipe_toml)?
     } else if args.run {
         run_shadow_workspace(&materialized, &recipe_toml)?
@@ -240,6 +265,14 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
             cleanup_status: None,
             cleanup_error: None,
             log_path: None,
+            run_session_id: None,
+            pid: None,
+            process_group_ids: Vec::new(),
+            primary_port: None,
+            primary_url: None,
+            shadow_dir: None,
+            readiness_state: None,
+            cleanup_policy: None,
         }
     };
     apply_shell_info(&mut run, &recipe_toml);
@@ -344,6 +377,7 @@ fn normalized(owner: &str, repo_raw: &str) -> NormalizedGitHubInput {
 fn materialize_source(input: &NormalizedGitHubInput) -> Result<MaterializedSource> {
     let workspace = ImportWorkspace {
         root: import_workspace_root(input)?,
+        keep: false,
     };
     let checkout_dir = workspace.root.join("source");
     let shadow_dir = workspace.root.join("shadow");
@@ -603,8 +637,8 @@ fn run_shadow_workspace(materialized: &MaterializedSource, recipe_toml: &str) ->
     Ok(import_run_from_output(&output))
 }
 
-/// Run the shadow workspace in background mode, wait for the readiness probe
-/// to pass, then return success. The server process continues running.
+/// Run the shadow workspace as a readiness probe and tear it down before
+/// returning.
 fn run_shadow_workspace_readiness_only(
     materialized: &MaterializedSource,
     recipe_toml: &str,
@@ -627,7 +661,8 @@ fn run_shadow_workspace_readiness_only(
             .unwrap_or(declared_port)
     };
     let ready_url = format!("http://127.0.0.1:{}/", actual_port);
-    let log_path = import_probe_log_path(&materialized.source)?;
+    let import_probe_id = new_import_run_id("probe", &materialized.source)?;
+    let log_path = import_run_log_path(&import_probe_id)?;
 
     // Spawn `ato run` as a probe. It must not outlive this command unless a
     // durable session handle owns it; readiness-only import has no such handle.
@@ -647,6 +682,7 @@ fn run_shadow_workspace_readiness_only(
     if actual_port != declared_port {
         command.env("ATO_UI_OVERRIDE_PORT", actual_port.to_string());
     }
+    command.env(IMPORT_PROBE_ID_ENV, &import_probe_id);
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
@@ -693,6 +729,14 @@ fn run_shadow_workspace_readiness_only(
                             cleanup_status: None,
                             cleanup_error: None,
                             log_path: None,
+                            run_session_id: None,
+                            pid: None,
+                            process_group_ids: Vec::new(),
+                            primary_port: None,
+                            primary_url: None,
+                            shadow_dir: None,
+                            readiness_state: None,
+                            cleanup_policy: None,
                         },
                         cleanup_outcome,
                         &log_path,
@@ -710,6 +754,14 @@ fn run_shadow_workspace_readiness_only(
                         cleanup_status: None,
                         cleanup_error: None,
                         log_path: None,
+                        run_session_id: None,
+                        pid: None,
+                        process_group_ids: Vec::new(),
+                        primary_port: None,
+                        primary_url: None,
+                        shadow_dir: None,
+                        readiness_state: None,
+                        cleanup_policy: None,
                     },
                     cleanup_outcome,
                     &log_path,
@@ -728,6 +780,14 @@ fn run_shadow_workspace_readiness_only(
                     cleanup_status: None,
                     cleanup_error: None,
                     log_path: None,
+                    run_session_id: None,
+                    pid: None,
+                    process_group_ids: Vec::new(),
+                    primary_port: None,
+                    primary_url: None,
+                    shadow_dir: None,
+                    readiness_state: None,
+                    cleanup_policy: None,
                 },
                 cleanup_outcome,
                 &log_path,
@@ -753,6 +813,14 @@ fn run_shadow_workspace_readiness_only(
                 cleanup_status: None,
                 cleanup_error: None,
                 log_path: None,
+                run_session_id: None,
+                pid: None,
+                process_group_ids: Vec::new(),
+                primary_port: None,
+                primary_url: None,
+                shadow_dir: None,
+                readiness_state: None,
+                cleanup_policy: None,
             },
             cleanup_outcome,
             &log_path,
@@ -771,6 +839,14 @@ fn run_shadow_workspace_readiness_only(
         cleanup_status: None,
         cleanup_error: None,
         log_path: None,
+        run_session_id: None,
+        pid: None,
+        process_group_ids: Vec::new(),
+        primary_port: None,
+        primary_url: None,
+        shadow_dir: None,
+        readiness_state: None,
+        cleanup_policy: None,
     };
     if cleanup_outcome.error.is_some() {
         run.status = "failed".to_string();
@@ -779,6 +855,157 @@ fn run_shadow_workspace_readiness_only(
         run.error_excerpt = cleanup_outcome.error.clone();
     }
     Ok(import_run_with_cleanup(run, cleanup_outcome, &log_path))
+}
+
+fn run_shadow_workspace_keep_alive(
+    materialized: &mut MaterializedSource,
+    recipe_toml: &str,
+) -> Result<ImportRun> {
+    let shadow_manifest = materialized.shadow_dir.join(CAPSULE_TOML);
+    fs::write(&shadow_manifest, recipe_toml)
+        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
+
+    let declared_port = infer_port(recipe_toml).unwrap_or(1111);
+    let actual_port = if crate::runtime::port_manager::is_port_available(declared_port) {
+        declared_port
+    } else {
+        (declared_port.saturating_add(1)..=u16::MAX)
+            .find(|&p| crate::runtime::port_manager::is_port_available(p))
+            .unwrap_or(declared_port)
+    };
+    let primary_url = format!("http://127.0.0.1:{actual_port}/");
+    let run_session_id = new_import_run_id("preview", &materialized.source)?;
+    let log_path = import_run_log_path(&run_session_id)?;
+
+    let mut command = Command::new(std::env::current_exe()?);
+    apply_probe_stdio(&mut command, &log_path)?;
+    command
+        .arg("run")
+        .arg(&materialized.shadow_dir)
+        .arg("--yes")
+        .current_dir(&materialized.shadow_dir)
+        .stdin(Stdio::null())
+        .env(IMPORT_SESSION_ID_ENV, &run_session_id);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    if actual_port != declared_port {
+        command.env("ATO_UI_OVERRIDE_PORT", actual_port.to_string());
+    }
+    if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
+        command.arg("--dangerously-skip-permissions");
+    }
+
+    let mut child = command
+        .spawn()
+        .context("failed to spawn keep-alive shadow workspace")?;
+    let pid = child.id() as i32;
+    let mut observed_pgids = std::collections::BTreeSet::new();
+    observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+    observed_pgids.insert(pid);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut readiness_state = "pending".to_string();
+    while std::time::Instant::now() < deadline {
+        observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+        if let Ok(resp) = client.get(&primary_url).send() {
+            if resp.status().is_success() {
+                readiness_state = "ready".to_string();
+                break;
+            }
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let combined = read_error_excerpt_from_log(&log_path);
+            let (phase, error_class) = if status.success() {
+                ("readiness", "exited_before_readiness")
+            } else {
+                classify_run_failure(&combined)
+            };
+            return Ok(ImportRun {
+                status: "failed".to_string(),
+                phase: Some(phase.to_string()),
+                error_class: Some(error_class.to_string()),
+                error_excerpt: Some(redact_error_excerpt(&combined)),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: Some(log_path.display().to_string()),
+                run_session_id: Some(run_session_id),
+                pid: Some(pid),
+                process_group_ids: observed_pgids.into_iter().collect(),
+                primary_port: Some(actual_port),
+                primary_url: Some(primary_url),
+                shadow_dir: Some(materialized.shadow_dir.display().to_string()),
+                readiness_state: Some("exited".to_string()),
+                cleanup_policy: Some("not_started".to_string()),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+
+    if readiness_state != "ready" {
+        let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+        cleanup.observed_pgids = observed_pgids;
+        let cleanup_outcome = cleanup.cleanup();
+        let excerpt = read_error_excerpt_from_log(&log_path);
+        return Ok(import_run_with_cleanup(
+            ImportRun {
+                status: "failed".to_string(),
+                phase: Some("readiness".to_string()),
+                error_class: Some("readiness_timeout".to_string()),
+                error_excerpt: Some(redact_error_excerpt(&format!(
+                    "readiness probe {primary_url} did not pass within 300s\n{excerpt}",
+                ))),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: None,
+                run_session_id: Some(run_session_id),
+                pid: Some(pid),
+                process_group_ids: cleanup.observed_pgids.iter().copied().collect(),
+                primary_port: Some(actual_port),
+                primary_url: Some(primary_url),
+                shadow_dir: Some(materialized.shadow_dir.display().to_string()),
+                readiness_state: Some("timeout".to_string()),
+                cleanup_policy: Some("failed_probe_teardown".to_string()),
+            },
+            cleanup_outcome,
+            &log_path,
+        ));
+    }
+
+    observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+    materialized._workspace.keep = true;
+    Ok(ImportRun {
+        status: "running".to_string(),
+        phase: Some("readiness".to_string()),
+        error_class: None,
+        error_excerpt: None,
+        command_mode: None,
+        requires_host_shell: None,
+        shell_kind: None,
+        cleanup_status: None,
+        cleanup_error: None,
+        log_path: Some(log_path.display().to_string()),
+        run_session_id: Some(run_session_id),
+        pid: Some(pid),
+        process_group_ids: observed_pgids.into_iter().collect(),
+        primary_port: Some(actual_port),
+        primary_url: Some(primary_url),
+        shadow_dir: Some(materialized.shadow_dir.display().to_string()),
+        readiness_state: Some(readiness_state),
+        cleanup_policy: Some("keep_until_explicit_stop".to_string()),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -878,20 +1105,25 @@ fn apply_probe_stdio(command: &mut Command, log_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn import_probe_log_path(source: &ImportSource) -> Result<PathBuf> {
+fn new_import_run_id(prefix: &str, source: &ImportSource) -> Result<String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system time before UNIX_EPOCH")?
         .as_nanos();
+    Ok(format!(
+        "{}-{}-{}-{}-{now}",
+        prefix,
+        source.repo_namespace,
+        source.repo_name,
+        std::process::id()
+    ))
+}
+
+fn import_run_log_path(run_id: &str) -> Result<PathBuf> {
     Ok(std::env::current_dir()?
         .join(".tmp")
         .join("ato-import-logs")
-        .join(format!(
-            "{}-{}-{}-{now}.log",
-            source.repo_namespace,
-            source.repo_name,
-            std::process::id()
-        )))
+        .join(format!("{run_id}.log")))
 }
 
 fn read_error_excerpt_from_log(log_path: &Path) -> String {
@@ -1012,6 +1244,11 @@ fn probe_pgids(root_pid: i32, shadow_dir: &Path) -> std::collections::BTreeSet<i
         })
         .filter_map(|row| (row.pgid > 0).then_some(row.pgid))
         .collect()
+}
+
+#[cfg(not(unix))]
+fn probe_pgids(_root_pid: i32, _shadow_dir: &Path) -> std::collections::BTreeSet<i32> {
+    std::collections::BTreeSet::new()
 }
 
 #[cfg(unix)]
@@ -1205,6 +1442,14 @@ fn import_run_from_output(output: &Output) -> ImportRun {
             cleanup_status: None,
             cleanup_error: None,
             log_path: None,
+            run_session_id: None,
+            pid: None,
+            process_group_ids: Vec::new(),
+            primary_port: None,
+            primary_url: None,
+            shadow_dir: None,
+            readiness_state: None,
+            cleanup_policy: None,
         };
     }
 
@@ -1227,6 +1472,14 @@ fn import_run_from_output(output: &Output) -> ImportRun {
         cleanup_status: None,
         cleanup_error: None,
         log_path: None,
+        run_session_id: None,
+        pid: None,
+        process_group_ids: Vec::new(),
+        primary_port: None,
+        primary_url: None,
+        shadow_dir: None,
+        readiness_state: None,
+        cleanup_policy: None,
     }
 }
 
