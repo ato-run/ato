@@ -1,8 +1,7 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -65,6 +64,15 @@ struct ImportRun {
     /// Shell kind used when `command_mode` is `"shell"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     shell_kind: Option<String>,
+    /// Cleanup result for probe-mode shadow runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_status: Option<String>,
+    /// Cleanup diagnostic when teardown was incomplete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_error: Option<String>,
+    /// Runtime log path for probe-mode shadow runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -216,7 +224,7 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
     };
     let recipe_hash = blake3_label(recipe_toml.as_bytes());
     let target_label = infer_target_label(&recipe_toml);
-    let mut run = if args.run && args.readiness_only {
+    let mut run = if args.run && (args.readiness_only || args.emit_json) {
         run_shadow_workspace_readiness_only(&materialized, &recipe_toml)?
     } else if args.run {
         run_shadow_workspace(&materialized, &recipe_toml)?
@@ -229,6 +237,9 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
             command_mode: None,
             requires_host_shell: None,
             shell_kind: None,
+            cleanup_status: None,
+            cleanup_error: None,
+            log_path: None,
         }
     };
     apply_shell_info(&mut run, &recipe_toml);
@@ -605,7 +616,8 @@ fn run_shadow_workspace_readiness_only(
     // Extract port from recipe for readiness waiting.
     // If the declared port is already in use, remap to a free port and inform
     // the child subprocess via ATO_UI_OVERRIDE_PORT so it binds the same port.
-    let declared_port = infer_port(recipe_toml).unwrap_or(1111);
+    let declared_port_from_recipe = infer_port(recipe_toml);
+    let declared_port = declared_port_from_recipe.unwrap_or(1111);
     let actual_port = if crate::runtime::port_manager::is_port_available(declared_port) {
         declared_port
     } else {
@@ -615,28 +627,36 @@ fn run_shadow_workspace_readiness_only(
             .unwrap_or(declared_port)
     };
     let ready_url = format!("http://127.0.0.1:{}/", actual_port);
+    let log_path = import_probe_log_path(&materialized.source)?;
 
-    // Spawn ato run in background (detached, process lives on)
+    // Spawn `ato run` as a probe. It must not outlive this command unless a
+    // durable session handle owns it; readiness-only import has no such handle.
     let mut command = Command::new(std::env::current_exe()?);
+    apply_probe_stdio(&mut command, &log_path)?;
     command
         .arg("run")
         .arg(&materialized.shadow_dir)
         .arg("--yes")
         .current_dir(&materialized.shadow_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stdin(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
     if actual_port != declared_port {
         command.env("ATO_UI_OVERRIDE_PORT", actual_port.to_string());
     }
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
-    let mut child = command
+    let child = command
         .spawn()
         .context("failed to spawn shadow workspace")?;
+    let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+    cleanup.observe();
 
-    // Poll readiness for up to 120s
+    // Poll readiness for up to 300s.
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -644,50 +664,103 @@ fn run_shadow_workspace_readiness_only(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     let mut ready = false;
     while std::time::Instant::now() < deadline {
+        cleanup.observe();
         if let Ok(resp) = client.get(&ready_url).send() {
             if resp.status().is_success() {
                 ready = true;
                 break;
             }
         }
-        if let Ok(Some(_)) = child.try_wait() {
-            // Process exited before readiness
-            let stdout = read_all(child.stdout.take());
-            let stderr = read_all(child.stderr.take());
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr),
-            );
+        if let Ok(Some(status)) = cleanup.child_mut().try_wait() {
+            // Short-lived commands can complete before readiness. Treat a
+            // successful exit as a valid probe completion; failures still
+            // flow through normal classification.
+            let combined = read_error_excerpt_from_log(&log_path);
+            let cleanup_outcome = cleanup.cleanup();
+            if status.success() {
+                if declared_port_from_recipe.is_some() {
+                    return Ok(import_run_with_cleanup(
+                        ImportRun {
+                            status: "failed".to_string(),
+                            phase: Some("readiness".to_string()),
+                            error_class: Some("exited_before_readiness".to_string()),
+                            error_excerpt: Some(redact_error_excerpt(&format!(
+                                "process exited successfully before readiness probe {ready_url} passed\n{combined}",
+                            ))),
+                            command_mode: None,
+                            requires_host_shell: None,
+                            shell_kind: None,
+                            cleanup_status: None,
+                            cleanup_error: None,
+                            log_path: None,
+                        },
+                        cleanup_outcome,
+                        &log_path,
+                    ));
+                }
+                return Ok(import_run_with_cleanup(
+                    ImportRun {
+                        status: "passed".to_string(),
+                        phase: Some("completed".to_string()),
+                        error_class: None,
+                        error_excerpt: None,
+                        command_mode: None,
+                        requires_host_shell: None,
+                        shell_kind: None,
+                        cleanup_status: None,
+                        cleanup_error: None,
+                        log_path: None,
+                    },
+                    cleanup_outcome,
+                    &log_path,
+                ));
+            }
             let (phase, error_class) = classify_run_failure(&combined);
-            return Ok(ImportRun {
-                status: "failed".to_string(),
-                phase: Some(phase.to_string()),
-                error_class: Some(error_class.to_string()),
-                error_excerpt: Some(redact_error_excerpt(&combined)),
-                command_mode: None,
-                requires_host_shell: None,
-                shell_kind: None,
-            });
+            return Ok(import_run_with_cleanup(
+                ImportRun {
+                    status: "failed".to_string(),
+                    phase: Some(phase.to_string()),
+                    error_class: Some(error_class.to_string()),
+                    error_excerpt: Some(redact_error_excerpt(&combined)),
+                    command_mode: None,
+                    requires_host_shell: None,
+                    shell_kind: None,
+                    cleanup_status: None,
+                    cleanup_error: None,
+                    log_path: None,
+                },
+                cleanup_outcome,
+                &log_path,
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
     if !ready {
-        let _ = child.kill();
-        let stderr = read_all(child.stderr.take());
-        anyhow::bail!(
-            "readiness probe {} did not pass within 120s\n{}",
-            ready_url,
-            String::from_utf8_lossy(&stderr)
-                .lines()
-                .take(20)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        let cleanup_outcome = cleanup.cleanup();
+        let excerpt = read_error_excerpt_from_log(&log_path);
+        return Ok(import_run_with_cleanup(
+            ImportRun {
+                status: "failed".to_string(),
+                phase: Some("readiness".to_string()),
+                error_class: Some("readiness_timeout".to_string()),
+                error_excerpt: Some(redact_error_excerpt(&format!(
+                    "readiness probe {ready_url} did not pass within 300s\n{excerpt}",
+                ))),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: None,
+            },
+            cleanup_outcome,
+            &log_path,
+        ));
     }
 
-    Ok(ImportRun {
+    let cleanup_outcome = cleanup.cleanup();
+    let mut run = ImportRun {
         status: "passed".to_string(),
         phase: Some("readiness".to_string()),
         error_class: None,
@@ -695,7 +768,298 @@ fn run_shadow_workspace_readiness_only(
         command_mode: None,
         requires_host_shell: None,
         shell_kind: None,
-    })
+        cleanup_status: None,
+        cleanup_error: None,
+        log_path: None,
+    };
+    if cleanup_outcome.error.is_some() {
+        run.status = "failed".to_string();
+        run.phase = Some("cleanup".to_string());
+        run.error_class = Some("cleanup_failed".to_string());
+        run.error_excerpt = cleanup_outcome.error.clone();
+    }
+    Ok(import_run_with_cleanup(run, cleanup_outcome, &log_path))
+}
+
+#[derive(Debug, Clone)]
+struct ProbeCleanupOutcome {
+    status: String,
+    error: Option<String>,
+}
+
+struct ProbeRunGuard {
+    child: Option<Child>,
+    shadow_dir: PathBuf,
+    observed_pgids: std::collections::BTreeSet<i32>,
+    cleaned: bool,
+}
+
+impl ProbeRunGuard {
+    fn new(child: Child, shadow_dir: PathBuf) -> Self {
+        Self {
+            child: Some(child),
+            shadow_dir,
+            observed_pgids: std::collections::BTreeSet::new(),
+            cleaned: false,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("probe child accessed after cleanup")
+    }
+
+    fn cleanup(&mut self) -> ProbeCleanupOutcome {
+        if self.cleaned {
+            return ProbeCleanupOutcome {
+                status: "already_cleaned".to_string(),
+                error: None,
+            };
+        }
+        self.cleaned = true;
+        self.observe();
+        let Some(mut child) = self.child.take() else {
+            return ProbeCleanupOutcome {
+                status: "already_cleaned".to_string(),
+                error: None,
+            };
+        };
+
+        let outcome =
+            terminate_probe_process_tree(&mut child, &self.shadow_dir, &self.observed_pgids);
+        let _ = child.wait();
+        outcome
+    }
+
+    fn observe(&mut self) {
+        #[cfg(unix)]
+        if let Some(child) = self.child.as_ref() {
+            self.observed_pgids
+                .extend(probe_pgids(child.id() as i32, &self.shadow_dir));
+        }
+    }
+}
+
+impl Drop for ProbeRunGuard {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+fn import_run_with_cleanup(
+    mut run: ImportRun,
+    cleanup: ProbeCleanupOutcome,
+    log_path: &Path,
+) -> ImportRun {
+    run.cleanup_status = Some(cleanup.status);
+    run.cleanup_error = cleanup.error;
+    run.log_path = Some(log_path.display().to_string());
+    run
+}
+
+fn apply_probe_stdio(command: &mut Command, log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("failed to clone {}", log_path.display()))?;
+    command.stdout(Stdio::from(stdout));
+    command.stderr(Stdio::from(stderr));
+    Ok(())
+}
+
+fn import_probe_log_path(source: &ImportSource) -> Result<PathBuf> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_nanos();
+    Ok(std::env::current_dir()?
+        .join(".tmp")
+        .join("ato-import-logs")
+        .join(format!(
+            "{}-{}-{}-{now}.log",
+            source.repo_namespace,
+            source.repo_name,
+            std::process::id()
+        )))
+}
+
+fn read_error_excerpt_from_log(log_path: &Path) -> String {
+    fs::read_to_string(log_path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(unix)]
+fn terminate_probe_process_tree(
+    child: &mut Child,
+    shadow_dir: &Path,
+    observed_pgids: &std::collections::BTreeSet<i32>,
+) -> ProbeCleanupOutcome {
+    let root_pid = child.id() as i32;
+    let mut pgids = observed_pgids.clone();
+    pgids.extend(probe_pgids(root_pid, shadow_dir));
+    pgids.insert(root_pid);
+    let had_live_processes = any_pgid_alive(&pgids);
+
+    if child.try_wait().ok().flatten().is_some() && !had_live_processes {
+        return ProbeCleanupOutcome {
+            status: "already_exited".to_string(),
+            error: None,
+        };
+    }
+
+    for pgid in &pgids {
+        signal_process_group(*pgid, libc::SIGTERM);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() && !any_pgid_alive(&pgids) {
+            return ProbeCleanupOutcome {
+                status: "terminated".to_string(),
+                error: None,
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    for pgid in probe_pgids(root_pid, shadow_dir) {
+        pgids.insert(pgid);
+    }
+    for pgid in &pgids {
+        signal_process_group(*pgid, libc::SIGKILL);
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    if any_pgid_alive(&pgids) {
+        ProbeCleanupOutcome {
+            status: "failed".to_string(),
+            error: Some(format!(
+                "failed to terminate import probe process groups {:?} for {}",
+                pgids,
+                shadow_dir.display()
+            )),
+        }
+    } else {
+        ProbeCleanupOutcome {
+            status: "killed".to_string(),
+            error: None,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_probe_process_tree(
+    child: &mut Child,
+    _shadow_dir: &Path,
+    _observed_pgids: &std::collections::BTreeSet<i32>,
+) -> ProbeCleanupOutcome {
+    match child.try_wait() {
+        Ok(Some(_)) => ProbeCleanupOutcome {
+            status: "already_exited".to_string(),
+            error: None,
+        },
+        _ => match child.kill() {
+            Ok(()) => ProbeCleanupOutcome {
+                status: "killed".to_string(),
+                error: None,
+            },
+            Err(error) => ProbeCleanupOutcome {
+                status: "failed".to_string(),
+                error: Some(error.to_string()),
+            },
+        },
+    }
+}
+
+#[cfg(unix)]
+fn probe_pgids(root_pid: i32, shadow_dir: &Path) -> std::collections::BTreeSet<i32> {
+    let rows = process_rows();
+    let mut pending = vec![root_pid];
+    let mut descendants = std::collections::BTreeSet::new();
+    while let Some(parent) = pending.pop() {
+        for row in rows.iter().filter(|row| row.ppid == parent) {
+            if descendants.insert(row.pid) {
+                pending.push(row.pid);
+            }
+        }
+    }
+
+    let shadow_dir = shadow_dir.display().to_string();
+    rows.into_iter()
+        .filter(|row| {
+            row.pid == root_pid
+                || descendants.contains(&row.pid)
+                || (!shadow_dir.is_empty() && row.command.contains(&shadow_dir))
+        })
+        .filter_map(|row| (row.pgid > 0).then_some(row.pgid))
+        .collect()
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct ProcessRow {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    command: String,
+}
+
+#[cfg(unix)]
+fn process_rows() -> Vec<ProcessRow> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid,ppid,pgid,command"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            Some(ProcessRow {
+                pid: parts.next()?.parse().ok()?,
+                ppid: parts.next()?.parse().ok()?,
+                pgid: parts.next()?.parse().ok()?,
+                command: parts.collect::<Vec<_>>().join(" "),
+            })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn any_pgid_alive(pgids: &std::collections::BTreeSet<i32>) -> bool {
+    pgids
+        .iter()
+        .any(|pgid| unsafe { libc::kill(-*pgid, 0) == 0 })
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: i32, signal: libc::c_int) {
+    if pgid > 0 {
+        unsafe {
+            libc::kill(-pgid, signal);
+        }
+    }
 }
 
 fn infer_port(recipe_toml: &str) -> Option<u16> {
@@ -838,6 +1202,9 @@ fn import_run_from_output(output: &Output) -> ImportRun {
             command_mode: None,
             requires_host_shell: None,
             shell_kind: None,
+            cleanup_status: None,
+            cleanup_error: None,
+            log_path: None,
         };
     }
 
@@ -857,6 +1224,9 @@ fn import_run_from_output(output: &Output) -> ImportRun {
         command_mode: None,
         requires_host_shell: None,
         shell_kind: None,
+        cleanup_status: None,
+        cleanup_error: None,
+        log_path: None,
     }
 }
 
