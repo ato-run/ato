@@ -6,7 +6,7 @@ use crate::adapters::runtime::oci_session_store::{
     StopByIdAttempt,
 };
 use crate::reporters::CliReporter;
-use crate::runtime::process::ProcessManager;
+use crate::runtime::process::{ImportPreviewStopResult, ImportPreviewStopStatus, ProcessManager};
 use capsule_core::CapsuleReporter;
 
 pub struct CloseArgs {
@@ -22,6 +22,7 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
     if args.all && args.name.is_none() && args.id.is_none() {
         let processes = pm.list_processes()?;
         let running: Vec<_> = processes.iter().filter(|p| p.status.is_active()).collect();
+        let import_previews = pm.list_import_preview_sessions().unwrap_or_default();
 
         // Check OCI sessions before stopping so we know total activity.
         let oci_running = OciSessionStore::new()
@@ -38,7 +39,7 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
             })
             .unwrap_or(0);
 
-        if running.is_empty() && oci_running == 0 {
+        if running.is_empty() && import_previews.is_empty() && oci_running == 0 {
             futures::executor::block_on(reporter.notify("No active capsules.".to_string()))?;
             return Ok(());
         }
@@ -76,6 +77,8 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
             )?;
         }
 
+        stop_all_import_preview_sessions(&pm, args.force, &reporter)?;
+
         // Stop OCI sessions.
         stop_all_oci_sessions(&args, &reporter)?;
 
@@ -90,7 +93,9 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 )?;
             }
             Ok(false) => {
-                if let Some(attempt) = stop_oci_by_id(id, args.force)? {
+                if let Some(result) = pm.stop_import_preview_session(id, args.force)? {
+                    report_import_preview_stop_result(&result, &reporter)?;
+                } else if let Some(attempt) = stop_oci_by_id(id, args.force)? {
                     report_oci_stop_attempt(&attempt, &reporter)?;
                 } else {
                     futures::executor::block_on(
@@ -155,6 +160,53 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
         anyhow::bail!("Either --id, --name, or --all is required");
     }
 
+    Ok(())
+}
+
+fn stop_all_import_preview_sessions(
+    pm: &ProcessManager,
+    force: bool,
+    reporter: &Arc<CliReporter>,
+) -> Result<()> {
+    let results = pm.stop_all_import_preview_sessions(force)?;
+    if results.is_empty() {
+        return Ok(());
+    }
+    futures::executor::block_on(reporter.notify(format!(
+        "Stopping {} import preview session(s)...",
+        results.len()
+    )))?;
+    for result in &results {
+        report_import_preview_stop_result(result, reporter)?;
+    }
+    Ok(())
+}
+
+fn report_import_preview_stop_result(
+    result: &ImportPreviewStopResult,
+    reporter: &Arc<CliReporter>,
+) -> Result<()> {
+    match result.status {
+        ImportPreviewStopStatus::Stopped => {
+            futures::executor::block_on(reporter.notify(format!(
+                "✅ Stopped import preview: {}",
+                result.session.run_session_id
+            )))?;
+        }
+        ImportPreviewStopStatus::AlreadyGone => {
+            futures::executor::block_on(reporter.warn(format!(
+                "⚠️  Import preview already gone: {}",
+                result.session.run_session_id
+            )))?;
+        }
+        ImportPreviewStopStatus::NotAtoOwned | ImportPreviewStopStatus::Failed => {
+            let detail = result.error.as_deref().unwrap_or("unknown stop failure");
+            futures::executor::block_on(reporter.warn(format!(
+                "❌ Failed to stop import preview {}: {}",
+                result.session.run_session_id, detail
+            )))?;
+        }
+    }
     Ok(())
 }
 
