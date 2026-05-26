@@ -7,11 +7,11 @@
 //! background task and pushing the transient "running" snapshot to
 //! the UI.
 
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, App, BackgroundExecutor};
 use serde::Deserialize;
 
@@ -573,9 +573,7 @@ fn write_temp_recipe(toml: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let pid = std::process::id();
-    let dir = env::current_dir()?
-        .join(".tmp")
-        .join(format!("ato-import-{pid}-{ts}"));
+    let dir = ato_path_or_workspace_tmp(format!("tmp/desktop/import-recipes/ato-import-{pid}-{ts}"));
     fs::create_dir_all(&dir)?;
     let path = dir.join("recipe.toml");
     fs::write(&path, toml)?;
