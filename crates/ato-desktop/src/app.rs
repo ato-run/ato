@@ -507,6 +507,10 @@ pub fn run(skip_onboarding: bool) {
         // user to keep or clear persisted tabs. ConfirmQuitKeep /
         // ConfirmQuitClear / CancelQuit are the resolution actions.
         cx.on_action(|_: &ConfirmQuitKeep, cx| {
+            crate::system_capsule::ato_import::stop_active_import_preview_blocking(
+                cx,
+                "desktop_shutdown",
+            );
             if crate::window::is_multi_window_enabled() {
                 let count = cx
                     .global_mut::<crate::state::session::SessionRegistry>()
@@ -516,6 +520,10 @@ pub fn run(skip_onboarding: bool) {
             cx.quit();
         });
         cx.on_action(|_: &ConfirmQuitClear, cx| {
+            crate::system_capsule::ato_import::stop_active_import_preview_blocking(
+                cx,
+                "desktop_shutdown",
+            );
             if crate::window::is_multi_window_enabled() {
                 let count = cx
                     .global_mut::<crate::state::session::SessionRegistry>()
@@ -528,6 +536,10 @@ pub fn run(skip_onboarding: bool) {
             cx.quit();
         });
         cx.on_action(|_: &ConfirmQuitWithCleanup, cx| {
+            crate::system_capsule::ato_import::stop_active_import_preview_blocking(
+                cx,
+                "desktop_shutdown",
+            );
             crate::window::dock::cleanup_dock_window(cx);
             let report = crate::orchestrator::cleanup_host_resources();
             tracing::info!(?report, "Host resource cleanup completed on quit");
@@ -635,6 +647,17 @@ pub fn run(skip_onboarding: bool) {
             if store_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
                 cx.set_global(crate::window::store::StoreWindowSlot(None));
                 tracing::info!("Store window closed; slot cleared");
+            }
+            let import_slot = cx
+                .try_global::<crate::window::import_window::ImportWindowSlot>()
+                .and_then(|slot| slot.window);
+            if import_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                crate::system_capsule::ato_import::stop_active_import_preview(cx, "window_close");
+                cx.set_global(crate::window::import_window::ImportWindowSlot::default());
+                tracing::info!("Import window closed; slot cleared");
             }
             let dock_slot = cx
                 .global::<crate::window::dock::DockWindowSlot>()

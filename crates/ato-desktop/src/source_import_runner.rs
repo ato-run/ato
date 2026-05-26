@@ -34,9 +34,9 @@ pub(crate) fn infer(repo: &str) -> Result<ImportOutput> {
     parse_import_output(&output.stdout)
 }
 
-/// Run `ato import <repo> --recipe <recipe_path> --run --emit-json`.
+/// Run `ato import <repo> --recipe <recipe_path> --run --keep-alive --emit-json`.
 ///
-/// The returned `ImportOutput.run.status` is `"passed"` or `"failed"`.
+/// The returned `ImportOutput.run.status` is `"running"` or `"failed"`.
 /// A failed shadow-workspace run still exits 0 at the CLI level — the
 /// failure shows up inside the JSON's `run` field, not as a process error.
 ///
@@ -54,10 +54,12 @@ pub(crate) fn run_with_recipe(
         .arg("--recipe")
         .arg(recipe_path)
         .arg("--run")
+        .arg("--keep-alive")
         .arg("--emit-json")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env("ATO_DESKTOP_PARENT_PID", std::process::id().to_string());
     if allow_unsafe {
         cmd.env("CAPSULE_ALLOW_UNSAFE", "1");
     }
@@ -75,6 +77,29 @@ pub(crate) fn run_with_recipe(
     }
 
     parse_import_output(&output.stdout)
+}
+
+pub(crate) fn stop_import_preview_session(run_session_id: &str) -> Result<()> {
+    let ato = resolve_ato_binary()?;
+    let output = Command::new(&ato)
+        .arg("stop")
+        .arg(run_session_id)
+        .arg("--force")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to spawn {} stop", ato.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "ato stop failed (status {}): {}",
+            output.status,
+            head_lines(&stderr, 20),
+        );
+    }
+    Ok(())
 }
 
 fn parse_import_output(stdout: &[u8]) -> Result<ImportOutput> {
