@@ -935,12 +935,13 @@ fn stop_import_preview_session_record(
     session: &ImportPreviewSession,
     force: bool,
 ) -> ImportPreviewStopResult {
-    if is_process_alive(session.ato_run_pid)
-        && !process_start_time_matches(
+    let ato_run_alive = is_process_alive(session.ato_run_pid);
+    let ato_run_owned = ato_run_alive
+        && process_start_time_matches(
             session.ato_run_pid,
             session.ato_run_process_start_time_unix_ms,
-        )
-    {
+        );
+    if ato_run_alive && !ato_run_owned {
         return ImportPreviewStopResult {
             session: session.clone(),
             status: ImportPreviewStopStatus::NotAtoOwned,
@@ -958,22 +959,38 @@ fn stop_import_preview_session_record(
 
     #[cfg(unix)]
     {
-        let mut pgids: std::collections::BTreeSet<i32> =
-            session.process_group_ids.iter().copied().collect();
-        pgids.insert(session.ato_run_pid);
-        for pgid in pgids.into_iter().filter(|pgid| *pgid > 0) {
+        let processes = unix_ps_processes();
+        let verified_pgids =
+            verified_import_preview_process_groups(session, ato_run_owned, &processes);
+        let live_unverified_pgids = live_unverified_import_preview_process_groups(
+            session,
+            &verified_pgids,
+            &processes,
+        );
+        for pgid in verified_pgids {
             if terminate_process_group_id_with_escalation(pgid, grace) {
                 stopped = true;
             }
         }
+        if stopped {
+            let _ = wait_for_process_exit(session.ato_run_pid, 10);
+        } else if !live_unverified_pgids.is_empty() {
+            return ImportPreviewStopResult {
+                session: session.clone(),
+                status: ImportPreviewStopStatus::NotAtoOwned,
+                error: Some(format!(
+                    "recorded process groups could not be verified as Ato-owned: {}",
+                    live_unverified_pgids
+                        .iter()
+                        .map(i32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            };
+        }
     }
 
-    if is_process_alive(session.ato_run_pid)
-        && process_start_time_matches(
-            session.ato_run_pid,
-            session.ato_run_process_start_time_unix_ms,
-        )
-    {
+    if ato_run_owned {
         match terminate_process(session.ato_run_pid, force) {
             Ok(true) => {
                 let _ = wait_for_process_exit(session.ato_run_pid, 10);
@@ -1173,6 +1190,187 @@ fn terminate_process_group_id_with_escalation(pgid: i32, term_grace: Duration) -
     signaled
 }
 
+#[cfg(unix)]
+fn verified_import_preview_process_groups(
+    session: &ImportPreviewSession,
+    ato_run_owned: bool,
+    processes: &[UnixPsProcess],
+) -> std::collections::BTreeSet<i32> {
+    let mut verified = std::collections::BTreeSet::new();
+    let ato_run_pgid = if ato_run_owned {
+        process_group_id_for_pid(session.ato_run_pid, processes)
+    } else {
+        None
+    };
+    if let Some(pgid) = ato_run_pgid.filter(|pgid| *pgid > 0) {
+        verified.insert(pgid);
+    }
+    for pgid in session
+        .process_group_ids
+        .iter()
+        .copied()
+        .filter(|pgid| *pgid > 0)
+    {
+        if Some(pgid) == ato_run_pgid || process_group_matches_import_preview_session(pgid, session, processes) {
+            verified.insert(pgid);
+        }
+    }
+    verified
+}
+
+#[cfg(unix)]
+fn live_unverified_import_preview_process_groups(
+    session: &ImportPreviewSession,
+    verified_pgids: &std::collections::BTreeSet<i32>,
+    processes: &[UnixPsProcess],
+) -> Vec<i32> {
+    session
+        .process_group_ids
+        .iter()
+        .copied()
+        .filter(|pgid| *pgid > 0)
+        .filter(|pgid| !verified_pgids.contains(pgid))
+        .filter(|pgid| processes.iter().any(|process| process.pgid == *pgid))
+        .collect()
+}
+
+#[cfg(unix)]
+fn process_group_id_for_pid(pid: i32, processes: &[UnixPsProcess]) -> Option<i32> {
+    processes
+        .iter()
+        .find(|process| process.pid == pid)
+        .map(|process| process.pgid)
+}
+
+#[cfg(unix)]
+fn process_group_matches_import_preview_session(
+    pgid: i32,
+    session: &ImportPreviewSession,
+    processes: &[UnixPsProcess],
+) -> bool {
+    if pgid <= 0 {
+        return false;
+    }
+    let marker = format!("ATO_IMPORT_SESSION_ID={}", session.run_session_id);
+    let shadow = session.shadow_dir.to_string_lossy();
+    processes.iter().any(|process| {
+        process.pgid == pgid
+            && (process.command.contains(&marker)
+                || process.command.contains(shadow.as_ref())
+                || process_current_working_dir(process.pid)
+                    .is_some_and(|cwd| cwd.starts_with(&session.shadow_dir)))
+    })
+}
+
+#[cfg(unix)]
+fn process_current_working_dir(pid: i32) -> Option<PathBuf> {
+    if pid <= 0 {
+        return None;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return fs::read_link(format!("/proc/{pid}/cwd")).ok();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(path) = line.strip_prefix('n') {
+                if !path.is_empty() {
+                    return Some(PathBuf::from(path));
+                }
+            }
+        }
+        None
+    }
+}
+
+#[cfg(unix)]
+fn sweep_import_env_process_groups(force: bool) -> usize {
+    let mut pgids = std::collections::BTreeSet::new();
+    for process in unix_ps_processes() {
+        if process.pgid <= 0 || !command_has_ato_import_env_marker(&process.command) {
+            continue;
+        }
+        if command_is_known_non_target(&process.command) {
+            continue;
+        }
+        pgids.insert(process.pgid);
+    }
+    let grace = if force {
+        Duration::from_millis(0)
+    } else {
+        Duration::from_secs(3)
+    };
+    pgids
+        .into_iter()
+        .filter(|pgid| terminate_process_group_id_with_escalation(*pgid, grace))
+        .count()
+}
+
+#[cfg(unix)]
+fn command_has_ato_import_env_marker(command: &str) -> bool {
+    command.contains("ATO_IMPORT_PROBE_ID=")
+        || command.contains("ATO_IMPORT_SESSION_ID=")
+        || command.contains("ATO_RUN_SESSION_ID=")
+}
+
+#[cfg(unix)]
+fn command_is_known_non_target(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("podman machine")
+        || lower.contains("podman-machine")
+        || lower.contains("/usr/sbin/fseventsd")
+        || lower.contains(" fseventsd")
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnixPsProcess {
+    pid: i32,
+    pgid: i32,
+    command: String,
+}
+
+#[cfg(unix)]
+fn unix_ps_processes() -> Vec<UnixPsProcess> {
+    let output = Command::new("ps")
+        .args(["eww", "-axo", "pid=,pgid=,command="])
+        .output()
+        .or_else(|_| {
+            Command::new("ps")
+                .args(["-axo", "pid=,pgid=,command="])
+                .output()
+        });
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_unix_ps_process_line)
+        .collect()
+}
+
+#[cfg(unix)]
+fn parse_unix_ps_process_line(line: &str) -> Option<UnixPsProcess> {
+    let trimmed = line.trim();
+    let mut parts = trimmed.split_whitespace();
+    let pid = parts.next()?.parse().ok()?;
+    let pgid = parts.next()?.parse().ok()?;
+    let command = parts.collect::<Vec<_>>().join(" ");
+    Some(UnixPsProcess { pid, pgid, command })
+}
 #[cfg(not(unix))]
 fn terminate_pgroup_with_escalation(pid: i32, _term_grace: Duration) {
     // Windows: no process-group concept that maps cleanly. Fall back
@@ -1332,6 +1530,88 @@ mod tests {
         let report = pm.sweep_run_dir_orphans().expect("sweep");
         assert_eq!(report.sockets_removed, 0);
         assert!(fresh_socket.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verified_import_preview_process_groups_require_session_proof_for_saved_pgids() {
+        let mut session = test_import_preview_session("preview-unverified", i32::MAX, i32::MAX, true);
+        session.process_group_ids = vec![777];
+        let processes = vec![UnixPsProcess {
+            pid: 4242,
+            pgid: 777,
+            command: "python3 unrelated_server.py".to_string(),
+        }];
+
+        let verified = verified_import_preview_process_groups(&session, false, &processes);
+        assert!(verified.is_empty());
+        assert_eq!(
+            live_unverified_import_preview_process_groups(&session, &verified, &processes),
+            vec![777]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn verified_import_preview_process_groups_accept_exact_session_marker() {
+        let mut session = test_import_preview_session("preview-marker", i32::MAX, i32::MAX, true);
+        session.process_group_ids = vec![888];
+        let processes = vec![UnixPsProcess {
+            pid: 5151,
+            pgid: 888,
+            command: format!(
+                "ATO_IMPORT_SESSION_ID={} python3 {}",
+                session.run_session_id,
+                session.shadow_dir.display()
+            ),
+        }];
+
+        let verified = verified_import_preview_process_groups(&session, false, &processes);
+        assert_eq!(verified.into_iter().collect::<Vec<_>>(), vec![888]);
+    }
+
+    fn test_import_preview_session(
+        id: &str,
+        owner_pid: i32,
+        ato_run_pid: i32,
+        create_shadow_dir: bool,
+    ) -> ImportPreviewSession {
+        let base = std::env::current_dir()
+            .expect("cwd")
+            .join(".tmp")
+            .join(format!("test-import-preview-{id}"));
+        let shadow_dir = base.join("shadow");
+        if create_shadow_dir {
+            fs::create_dir_all(&shadow_dir).expect("shadow dir");
+        }
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("unix time")
+            .as_millis() as u64;
+        ImportPreviewSession {
+            run_session_id: id.to_string(),
+            owner_kind: "cli".to_string(),
+            owner_pid,
+            owner_process_start_time_unix_ms: owner_pid
+                .try_into()
+                .ok()
+                .and_then(ato_session_core::process::process_start_time_unix_ms),
+            ato_run_pid,
+            ato_run_process_start_time_unix_ms: ato_run_pid
+                .try_into()
+                .ok()
+                .and_then(ato_session_core::process::process_start_time_unix_ms),
+            process_group_ids: Vec::new(),
+            primary_port: None,
+            primary_url: None,
+            shadow_dir,
+            log_path: base.join("preview.log"),
+            created_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            expires_at_unix_ms: None,
+            readiness_state: "ready".to_string(),
+            cleanup_policy: "keep_until_explicit_stop".to_string(),
+        }
     }
 
     #[test]
