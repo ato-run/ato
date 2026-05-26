@@ -784,6 +784,8 @@ pub(crate) enum Commands {
         alias = "close"
     )]
     Stop {
+        #[arg(value_name = "ID")]
+        target: Option<String>,
         #[arg(long)]
         id: Option<String>,
         #[arg(long)]
