@@ -309,6 +309,15 @@ impl DesktopShell {
         let launcher_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search, command, or ask AI…"));
         ato_session_core::sweep::sweep_startup_runtime_artifacts_best_effort();
+        cx.background_executor()
+            .spawn(async {
+                if let Err(error) =
+                    crate::source_import_runner::sweep_stale_import_preview_sessions()
+                {
+                    tracing::warn!(?error, "import preview startup sweep failed");
+                }
+            })
+            .detach();
         match cleanup_stale_capsule_sessions() {
             Ok(notes) => {
                 for note in notes {

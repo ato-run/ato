@@ -102,6 +102,29 @@ pub(crate) fn stop_import_preview_session(run_session_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn sweep_stale_import_preview_sessions() -> Result<()> {
+    let ato = resolve_ato_binary()?;
+    let output = Command::new(&ato)
+        .arg("internal")
+        .arg("import-preview-sweep")
+        .arg("--json")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to spawn {} internal import-preview-sweep", ato.display()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "ato import-preview-sweep failed (status {}): {}",
+            output.status,
+            head_lines(&stderr, 20),
+        );
+    }
+    Ok(())
+}
+
 fn parse_import_output(stdout: &[u8]) -> Result<ImportOutput> {
     let stdout = std::str::from_utf8(stdout).context("ato import emitted non-utf8 stdout")?;
     let trimmed = stdout.trim();
