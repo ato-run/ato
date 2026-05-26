@@ -15,6 +15,10 @@ pub(crate) struct ImportArgs {
     #[arg(long = "run", default_value_t = false)]
     pub(crate) run: bool,
 
+    /// Keep the imported shadow runtime alive and return an import preview session handle.
+    #[arg(long = "keep-alive", default_value_t = false)]
+    pub(crate) keep_alive: bool,
+
     /// Emit machine-readable JSON output.
     #[arg(long = "emit-json", default_value_t = false)]
     pub(crate) emit_json: bool,
