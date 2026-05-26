@@ -994,11 +994,32 @@ where
 #[async_trait]
 impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
     async fn pull_image(&self, image: &str) -> capsule_core::Result<()> {
-        // Always invoke `podman pull` so mutable tags (e.g. `:latest`) refresh
-        // against the registry, matching the prior bollard pull semantics.
-        // Skipping when `podman image exists` succeeds is unsafe here because
-        // session orchestration may pass an unresolved tag — the resolved-
-        // digest path lives on `OciProvider::pull_image(&OciImageResolution)`.
+        // For a digest-pinned reference (`...@sha256:...`) the image is
+        // immutable — if it's already in the local store, the registry round
+        // trip can never produce a different result. Skip the pull in that
+        // case so sessions still start when the registry is unreachable
+        // (offline laptop, DNS hiccup, etc.). This restores the offline
+        // resilience that PR #289's broader "never skip" rule accidentally
+        // removed for digest-pinned refs.
+        if image.contains("@sha256:") {
+            let exists = tokio::process::Command::new("podman")
+                .args(["image", "exists", image])
+                .status()
+                .await
+                .map_err(|err| {
+                    CapsuleError::ContainerEngine(format!(
+                        "failed to run podman image exists: {err}"
+                    ))
+                })?;
+            if exists.success() {
+                return Ok(());
+            }
+        }
+
+        // For mutable tags (`:latest`, `:main`, etc.) always attempt the pull
+        // so the cached image refreshes against the registry, matching the
+        // prior bollard semantics. The resolved-digest path lives on
+        // `OciProvider::pull_image(&OciImageResolution)`.
         let output = tokio::process::Command::new("podman")
             .args(["pull", image])
             .output()
@@ -1009,6 +1030,27 @@ impl OciRuntimeClient for PodmanProvider<SystemCommandRunner> {
         if output.status.success() {
             return Ok(());
         }
+
+        // If the pull failed but a local copy exists, fall back to it with a
+        // structured warning rather than failing the session. Common cause:
+        // transient registry/DNS outage. For mutable tags this means the
+        // session runs against possibly-stale content, which is preferable to
+        // refusing to start at all.
+        let cached = tokio::process::Command::new("podman")
+            .args(["image", "exists", image])
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if cached {
+            tracing::warn!(
+                image = %image,
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "podman pull failed; falling back to locally cached image"
+            );
+            return Ok(());
+        }
+
         Err(CapsuleError::Runtime(format!(
             "podman pull failed for '{}': {}",
             image,
