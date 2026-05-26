@@ -197,6 +197,9 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
     if args.keep_alive && !args.run {
         bail!("--keep-alive requires --run");
     }
+    if args.keep_alive && !args.emit_json {
+        bail!("--keep-alive requires --emit-json");
+    }
 
     let input = normalize_github_import_input(&args.repo)?;
     let mut materialized = materialize_source(&input)?;
