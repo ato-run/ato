@@ -9,6 +9,13 @@
 //!
 //! Each test gets its own `ATO_HOME` tempdir so they cannot collide on
 //! the canonical control socket path.
+//!
+//! Unix-only in slice A. The whole file is gated behind `#[cfg(unix)]`
+//! because the `ato_net::control::Client` it drives is Unix-only —
+//! when slice A's TCP fallback (tracked under #294) lands, these tests
+//! can be split into transport-specific variants.
+
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
