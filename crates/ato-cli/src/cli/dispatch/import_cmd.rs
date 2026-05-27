@@ -990,13 +990,15 @@ fn run_shadow_workspace_keep_alive(
 
     observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
     let now = now_unix_ms()?;
+    let (owner_kind, owner_pid) = import_preview_owner();
     let session = ImportPreviewSession {
         run_session_id,
-        owner_kind: import_preview_owner_kind(),
-        owner_pid: std::process::id() as i32,
-        owner_process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
-            std::process::id(),
-        ),
+        owner_kind,
+        owner_pid,
+        owner_process_start_time_unix_ms: owner_pid
+            .try_into()
+            .ok()
+            .and_then(ato_session_core::process::process_start_time_unix_ms),
         ato_run_pid: pid,
         ato_run_process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
             child.id(),
@@ -1011,6 +1013,8 @@ fn run_shadow_workspace_keep_alive(
         expires_at_unix_ms: None,
         readiness_state,
         cleanup_policy: "keep_until_explicit_stop".to_string(),
+        last_sweep_status: None,
+        last_sweep_error: None,
     };
     let process_manager = ProcessManager::new()?;
     if let Err(error) = process_manager.write_import_preview_session(&session) {
@@ -1084,14 +1088,28 @@ fn import_run_from_import_preview_session(session: &ImportPreviewSession) -> Imp
     }
 }
 
-fn import_preview_owner_kind() -> String {
-    if std::env::var_os("ATO_DESKTOP_SESSION_ROOT").is_some()
-        || std::env::var_os("ATO_DESKTOP_PARENT_PID").is_some()
+fn import_preview_owner() -> (String, i32) {
+    if let Some(owner_pid) = std::env::var("ATO_DESKTOP_PARENT_PID")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|pid| *pid > 0)
     {
-        "desktop".to_string()
-    } else {
-        "cli".to_string()
+        return ("desktop".to_string(), owner_pid);
     }
+    if std::env::var_os("ATO_DESKTOP_SESSION_ROOT").is_some() {
+        return ("desktop".to_string(), std::process::id() as i32);
+    }
+    ("cli".to_string(), cli_owner_pid())
+}
+
+#[cfg(unix)]
+fn cli_owner_pid() -> i32 {
+    unsafe { libc::getppid() }
+}
+
+#[cfg(not(unix))]
+fn cli_owner_pid() -> i32 {
+    std::process::id() as i32
 }
 
 fn now_unix_ms() -> Result<u64> {
