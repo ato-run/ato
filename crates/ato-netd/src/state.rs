@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use tokio::sync::{watch, Mutex};
 
-use crate::egress::{EgressManager, policy::EgressPolicy};
+use crate::egress::{policy::EgressPolicy, EgressManager};
 use crate::ingress::IngressManager;
 
 /// Shared, cheaply-cloneable handle into the daemon's runtime state.
@@ -167,4 +167,3 @@ mod tests {
         .expect("late subscriber must observe a sticky shutdown signal");
     }
 }
-

@@ -40,7 +40,9 @@ pub const PORT_RANGE_END: u16 = 49_999;
 pub enum AllocError {
     /// The persisted JSON file contains two different keys mapped to the
     /// same port number.  This indicates manual file corruption.
-    #[error("port {port} is already claimed by key {other_key:?} in the persisted allocation table")]
+    #[error(
+        "port {port} is already claimed by key {other_key:?} in the persisted allocation table"
+    )]
     PersistedPortTaken { port: u16, other_key: String },
 
     /// The port range is exhausted.  Increase [`PORT_RANGE_END`] or
@@ -103,15 +105,16 @@ impl PortAllocator {
         for (key, &port) in &table.ports {
             if let Some(other_key) = by_port.insert(port, key.clone()) {
                 if other_key != *key {
-                    return Err(AllocError::PersistedPortTaken {
-                        port,
-                        other_key,
-                    });
+                    return Err(AllocError::PersistedPortTaken { port, other_key });
                 }
             }
         }
 
-        Ok(Self { path, table, by_port })
+        Ok(Self {
+            path,
+            table,
+            by_port,
+        })
     }
 
     /// Return the persisted port for `key`, or allocate a new one.
@@ -169,10 +172,7 @@ impl PortAllocator {
 
 fn tmp_path_for(path: &Path) -> PathBuf {
     let mut tmp = path.to_path_buf();
-    let mut name = tmp
-        .file_name()
-        .unwrap_or_default()
-        .to_os_string();
+    let mut name = tmp.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     tmp.set_file_name(name);
     tmp
@@ -237,7 +237,9 @@ mod tests {
     async fn persisted_port_taken_error_on_corrupt_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state/netd/stable_origin_ports.json");
-        tokio::fs::create_dir_all(path.parent().unwrap()).await.unwrap();
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
 
         // Write a corrupt table: two keys sharing port 40000.
         let corrupt = r#"{"ports":{"key-a":40000,"key-b":40000}}"#;
@@ -245,7 +247,10 @@ mod tests {
 
         let result = PortAllocator::load(&path).await;
         assert!(
-            matches!(result, Err(AllocError::PersistedPortTaken { port: 40000, .. })),
+            matches!(
+                result,
+                Err(AllocError::PersistedPortTaken { port: 40000, .. })
+            ),
             "expected PersistedPortTaken, got: {result:?}",
         );
     }
