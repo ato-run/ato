@@ -75,6 +75,123 @@ pub struct RuntimeSettings {
     /// Maximum number of concurrent terminal sessions.
     #[serde(default = "default_terminal_max_sessions")]
     pub terminal_max_sessions: usize,
+    /// Backend engine selection for source / OCI / Wasm capsules.
+    /// Note: Podman is an OCI host dependency; Ato does not bundle it.
+    /// PostgreSQL is NOT a backend engine — it is a per-capsule tool artifact
+    /// fetched on-demand when a recipe/lock explicitly requires it.
+    #[serde(default)]
+    pub backend_engines: BackendEngineSettings,
+}
+
+/// Backend engine selection for the three capsule execution categories.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackendEngineSettings {
+    /// Engine for source-execution capsules (e.g. nacelle).
+    #[serde(default)]
+    pub source: SourceBackendEngine,
+    /// Engine for OCI capsules (e.g. podman).
+    #[serde(default)]
+    pub oci: OciBackendEngine,
+    /// Engine for Wasm capsules (e.g. wasmtime).
+    #[serde(default)]
+    pub wasm: WasmBackendEngine,
+}
+
+impl Default for BackendEngineSettings {
+    fn default() -> Self {
+        Self {
+            source: SourceBackendEngine::default(),
+            oci: OciBackendEngine::default(),
+            wasm: WasmBackendEngine::default(),
+        }
+    }
+}
+
+/// Source execution engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceBackendEngine {
+    /// Nacelle sandboxed runtime (default, recommended).
+    #[default]
+    Nacelle,
+    /// Host process fallback (advanced / unsafe).
+    Host,
+}
+
+impl<'de> Deserialize<'de> for SourceBackendEngine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d).unwrap_or_default();
+        match s.as_str() {
+            "nacelle" => Ok(Self::Nacelle),
+            "host" => Ok(Self::Host),
+            other => {
+                warn!(
+                    value = other,
+                    "Unknown source backend engine in config; using default (nacelle)"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
+}
+
+/// OCI execution engine.
+///
+/// Podman is an OCI backend host dependency. Ato does not bundle or install
+/// Podman automatically.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OciBackendEngine {
+    /// Podman (default, recommended). Must be installed on the host.
+    #[default]
+    Podman,
+    /// Docker-compatible daemon (experimental — not yet wired to runtime).
+    Docker,
+    /// Youki OCI runtime (experimental — not yet wired to runtime).
+    Youki,
+}
+
+impl<'de> Deserialize<'de> for OciBackendEngine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d).unwrap_or_default();
+        match s.as_str() {
+            "podman" => Ok(Self::Podman),
+            "docker" => Ok(Self::Docker),
+            "youki" => Ok(Self::Youki),
+            other => {
+                warn!(
+                    value = other,
+                    "Unknown OCI backend engine in config; using default (podman)"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
+}
+
+/// Wasm execution engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WasmBackendEngine {
+    /// Wasmtime (default, only supported option currently).
+    #[default]
+    Wasmtime,
+}
+
+impl<'de> Deserialize<'de> for WasmBackendEngine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d).unwrap_or_default();
+        match s.as_str() {
+            "wasmtime" => Ok(Self::Wasmtime),
+            other => {
+                warn!(
+                    value = other,
+                    "Unknown Wasm backend engine in config; using default (wasmtime)"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -551,6 +668,7 @@ impl Default for RuntimeSettings {
             allow_unsafe_env: false,
             terminal_font_size: default_terminal_font_size(),
             terminal_max_sessions: default_terminal_max_sessions(),
+            backend_engines: BackendEngineSettings::default(),
         }
     }
 }
@@ -1476,6 +1594,122 @@ mod tests {
         assert_eq!(
             parsed.desktop.window_close_behavior,
             WindowCloseBehavior::StopSession
+        );
+    }
+
+    // ── canonicalize_handle (#56) ────────────────────────────────
+
+    // ── backend engine config (#329) ──────────────────────────────
+
+    #[test]
+    fn backend_engine_defaults_are_nacelle_podman_wasmtime() {
+        let config = DesktopConfig::default();
+        assert_eq!(
+            config.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle
+        );
+        assert_eq!(
+            config.runtime.backend_engines.oci,
+            OciBackendEngine::Podman
+        );
+        assert_eq!(
+            config.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
+    }
+
+    #[test]
+    fn backend_engine_roundtrip_json() {
+        let mut config = DesktopConfig::default();
+        config.runtime.backend_engines.source = SourceBackendEngine::Host;
+        config.runtime.backend_engines.oci = OciBackendEngine::Docker;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.runtime.backend_engines.source,
+            SourceBackendEngine::Host
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.oci,
+            OciBackendEngine::Docker
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
+    }
+
+    #[test]
+    fn backend_engine_missing_field_defaults() {
+        // Pre-existing configs without backend_engines must load cleanly.
+        let json = r#"{"general": {"theme": "dark"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.oci,
+            OciBackendEngine::Podman
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
+    }
+
+    #[test]
+    fn backend_engine_unknown_value_warns_and_defaults() {
+        // Unknown engine values must not cause a parse error; they fall back to
+        // the default and emit a tracing::warn! (lenient-on-load policy).
+        let json = r#"{
+            "runtime": {
+                "backend_engines": {
+                    "source": "unknown-engine",
+                    "oci": "unsupported-runtime",
+                    "wasm": "bad-value"
+                }
+            }
+        }"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle,
+            "unknown source engine must fall back to nacelle"
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.oci,
+            OciBackendEngine::Podman,
+            "unknown OCI engine must fall back to podman"
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime,
+            "unknown Wasm engine must fall back to wasmtime"
+        );
+    }
+
+    #[test]
+    fn backend_engine_snapshot_contains_backend_engines() {
+        use crate::settings::settings_snapshot_from_config;
+        let config = DesktopConfig::default();
+        let snapshot = settings_snapshot_from_config(&config);
+        let engines = snapshot
+            .get("resolved")
+            .and_then(|r| r.get("runtime"))
+            .and_then(|r| r.get("backendEngines"))
+            .expect("resolved.runtime.backendEngines must exist in snapshot");
+        assert!(
+            engines.get("source").is_some(),
+            "snapshot must include source engine"
+        );
+        assert!(
+            engines.get("oci").is_some(),
+            "snapshot must include oci engine"
+        );
+        assert!(
+            engines.get("wasm").is_some(),
+            "snapshot must include wasm engine"
         );
     }
 
