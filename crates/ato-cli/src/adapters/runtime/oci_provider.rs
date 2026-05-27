@@ -14,6 +14,18 @@ use std::process::Command;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::adapters::runtime::podman_machine::{parse_podman_machine_list, PodmanMachineStatus};
+
+// In tests use zero timeouts so the poll loop exits immediately without sleeping.
+#[cfg(not(test))]
+const MACHINE_READY_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+#[cfg(not(test))]
+const MACHINE_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(test)]
+const MACHINE_READY_POLL_TIMEOUT: std::time::Duration = std::time::Duration::ZERO;
+#[cfg(test)]
+const MACHINE_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::ZERO;
+
 const PODMAN_POLICY_PROFILE_V1: &str = "oci-podman-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +216,25 @@ pub(crate) enum OciProviderError {
 
     #[error("OCI cleanup operation '{operation}' failed: {message}")]
     OciCleanupFailed { operation: String, message: String },
+
+    #[error(
+        "Podman machine is not configured. Run: podman machine init && podman machine start"
+    )]
+    MachineNotConfigured,
+
+    #[error(
+        "Multiple Podman machines are stopped and Ato cannot decide which one to start. \
+         Machines: {names}. Start the desired machine manually: podman machine start <name>"
+    )]
+    MachineAmbiguous { names: String },
+
+    #[error("Failed to start Podman machine '{machine_name}': {reason}")]
+    MachineStartFailed { machine_name: String, reason: String },
+
+    #[error(
+        "Podman machine '{machine_name}' did not become ready within {elapsed_secs}s after start"
+    )]
+    MachineReadyTimeout { machine_name: String, elapsed_secs: u64 },
 }
 
 impl OciProviderError {
@@ -225,6 +256,10 @@ impl OciProviderError {
             Self::OciExecutionGateFailed { .. } => "oci_execution_gate_failed",
             Self::OciContainerStartFailed { .. } => "oci_container_start_failed",
             Self::OciCleanupFailed { .. } => "oci_cleanup_failed",
+            Self::MachineNotConfigured => "oci_machine_not_configured",
+            Self::MachineAmbiguous { .. } => "oci_machine_ambiguous",
+            Self::MachineStartFailed { .. } => "oci_machine_start_failed",
+            Self::MachineReadyTimeout { .. } => "oci_machine_ready_timeout",
         }
     }
 
@@ -241,6 +276,14 @@ pub(crate) trait OciProvider: Send + Sync {
     fn semantics(&self) -> &OciProviderSemantics;
 
     async fn probe(&self) -> Result<OciProviderProbe, OciProviderError>;
+
+    /// Ensure the OCI provider is ready to accept container operations.
+    ///
+    /// On macOS/Windows this may auto-start a stopped Podman machine.
+    /// The default implementation simply delegates to `probe` + `require_ready`.
+    async fn ensure_ready(&self) -> Result<(), OciProviderError> {
+        self.probe().await?.require_ready().map(|_| ())
+    }
 
     async fn resolve_image(
         &self,
@@ -404,6 +447,80 @@ impl<R> PodmanProvider<R> {
     }
 }
 
+impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
+    /// macOS/Windows: inspect the machine list and start the machine if exactly one is stopped.
+    async fn ensure_machine_ready(&self) -> Result<(), OciProviderError> {
+        let ver_out = run_provider_command(&self.runner, "podman", &["--version"])?;
+        if !ver_out.success() {
+            return Err(command_failed("podman --version", ver_out));
+        }
+        let list_out = run_provider_command(
+            &self.runner,
+            "podman",
+            &["machine", "list", "--format", "json"],
+        )?;
+        if !list_out.success() {
+            return Err(command_failed("podman machine list --format json", list_out));
+        }
+        match parse_podman_machine_list(&list_out.stdout) {
+            PodmanMachineStatus::Running { .. } => Ok(()),
+            PodmanMachineStatus::NotConfigured => Err(OciProviderError::MachineNotConfigured),
+            PodmanMachineStatus::Stopped { names } if names.len() > 1 => {
+                Err(OciProviderError::MachineAmbiguous {
+                    names: names.join(", "),
+                })
+            }
+            PodmanMachineStatus::Stopped { names } => {
+                let machine_name = names.into_iter().next().unwrap_or_default();
+                self.start_machine_and_wait(&machine_name).await
+            }
+            PodmanMachineStatus::Unknown { reason }
+            | PodmanMachineStatus::Unavailable { reason } => Err(OciProviderError::ProbeFailed {
+                provider: "podman",
+                message: format!("podman machine list: {reason}"),
+            }),
+        }
+    }
+
+    /// Start a single stopped machine and poll `podman info` until it is ready.
+    async fn start_machine_and_wait(&self, machine_name: &str) -> Result<(), OciProviderError> {
+        let start_out =
+            run_provider_command(&self.runner, "podman", &["machine", "start", machine_name])?;
+        if !start_out.success() {
+            let reason = if start_out.stderr.trim().is_empty() {
+                start_out.stdout.trim().to_string()
+            } else {
+                start_out.stderr.trim().to_string()
+            };
+            return Err(OciProviderError::MachineStartFailed {
+                machine_name: machine_name.to_string(),
+                reason,
+            });
+        }
+        // Poll `podman info` until the machine daemon is up.
+        let start = std::time::Instant::now();
+        loop {
+            let info_out = self
+                .runner
+                .run("podman", &["info"])
+                .map_err(|err| OciProviderError::ProbeFailed {
+                    provider: "podman",
+                    message: format!("podman info poll: {err}"),
+                })?;
+            if info_out.success() {
+                return Ok(());
+            }
+            if start.elapsed() >= MACHINE_READY_POLL_TIMEOUT {
+                return Err(OciProviderError::MachineReadyTimeout {
+                    machine_name: machine_name.to_string(),
+                    elapsed_secs: MACHINE_READY_POLL_TIMEOUT.as_secs(),
+                });
+            }
+            tokio::time::sleep(MACHINE_READY_POLL_INTERVAL).await;
+        }
+    }
+}
+
 #[async_trait]
 impl<R> OciProvider for PodmanProvider<R>
 where
@@ -489,6 +606,24 @@ where
                     inventory,
                     detail,
                 })
+            }
+            PodmanProbePlatform::Unsupported(platform) => {
+                Err(OciProviderError::UnsupportedPlatform {
+                    provider: "podman",
+                    platform: platform.clone(),
+                })
+            }
+        }
+    }
+
+    async fn ensure_ready(&self) -> Result<(), OciProviderError> {
+        match &self.platform {
+            PodmanProbePlatform::Linux => {
+                // Native Linux Podman never needs machine management.
+                self.probe().await?.require_ready().map(|_| ())
+            }
+            PodmanProbePlatform::Macos | PodmanProbePlatform::Windows => {
+                self.ensure_machine_ready().await
             }
             PodmanProbePlatform::Unsupported(platform) => {
                 Err(OciProviderError::UnsupportedPlatform {
@@ -2665,5 +2800,162 @@ mod tests {
         assert_eq!(lock.platform.os, "linux");
         assert_eq!(lock.platform.architecture, "amd64");
         assert!(lock.importer_input_hash.is_none());
+    }
+
+    // ----- ensure_ready() tests -----
+
+    #[tokio::test]
+    async fn ensure_ready_macos_already_running_returns_ok() {
+        let machine_json =
+            r#"[{"Name":"podman-machine-default","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, machine_json, ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        provider.ensure_ready().await.expect("already running must be ok");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_single_stopped_starts_and_returns_ok() {
+        let stopped_json =
+            r#"[{"Name":"podman-machine-default","Running":false}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, stopped_json, ""),
+                )
+                .with_output(
+                    &["podman", "machine", "start", "podman-machine-default"],
+                    output(0, "Machine \"podman-machine-default\" started successfully\n", ""),
+                )
+                .with_output(&["podman", "info"], output(0, "{}", "")),
+            PodmanProbePlatform::Macos,
+        );
+        provider
+            .ensure_ready()
+            .await
+            .expect("single stopped machine should start and become ready");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_no_machines_returns_not_configured_error() {
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, "[]", ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("no machines must fail");
+        assert_eq!(err.code(), "oci_machine_not_configured");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_multiple_stopped_returns_ambiguous_error() {
+        let two_stopped =
+            r#"[{"Name":"machine-a","Running":false},{"Name":"machine-b","Running":false}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, two_stopped, ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("multiple stopped machines must fail");
+        assert_eq!(err.code(), "oci_machine_ambiguous");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_missing_podman_binary_returns_missing_error() {
+        // FakeRunner returns NotFound for any unregistered command, which
+        // run_provider_command maps to OciProviderError::Missing.
+        let provider =
+            PodmanProvider::with_runner(FakeRunner::default(), PodmanProbePlatform::Macos);
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("missing binary must fail");
+        assert_eq!(err.code(), "oci_provider_missing");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_start_succeeds_but_podman_info_fails_returns_timeout() {
+        // With #[cfg(test)] MACHINE_READY_POLL_TIMEOUT = Duration::ZERO, the
+        // first failing `podman info` response immediately triggers timeout.
+        let stopped_json =
+            r#"[{"Name":"podman-machine-default","Running":false}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, stopped_json, ""),
+                )
+                .with_output(
+                    &["podman", "machine", "start", "podman-machine-default"],
+                    output(0, "started\n", ""),
+                )
+                .with_output(&["podman", "info"], output(1, "", "daemon not ready")),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("failing podman info must time out");
+        assert_eq!(err.code(), "oci_machine_ready_timeout");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_linux_delegates_to_probe() {
+        // On Linux, ensure_ready calls probe + require_ready. Native Linux is
+        // always ready, so no machine management is attempted.
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 4.9.0\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(0, "true\n", ""),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+        provider
+            .ensure_ready()
+            .await
+            .expect("linux native podman is always ready");
     }
 }
