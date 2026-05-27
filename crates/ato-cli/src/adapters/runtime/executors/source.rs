@@ -417,10 +417,14 @@ fn apply_host_isolation(
     extra_env.extend(launch_ctx_env);
     if let Some(proxy_env) = proxy::proxy_env_from_env(&[])? {
         extra_env.extend([
-            ("HTTP_PROXY".to_string(), proxy_env.http_proxy),
-            ("HTTPS_PROXY".to_string(), proxy_env.https_proxy),
-            ("ALL_PROXY".to_string(), proxy_env.all_proxy),
-            ("NO_PROXY".to_string(), proxy_env.no_proxy),
+            ("HTTP_PROXY".to_string(), proxy_env.http_proxy.clone()),
+            ("HTTPS_PROXY".to_string(), proxy_env.https_proxy.clone()),
+            ("ALL_PROXY".to_string(), proxy_env.all_proxy.clone()),
+            ("NO_PROXY".to_string(), proxy_env.no_proxy.clone()),
+            ("http_proxy".to_string(), proxy_env.http_proxy),
+            ("https_proxy".to_string(), proxy_env.https_proxy),
+            ("all_proxy".to_string(), proxy_env.all_proxy),
+            ("no_proxy".to_string(), proxy_env.no_proxy),
         ]);
     }
     isolation.apply_to_command(cmd, extra_env);
