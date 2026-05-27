@@ -96,6 +96,10 @@ pub struct ImportPreviewSession {
     pub expires_at_unix_ms: Option<u64>,
     pub readiness_state: String,
     pub cleanup_policy: String,
+    #[serde(default)]
+    pub last_sweep_status: Option<String>,
+    #[serde(default)]
+    pub last_sweep_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +126,15 @@ pub struct ImportPreviewStopResult {
     pub session: ImportPreviewSession,
     pub status: ImportPreviewStopStatus,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPreviewSweepReport {
+    pub active_sessions_kept: usize,
+    pub stale_sessions_stopped: usize,
+    pub stale_sessions_already_gone: usize,
+    pub stale_sessions_failed: usize,
+    pub env_process_groups_stopped: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,6 +596,41 @@ impl ProcessManager {
         Ok(results)
     }
 
+    pub fn sweep_import_preview_sessions(&self, force: bool) -> Result<ImportPreviewSweepReport> {
+        let mut report = ImportPreviewSweepReport::default();
+        let sessions = self.list_import_preview_sessions()?;
+        for session in &sessions {
+            if !import_preview_session_is_stale(&session) {
+                report.active_sessions_kept += 1;
+                continue;
+            }
+
+            match self.stop_import_preview_session(&session.run_session_id, force)? {
+                Some(result) => match result.status {
+                    ImportPreviewStopStatus::Stopped => report.stale_sessions_stopped += 1,
+                    ImportPreviewStopStatus::AlreadyGone => report.stale_sessions_already_gone += 1,
+                    ImportPreviewStopStatus::NotAtoOwned | ImportPreviewStopStatus::Failed => {
+                        report.stale_sessions_failed += 1;
+                        let mut failed = result.session;
+                        failed.updated_at_unix_ms =
+                            now_unix_ms_lossy().unwrap_or(failed.updated_at_unix_ms);
+                        failed.last_sweep_status = Some(result.status.to_string());
+                        failed.last_sweep_error = result.error;
+                        let _ = self.write_import_preview_session(&failed);
+                    }
+                },
+                None => report.stale_sessions_already_gone += 1,
+            }
+        }
+
+        #[cfg(unix)]
+        {
+            report.env_process_groups_stopped = sweep_import_env_process_groups(force, &sessions);
+        }
+
+        Ok(report)
+    }
+
     fn stop_process_tree(&self, info: &ProcessInfo, force: bool) -> Result<bool> {
         let mut stopped = false;
         if is_process_alive(info.pid)
@@ -706,6 +754,12 @@ impl ProcessManager {
                 tracing::debug!(error = %error, "sweep_run_dir_orphans: pid sweep failed");
             }
         }
+        match self.sweep_import_preview_sessions(false) {
+            Ok(import_report) => report.import_preview = import_report,
+            Err(error) => {
+                tracing::debug!(error = %error, "sweep_run_dir_orphans: import preview sweep failed");
+            }
+        }
 
         // Class 2 & 3: orphaned sockets / sock-txt artifacts.
         let entries = match fs::read_dir(&self.run_dir) {
@@ -803,6 +857,7 @@ impl ProcessManager {
 pub struct RunDirSweepReport {
     pub pid_files_removed: usize,
     pub sockets_removed: usize,
+    pub import_preview: ImportPreviewSweepReport,
 }
 
 /// Parse the embedded `<pid>` from a `*.sock` / `*.sock.txt` filename.
@@ -929,6 +984,36 @@ fn process_start_time_matches(pid: i32, expected_start_time_unix_ms: Option<u64>
         return false;
     };
     ato_session_core::process::process_start_time_unix_ms(pid) == Some(expected)
+}
+
+fn import_preview_session_is_stale(session: &ImportPreviewSession) -> bool {
+    if let Some(expires_at) = session.expires_at_unix_ms {
+        if now_unix_ms_lossy().is_some_and(|now| now >= expires_at) {
+            return true;
+        }
+    }
+    if !session.shadow_dir.exists() {
+        return true;
+    }
+    if !is_process_alive(session.owner_pid)
+        || !process_start_time_matches(session.owner_pid, session.owner_process_start_time_unix_ms)
+    {
+        return true;
+    }
+    if !is_process_alive(session.ato_run_pid) {
+        return true;
+    }
+    !process_start_time_matches(
+        session.ato_run_pid,
+        session.ato_run_process_start_time_unix_ms,
+    )
+}
+
+fn now_unix_ms_lossy() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
 }
 
 fn stop_import_preview_session_record(
@@ -1226,7 +1311,9 @@ fn verified_import_preview_process_groups(
         .copied()
         .filter(|pgid| *pgid > 0)
     {
-        if Some(pgid) == ato_run_pgid || process_group_matches_import_preview_session(pgid, session, processes) {
+        if Some(pgid) == ato_run_pgid
+            || process_group_matches_import_preview_session(pgid, session, processes)
+        {
             verified.insert(pgid);
         }
     }
@@ -1266,14 +1353,8 @@ fn process_group_matches_import_preview_session(
     if pgid <= 0 {
         return false;
     }
-    let marker = format!("ATO_IMPORT_SESSION_ID={}", session.run_session_id);
-    let shadow = session.shadow_dir.to_string_lossy();
     processes.iter().any(|process| {
-        process.pgid == pgid
-            && (process.command.contains(&marker)
-                || process.command.contains(shadow.as_ref())
-                || process_current_working_dir(process.pid)
-                    .is_some_and(|cwd| cwd.starts_with(&session.shadow_dir)))
+        process.pgid == pgid && process_matches_import_preview_session_process(process, session)
     })
 }
 
@@ -1309,17 +1390,25 @@ fn process_current_working_dir(pid: i32) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn sweep_import_env_process_groups(force: bool) -> usize {
-    let mut pgids = std::collections::BTreeSet::new();
-    for process in unix_ps_processes() {
-        if process.pgid <= 0 || !command_has_ato_import_env_marker(&process.command) {
-            continue;
-        }
-        if command_is_known_non_target(&process.command) {
-            continue;
-        }
-        pgids.insert(process.pgid);
-    }
+fn process_matches_import_preview_session_process(
+    process: &UnixPsProcess,
+    session: &ImportPreviewSession,
+) -> bool {
+    let marker = format!("ATO_IMPORT_SESSION_ID={}", session.run_session_id);
+    process.command.contains(&marker) || process_references_path(process, &session.shadow_dir)
+}
+
+#[cfg(unix)]
+fn process_references_path(process: &UnixPsProcess, path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    process.command.contains(path_str.as_ref())
+        || process_current_working_dir(process.pid).is_some_and(|cwd| cwd.starts_with(path))
+}
+
+#[cfg(unix)]
+fn sweep_import_env_process_groups(force: bool, sessions: &[ImportPreviewSession]) -> usize {
+    let processes = unix_ps_processes();
+    let pgids = import_preview_env_sweep_candidates(sessions, &processes);
     let grace = if force {
         Duration::from_millis(0)
     } else {
@@ -1332,10 +1421,126 @@ fn sweep_import_env_process_groups(force: bool) -> usize {
 }
 
 #[cfg(unix)]
-fn command_has_ato_import_env_marker(command: &str) -> bool {
-    command.contains("ATO_IMPORT_PROBE_ID=")
-        || command.contains("ATO_IMPORT_SESSION_ID=")
-        || command.contains("ATO_RUN_SESSION_ID=")
+fn import_preview_env_sweep_candidates(
+    sessions: &[ImportPreviewSession],
+    processes: &[UnixPsProcess],
+) -> std::collections::BTreeSet<i32> {
+    let protected_pgids = active_import_preview_process_groups(sessions, processes);
+    let mut pgids = std::collections::BTreeSet::new();
+    for process in processes {
+        if process.pgid <= 0
+            || protected_pgids.contains(&process.pgid)
+            || command_is_known_non_target(&process.command)
+        {
+            continue;
+        }
+        if process_matches_import_preview_env_sweep(process, sessions) {
+            pgids.insert(process.pgid);
+        }
+    }
+    pgids
+}
+
+#[cfg(unix)]
+fn active_import_preview_process_groups(
+    sessions: &[ImportPreviewSession],
+    processes: &[UnixPsProcess],
+) -> std::collections::BTreeSet<i32> {
+    let mut protected = std::collections::BTreeSet::new();
+    for session in sessions
+        .iter()
+        .filter(|session| !import_preview_session_is_stale(session))
+    {
+        protected.extend(
+            session
+                .process_group_ids
+                .iter()
+                .copied()
+                .filter(|pgid| *pgid > 0),
+        );
+        if let Some(pgid) =
+            process_group_id_for_pid(session.ato_run_pid, processes).filter(|pgid| *pgid > 0)
+        {
+            protected.insert(pgid);
+        }
+    }
+    protected
+}
+
+#[cfg(unix)]
+fn process_matches_import_preview_env_sweep(
+    process: &UnixPsProcess,
+    sessions: &[ImportPreviewSession],
+) -> bool {
+    if let Some(session_id) = command_env_marker_value(&process.command, "ATO_IMPORT_SESSION_ID=") {
+        return !sessions.iter().any(|session| {
+            session.run_session_id == session_id && !import_preview_session_is_stale(session)
+        });
+    }
+
+    let references_import_workspace = process_references_import_workspace(process, sessions);
+    if !references_import_workspace {
+        return false;
+    }
+
+    if command_env_marker_value(&process.command, "ATO_IMPORT_PROBE_ID=").is_some() {
+        return !active_session_owns_process(process, sessions);
+    }
+
+    !active_session_owns_process(process, sessions)
+}
+
+#[cfg(unix)]
+fn command_env_marker_value<'a>(command: &'a str, marker: &str) -> Option<&'a str> {
+    command
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix(marker))
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(unix)]
+fn active_session_owns_process(process: &UnixPsProcess, sessions: &[ImportPreviewSession]) -> bool {
+    sessions
+        .iter()
+        .filter(|session| !import_preview_session_is_stale(session))
+        .any(|session| process_matches_import_preview_session_process(process, session))
+}
+
+#[cfg(unix)]
+fn process_references_import_workspace(
+    process: &UnixPsProcess,
+    sessions: &[ImportPreviewSession],
+) -> bool {
+    sessions
+        .iter()
+        .any(|session| process_references_path(process, &session.shadow_dir))
+        || command_mentions_import_workspace(&process.command)
+        || process_current_working_dir(process.pid)
+            .is_some_and(|cwd| path_looks_like_import_workspace(&cwd))
+}
+
+#[cfg(unix)]
+fn command_mentions_import_workspace(command: &str) -> bool {
+    command.contains(".tmp/ato-import/")
+        || command.contains(".tmp\\ato-import\\")
+        || command.contains("/.tmp/ato-import")
+        || command.contains("\\.tmp\\ato-import")
+}
+
+#[cfg(unix)]
+fn path_looks_like_import_workspace(path: &Path) -> bool {
+    let mut saw_tmp = false;
+    for component in path.components() {
+        let component = component.as_os_str().to_string_lossy();
+        if component == ".tmp" {
+            saw_tmp = true;
+            continue;
+        }
+        if saw_tmp && component.starts_with("ato-import") {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -1548,9 +1753,65 @@ mod tests {
     }
 
     #[test]
+    fn sweep_import_preview_sessions_removes_stale_dead_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let pm = ProcessManager {
+            run_dir: run_dir.clone(),
+        };
+        let session = test_import_preview_session("preview-stale", i32::MAX, i32::MAX, false);
+        pm.write_import_preview_session(&session)
+            .expect("write session");
+
+        let report = pm.sweep_import_preview_sessions(false).expect("sweep");
+
+        assert_eq!(report.stale_sessions_already_gone, 1);
+        assert!(pm
+            .read_import_preview_session("preview-stale")
+            .expect("read")
+            .is_none());
+        let _ = fs::remove_dir_all(
+            std::env::current_dir()
+                .expect("cwd")
+                .join(".tmp")
+                .join("test-import-preview-preview-stale"),
+        );
+    }
+
+    #[test]
+    fn sweep_import_preview_sessions_keeps_live_owned_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let pm = ProcessManager {
+            run_dir: run_dir.clone(),
+        };
+        let pid = std::process::id() as i32;
+        let session = test_import_preview_session("preview-live", pid, pid, true);
+        pm.write_import_preview_session(&session)
+            .expect("write session");
+
+        let report = pm.sweep_import_preview_sessions(false).expect("sweep");
+
+        assert_eq!(report.active_sessions_kept, 1);
+        assert!(pm
+            .read_import_preview_session("preview-live")
+            .expect("read")
+            .is_some());
+        let _ = fs::remove_dir_all(
+            std::env::current_dir()
+                .expect("cwd")
+                .join(".tmp")
+                .join("test-import-preview-preview-live"),
+        );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn verified_import_preview_process_groups_require_session_proof_for_saved_pgids() {
-        let mut session = test_import_preview_session("preview-unverified", i32::MAX, i32::MAX, true);
+        let mut session =
+            test_import_preview_session("preview-unverified", i32::MAX, i32::MAX, true);
         session.process_group_ids = vec![777];
         let processes = vec![UnixPsProcess {
             pid: 4242,
@@ -1587,7 +1848,8 @@ mod tests {
 
     #[test]
     fn import_preview_stop_outcome_prefers_unverified_groups_over_stopped() {
-        let session = test_import_preview_session("preview-stop-outcome", i32::MAX, i32::MAX, false);
+        let session =
+            test_import_preview_session("preview-stop-outcome", i32::MAX, i32::MAX, false);
         let result = import_preview_stop_outcome(&session, true, &[777, 888]);
 
         assert_eq!(result.status, ImportPreviewStopStatus::NotAtoOwned);
@@ -1595,6 +1857,59 @@ mod tests {
             result.error.as_deref(),
             Some("recorded process groups could not be verified as Ato-owned: 777, 888")
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_env_sweep_candidates_ignore_run_session_only_marker() {
+        let processes = vec![UnixPsProcess {
+            pid: 4242,
+            pgid: 777,
+            command: "ATO_RUN_SESSION_ID=run-123 python3 server.py".to_string(),
+        }];
+
+        let selected = import_preview_env_sweep_candidates(&[], &processes);
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_env_sweep_candidates_skip_active_import_session_marker() {
+        let mut session = test_import_preview_session(
+            "preview-active-marker",
+            std::process::id() as i32,
+            std::process::id() as i32,
+            true,
+        );
+        session.process_group_ids = vec![888];
+        let processes = vec![UnixPsProcess {
+            pid: 5151,
+            pgid: 888,
+            command: format!(
+                "ATO_IMPORT_SESSION_ID={} python3 {}",
+                session.run_session_id,
+                session.shadow_dir.display()
+            ),
+        }];
+
+        let selected = import_preview_env_sweep_candidates(&[session], &processes);
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn import_preview_env_sweep_candidates_select_missing_import_session_marker() {
+        let processes = vec![UnixPsProcess {
+            pid: 6262,
+            pgid: 999,
+            command: "ATO_IMPORT_SESSION_ID=preview-missing python3 stale_server.py".to_string(),
+        }];
+
+        let selected = import_preview_env_sweep_candidates(&[], &processes);
+
+        assert_eq!(selected.into_iter().collect::<Vec<_>>(), vec![999]);
     }
 
     fn test_import_preview_session(
@@ -1611,10 +1926,7 @@ mod tests {
         if create_shadow_dir {
             fs::create_dir_all(&shadow_dir).expect("shadow dir");
         }
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("unix time")
-            .as_millis() as u64;
+        let now = now_unix_ms_lossy().expect("now");
         ImportPreviewSession {
             run_session_id: id.to_string(),
             owner_kind: "cli".to_string(),
@@ -1638,6 +1950,8 @@ mod tests {
             expires_at_unix_ms: None,
             readiness_state: "ready".to_string(),
             cleanup_policy: "keep_until_explicit_stop".to_string(),
+            last_sweep_status: None,
+            last_sweep_error: None,
         }
     }
 
