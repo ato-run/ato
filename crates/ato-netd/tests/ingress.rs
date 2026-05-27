@@ -120,10 +120,7 @@ async fn http_get(url: &str) -> SimpleResp {
         .expect("http handshake");
     tokio::spawn(conn);
 
-    let path = url
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
+    let path = url.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let req = Request::builder()
         .uri(path)
         .header("host", format!("{host}:{port}"))
@@ -133,12 +130,7 @@ async fn http_get(url: &str) -> SimpleResp {
     let resp = sender.send_request(req).await.expect("send request");
     let status = resp.status().as_u16();
     // Tolerate truncated bodies (upstream-gone-mid-stream scenario).
-    let body = resp
-        .collect()
-        .await
-        .unwrap_or_default()
-        .to_bytes()
-        .to_vec();
+    let body = resp.collect().await.unwrap_or_default().to_bytes().to_vec();
 
     SimpleResp { status, body }
 }
@@ -154,20 +146,18 @@ async fn static_get_byte_for_byte() {
     tokio::spawn(async move {
         while let Ok((stream, _)) = upstream_listener.accept().await {
             let io = TokioIo::new(stream);
-            tokio::spawn(
-                hyper::server::conn::http1::Builder::new().serve_connection(
-                    io,
-                    service_fn(|_req: Request<Incoming>| async {
-                        Ok::<_, hyper::Error>(
-                            http::Response::builder()
-                                .status(200)
-                                .header("content-type", "text/plain")
-                                .body(Full::new(Bytes::from("hello proxy")))
-                                .unwrap(),
-                        )
-                    }),
-                ),
-            );
+            tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                io,
+                service_fn(|_req: Request<Incoming>| async {
+                    Ok::<_, hyper::Error>(
+                        http::Response::builder()
+                            .status(200)
+                            .header("content-type", "text/plain")
+                            .body(Full::new(Bytes::from("hello proxy")))
+                            .unwrap(),
+                    )
+                }),
+            ));
         }
     });
 
@@ -470,15 +460,13 @@ async fn concurrent_routes() {
             while let Ok((stream, _)) = listener.accept().await {
                 let io = TokioIo::new(stream);
                 let body = Full::new(Bytes::from(label));
-                tokio::spawn(
-                    hyper::server::conn::http1::Builder::new().serve_connection(
-                        io,
-                        service_fn(move |_req: Request<Incoming>| {
-                            let body = body.clone();
-                            async move { Ok::<_, hyper::Error>(http::Response::new(body)) }
-                        }),
-                    ),
-                );
+                tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                    io,
+                    service_fn(move |_req: Request<Incoming>| {
+                        let body = body.clone();
+                        async move { Ok::<_, hyper::Error>(http::Response::new(body)) }
+                    }),
+                ));
             }
         });
     }
@@ -516,14 +504,12 @@ async fn restart_returns_same_port() {
     tokio::spawn(async move {
         while let Ok((stream, _)) = upstream_listener.accept().await {
             let io = TokioIo::new(stream);
-            tokio::spawn(
-                hyper::server::conn::http1::Builder::new().serve_connection(
-                    io,
-                    service_fn(|_req: Request<Incoming>| async {
-                        Ok::<_, hyper::Error>(http::Response::new(Full::new(Bytes::from("ok"))))
-                    }),
-                ),
-            );
+            tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                io,
+                service_fn(|_req: Request<Incoming>| async {
+                    Ok::<_, hyper::Error>(http::Response::new(Full::new(Bytes::from("ok"))))
+                }),
+            ));
         }
     });
 
@@ -550,7 +536,10 @@ async fn restart_returns_same_port() {
         .unwrap();
     shutdown_daemon(client2, child2).await;
 
-    assert_eq!(port1, port2, "stable port must persist across daemon restart");
+    assert_eq!(
+        port1, port2,
+        "stable port must persist across daemon restart"
+    );
 }
 
 /// Test 8: re-registering the same key with a different upstream URL
@@ -566,15 +555,13 @@ async fn reregister_same_key_updates_upstream() {
             while let Ok((stream, _)) = listener.accept().await {
                 let io = TokioIo::new(stream);
                 let body = Full::new(Bytes::from(label));
-                tokio::spawn(
-                    hyper::server::conn::http1::Builder::new().serve_connection(
-                        io,
-                        service_fn(move |_req: Request<Incoming>| {
-                            let body = body.clone();
-                            async move { Ok::<_, hyper::Error>(http::Response::new(body)) }
-                        }),
-                    ),
-                );
+                tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                    io,
+                    service_fn(move |_req: Request<Incoming>| {
+                        let body = body.clone();
+                        async move { Ok::<_, hyper::Error>(http::Response::new(body)) }
+                    }),
+                ));
             }
         });
     }
@@ -601,7 +588,10 @@ async fn reregister_same_key_updates_upstream() {
 
     sleep(Duration::from_millis(150)).await;
     let r2 = http_get(&format!("http://127.0.0.1:{port2}/")).await;
-    assert_eq!(r2.body, b"v2", "new upstream must be active after re-register");
+    assert_eq!(
+        r2.body, b"v2",
+        "new upstream must be active after re-register"
+    );
 
     shutdown_daemon(client, child).await;
 }
@@ -618,14 +608,12 @@ async fn deregister_keeps_port_in_allocator() {
     tokio::spawn(async move {
         while let Ok((stream, _)) = upstream_listener.accept().await {
             let io = TokioIo::new(stream);
-            tokio::spawn(
-                hyper::server::conn::http1::Builder::new().serve_connection(
-                    io,
-                    service_fn(|_req: Request<Incoming>| async {
-                        Ok::<_, hyper::Error>(http::Response::new(Full::new(Bytes::from("ok"))))
-                    }),
-                ),
-            );
+            tokio::spawn(hyper::server::conn::http1::Builder::new().serve_connection(
+                io,
+                service_fn(|_req: Request<Incoming>| async {
+                    Ok::<_, hyper::Error>(http::Response::new(Full::new(Bytes::from("ok"))))
+                }),
+            ));
         }
     });
 
@@ -665,4 +653,3 @@ async fn deregister_keeps_port_in_allocator() {
 
     shutdown_daemon(client, child).await;
 }
-

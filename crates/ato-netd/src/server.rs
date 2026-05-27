@@ -216,7 +216,13 @@ async fn dispatch(request: Request, state: &DaemonState) -> Response {
             result: ResponseResult::Empty {},
         },
         Request::RegisterIngress { key, upstream_url } => {
-            match state.ingress().lock().await.register_or_swap(&key, &upstream_url).await {
+            match state
+                .ingress()
+                .lock()
+                .await
+                .register_or_swap(&key, &upstream_url)
+                .await
+            {
                 Ok(info) => Response::Ok {
                     result: ResponseResult::IngressRegistered(info),
                 },

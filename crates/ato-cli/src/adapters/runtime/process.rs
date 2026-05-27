@@ -1226,7 +1226,9 @@ fn verified_import_preview_process_groups(
         .copied()
         .filter(|pgid| *pgid > 0)
     {
-        if Some(pgid) == ato_run_pgid || process_group_matches_import_preview_session(pgid, session, processes) {
+        if Some(pgid) == ato_run_pgid
+            || process_group_matches_import_preview_session(pgid, session, processes)
+        {
             verified.insert(pgid);
         }
     }
@@ -1550,7 +1552,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn verified_import_preview_process_groups_require_session_proof_for_saved_pgids() {
-        let mut session = test_import_preview_session("preview-unverified", i32::MAX, i32::MAX, true);
+        let mut session =
+            test_import_preview_session("preview-unverified", i32::MAX, i32::MAX, true);
         session.process_group_ids = vec![777];
         let processes = vec![UnixPsProcess {
             pid: 4242,
@@ -1587,7 +1590,8 @@ mod tests {
 
     #[test]
     fn import_preview_stop_outcome_prefers_unverified_groups_over_stopped() {
-        let session = test_import_preview_session("preview-stop-outcome", i32::MAX, i32::MAX, false);
+        let session =
+            test_import_preview_session("preview-stop-outcome", i32::MAX, i32::MAX, false);
         let result = import_preview_stop_outcome(&session, true, &[777, 888]);
 
         assert_eq!(result.status, ImportPreviewStopStatus::NotAtoOwned);
