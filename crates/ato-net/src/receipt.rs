@@ -147,6 +147,13 @@ pub enum EgressDecision {
     DenyCidr,
     /// Reserved for future category-based deny rules.
     DenyByCategory,
+    /// The DNS resolver returned an error (NXDOMAIN, timeout, etc.).
+    /// This is an infrastructure failure, not a policy denial — the
+    /// resolver **was** called.
+    ResolveFailure,
+    /// The TCP connect to the upstream failed after policy allowed the
+    /// connection and DNS resolution succeeded.
+    ConnectFailure,
     /// Connection is proxied through the ato-netd egress proxy.
     Proxy,
 }
@@ -227,5 +234,23 @@ mod tests {
         let d = EgressDecision::DenyCidr;
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(json, r#""deny_cidr""#);
+    }
+
+    #[test]
+    fn egress_decision_resolve_failure_serde() {
+        let d = EgressDecision::ResolveFailure;
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#""resolve_failure""#);
+        let back: EgressDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, EgressDecision::ResolveFailure);
+    }
+
+    #[test]
+    fn egress_decision_connect_failure_serde() {
+        let d = EgressDecision::ConnectFailure;
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#""connect_failure""#);
+        let back: EgressDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, EgressDecision::ConnectFailure);
     }
 }
