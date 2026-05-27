@@ -134,23 +134,18 @@ pub fn dispatch(
             // registry cleanup when the OS close event fires.
         }
         WindowsCommand::StopSession { session_id } => {
-            let stop_result = {
-                let registry = cx.global_mut::<SessionRegistry>();
-                registry.stop_oci_session_and_refresh(&session_id)
-            };
-            match stop_result {
-                Ok(true) => crate::window::card_switcher::refresh_session_snapshot(cx),
-                Ok(false) => cx
-                    .global_mut::<SessionRegistry>()
-                    .stop_session_once(&session_id),
-                Err(error) => {
-                    tracing::error!(session_id = %session_id, %error, "ato_windows: OCI stop failed");
-                    crate::window::card_switcher::refresh_session_snapshot(cx);
-                }
-            }
+            // Use the non-blocking stop path for all session kinds.
+            // `stop_session_once` sets process_state to Stopping immediately
+            // and then dispatches the actual stop (ato stop --id / ato stop
+            // --session) on a background thread, keeping the GPUI event loop
+            // and the rest of the Desktop UI responsive even when container
+            // stop is slow or hangs.
+            cx.global_mut::<SessionRegistry>()
+                .stop_session_once(&session_id);
+            crate::window::card_switcher::refresh_session_snapshot(cx);
             tracing::info!(
                 session_id = %session_id,
-                "ato_windows: StopSession dispatched"
+                "ato_windows: StopSession dispatched (non-blocking)"
             );
         }
         WindowsCommand::OpenEndpoint { url } => {

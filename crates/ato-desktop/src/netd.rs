@@ -102,11 +102,35 @@ pub(crate) fn logical_key_for_route(route: &GuestRoute) -> Option<String> {
 // Public registration API
 // ---------------------------------------------------------------------------
 
+/// Normalize an upstream URL so that wildcard bind addresses (`0.0.0.0` and
+/// `[::]`) are replaced with the loopback address `127.0.0.1`.
+///
+/// Reverse proxies and plain TCP clients cannot connect to wildcard addresses.
+/// If the upstream was started with `0.0.0.0:<port>` (e.g. a Docker container
+/// that binds all interfaces), the ingress proxy must reach it via a concrete
+/// address.  We canonicalize to `127.0.0.1` because the upstream is always
+/// a local process.
+pub(crate) fn normalize_upstream_url(url: &str) -> std::borrow::Cow<'_, str> {
+    if url.contains("//0.0.0.0:") || url.contains("//[::]:") || url.contains("//[::]") {
+        let normalized = url
+            .replace("//0.0.0.0:", "//127.0.0.1:")
+            .replace("//[::]:", "//127.0.0.1:")
+            .replace("//[::]/", "//127.0.0.1/");
+        std::borrow::Cow::Owned(normalized)
+    } else {
+        std::borrow::Cow::Borrowed(url)
+    }
+}
+
 /// Register a stable ingress route with `ato-netd` and return the allocated
 /// port. If `ato-netd` is not running, it will be spawned automatically.
 ///
 /// The same `key` always returns the same `stable_port` across restarts
 /// (persisted in `${ATO_HOME}/state/netd/stable_origin_ports.json`).
+///
+/// The `upstream_url` is normalized before registration: wildcard bind
+/// addresses (`0.0.0.0`, `[::]`) are replaced with `127.0.0.1` so the
+/// ato-netd proxy can actually connect to the upstream.
 ///
 /// # Errors
 /// - [`IngressError::PersistedPortTaken`] — the stable port is held by
@@ -114,8 +138,14 @@ pub(crate) fn logical_key_for_route(route: &GuestRoute) -> Option<String> {
 /// - Other variants for binary-not-found, spawn failures, and timeouts.
 #[cfg(unix)]
 pub(crate) fn register_stable_ingress(key: &str, upstream_url: &str) -> Result<u16, IngressError> {
+    let normalized = normalize_upstream_url(upstream_url);
+    tracing::info!(
+        key = %key,
+        upstream_url = %normalized,
+        "registering ato-netd stable ingress"
+    );
     let mut client = ensure_netd_connected()?;
-    match client.register_ingress(key, upstream_url) {
+    match client.register_ingress(key, &normalized) {
         Ok(info) => Ok(info.port),
         Err(ato_net::control::Error::DaemonError { code, message }) => {
             Err(map_daemon_error(key, &code, &message))
@@ -427,6 +457,42 @@ mod tests {
         assert!(
             matches!(err, IngressError::Control(ato_net::control::Error::DaemonError { .. })),
             "non-claimed error should pass through as Control"
+        );
+    }
+
+    #[test]
+    fn normalize_upstream_url_wildcard_ipv4() {
+        assert_eq!(
+            normalize_upstream_url("http://0.0.0.0:8080/"),
+            "http://127.0.0.1:8080/"
+        );
+    }
+
+    #[test]
+    fn normalize_upstream_url_wildcard_ipv6() {
+        assert_eq!(
+            normalize_upstream_url("http://[::]:8080/"),
+            "http://127.0.0.1:8080/"
+        );
+    }
+
+    #[test]
+    fn normalize_upstream_url_loopback_unchanged() {
+        let url = "http://127.0.0.1:8080/foo/bar?q=1";
+        assert_eq!(normalize_upstream_url(url), url);
+    }
+
+    #[test]
+    fn normalize_upstream_url_localhost_unchanged() {
+        let url = "http://localhost:3000/";
+        assert_eq!(normalize_upstream_url(url), url);
+    }
+
+    #[test]
+    fn normalize_upstream_url_preserves_path_and_query() {
+        assert_eq!(
+            normalize_upstream_url("http://0.0.0.0:9000/app/ui?debug=1"),
+            "http://127.0.0.1:9000/app/ui?debug=1"
         );
     }
 }
