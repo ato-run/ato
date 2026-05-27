@@ -18,13 +18,14 @@
 //! - Desktop UX / session replay (deferred).
 //! - Secret values are never stored here.
 
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::adapters::runtime::podman_machine::parse_podman_machine_list;
 
 const OCI_SESSIONS_DIR: &str = "oci-sessions";
 
@@ -394,47 +395,9 @@ pub fn apply_stop_result(store: &OciSessionStore, session_id: &str, result: &Sto
 
 // ── Podman machine helpers ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PodmanMachineStatus {
-    Running { names: Vec<String> },
-    Stopped { names: Vec<String> },
-    NotConfigured,
-    Unavailable { reason: String },
-    Unknown { reason: String },
-}
-
-impl PodmanMachineStatus {
-    pub fn display_status(&self) -> String {
-        match self {
-            Self::Running { names } => format!("running{}", display_machine_names(names)),
-            Self::Stopped { names } => format!("stopped{}", display_machine_names(names)),
-            Self::NotConfigured => "not configured".to_string(),
-            Self::Unavailable { reason } => format!("unavailable ({reason})"),
-            Self::Unknown { reason } => format!("unknown ({reason})"),
-        }
-    }
-
-    pub fn status_label(&self) -> &'static str {
-        match self {
-            Self::Running { .. } => "running",
-            Self::Stopped { .. } => "stopped",
-            Self::NotConfigured => "not_configured",
-            Self::Unavailable { .. } => "unavailable",
-            Self::Unknown { .. } => "unknown",
-        }
-    }
-
-    pub fn machine_names(&self) -> &[String] {
-        match self {
-            Self::Running { names } | Self::Stopped { names } => names,
-            Self::NotConfigured | Self::Unavailable { .. } | Self::Unknown { .. } => &[],
-        }
-    }
-
-    pub fn is_visible(&self) -> bool {
-        !matches!(self, Self::Unavailable { .. } | Self::NotConfigured)
-    }
-}
+// `PodmanMachineStatus` and `parse_podman_machine_list` live in the shared
+// `podman_machine` module and are imported above.
+pub use crate::adapters::runtime::podman_machine::PodmanMachineStatus;
 
 #[derive(Debug)]
 pub struct PodmanMachineStopResult {
@@ -449,14 +412,6 @@ struct MachineCommandOutput {
     success: bool,
     stdout: String,
     stderr: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PodmanMachineListEntry {
-    #[serde(rename = "Name", default)]
-    name: String,
-    #[serde(rename = "Running", default)]
-    running: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -535,16 +490,16 @@ where
 
     let status_before = podman_machine_status_with(&mut status_run);
     let names = match &status_before {
-        PodmanMachineStatus::Running { names } if names.len() == 1 => names.clone(),
-        PodmanMachineStatus::Running { names } => {
-            let running_count = names.len();
+        PodmanMachineStatus::Running { all_names, .. } if all_names.len() == 1 => all_names.clone(),
+        PodmanMachineStatus::Running { all_names, .. } => {
+            let configured_count = all_names.len();
             return PodmanMachineStopResult {
                 status_before,
                 stopped_machines: vec![],
                 errors: vec![],
                 skipped_reason: Some(format!(
-                    "{} running Podman machine(s) present; machine ownership is ambiguous",
-                    running_count
+                    "{} configured Podman machine(s) present; machine ownership is ambiguous",
+                    configured_count
                 )),
             };
         }
@@ -673,51 +628,6 @@ fn is_ato_managed_container(container: &serde_json::Value) -> bool {
                 || label.starts_with("io.ato.execution_id=")
         }),
         _ => false,
-    }
-}
-
-fn parse_podman_machine_list(stdout: &str) -> PodmanMachineStatus {
-    let entries: Vec<PodmanMachineListEntry> = match serde_json::from_str(stdout) {
-        Ok(entries) => entries,
-        Err(err) => {
-            return PodmanMachineStatus::Unknown {
-                reason: format!("podman machine list output was not recognized: {err}"),
-            };
-        }
-    };
-    if entries.is_empty() {
-        return PodmanMachineStatus::NotConfigured;
-    }
-
-    let running_names: Vec<String> = entries
-        .iter()
-        .filter(|entry| entry.running)
-        .map(machine_name)
-        .collect();
-    if !running_names.is_empty() {
-        return PodmanMachineStatus::Running {
-            names: running_names,
-        };
-    }
-
-    PodmanMachineStatus::Stopped {
-        names: entries.iter().map(machine_name).collect(),
-    }
-}
-
-fn machine_name(entry: &PodmanMachineListEntry) -> String {
-    if entry.name.is_empty() {
-        "<unnamed>".to_string()
-    } else {
-        entry.name.clone()
-    }
-}
-
-fn display_machine_names(names: &[String]) -> String {
-    if names.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", names.join(", "))
     }
 }
 
@@ -1309,10 +1219,14 @@ mod tests {
         assert_eq!(
             status,
             PodmanMachineStatus::Running {
-                names: vec!["podman-machine-default".to_string()]
+                running_names: vec!["podman-machine-default".to_string()],
+                all_names: vec!["podman-machine-default".to_string(), "old".to_string(),]
             }
         );
-        assert_eq!(status.display_status(), "running (podman-machine-default)");
+        assert_eq!(
+            status.display_status(),
+            "running (podman-machine-default); configured (podman-machine-default, old)"
+        );
     }
 
     #[test]

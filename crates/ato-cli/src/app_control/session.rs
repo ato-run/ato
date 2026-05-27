@@ -1188,17 +1188,15 @@ pub(super) fn start_orchestration_session_in_process(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
     let oci_provider = DefaultOciProviderSelector.select_provider();
-    // Readiness preflight: surface "podman binary missing", "podman machine
-    // stopped", or "unsupported platform" as a typed error *before* we start
-    // creating networks, pulling images, or running `podman create`. Without
-    // this gate, those conditions only become visible as partial-setup
-    // failures deep inside `execute_until_ready_and_detach`, which is exactly
-    // the "hang from a half-built session" regression #289 is trying to avoid.
+    // Ensure the OCI provider is ready before touching networks or containers.
+    // On macOS/Windows this auto-starts a stopped Podman machine.  Without
+    // this gate, a stopped machine only surfaces as partial-setup failures deep
+    // inside `execute_until_ready_and_detach` (regression #289 / #328).
     runtime_handle
-        .block_on(async { oci_provider.probe().await?.require_ready().map(|_| ()) })
+        .block_on(async { oci_provider.ensure_ready().await })
         .map_err(|err| {
             anyhow::Error::from(err)
-                .context("OCI provider readiness probe failed before session start")
+                .context("OCI provider not ready before session start")
         })?;
     let detached = runtime_handle
         .block_on(
