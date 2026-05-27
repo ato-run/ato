@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 
 use crate::config::{
     CapsuleOpenMode, CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode,
-    ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore,
-    StartupSurface, ThemeConfig, UpdateChannel, WindowCloseBehavior,
+    ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel,
+    OciBackendEngine, SecretStore, SourceBackendEngine, StartupSurface, ThemeConfig, UpdateChannel,
+    WasmBackendEngine, WindowCloseBehavior,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -249,6 +250,11 @@ pub fn settings_snapshot_from_config(config: &DesktopConfig) -> Value {
                 "executionBoundary": setting(config.runtime.execution_boundary, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "unsafePrompt": setting(config.runtime.unsafe_prompt, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "allowUnsafeEnv": setting(config.runtime.allow_unsafe_env, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                "backendEngines": {
+                    "source": setting(config.runtime.backend_engines.source, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                    "oci": setting(config.runtime.backend_engines.oci, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                    "wasm": setting(config.runtime.backend_engines.wasm, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                },
             },
             "sandbox": {
                 "requireNacelle": setting(config.sandbox.require_nacelle, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
@@ -474,6 +480,9 @@ fn patch_global_settings(state: &mut AppState, payload: Value) -> Result<Value, 
         "defaultEgressPolicy",
         "requireNacelle",
         "tailnetSidecar",
+        "sourceEngine",
+        "ociEngine",
+        "wasmEngine",
     ] {
         if patch.get(key).is_some() && !confirmed {
             return Err(SettingsError::ConfirmRequired {
@@ -608,6 +617,46 @@ fn apply_confirmed_global_patch(
         next.sandbox.tailnet_sidecar = value;
         changed.push("tailnetSidecar".to_string());
         *requires_restart = true;
+    }
+    if let Some(value) = patch.get("sourceEngine").and_then(Value::as_str) {
+        next.runtime.backend_engines.source = match value {
+            "nacelle" => SourceBackendEngine::Nacelle,
+            "host" => SourceBackendEngine::Host,
+            _ => {
+                return Err(SettingsError::Validation {
+                    field: "sourceEngine".to_string(),
+                    message: "Expected nacelle or host.".to_string(),
+                })
+            }
+        };
+        changed.push("sourceEngine".to_string());
+        *requires_reload = true;
+    }
+    if let Some(value) = patch.get("ociEngine").and_then(Value::as_str) {
+        next.runtime.backend_engines.oci = match value {
+            "podman" => OciBackendEngine::Podman,
+            _ => {
+                return Err(SettingsError::Validation {
+                    field: "ociEngine".to_string(),
+                    message: "Expected podman. Docker and Youki are not yet supported.".to_string(),
+                })
+            }
+        };
+        changed.push("ociEngine".to_string());
+        *requires_reload = true;
+    }
+    if let Some(value) = patch.get("wasmEngine").and_then(Value::as_str) {
+        next.runtime.backend_engines.wasm = match value {
+            "wasmtime" => WasmBackendEngine::Wasmtime,
+            _ => {
+                return Err(SettingsError::Validation {
+                    field: "wasmEngine".to_string(),
+                    message: "Expected wasmtime.".to_string(),
+                })
+            }
+        };
+        changed.push("wasmEngine".to_string());
+        *requires_reload = true;
     }
     state.update_config(|config| *config = next);
     Ok(())
