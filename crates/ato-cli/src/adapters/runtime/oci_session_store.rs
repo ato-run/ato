@@ -490,16 +490,16 @@ where
 
     let status_before = podman_machine_status_with(&mut status_run);
     let names = match &status_before {
-        PodmanMachineStatus::Running { names } if names.len() == 1 => names.clone(),
-        PodmanMachineStatus::Running { names } => {
-            let running_count = names.len();
+        PodmanMachineStatus::Running { all_names, .. } if all_names.len() == 1 => all_names.clone(),
+        PodmanMachineStatus::Running { all_names, .. } => {
+            let configured_count = all_names.len();
             return PodmanMachineStopResult {
                 status_before,
                 stopped_machines: vec![],
                 errors: vec![],
                 skipped_reason: Some(format!(
-                    "{} running Podman machine(s) present; machine ownership is ambiguous",
-                    running_count
+                    "{} configured Podman machine(s) present; machine ownership is ambiguous",
+                    configured_count
                 )),
             };
         }
@@ -1219,10 +1219,14 @@ mod tests {
         assert_eq!(
             status,
             PodmanMachineStatus::Running {
-                names: vec!["podman-machine-default".to_string()]
+                running_names: vec!["podman-machine-default".to_string()],
+                all_names: vec!["podman-machine-default".to_string(), "old".to_string(),]
             }
         );
-        assert_eq!(status.display_status(), "running (podman-machine-default)");
+        assert_eq!(
+            status.display_status(),
+            "running (podman-machine-default); configured (podman-machine-default, old)"
+        );
     }
 
     #[test]

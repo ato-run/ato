@@ -470,9 +470,9 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
             ));
         }
         match parse_podman_machine_list(&list_out.stdout) {
-            PodmanMachineStatus::Running { names } if names.len() > 1 => {
+            PodmanMachineStatus::Running { all_names, .. } if all_names.len() > 1 => {
                 Err(OciProviderError::MachineAmbiguous {
-                    names: names.join(", "),
+                    names: all_names.join(", "),
                 })
             }
             PodmanMachineStatus::Running { .. } => Ok(()),
@@ -2930,6 +2930,29 @@ mod tests {
             .ensure_ready()
             .await
             .expect_err("multiple running machines must fail");
+        assert_eq!(err.code(), "oci_machine_ambiguous");
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_macos_one_running_one_stopped_returns_ambiguous_error() {
+        let mixed_state =
+            r#"[{"Name":"machine-a","Running":false},{"Name":"machine-b","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, mixed_state, ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("mixed-state machines must fail");
         assert_eq!(err.code(), "oci_machine_ambiguous");
     }
 

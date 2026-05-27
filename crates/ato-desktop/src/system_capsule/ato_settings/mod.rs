@@ -418,52 +418,65 @@ fn collect_podman_diagnostics() -> serde_json::Value {
             "machine": "not_configured",
             "guidance": "No Podman machine found. Run: podman machine init && podman machine start",
         }),
-        Ok(serde_json::Value::Array(machines)) => {
-            let running: Vec<&str> = machines
-                .iter()
-                .filter(|m| m.get("Running").and_then(|v| v.as_bool()).unwrap_or(false))
-                .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
-                .collect();
-            let names: Vec<&str> = machines
-                .iter()
-                .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
-                .collect();
-
-            if running.len() > 1 {
-                serde_json::json!({
-                    "binary": "found",
-                    "machine": "ambiguous",
-                    "machineNames": running,
-                    "guidance": "Multiple running Podman machines found. Choose one or clean up machines before launching OCI capsules.",
-                })
-            } else if !running.is_empty() {
-                serde_json::json!({
-                    "binary": "found",
-                    "machine": "running",
-                    "machineNames": running,
-                    "guidance": null,
-                })
-            } else if names.len() == 1 {
-                serde_json::json!({
-                    "binary": "found",
-                    "machine": "stopped",
-                    "machineNames": names,
-                    "guidance": "Podman machine is stopped. Ato can auto-start it on next OCI launch.",
-                })
-            } else {
-                serde_json::json!({
-                    "binary": "found",
-                    "machine": "ambiguous",
-                    "machineNames": names,
-                    "guidance": "Multiple Podman machines found. Choose one or clean up: podman machine rm",
-                })
-            }
-        }
+        Ok(serde_json::Value::Array(machines)) => podman_diagnostics_from_machine_entries(&machines),
         Ok(_) => serde_json::json!({
             "binary": "found",
             "machine": "unknown",
             "guidance": "Podman machine list returned an unexpected format.",
         }),
+    }
+}
+
+fn podman_diagnostics_from_machine_entries(machines: &[serde_json::Value]) -> serde_json::Value {
+    let running: Vec<&str> = machines
+        .iter()
+        .filter(|m| m.get("Running").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
+        .collect();
+    let names: Vec<&str> = machines
+        .iter()
+        .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
+        .collect();
+
+    if names.len() > 1 {
+        serde_json::json!({
+            "binary": "found",
+            "machine": "ambiguous",
+            "machineNames": names,
+            "guidance": "Multiple Podman machines found. Choose one or clean up: podman machine rm",
+        })
+    } else if running.len() == 1 {
+        serde_json::json!({
+            "binary": "found",
+            "machine": "running",
+            "machineNames": running,
+            "guidance": null,
+        })
+    } else {
+        serde_json::json!({
+            "binary": "found",
+            "machine": "stopped",
+            "machineNames": names,
+            "guidance": "Podman machine is stopped. Ato can auto-start it on next OCI launch.",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::podman_diagnostics_from_machine_entries;
+    use serde_json::json;
+
+    #[test]
+    fn diagnostics_one_running_one_stopped_reports_ambiguous() {
+        let machines = vec![
+            json!({"Name": "machine-a", "Running": false}),
+            json!({"Name": "machine-b", "Running": true}),
+        ];
+        let diagnostics = podman_diagnostics_from_machine_entries(&machines);
+        assert_eq!(diagnostics["machine"], "ambiguous");
+        assert_eq!(diagnostics["machineNames"][0], "machine-a");
+        assert_eq!(diagnostics["machineNames"][1], "machine-b");
     }
 }
 
