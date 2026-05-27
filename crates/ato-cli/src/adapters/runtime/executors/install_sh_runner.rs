@@ -35,6 +35,7 @@ use capsule_core::routing::importer::docker_run_script::{
 use capsule_core::types::OciImageResolution;
 use capsule_core::CapsuleReporter;
 
+use super::launch_context::RuntimeLaunchContext;
 use super::oci_multi_service::execute_service_graph_with_provider;
 use crate::adapters::runtime::oci_provider::{
     DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest,
@@ -430,6 +431,7 @@ pub(crate) async fn execute_install_sh_run_with_provider<P: OciProvider>(
         reporter,
         provider,
         session_meta,
+        &RuntimeLaunchContext::empty(),
     )
     .await
 }

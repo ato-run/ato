@@ -71,8 +71,11 @@ pub fn proxy_env_from_env(extra_no_proxy: &[String]) -> Result<Option<ProxyEnv>>
 /// `http://127.0.0.1:<port>` rather than a `socks5h://` URL.
 pub fn proxy_env_for_http_connect(port: u16, extra_no_proxy: &[String]) -> ProxyEnv {
     let proxy_url = format!("http://127.0.0.1:{port}");
-    let mut entries: Vec<String> =
-        vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+    let mut entries: Vec<String> = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
 
     for entry in extra_no_proxy {
         let trimmed = entry.trim();
@@ -120,9 +123,59 @@ pub fn proxy_env_to_pairs(proxy: &ProxyEnv) -> Vec<(String, String)> {
     ]
 }
 
-/// Apply proxy environment variables to a [`std::process::Command`], including
-/// both uppercase and lowercase variants so that tools that only check one form
-/// are covered.
+/// Build a `ProxyEnv` pointing at the `ato-netd` HTTP CONNECT proxy for use inside
+/// OCI containers.
+///
+/// Unlike [`proxy_env_for_http_connect`] which uses `127.0.0.1`, containers cannot
+/// reach the loopback address of the host.  `host.containers.internal` resolves to
+/// the host gateway via `--add-host=host.containers.internal:host-gateway` and is
+/// the Podman-standard way to reach host services from inside a container.
+///
+/// `extra_no_proxy` should contain all peer service aliases in the orchestration
+/// network so that inter-service traffic stays inside the container network and
+/// does not round-trip through the egress proxy.
+pub fn proxy_env_for_oci_container(port: u16, extra_no_proxy: &[&str]) -> ProxyEnv {
+    let proxy_url = format!("http://host.containers.internal:{port}");
+    let mut entries: Vec<String> = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+
+    for entry in extra_no_proxy {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !entries.iter().any(|existing| existing == trimmed) {
+            entries.push(trimmed.to_string());
+        }
+    }
+
+    ProxyEnv {
+        http_proxy: proxy_url.clone(),
+        https_proxy: proxy_url.clone(),
+        all_proxy: proxy_url,
+        no_proxy: entries.join(","),
+    }
+}
+
+/// The constant `--add-host` entry that allows OCI containers to reach host services.
+pub const OCI_HOST_GATEWAY_ENTRY: &str = "host.containers.internal:host-gateway";
+
+/// The list of 8 proxy variable names (uppercase + lowercase) that must be stripped
+/// from a container env when `egress_proxy = false`.
+pub const PROXY_ENV_KEYS: [&str; 8] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
 pub fn apply_proxy_env(cmd: &mut std::process::Command, proxy: &ProxyEnv) {
     cmd.env("HTTP_PROXY", &proxy.http_proxy)
         .env("HTTPS_PROXY", &proxy.https_proxy)
@@ -264,7 +317,12 @@ mod tests {
         assert!(keys.contains(&"all_proxy"));
         assert!(keys.contains(&"no_proxy"));
         // uppercase and lowercase values must match
-        let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
         assert_eq!(get("HTTP_PROXY"), get("http_proxy"));
         assert_eq!(get("NO_PROXY"), get("no_proxy"));
     }

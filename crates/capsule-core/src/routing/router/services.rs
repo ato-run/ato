@@ -220,6 +220,11 @@ impl ManifestData {
                     .as_ref()
                     .map(|network| network.allow_from.clone())
                     .unwrap_or_default(),
+                egress_proxy: service
+                    .network
+                    .as_ref()
+                    .map(|network| network.egress_proxy)
+                    .unwrap_or(true),
             };
             if name == "main" && runtime.runtime().port.is_some() {
                 network.publish = true;
