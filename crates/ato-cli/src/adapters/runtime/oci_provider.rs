@@ -818,6 +818,10 @@ where
             args.push("--network-alias".into());
             args.push(alias.clone());
         }
+        for host_entry in &request.extra_hosts {
+            args.push("--add-host".into());
+            args.push(host_entry.clone());
+        }
         args.push(request.image.clone());
         args.extend(request.cmd.iter().cloned());
         let output = tokio::process::Command::new("podman")
@@ -2398,6 +2402,7 @@ mod tests {
                 network: None,
                 aliases: Vec::new(),
                 platform: None,
+                extra_hosts: vec![],
             })
             .await
             .expect("create");

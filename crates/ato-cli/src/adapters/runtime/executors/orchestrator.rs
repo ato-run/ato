@@ -637,6 +637,7 @@ async fn launch_service<C: OciRuntimeClient>(
                     network: network_name.map(str::to_string),
                     aliases: service.network.aliases.clone(),
                     platform: None,
+                    extra_hosts: vec![],
                 })
                 .await
                 .with_context(|| {

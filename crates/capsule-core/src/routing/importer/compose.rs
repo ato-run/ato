@@ -389,6 +389,7 @@ impl ComposeImportOutput {
                 aliases: vec![svc.name.clone()],
                 publish: is_published,
                 allow_from: vec![],
+                egress_proxy: true,
             };
 
             let runtime = ResolvedTargetRuntime {
