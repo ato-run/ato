@@ -390,6 +390,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "ato-net",
  "ato-session-core",
  "axoupdater",
  "axum 0.7.9",
