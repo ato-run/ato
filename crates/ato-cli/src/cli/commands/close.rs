@@ -398,6 +398,8 @@ mod tests {
                 expires_at_unix_ms: None,
                 readiness_state: "ready".to_string(),
                 cleanup_policy: "keep_until_explicit_stop".to_string(),
+                last_sweep_status: None,
+                last_sweep_error: None,
             },
             status: ImportPreviewStopStatus::NotAtoOwned,
             error: Some("ownership could not be verified".to_string()),

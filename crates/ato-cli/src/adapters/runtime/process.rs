@@ -631,6 +631,23 @@ impl ProcessManager {
         Ok(report)
     }
 
+    pub fn active_import_preview_session_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<Option<ImportPreviewSession>> {
+        for session in self.list_import_preview_sessions()? {
+            if import_preview_session_is_stale(&session) {
+                continue;
+            }
+            if session.shadow_dir.starts_with(workspace)
+                || workspace.starts_with(&session.shadow_dir)
+            {
+                return Ok(Some(session));
+            }
+        }
+        Ok(None)
+    }
+
     fn stop_process_tree(&self, info: &ProcessInfo, force: bool) -> Result<bool> {
         let mut stopped = false;
         if is_process_alive(info.pid)
@@ -1799,6 +1816,19 @@ mod tests {
             .read_import_preview_session("preview-live")
             .expect("read")
             .is_some());
+        let workspace = std::env::current_dir()
+            .expect("cwd")
+            .join(".tmp")
+            .join("test-import-preview-preview-live");
+        let active = pm
+            .active_import_preview_session_for_workspace(&workspace)
+            .expect("active session");
+        assert_eq!(
+            active
+                .as_ref()
+                .map(|session| session.run_session_id.as_str()),
+            Some("preview-live")
+        );
         let _ = fs::remove_dir_all(
             std::env::current_dir()
                 .expect("cwd")
