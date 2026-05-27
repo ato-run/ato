@@ -488,6 +488,7 @@ name = "ato-netd"
 version = "0.5.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "ato-net",
  "bytes",
  "capsule-core",
@@ -497,6 +498,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
+ "ipnet",
  "serde",
  "serde_json",
  "serial_test",

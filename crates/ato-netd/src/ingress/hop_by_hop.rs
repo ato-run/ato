@@ -133,8 +133,17 @@ mod tests {
             ("keep-alive", "timeout=5"),
         ]);
         scrub_hop_by_hop_ws(&mut headers);
-        assert!(headers.get("upgrade").is_some(), "Upgrade must survive ws scrub");
-        assert!(headers.get("connection").is_some(), "Connection must survive ws scrub");
-        assert!(headers.get("keep-alive").is_none(), "keep-alive must be removed");
+        assert!(
+            headers.get("upgrade").is_some(),
+            "Upgrade must survive ws scrub"
+        );
+        assert!(
+            headers.get("connection").is_some(),
+            "Connection must survive ws scrub"
+        );
+        assert!(
+            headers.get("keep-alive").is_none(),
+            "keep-alive must be removed"
+        );
     }
 }

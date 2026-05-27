@@ -20,11 +20,13 @@ use std::process::ExitCode;
 use clap::Parser;
 
 #[cfg(unix)]
+mod egress;
+#[cfg(unix)]
+mod ingress;
+#[cfg(unix)]
 mod server;
 #[cfg(unix)]
 mod state;
-#[cfg(unix)]
-mod ingress;
 
 /// Command-line surface. Same binary handles two callers:
 ///
