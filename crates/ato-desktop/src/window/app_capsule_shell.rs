@@ -658,6 +658,13 @@ impl AppCapsuleShell {
                 // so the WebView URL is stable across backend restarts.
                 let effective_url = if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
                     let key = ato_net::stable_origin::logical_key_for_handle(&self.handle);
+                    tracing::info!(
+                        handle = %self.handle,
+                        session_id = %session.session_id,
+                        upstream_url = %url,
+                        ingress_key = %key,
+                        "AppCapsuleShell: registering ato-netd stable ingress"
+                    );
                     match crate::netd::register_stable_ingress(&key, &url) {
                         Ok(port) => {
                             self.stable_ingress_key = Some(key);
