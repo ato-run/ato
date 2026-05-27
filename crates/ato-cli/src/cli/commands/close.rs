@@ -16,6 +16,12 @@ pub struct CloseArgs {
     pub force: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportPreviewStopOutcome {
+    Success,
+    Failure,
+}
+
 pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
     let pm = ProcessManager::new()?;
 
@@ -94,7 +100,12 @@ pub fn execute(args: CloseArgs, reporter: Arc<CliReporter>) -> Result<()> {
             }
             Ok(false) => {
                 if let Some(result) = pm.stop_import_preview_session(id, args.force)? {
-                    report_import_preview_stop_result(&result, &reporter)?;
+                    if matches!(
+                        report_import_preview_stop_result(&result, &reporter)?,
+                        ImportPreviewStopOutcome::Failure
+                    ) {
+                        anyhow::bail!("{}", import_preview_stop_failure_message(&result));
+                    }
                 } else if let Some(attempt) = stop_oci_by_id(id, args.force)? {
                     report_oci_stop_attempt(&attempt, &reporter)?;
                 } else {
@@ -176,8 +187,20 @@ fn stop_all_import_preview_sessions(
         "Stopping {} import preview session(s)...",
         results.len()
     )))?;
+    let mut failures = Vec::new();
     for result in &results {
-        report_import_preview_stop_result(result, reporter)?;
+        if matches!(
+            report_import_preview_stop_result(result, reporter)?,
+            ImportPreviewStopOutcome::Failure
+        ) {
+            failures.push(import_preview_stop_failure_message(result));
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "failed to stop import preview session(s): {}",
+            failures.join("; ")
+        );
     }
     Ok(())
 }
@@ -185,29 +208,48 @@ fn stop_all_import_preview_sessions(
 fn report_import_preview_stop_result(
     result: &ImportPreviewStopResult,
     reporter: &Arc<CliReporter>,
-) -> Result<()> {
+) -> Result<ImportPreviewStopOutcome> {
     match result.status {
         ImportPreviewStopStatus::Stopped => {
             futures::executor::block_on(reporter.notify(format!(
                 "✅ Stopped import preview: {}",
                 result.session.run_session_id
             )))?;
+            Ok(ImportPreviewStopOutcome::Success)
         }
         ImportPreviewStopStatus::AlreadyGone => {
             futures::executor::block_on(reporter.warn(format!(
                 "⚠️  Import preview already gone: {}",
                 result.session.run_session_id
             )))?;
+            Ok(ImportPreviewStopOutcome::Success)
         }
         ImportPreviewStopStatus::NotAtoOwned | ImportPreviewStopStatus::Failed => {
-            let detail = result.error.as_deref().unwrap_or("unknown stop failure");
-            futures::executor::block_on(reporter.warn(format!(
-                "❌ Failed to stop import preview {}: {}",
-                result.session.run_session_id, detail
-            )))?;
+            futures::executor::block_on(
+                reporter.warn(import_preview_stop_failure_message(result)),
+            )?;
+            Ok(import_preview_stop_outcome(result.status))
         }
     }
-    Ok(())
+}
+
+fn import_preview_stop_failure_message(result: &ImportPreviewStopResult) -> String {
+    let detail = result.error.as_deref().unwrap_or("unknown stop failure");
+    format!(
+        "❌ Failed to stop import preview {}: {}",
+        result.session.run_session_id, detail
+    )
+}
+
+fn import_preview_stop_outcome(status: ImportPreviewStopStatus) -> ImportPreviewStopOutcome {
+    match status {
+        ImportPreviewStopStatus::Stopped | ImportPreviewStopStatus::AlreadyGone => {
+            ImportPreviewStopOutcome::Success
+        }
+        ImportPreviewStopStatus::NotAtoOwned | ImportPreviewStopStatus::Failed => {
+            ImportPreviewStopOutcome::Failure
+        }
+    }
 }
 
 /// Stop all running OCI sessions (containers + networks).
@@ -334,5 +376,44 @@ mod tests {
             force: true,
         };
         assert!(args.force);
+    }
+
+    #[test]
+    fn import_preview_stop_failure_message_includes_session_and_detail() {
+        let result = ImportPreviewStopResult {
+            session: crate::runtime::process::ImportPreviewSession {
+                run_session_id: "preview-123".to_string(),
+                owner_kind: "desktop".to_string(),
+                owner_pid: 1,
+                owner_process_start_time_unix_ms: None,
+                ato_run_pid: 2,
+                ato_run_process_start_time_unix_ms: None,
+                process_group_ids: vec![],
+                primary_port: None,
+                primary_url: None,
+                shadow_dir: std::path::PathBuf::from(".tmp/shadow"),
+                log_path: std::path::PathBuf::from(".tmp/log"),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+                expires_at_unix_ms: None,
+                readiness_state: "ready".to_string(),
+                cleanup_policy: "keep_until_explicit_stop".to_string(),
+            },
+            status: ImportPreviewStopStatus::NotAtoOwned,
+            error: Some("ownership could not be verified".to_string()),
+        };
+
+        assert_eq!(
+            import_preview_stop_failure_message(&result),
+            "❌ Failed to stop import preview preview-123: ownership could not be verified"
+        );
+    }
+
+    #[test]
+    fn import_preview_stop_outcome_marks_failed_status_as_failure() {
+        assert_eq!(
+            import_preview_stop_outcome(ImportPreviewStopStatus::Failed),
+            ImportPreviewStopOutcome::Failure
+        );
     }
 }
