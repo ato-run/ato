@@ -73,9 +73,10 @@ fn execute_preflight_command(target: String, json: bool) -> Result<()> {
 fn execute_import_preview_sweep_command(force: bool, json: bool) -> Result<()> {
     let process_manager = ProcessManager::new()?;
     let report = process_manager.sweep_import_preview_sessions(force)?;
+    let ok = report.stale_sessions_failed == 0;
     if json {
         let payload = serde_json::json!({
-            "ok": report.stale_sessions_failed == 0,
+            "ok": ok,
             "import_preview": report,
         });
         println!("{payload}");
@@ -89,7 +90,13 @@ fn execute_import_preview_sweep_command(force: bool, json: bool) -> Result<()> {
             report.env_process_groups_stopped
         );
     }
-    Ok(())
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "import-preview sweep reported stale session cleanup failures"
+        ))
+    }
 }
 
 fn execute_consent_command(command: ConsentInternalCommands) -> Result<()> {
