@@ -166,6 +166,29 @@ impl AppCapsuleShell {
                     let _ = prog.send(step);
                 })),
             );
+            // For WebUrl sessions (e.g. OCI/Docker Compose), the CLI returns as
+            // soon as the port is allocated, but the web server inside the
+            // container may still be initializing. Opening the WebView too early
+            // causes a thundering-herd: the browser loads the HTML (via our 503
+            // auto-refresh), then immediately fires ~150 parallel sub-resource
+            // requests that overwhelm the barely-started server → all 503.
+            //
+            // Probe the upstream directly until it returns HTTP 200 (up to 60s).
+            // This keeps the boot wizard at "Connecting to capsule endpoint" while
+            // we wait, and ensures the WebView opens only once the backend is
+            // actually ready to handle concurrent load.
+            if let Ok(ref session) = result {
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    if let Some(ref local_url) = session.local_url {
+                        let upstream =
+                            crate::netd::normalize_upstream_url(local_url).into_owned();
+                        wait_for_upstream_http_ready(
+                            &upstream,
+                            Duration::from_secs(60),
+                        );
+                    }
+                }
+            }
             // If already aborted and the session started, stop it immediately.
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
@@ -807,6 +830,40 @@ impl Render for AppCapsuleShell {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Poll `url` with a direct HTTP GET until it returns 200 or `timeout` elapses.
+///
+/// Used before opening the WebView for `WebUrl` sessions so the browser never
+/// fires its initial burst of parallel sub-resource requests against a server
+/// that is still initialising.  The probe bypasses ato-netd and hits the
+/// upstream directly, so it is unaffected by ingress not-yet-registered state.
+fn wait_for_upstream_http_ready(url: &str, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(500);
+    loop {
+        match ato_session_core::healthcheck::http_get_ok(url, Duration::from_millis(800)) {
+            Ok(true) => {
+                tracing::info!(upstream = %url, "upstream HTTP readiness probe passed");
+                return;
+            }
+            Ok(false) => {
+                tracing::debug!(upstream = %url, "upstream not ready yet, retrying");
+            }
+            Err(ref e) => {
+                tracing::debug!(upstream = %url, error = %e, "upstream probe error, retrying");
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                upstream = %url,
+                timeout_secs = timeout.as_secs(),
+                "upstream readiness probe timed out, opening WebView anyway"
+            );
+            return;
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
 
 fn session_current_url(session: &GuestLaunchSession) -> String {
     let base = session.local_url.as_deref().unwrap_or("about:blank");
