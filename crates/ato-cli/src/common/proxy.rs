@@ -65,11 +65,73 @@ pub fn proxy_env_from_env(extra_no_proxy: &[String]) -> Result<Option<ProxyEnv>>
     Ok(Some(proxy_env_for_socks5(port, extra_no_proxy)))
 }
 
+/// Build a `ProxyEnv` pointing at a local HTTP CONNECT proxy.
+///
+/// Used for `ato-netd` egress proxy injection. All proxy vars point to
+/// `http://127.0.0.1:<port>` rather than a `socks5h://` URL.
+pub fn proxy_env_for_http_connect(port: u16, extra_no_proxy: &[String]) -> ProxyEnv {
+    let proxy_url = format!("http://127.0.0.1:{port}");
+    let mut entries: Vec<String> =
+        vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+
+    for entry in extra_no_proxy {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !entries.iter().any(|existing| existing == trimmed) {
+            entries.push(trimmed.to_string());
+        }
+    }
+
+    if let Ok(existing) = std::env::var("NO_PROXY") {
+        for entry in existing.split(',') {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !entries.iter().any(|existing| existing == trimmed) {
+                entries.push(trimmed.to_string());
+            }
+        }
+    }
+
+    ProxyEnv {
+        http_proxy: proxy_url.clone(),
+        https_proxy: proxy_url.clone(),
+        all_proxy: proxy_url,
+        no_proxy: entries.join(","),
+    }
+}
+
+/// Return all 8 proxy environment variable pairs (uppercase + lowercase) for
+/// injecting into a workload's environment. The caller can pass these directly
+/// to `RuntimeLaunchContext::extend_injected_env`.
+pub fn proxy_env_to_pairs(proxy: &ProxyEnv) -> Vec<(String, String)> {
+    vec![
+        ("HTTP_PROXY".to_string(), proxy.http_proxy.clone()),
+        ("HTTPS_PROXY".to_string(), proxy.https_proxy.clone()),
+        ("ALL_PROXY".to_string(), proxy.all_proxy.clone()),
+        ("NO_PROXY".to_string(), proxy.no_proxy.clone()),
+        ("http_proxy".to_string(), proxy.http_proxy.clone()),
+        ("https_proxy".to_string(), proxy.https_proxy.clone()),
+        ("all_proxy".to_string(), proxy.all_proxy.clone()),
+        ("no_proxy".to_string(), proxy.no_proxy.clone()),
+    ]
+}
+
+/// Apply proxy environment variables to a [`std::process::Command`], including
+/// both uppercase and lowercase variants so that tools that only check one form
+/// are covered.
 pub fn apply_proxy_env(cmd: &mut std::process::Command, proxy: &ProxyEnv) {
     cmd.env("HTTP_PROXY", &proxy.http_proxy)
         .env("HTTPS_PROXY", &proxy.https_proxy)
         .env("ALL_PROXY", &proxy.all_proxy)
-        .env("NO_PROXY", &proxy.no_proxy);
+        .env("NO_PROXY", &proxy.no_proxy)
+        .env("http_proxy", &proxy.http_proxy)
+        .env("https_proxy", &proxy.https_proxy)
+        .env("all_proxy", &proxy.all_proxy)
+        .env("no_proxy", &proxy.no_proxy);
 }
 
 #[cfg(test)]
@@ -78,6 +140,10 @@ pub fn extend_env_map(env: &mut HashMap<String, String>, proxy: &ProxyEnv) {
     env.insert("HTTPS_PROXY".to_string(), proxy.https_proxy.clone());
     env.insert("ALL_PROXY".to_string(), proxy.all_proxy.clone());
     env.insert("NO_PROXY".to_string(), proxy.no_proxy.clone());
+    env.insert("http_proxy".to_string(), proxy.http_proxy.clone());
+    env.insert("https_proxy".to_string(), proxy.https_proxy.clone());
+    env.insert("all_proxy".to_string(), proxy.all_proxy.clone());
+    env.insert("no_proxy".to_string(), proxy.no_proxy.clone());
 }
 
 #[cfg(test)]
@@ -158,5 +224,59 @@ mod tests {
         assert!(parts.contains(&"127.0.0.1"));
         assert!(parts.contains(&"existing.com"));
         assert!(parts.contains(&"new.entry.com"));
+    }
+
+    #[test]
+    fn http_connect_proxy_env_builds_expected_url() {
+        let env = proxy_env_for_http_connect(8888, &[]);
+        assert_eq!(env.http_proxy, "http://127.0.0.1:8888");
+        assert_eq!(env.https_proxy, "http://127.0.0.1:8888");
+        assert_eq!(env.all_proxy, "http://127.0.0.1:8888");
+        let parts: Vec<&str> = env.no_proxy.split(',').collect();
+        assert!(parts.contains(&"localhost"));
+        assert!(parts.contains(&"127.0.0.1"));
+        assert!(parts.contains(&"::1"));
+    }
+
+    #[test]
+    fn http_connect_proxy_env_merges_extra_no_proxy() {
+        let extras = vec!["internal.corp".to_string(), "127.0.0.1".to_string()];
+        let env = proxy_env_for_http_connect(9999, &extras);
+        let parts: Vec<&str> = env.no_proxy.split(',').collect();
+        assert!(parts.contains(&"internal.corp"));
+        // dedup: 127.0.0.1 should appear exactly once
+        let count = parts.iter().filter(|p| **p == "127.0.0.1").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn proxy_env_to_pairs_returns_8_entries() {
+        let env = proxy_env_for_http_connect(7777, &[]);
+        let pairs = proxy_env_to_pairs(&env);
+        assert_eq!(pairs.len(), 8);
+        let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"HTTP_PROXY"));
+        assert!(keys.contains(&"HTTPS_PROXY"));
+        assert!(keys.contains(&"ALL_PROXY"));
+        assert!(keys.contains(&"NO_PROXY"));
+        assert!(keys.contains(&"http_proxy"));
+        assert!(keys.contains(&"https_proxy"));
+        assert!(keys.contains(&"all_proxy"));
+        assert!(keys.contains(&"no_proxy"));
+        // uppercase and lowercase values must match
+        let get = |k: &str| pairs.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("HTTP_PROXY"), get("http_proxy"));
+        assert_eq!(get("NO_PROXY"), get("no_proxy"));
+    }
+
+    #[test]
+    fn extend_env_map_inserts_lowercase_variants() {
+        let env = proxy_env_for_socks5(3128, &[]);
+        let mut map = HashMap::new();
+        extend_env_map(&mut map, &env);
+        assert_eq!(map.get("HTTP_PROXY"), Some(&env.http_proxy));
+        assert_eq!(map.get("http_proxy"), Some(&env.http_proxy));
+        assert_eq!(map.get("NO_PROXY"), Some(&env.no_proxy));
+        assert_eq!(map.get("no_proxy"), Some(&env.no_proxy));
     }
 }
