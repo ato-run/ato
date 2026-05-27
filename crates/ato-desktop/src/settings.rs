@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 
 use crate::config::{
     CapsuleOpenMode, CapsulePolicyOverride, ContentWindowPresentation, ControlBarMode,
-    ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel, SecretStore,
-    StartupSurface, ThemeConfig, UpdateChannel, WindowCloseBehavior,
+    ControlBarPosition, DesktopConfig, EgressPolicyMode, LanguageConfig, LogLevel,
+    OciBackendEngine, SecretStore, SourceBackendEngine, StartupSurface, ThemeConfig, UpdateChannel,
+    WasmBackendEngine, WindowCloseBehavior,
 };
 use crate::state::{ActivityTone, AppState, GuestRoute, HostPanelRoute, PaneId, PaneSurface};
 use crate::ui::share::web_favicon_origin;
@@ -249,6 +250,11 @@ pub fn settings_snapshot_from_config(config: &DesktopConfig) -> Value {
                 "executionBoundary": setting(config.runtime.execution_boundary, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "unsafePrompt": setting(config.runtime.unsafe_prompt, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
                 "allowUnsafeEnv": setting(config.runtime.allow_unsafe_env, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                "backendEngines": {
+                    "source": setting(config.runtime.backend_engines.source, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                    "oci": setting(config.runtime.backend_engines.oci, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                    "wasm": setting(config.runtime.backend_engines.wasm, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
+                },
             },
             "sandbox": {
                 "requireNacelle": setting(config.sandbox.require_nacelle, SettingSource::Global, false, None, SafetyClass::ConfirmBeforeCommit),
@@ -474,6 +480,9 @@ fn patch_global_settings(state: &mut AppState, payload: Value) -> Result<Value, 
         "defaultEgressPolicy",
         "requireNacelle",
         "tailnetSidecar",
+        "sourceEngine",
+        "ociEngine",
+        "wasmEngine",
     ] {
         if patch.get(key).is_some() && !confirmed {
             return Err(SettingsError::ConfirmRequired {
@@ -609,7 +618,57 @@ fn apply_confirmed_global_patch(
         changed.push("tailnetSidecar".to_string());
         *requires_restart = true;
     }
+    apply_backend_engine_patch(&mut next, patch, changed, requires_reload)?;
     state.update_config(|config| *config = next);
+    Ok(())
+}
+
+fn apply_backend_engine_patch(
+    config: &mut DesktopConfig,
+    patch: &Value,
+    changed: &mut Vec<String>,
+    requires_reload: &mut bool,
+) -> Result<(), SettingsError> {
+    if let Some(value) = patch.get("sourceEngine").and_then(Value::as_str) {
+        config.runtime.backend_engines.source = match value {
+            "nacelle" => SourceBackendEngine::Nacelle,
+            "host" => SourceBackendEngine::Host,
+            _ => {
+                return Err(SettingsError::Validation {
+                    field: "sourceEngine".to_string(),
+                    message: "Expected nacelle or host.".to_string(),
+                })
+            }
+        };
+        changed.push("sourceEngine".to_string());
+        *requires_reload = true;
+    }
+    if let Some(value) = patch.get("ociEngine").and_then(Value::as_str) {
+        config.runtime.backend_engines.oci = match value {
+            "podman" => OciBackendEngine::Podman,
+            _ => {
+                return Err(SettingsError::Validation {
+                    field: "ociEngine".to_string(),
+                    message: "Expected podman. Docker and Youki are not yet supported.".to_string(),
+                })
+            }
+        };
+        changed.push("ociEngine".to_string());
+        *requires_reload = true;
+    }
+    if let Some(value) = patch.get("wasmEngine").and_then(Value::as_str) {
+        config.runtime.backend_engines.wasm = match value {
+            "wasmtime" => WasmBackendEngine::Wasmtime,
+            _ => {
+                return Err(SettingsError::Validation {
+                    field: "wasmEngine".to_string(),
+                    message: "Expected wasmtime.".to_string(),
+                })
+            }
+        };
+        changed.push("wasmEngine".to_string());
+        *requires_reload = true;
+    }
     Ok(())
 }
 
@@ -1024,6 +1083,47 @@ pub fn patch_config_for_capsule(
     request_id: Option<&str>,
 ) -> Value {
     let mut changed = Vec::new();
+    let mut requires_reload = false;
+
+    const ENGINE_KEYS: &[&str] = &["sourceEngine", "ociEngine", "wasmEngine"];
+    if let Some(engine_key) = ENGINE_KEYS.iter().find(|&&key| patch.get(key).is_some()) {
+        let confirmed = patch
+            .get("confirmed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !confirmed {
+            let err = SettingsError::ConfirmRequired {
+                field: (*engine_key).to_string(),
+                message:
+                    "This setting affects execution or connectivity and must be confirmed before commit."
+                        .to_string(),
+            };
+            return json!({
+                "ok": false,
+                "requestId": request_id,
+                "error": err.to_json(),
+                "changedKeys": [],
+                "appliesOnNextLaunch": false,
+                "requiresReload": false,
+                "requiresRestart": false,
+            });
+        }
+        let mut next = config.clone();
+        if let Err(err) =
+            apply_backend_engine_patch(&mut next, patch, &mut changed, &mut requires_reload)
+        {
+            return json!({
+                "ok": false,
+                "requestId": request_id,
+                "error": err.to_json(),
+                "changedKeys": [],
+                "appliesOnNextLaunch": false,
+                "requiresReload": false,
+                "requiresRestart": false,
+            });
+        }
+        *config = next;
+    }
 
     // General
     if let Some(v) = patch.get("theme").and_then(Value::as_str) {
@@ -1088,6 +1188,7 @@ pub fn patch_config_for_capsule(
         "requestId": request_id,
         "changedKeys": changed,
         "appliesOnNextLaunch": applies_on_next_launch,
+        "requiresReload": requires_reload,
         "requiresRestart": false,
     })
 }
@@ -1210,7 +1311,10 @@ pub fn secrets_snapshot_from_store(store: &SecretStore) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ControlBarMode, ControlBarPosition, DesktopConfig, StartupSurface};
+    use crate::config::{
+        ControlBarMode, ControlBarPosition, DesktopConfig, OciBackendEngine, SourceBackendEngine,
+        StartupSurface, WasmBackendEngine,
+    };
 
     fn default_config() -> DesktopConfig {
         DesktopConfig::default()
@@ -1458,5 +1562,77 @@ mod tests {
         assert_eq!(config.desktop.window_close_behavior, original);
         let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
         assert!(!changed.contains(&"windowCloseBehavior".to_string()));
+    }
+
+    #[test]
+    fn patch_config_for_capsule_source_engine_requires_confirmation() {
+        let mut config = default_config();
+        let original = config.runtime.backend_engines.source;
+        let patch = serde_json::json!({"sourceEngine": "host"});
+        let resp = patch_config_for_capsule(&mut config, &patch, Some("req-engine"));
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["requestId"], "req-engine");
+        assert_eq!(resp["error"]["type"], "confirm_required");
+        assert_eq!(resp["error"]["field"], "sourceEngine");
+        assert_eq!(config.runtime.backend_engines.source, original);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_invalid_oci_engine_returns_validation_error() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"ociEngine": "docker", "confirmed": true});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["type"], "validation_error");
+        assert_eq!(resp["error"]["field"], "ociEngine");
+        assert_eq!(config.runtime.backend_engines.oci, OciBackendEngine::Podman);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_invalid_engine_patch_does_not_partially_apply() {
+        let mut config = default_config();
+        let patch =
+            serde_json::json!({"sourceEngine": "host", "ociEngine": "docker", "confirmed": true});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["type"], "validation_error");
+        assert_eq!(
+            config.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle
+        );
+        assert_eq!(config.runtime.backend_engines.oci, OciBackendEngine::Podman);
+    }
+
+    #[test]
+    fn patch_config_for_capsule_engine_change_updates_config_and_reload_flag() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"sourceEngine": "host", "confirmed": true});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        let changed: Vec<String> = serde_json::from_value(resp["changedKeys"].clone()).unwrap();
+        assert_eq!(resp["ok"], true);
+        assert_eq!(
+            config.runtime.backend_engines.source,
+            SourceBackendEngine::Host
+        );
+        assert!(changed.contains(&"sourceEngine".to_string()));
+        assert_eq!(resp["requiresReload"], true);
+
+        let snapshot = settings_snapshot_from_config(&config);
+        assert_eq!(
+            snapshot["resolved"]["runtime"]["backendEngines"]["source"]["declared"],
+            "host"
+        );
+    }
+
+    #[test]
+    fn patch_config_for_capsule_wasm_engine_updates_config() {
+        let mut config = default_config();
+        let patch = serde_json::json!({"wasmEngine": "wasmtime", "confirmed": true});
+        let resp = patch_config_for_capsule(&mut config, &patch, None);
+        assert_eq!(resp["ok"], true);
+        assert_eq!(
+            config.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
     }
 }
