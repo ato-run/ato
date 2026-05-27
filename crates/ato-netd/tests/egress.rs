@@ -163,7 +163,10 @@ async fn connect_happy_path() {
     let proxy_port = report.egress_proxy_port.expect("egress_proxy_port");
 
     let (status, mut stream) = send_connect(proxy_port, &authority).await;
-    assert_eq!(status, 200, "CONNECT should return 200 Connection established");
+    assert_eq!(
+        status, 200,
+        "CONNECT should return 200 Connection established"
+    );
 
     // Send some data through the tunnel — the echo server sends it back.
     let payload = b"hello egress proxy";
@@ -171,10 +174,7 @@ async fn connect_happy_path() {
 
     let mut echo_buf = vec![0u8; payload.len()];
     stream.read_exact(&mut echo_buf).await.unwrap();
-    assert_eq!(
-        echo_buf, payload,
-        "echoed data must match sent payload"
-    );
+    assert_eq!(echo_buf, payload, "echoed data must match sent payload");
 }
 
 /// 50 concurrent CONNECT tunnels — no cross-talk, all succeed.
@@ -204,7 +204,10 @@ async fn concurrent_50_connects() {
             stream.write_all(&payload).await.unwrap();
             let mut echo_buf = vec![0u8; 16];
             stream.read_exact(&mut echo_buf).await.unwrap();
-            assert_eq!(echo_buf, payload, "connection {i}: echo mismatch (cross-talk?)");
+            assert_eq!(
+                echo_buf, payload,
+                "connection {i}: echo mismatch (cross-talk?)"
+            );
         }));
     }
 

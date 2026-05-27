@@ -319,7 +319,11 @@ async fn write_error_response(
     target: &str,
     port: u16,
 ) -> anyhow::Result<()> {
-    let status_text = if status == 403 { "Forbidden" } else { "Bad Gateway" };
+    let status_text = if status == 403 {
+        "Forbidden"
+    } else {
+        "Bad Gateway"
+    };
     let body = serde_json::json!({
         "error": format!("connection to {target}:{port} denied"),
         "stage": stage,
@@ -456,12 +460,24 @@ mod tests {
             let addrs_v4 = self
                 .addrs
                 .iter()
-                .filter_map(|a| if let IpAddr::V4(v) = a { Some(*v) } else { None })
+                .filter_map(|a| {
+                    if let IpAddr::V4(v) = a {
+                        Some(*v)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             let addrs_v6 = self
                 .addrs
                 .iter()
-                .filter_map(|a| if let IpAddr::V6(v) = a { Some(*v) } else { None })
+                .filter_map(|a| {
+                    if let IpAddr::V6(v) = a {
+                        Some(*v)
+                    } else {
+                        None
+                    }
+                })
                 .collect();
             Ok(ResolvedRecord {
                 name: "test".to_string(),
@@ -510,8 +526,7 @@ mod tests {
         let echo_port = start_echo_server().await;
         let upstream_addr: IpAddr = "127.0.0.1".parse().unwrap();
 
-        let (resolver, _counter) =
-            FakeResolver::returning(vec![upstream_addr]);
+        let (resolver, _counter) = FakeResolver::returning(vec![upstream_addr]);
         let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
 
         let policy = Arc::new(EgressPolicy::permissive());
@@ -531,13 +546,10 @@ mod tests {
         assert_eq!(status, 200, "expected 200 Connection established");
 
         // Receipt must be available before relay (not after close).
-        let receipt = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            receipt_rx.recv(),
-        )
-        .await
-        .expect("receipt timed out")
-        .expect("channel closed");
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
 
         assert_eq!(receipt.decision, EgressDecision::Allow);
         assert_eq!(receipt.stage, "connect");
@@ -556,9 +568,7 @@ mod tests {
         let (resolver, call_count) = FakeResolver::returning(vec![]);
         let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
 
-        let policy = Arc::new(
-            EgressPolicy::permissive().with_hostname_deny("denied.test"),
-        );
+        let policy = Arc::new(EgressPolicy::permissive().with_hostname_deny("denied.test"));
         let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -580,13 +590,10 @@ mod tests {
         );
 
         // Receipt must report hostname stage.
-        let receipt = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            receipt_rx.recv(),
-        )
-        .await
-        .expect("receipt timed out")
-        .expect("channel closed");
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
 
         assert_eq!(receipt.decision, EgressDecision::DenyHost);
         assert_eq!(receipt.stage, "hostname");
@@ -599,10 +606,8 @@ mod tests {
         let (resolver, _) = FakeResolver::returning(vec![private_ip]);
         let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
 
-        let policy = Arc::new(
-            EgressPolicy::permissive()
-                .with_cidr_deny("192.168.0.0/16".parse().unwrap()),
-        );
+        let policy =
+            Arc::new(EgressPolicy::permissive().with_cidr_deny("192.168.0.0/16".parse().unwrap()));
         let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -616,13 +621,10 @@ mod tests {
         let (status, _) = send_connect(proxy_addr, "rebind.test:443").await;
         assert_eq!(status, 403, "expected 403 Forbidden for CIDR deny");
 
-        let receipt = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            receipt_rx.recv(),
-        )
-        .await
-        .expect("receipt timed out")
-        .expect("channel closed");
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
 
         assert_eq!(receipt.decision, EgressDecision::DenyCidr);
         assert_eq!(receipt.stage, "cidr");
@@ -679,13 +681,10 @@ mod tests {
         assert_eq!(status, 502, "expected 502 when upstream TCP connect fails");
 
         // Receipt stage should be "connect".
-        let receipt = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            receipt_rx.recv(),
-        )
-        .await
-        .expect("receipt timed out")
-        .expect("channel closed");
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
 
         assert_eq!(receipt.stage, "connect");
     }

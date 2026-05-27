@@ -62,11 +62,7 @@ pub struct DnsResolutionRecord {
 
 impl DnsResolutionRecord {
     /// Construct a success record from a [`ResolvedRecord`] plus timing.
-    pub fn from_resolved(
-        record: &ResolvedRecord,
-        queried_at_unix: u64,
-        latency_ms: u32,
-    ) -> Self {
+    pub fn from_resolved(record: &ResolvedRecord, queried_at_unix: u64, latency_ms: u32) -> Self {
         Self {
             name: record.name.clone(),
             cname_chain: record.cname_chain.clone(),

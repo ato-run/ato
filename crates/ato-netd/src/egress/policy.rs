@@ -156,8 +156,7 @@ mod tests {
 
     #[test]
     fn cidr_deny_blocks_matching_ip() {
-        let p = EgressPolicy::permissive()
-            .with_cidr_deny("192.168.0.0/16".parse().unwrap());
+        let p = EgressPolicy::permissive().with_cidr_deny("192.168.0.0/16".parse().unwrap());
         let private: IpAddr = "192.168.1.1".parse().unwrap();
         let public: IpAddr = "8.8.8.8".parse().unwrap();
         assert_eq!(p.check_addr(private), PolicyDecision::DenyCidr);

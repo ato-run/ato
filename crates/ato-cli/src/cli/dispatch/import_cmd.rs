@@ -1042,7 +1042,8 @@ fn run_shadow_workspace_keep_alive(
             &log_path,
         ));
     }
-    let stored_session = match process_manager.read_import_preview_session(&session.run_session_id) {
+    let stored_session = match process_manager.read_import_preview_session(&session.run_session_id)
+    {
         Ok(Some(stored_session)) => stored_session,
         Ok(None) => {
             let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
