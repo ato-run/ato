@@ -217,9 +217,7 @@ pub(crate) enum OciProviderError {
     #[error("OCI cleanup operation '{operation}' failed: {message}")]
     OciCleanupFailed { operation: String, message: String },
 
-    #[error(
-        "Podman machine is not configured. Run: podman machine init && podman machine start"
-    )]
+    #[error("Podman machine is not configured. Run: podman machine init && podman machine start")]
     MachineNotConfigured,
 
     #[error(
@@ -229,12 +227,18 @@ pub(crate) enum OciProviderError {
     MachineAmbiguous { names: String },
 
     #[error("Failed to start Podman machine '{machine_name}': {reason}")]
-    MachineStartFailed { machine_name: String, reason: String },
+    MachineStartFailed {
+        machine_name: String,
+        reason: String,
+    },
 
     #[error(
         "Podman machine '{machine_name}' did not become ready within {elapsed_secs}s after start"
     )]
-    MachineReadyTimeout { machine_name: String, elapsed_secs: u64 },
+    MachineReadyTimeout {
+        machine_name: String,
+        elapsed_secs: u64,
+    },
 }
 
 impl OciProviderError {
@@ -460,9 +464,17 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
             &["machine", "list", "--format", "json"],
         )?;
         if !list_out.success() {
-            return Err(command_failed("podman machine list --format json", list_out));
+            return Err(command_failed(
+                "podman machine list --format json",
+                list_out,
+            ));
         }
         match parse_podman_machine_list(&list_out.stdout) {
+            PodmanMachineStatus::Running { names } if names.len() > 1 => {
+                Err(OciProviderError::MachineAmbiguous {
+                    names: names.join(", "),
+                })
+            }
             PodmanMachineStatus::Running { .. } => Ok(()),
             PodmanMachineStatus::NotConfigured => Err(OciProviderError::MachineNotConfigured),
             PodmanMachineStatus::Stopped { names } if names.len() > 1 => {
@@ -500,13 +512,12 @@ impl<R: OciCommandRunner + Send + Sync> PodmanProvider<R> {
         // Poll `podman info` until the machine daemon is up.
         let start = std::time::Instant::now();
         loop {
-            let info_out = self
-                .runner
-                .run("podman", &["info"])
-                .map_err(|err| OciProviderError::ProbeFailed {
+            let info_out = self.runner.run("podman", &["info"]).map_err(|err| {
+                OciProviderError::ProbeFailed {
                     provider: "podman",
                     message: format!("podman info poll: {err}"),
-                })?;
+                }
+            })?;
             if info_out.success() {
                 return Ok(());
             }
@@ -2806,8 +2817,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_ready_macos_already_running_returns_ok() {
-        let machine_json =
-            r#"[{"Name":"podman-machine-default","Running":true}]"#;
+        let machine_json = r#"[{"Name":"podman-machine-default","Running":true}]"#;
         let provider = PodmanProvider::with_runner(
             FakeRunner::default()
                 .with_output(
@@ -2820,13 +2830,15 @@ mod tests {
                 ),
             PodmanProbePlatform::Macos,
         );
-        provider.ensure_ready().await.expect("already running must be ok");
+        provider
+            .ensure_ready()
+            .await
+            .expect("already running must be ok");
     }
 
     #[tokio::test]
     async fn ensure_ready_macos_single_stopped_starts_and_returns_ok() {
-        let stopped_json =
-            r#"[{"Name":"podman-machine-default","Running":false}]"#;
+        let stopped_json = r#"[{"Name":"podman-machine-default","Running":false}]"#;
         let provider = PodmanProvider::with_runner(
             FakeRunner::default()
                 .with_output(
@@ -2839,7 +2851,11 @@ mod tests {
                 )
                 .with_output(
                     &["podman", "machine", "start", "podman-machine-default"],
-                    output(0, "Machine \"podman-machine-default\" started successfully\n", ""),
+                    output(
+                        0,
+                        "Machine \"podman-machine-default\" started successfully\n",
+                        "",
+                    ),
                 )
                 .with_output(&["podman", "info"], output(0, "{}", "")),
             PodmanProbePlatform::Macos,
@@ -2895,6 +2911,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_ready_macos_multiple_running_returns_ambiguous_error() {
+        let two_running =
+            r#"[{"Name":"machine-a","Running":true},{"Name":"machine-b","Running":true}]"#;
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(0, two_running, ""),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+        let err = provider
+            .ensure_ready()
+            .await
+            .expect_err("multiple running machines must fail");
+        assert_eq!(err.code(), "oci_machine_ambiguous");
+    }
+
+    #[tokio::test]
     async fn ensure_ready_missing_podman_binary_returns_missing_error() {
         // FakeRunner returns NotFound for any unregistered command, which
         // run_provider_command maps to OciProviderError::Missing.
@@ -2911,8 +2950,7 @@ mod tests {
     async fn ensure_ready_start_succeeds_but_podman_info_fails_returns_timeout() {
         // With #[cfg(test)] MACHINE_READY_POLL_TIMEOUT = Duration::ZERO, the
         // first failing `podman info` response immediately triggers timeout.
-        let stopped_json =
-            r#"[{"Name":"podman-machine-default","Running":false}]"#;
+        let stopped_json = r#"[{"Name":"podman-machine-default","Running":false}]"#;
         let provider = PodmanProvider::with_runner(
             FakeRunner::default()
                 .with_output(

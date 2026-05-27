@@ -429,7 +429,14 @@ fn collect_podman_diagnostics() -> serde_json::Value {
                 .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
                 .collect();
 
-            if !running.is_empty() {
+            if running.len() > 1 {
+                serde_json::json!({
+                    "binary": "found",
+                    "machine": "ambiguous",
+                    "machineNames": running,
+                    "guidance": "Multiple running Podman machines found. Choose one or clean up machines before launching OCI capsules.",
+                })
+            } else if !running.is_empty() {
                 serde_json::json!({
                     "binary": "found",
                     "machine": "running",
