@@ -12,8 +12,13 @@ use serde::Deserialize;
 /// and for deciding which machine to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PodmanMachineStatus {
-    /// At least one machine is running.  Only running machine names are listed.
-    Running { names: Vec<String> },
+    /// At least one machine is running.
+    Running {
+        /// Running machine names.
+        running_names: Vec<String>,
+        /// All configured machine names, including stopped ones.
+        all_names: Vec<String>,
+    },
     /// One or more machines are configured but none are running.
     Stopped { names: Vec<String> },
     /// No machines are configured (`podman machine list` returned an empty array).
@@ -28,7 +33,20 @@ pub enum PodmanMachineStatus {
 impl PodmanMachineStatus {
     pub fn display_status(&self) -> String {
         match self {
-            Self::Running { names } => format!("running{}", display_machine_names(names)),
+            Self::Running {
+                running_names,
+                all_names,
+            } if running_names == all_names => {
+                format!("running{}", display_machine_names(running_names))
+            }
+            Self::Running {
+                running_names,
+                all_names,
+            } => format!(
+                "running{}; configured{}",
+                display_machine_names(running_names),
+                display_machine_names(all_names)
+            ),
             Self::Stopped { names } => format!("stopped{}", display_machine_names(names)),
             Self::NotConfigured => "not configured".to_string(),
             Self::Unavailable { reason } => format!("unavailable ({reason})"),
@@ -48,7 +66,8 @@ impl PodmanMachineStatus {
 
     pub fn machine_names(&self) -> &[String] {
         match self {
-            Self::Running { names } | Self::Stopped { names } => names,
+            Self::Running { all_names, .. } => all_names,
+            Self::Stopped { names } => names,
             Self::NotConfigured | Self::Unavailable { .. } | Self::Unknown { .. } => &[],
         }
     }
@@ -86,15 +105,15 @@ pub(crate) fn parse_podman_machine_list(stdout: &str) -> PodmanMachineStatus {
         .filter(|entry| entry.running)
         .map(machine_display_name)
         .collect();
+    let all_names: Vec<String> = entries.iter().map(machine_display_name).collect();
     if !running_names.is_empty() {
         return PodmanMachineStatus::Running {
-            names: running_names,
+            running_names,
+            all_names,
         };
     }
 
-    PodmanMachineStatus::Stopped {
-        names: entries.iter().map(machine_display_name).collect(),
-    }
+    PodmanMachineStatus::Stopped { names: all_names }
 }
 
 pub(crate) fn machine_display_name(entry: &PodmanMachineListEntry) -> String {
@@ -130,7 +149,8 @@ mod tests {
         assert_eq!(
             status,
             PodmanMachineStatus::Running {
-                names: vec!["podman-machine-default".to_string()]
+                running_names: vec!["podman-machine-default".to_string()],
+                all_names: vec!["podman-machine-default".to_string()],
             }
         );
     }
@@ -148,16 +168,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_multiple_machines_one_running() {
+    fn parse_multiple_machines_one_running_preserves_all_machine_names() {
         let json = r#"[{"Name":"a","Running":false},{"Name":"b","Running":true}]"#;
         let status = parse_podman_machine_list(json);
-        // Only running names appear; stopped ones are omitted from the Running variant.
         assert_eq!(
             status,
             PodmanMachineStatus::Running {
-                names: vec!["b".to_string()]
+                running_names: vec!["b".to_string()],
+                all_names: vec!["a".to_string(), "b".to_string()]
             }
         );
+        assert_eq!(status.display_status(), "running (b); configured (a, b)");
     }
 
     #[test]
