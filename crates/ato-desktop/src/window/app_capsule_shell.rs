@@ -359,6 +359,15 @@ impl AppCapsuleShell {
                     let _ = prog.send(step);
                 })),
             );
+            if let Ok(ref session) = result {
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    if let Some(ref local_url) = session.local_url {
+                        let upstream =
+                            crate::netd::normalize_upstream_url(local_url).into_owned();
+                        wait_for_upstream_http_ready(&upstream, Duration::from_secs(60));
+                    }
+                }
+            }
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
                     let sid = session.session_id.clone();
@@ -837,7 +846,7 @@ impl Render for AppCapsuleShell {
 /// fires its initial burst of parallel sub-resource requests against a server
 /// that is still initialising.  The probe bypasses ato-netd and hits the
 /// upstream directly, so it is unaffected by ingress not-yet-registered state.
-fn wait_for_upstream_http_ready(url: &str, timeout: Duration) {
+pub(crate) fn wait_for_upstream_http_ready(url: &str, timeout: Duration) {
     let deadline = std::time::Instant::now() + timeout;
     let poll_interval = Duration::from_millis(500);
     loop {
