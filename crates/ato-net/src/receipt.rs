@@ -109,11 +109,6 @@ impl DnsResolutionRecord {
 // ── NetworkEgressDecision ─────────────────────────────────────────────────────
 
 /// Outcome of one egress policy check for an outbound connection attempt.
-///
-/// This is a placeholder for Slice E (#300), which will implement the full
-/// HTTP CONNECT egress proxy and policy engine.  The struct is defined here
-/// in Slice D so receipt consumers can name the type without a
-/// source-incompatible change later.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NetworkEgressDecision {
     /// Target hostname or IP.
@@ -133,6 +128,12 @@ pub struct NetworkEgressDecision {
 
     /// Wall-clock timestamp (Unix seconds) at the point of the decision.
     pub decided_at_unix: u64,
+
+    /// The pipeline stage at which the decision was reached:
+    /// `"hostname"` (deny before DNS), `"dns"` (resolver failure),
+    /// `"cidr"` (IP blocked after resolve), `"connect"` (TCP failure
+    /// or allowed connection).
+    pub stage: String,
 }
 
 /// The outcome of an egress policy check.
@@ -141,8 +142,15 @@ pub struct NetworkEgressDecision {
 pub enum EgressDecision {
     /// Connection is allowed to proceed.
     Allow,
-    /// Connection is blocked by policy.
-    Deny,
+    /// Connection is blocked because the hostname matched a deny rule.
+    /// The resolver is **not** called when this decision is reached —
+    /// no DNS leak on deny.
+    DenyHost,
+    /// Connection is blocked because a resolved IP fell inside a denied
+    /// CIDR range (DNS-rebinding protection).
+    DenyCidr,
+    /// Reserved for future category-based deny rules.
+    DenyByCategory,
     /// Connection is proxied through the ato-netd egress proxy.
     Proxy,
 }
@@ -197,22 +205,31 @@ mod tests {
         let decision = NetworkEgressDecision {
             target: "api.example.com".to_string(),
             port: 443,
-            protocol: "https".to_string(),
+            protocol: "tcp".to_string(),
             decision: EgressDecision::Allow,
             resolved_addr: Some("1.2.3.4".parse().unwrap()),
             decided_at_unix: 1_700_000_001,
+            stage: "connect".to_string(),
         };
         let event = NetworkReceiptEvent::EgressDecision(decision);
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"kind\":\"egress_decision\""));
+        assert!(json.contains("\"stage\":\"connect\""));
         let back: NetworkReceiptEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, event);
     }
 
     #[test]
-    fn egress_decision_deny_serde() {
-        let d = EgressDecision::Deny;
+    fn egress_decision_deny_host_serde() {
+        let d = EgressDecision::DenyHost;
         let json = serde_json::to_string(&d).unwrap();
-        assert_eq!(json, r#""deny""#);
+        assert_eq!(json, r#""deny_host""#);
+    }
+
+    #[test]
+    fn egress_decision_deny_cidr_serde() {
+        let d = EgressDecision::DenyCidr;
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(json, r#""deny_cidr""#);
     }
 }

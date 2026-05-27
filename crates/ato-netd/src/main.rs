@@ -25,6 +25,8 @@ mod server;
 mod state;
 #[cfg(unix)]
 mod ingress;
+#[cfg(unix)]
+mod egress;
 
 /// Command-line surface. Same binary handles two callers:
 ///

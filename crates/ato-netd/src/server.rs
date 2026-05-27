@@ -5,10 +5,12 @@
 //! request-response per line.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ato_net::control::{
     ErrorPayload, ListenerInfo, Request, Response, ResponseResult, StatusReport,
 };
+use ato_net::resolver::SystemResolver;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
@@ -85,6 +87,16 @@ impl Daemon {
         info!(socket = %socket_path.display(), "ato-netd: control socket bound");
 
         let state = DaemonState::new(ato_home).await?;
+
+        // Start the egress CONNECT proxy using the system DNS resolver.
+        // Failure here is a hard startup error — the daemon is not useful
+        // without an egress proxy for slice E+.
+        let resolver = Arc::new(
+            SystemResolver::new()
+                .map_err(|e| anyhow::anyhow!("failed to create system resolver: {e}"))?,
+        );
+        state.init_egress(resolver).await?;
+
         Ok(Self {
             listener,
             socket_path: socket_path.clone(),
@@ -131,6 +143,7 @@ impl Daemon {
         }
 
         // Gracefully drain all ingress connections before exit.
+        state.shutdown_egress().await;
         state.shutdown_ingress().await;
 
         info!(socket = %socket_path.display(), "ato-netd: daemon exiting cleanly");
@@ -230,11 +243,13 @@ async fn build_status_report(state: &DaemonState) -> StatusReport {
         .into_iter()
         .map(|(key, port)| ListenerInfo { key, port })
         .collect();
+    let egress_proxy_port = state.egress_port().await;
     StatusReport {
         version: env!("CARGO_PKG_VERSION").to_string(),
         pid: std::process::id(),
         uptime_secs: state.uptime_secs(),
         listeners,
+        egress_proxy_port,
     }
 }
 

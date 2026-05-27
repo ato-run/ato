@@ -122,6 +122,11 @@ pub struct StatusReport {
     /// populated by **B** (ingress), **E** (egress CONNECT), etc.
     #[serde(default)]
     pub listeners: Vec<ListenerInfo>,
+    /// Port the egress HTTP CONNECT proxy is listening on, if running.
+    /// Added in slice **E** (#300). Absent in older daemons; defaults
+    /// to `None` via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_proxy_port: Option<u16>,
 }
 
 /// Description of an ingress listener owned by the running daemon.
@@ -513,6 +518,7 @@ mod tests {
                 pid: 12345,
                 uptime_secs: 7,
                 listeners: vec![],
+                egress_proxy_port: None,
             }),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -605,6 +611,7 @@ mod tests {
                     pid: 99,
                     uptime_secs: 3,
                     listeners: vec![],
+                    egress_proxy_port: None,
                 }),
             };
             let handle = spawn_fake_daemon(&path, resp);
