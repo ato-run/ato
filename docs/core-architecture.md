@@ -67,8 +67,9 @@ it: they describe the launch envelope that is about to run.
 
 - the public execution handle is `ato-cli`; `nacelle` is internal plumbing
 - manifest and lock resolution MUST happen before engine execution
-- engine discovery MUST prefer explicit / configured paths and MUST NOT fall back
-  to PATH search
+- the canonical `discover_nacelle()` path disables PATH fallback; other
+  nacelle-resolution paths (`resolve_nacelle_binary`, `find_nacelle_binary`)
+  may fall back to PATH as a last resort
 - `capsule-core` is the contract layer for manifest shape, routing, and
   execution identity
 - `ato-desktop` is a consumer of session / receipt metadata, not the source of
