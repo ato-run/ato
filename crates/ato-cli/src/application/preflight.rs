@@ -132,7 +132,13 @@ where
     S: OciProviderSelector,
 {
     let provider = selector.select_provider();
-    evaluate_oci_provider_readiness(provider.probe().await, mode, requirements)
+    // Auto-start a stopped machine (macOS/Windows) or verify binary is present (Linux).
+    // Any ensure_ready failure is treated the same as a not-ready probe result so that
+    // BestEffort callers still get OciProviderReadinessOutcome::NotReady rather than Err.
+    match provider.ensure_ready().await {
+        Err(err) => oci_provider_readiness_failure(mode, err),
+        Ok(()) => evaluate_oci_provider_readiness(provider.probe().await, mode, requirements),
+    }
 }
 
 fn evaluate_oci_provider_readiness(
