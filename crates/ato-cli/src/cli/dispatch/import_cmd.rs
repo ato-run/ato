@@ -197,22 +197,146 @@ impl Drop for ImportWorkspace {
 enum ImportWorkspaceCleanupOutcome {
     Removed,
     SkippedActive { run_session_id: String },
+    SkippedOpenProcess { pid_or_pgid: String, reason: String },
+    SkippedUnknown { reason: String },
     AlreadyGone,
 }
 
 fn cleanup_import_workspace_root(root: &Path) -> Result<ImportWorkspaceCleanupOutcome> {
+    cleanup_import_workspace_root_with(
+        root,
+        |workspace| {
+            let process_manager = ProcessManager::new()?;
+            Ok(process_manager
+                .active_import_preview_session_for_workspace(workspace)?
+                .map(|session| session.run_session_id))
+        },
+        workspace_open_process_guard,
+    )
+}
+
+fn cleanup_import_workspace_root_with<SessionGuard, OpenGuard>(
+    root: &Path,
+    session_guard: SessionGuard,
+    open_guard: OpenGuard,
+) -> Result<ImportWorkspaceCleanupOutcome>
+where
+    SessionGuard: FnOnce(&Path) -> Result<Option<String>>,
+    OpenGuard: FnOnce(&Path) -> Result<Option<WorkspaceOpenProcess>>,
+{
     if !root.exists() {
         return Ok(ImportWorkspaceCleanupOutcome::AlreadyGone);
     }
-    if let Ok(process_manager) = ProcessManager::new() {
-        if let Some(session) = process_manager.active_import_preview_session_for_workspace(root)? {
-            return Ok(ImportWorkspaceCleanupOutcome::SkippedActive {
-                run_session_id: session.run_session_id,
+
+    match session_guard(root) {
+        Ok(Some(run_session_id)) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedActive { run_session_id });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedUnknown {
+                reason: error.to_string(),
             });
         }
     }
+
+    match open_guard(root) {
+        Ok(Some(open_process)) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedOpenProcess {
+                pid_or_pgid: open_process.pid_or_pgid,
+                reason: open_process.reason,
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedUnknown {
+                reason: error.to_string(),
+            });
+        }
+    }
+
     fs::remove_dir_all(root).with_context(|| format!("failed to remove {}", root.display()))?;
     Ok(ImportWorkspaceCleanupOutcome::Removed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceOpenProcess {
+    pid_or_pgid: String,
+    reason: String,
+}
+
+#[cfg(unix)]
+fn workspace_open_process_guard(root: &Path) -> Result<Option<WorkspaceOpenProcess>> {
+    workspace_open_process_guard_with(root, &process_rows(), process_current_working_dir_with_lsof)
+}
+
+#[cfg(not(unix))]
+fn workspace_open_process_guard(_root: &Path) -> Result<Option<WorkspaceOpenProcess>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn workspace_open_process_guard_with<F>(
+    root: &Path,
+    rows: &[ProcessRow],
+    cwd_lookup: F,
+) -> Result<Option<WorkspaceOpenProcess>>
+where
+    F: Fn(i32) -> Result<Option<PathBuf>>,
+{
+    let workspace = root.display().to_string();
+    for row in rows {
+        if row.command.contains(&workspace) {
+            return Ok(Some(WorkspaceOpenProcess {
+                pid_or_pgid: format!("pid:{}", row.pid),
+                reason: format!("command references {}", root.display()),
+            }));
+        }
+
+        if cwd_lookup(row.pid)?
+            .as_ref()
+            .is_some_and(|cwd| cwd.starts_with(root))
+        {
+            return Ok(Some(WorkspaceOpenProcess {
+                pid_or_pgid: format!("pid:{}", row.pid),
+                reason: format!("cwd is under {}", root.display()),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn process_current_working_dir_with_lsof(pid: i32) -> Result<Option<PathBuf>> {
+    if pid <= 0 {
+        return Ok(None);
+    }
+
+    let output = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
+        .output()
+        .with_context(|| format!("failed to execute lsof for pid {}", pid))?;
+
+    if !output.status.success() {
+        if output.stdout.is_empty() {
+            return Ok(None);
+        }
+        return Err(anyhow::anyhow!(
+            "lsof failed for pid {} with status {}",
+            pid,
+            output.status
+        ));
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix('n') {
+            if !path.is_empty() {
+                return Ok(Some(PathBuf::from(path)));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
@@ -1870,6 +1994,7 @@ fn source_tree_hash_from_files(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn normalizes_supported_github_inputs() {
@@ -1893,6 +2018,107 @@ mod tests {
         let error = normalize_github_import_input("capsule://store/foo/bar")
             .expect_err("capsule scheme rejected");
         assert!(error.to_string().contains("capsule:// imports"));
+    }
+
+    #[test]
+    fn cleanup_import_workspace_root_skips_active_session() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let outcome = cleanup_import_workspace_root_with(
+            &workspace,
+            |_| Ok(Some("preview-123".to_string())),
+            |_| Ok(None),
+        )
+        .expect("cleanup outcome");
+
+        assert_eq!(
+            outcome,
+            ImportWorkspaceCleanupOutcome::SkippedActive {
+                run_session_id: "preview-123".to_string()
+            }
+        );
+        assert!(workspace.exists());
+    }
+
+    #[test]
+    fn cleanup_import_workspace_root_removes_when_no_guards_match() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("shadow")).expect("workspace");
+
+        let outcome = cleanup_import_workspace_root_with(&workspace, |_| Ok(None), |_| Ok(None))
+            .expect("cleanup outcome");
+
+        assert_eq!(outcome, ImportWorkspaceCleanupOutcome::Removed);
+        assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn cleanup_import_workspace_root_skips_when_session_guard_fails() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let outcome = cleanup_import_workspace_root_with(
+            &workspace,
+            |_| Err(anyhow::anyhow!("session store unavailable")),
+            |_| Ok(None),
+        )
+        .expect("cleanup outcome");
+
+        assert_eq!(
+            outcome,
+            ImportWorkspaceCleanupOutcome::SkippedUnknown {
+                reason: "session store unavailable".to_string()
+            }
+        );
+        assert!(workspace.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_open_process_guard_detects_command_reference() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let rows = vec![ProcessRow {
+            pid: 4242,
+            ppid: 1,
+            pgid: 4242,
+            command: format!("python3 {}", workspace.display()),
+        }];
+
+        let open_process = workspace_open_process_guard_with(&workspace, &rows, |_| Ok(None))
+            .expect("guard result")
+            .expect("open process");
+
+        assert_eq!(open_process.pid_or_pgid, "pid:4242");
+        assert!(open_process.reason.contains("command references"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_open_process_guard_detects_cwd_reference() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let shadow = workspace.join("shadow");
+        fs::create_dir_all(&shadow).expect("workspace");
+        let rows = vec![ProcessRow {
+            pid: 5151,
+            ppid: 1,
+            pgid: 5151,
+            command: "python3 server.py".to_string(),
+        }];
+
+        let open_process =
+            workspace_open_process_guard_with(&workspace, &rows, |_| Ok(Some(shadow.clone())))
+                .expect("guard result")
+                .expect("open process");
+
+        assert_eq!(open_process.pid_or_pgid, "pid:5151");
+        assert!(open_process.reason.contains("cwd is under"));
     }
 
     #[test]
