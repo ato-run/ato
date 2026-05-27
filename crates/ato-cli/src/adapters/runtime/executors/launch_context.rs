@@ -92,6 +92,17 @@ impl RuntimeLaunchContext {
         self
     }
 
+    /// Extend the injected environment with additional key-value pairs,
+    /// recording each as [`EnvOrigin::ManifestStatic`]. Takes `&mut self`
+    /// so callers that already hold a prepared context can patch it in-place.
+    pub fn extend_injected_env(&mut self, env: impl IntoIterator<Item = (String, String)>) {
+        for (key, value) in env {
+            self.injected_env_origins
+                .insert(key.clone(), EnvOrigin::ManifestStatic);
+            self.injected_env.insert(key, value);
+        }
+    }
+
     pub fn with_injected_mounts(mut self, mounts: Vec<InjectedMount>) -> Self {
         self.injected_mounts.extend(mounts);
         self

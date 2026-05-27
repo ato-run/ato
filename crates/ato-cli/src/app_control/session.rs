@@ -719,10 +719,28 @@ pub(super) fn start_runtime_session(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "prepare_session_execution");
     let PreparedSessionExecution {
-        prepared,
+        mut prepared,
         dep_contracts,
     } = prepare_session_execution(plan, raw_manifest)?;
     timer.finish_ok();
+
+    #[cfg(unix)]
+    {
+        match crate::common::netd::ensure_egress_proxy() {
+            Ok(egress_port) => {
+                let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
+                prepared
+                    .launch_ctx
+                    .extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                tracing::debug!(egress_port, "ato-netd egress proxy injected into session launch context");
+            }
+            Err(crate::common::netd::EgressProxyError::NotSupported) => {}
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context("failed to start ato-netd egress proxy for session"));
+            }
+        }
+    }
 
     let session_web_port = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         if plan.execution_port().is_some() || runtime_overrides::override_port(None).is_some() {
@@ -1121,6 +1139,26 @@ pub(super) fn start_orchestration_session_in_process(
         ))
         .map_err(|err| err.context("failed to set up dependency contracts for session start"))?;
     timer.finish_ok();
+
+    #[cfg(unix)]
+    {
+        match crate::common::netd::ensure_egress_proxy() {
+            Ok(egress_port) => {
+                let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
+                launch_ctx
+                    .extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                tracing::debug!(
+                    egress_port,
+                    "ato-netd egress proxy injected into orchestration session launch context"
+                );
+            }
+            Err(crate::common::netd::EgressProxyError::NotSupported) => {}
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context("failed to start ato-netd egress proxy for orchestration session"));
+            }
+        }
+    }
 
     // Step 2: [services] orchestration in detach mode. The detach API runs
     // ServicePhaseCoordinator (the same one foreground `ato run` uses) and
@@ -2866,6 +2904,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
     if stopped && session_path.exists() {
         fs::remove_file(&session_path)
             .with_context(|| format!("failed to remove session file {}", session_path.display()))?;
+        crate::common::netd::try_shutdown_if_last_session();
     }
 
     if json {

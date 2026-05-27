@@ -475,6 +475,24 @@ impl SyncClient {
         }
     }
 
+    /// Send a `Status` request and parse the response.
+    pub fn status(&mut self) -> Result<StatusReport, Error> {
+        match self.call(Request::Status)? {
+            ResponseResult::Status(s) => Ok(s),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected StatusReport, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Send a `Shutdown` request. Consumes the client because the
+    /// connection is expected to close shortly after the ack.
+    pub fn shutdown(mut self) -> Result<(), Error> {
+        let _ = self.call(Request::Shutdown)?;
+        Ok(())
+    }
+
     /// Low-level request/response helper.
     pub fn call(&mut self, request: Request) -> Result<ResponseResult, Error> {
         use std::io::{BufRead, Write};
