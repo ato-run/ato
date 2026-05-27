@@ -173,20 +173,12 @@ impl AppCapsuleShell {
             // auto-refresh), then immediately fires ~150 parallel sub-resource
             // requests that overwhelm the barely-started server → all 503.
             //
-            // Probe the upstream directly until it returns HTTP 200 (up to 60s).
-            // This keeps the boot wizard at "Connecting to capsule endpoint" while
-            // we wait, and ensures the WebView opens only once the backend is
-            // actually ready to handle concurrent load.
+            // Probe the upstream directly until it responds to HTTP (up to 60s),
+            // checking the abort flag on every iteration so a cancelled launch
+            // exits within ~500 ms.
             if let Ok(ref session) = result {
                 if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    if let Some(ref local_url) = session.local_url {
-                        let upstream =
-                            crate::netd::normalize_upstream_url(local_url).into_owned();
-                        wait_for_upstream_http_ready(
-                            &upstream,
-                            Duration::from_secs(60),
-                        );
-                    }
+                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
                 }
             }
             // If already aborted and the session started, stop it immediately.
@@ -361,11 +353,7 @@ impl AppCapsuleShell {
             );
             if let Ok(ref session) = result {
                 if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    if let Some(ref local_url) = session.local_url {
-                        let upstream =
-                            crate::netd::normalize_upstream_url(local_url).into_owned();
-                        wait_for_upstream_http_ready(&upstream, Duration::from_secs(60));
-                    }
+                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
                 }
             }
             if abort_clone.load(Ordering::Acquire) {
@@ -498,6 +486,11 @@ impl AppCapsuleShell {
                     None,
                 )
             });
+            if let Ok(ref session) = result {
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+                }
+            }
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
                     let sid = session.session_id.clone();
@@ -840,35 +833,72 @@ impl Render for AppCapsuleShell {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-/// Poll `url` with a direct HTTP GET until it returns 200 or `timeout` elapses.
+/// Outcome returned by [`wait_for_session_upstream_ready`].
+#[derive(Debug, PartialEq)]
+pub(crate) enum ProbeOutcome {
+    /// Upstream answered HTTP within the timeout.
+    Ready,
+    /// Timeout elapsed without a successful probe.
+    TimedOut,
+    /// The `abort` flag was set; the probe stopped early.
+    Aborted,
+}
+
+/// Probe the upstream for a `WebUrl` session until it responds to HTTP, the
+/// `abort` flag fires, or `timeout` elapses.
 ///
-/// Used before opening the WebView for `WebUrl` sessions so the browser never
-/// fires its initial burst of parallel sub-resource requests against a server
-/// that is still initialising.  The probe bypasses ato-netd and hits the
-/// upstream directly, so it is unaffected by ingress not-yet-registered state.
-pub(crate) fn wait_for_upstream_http_ready(url: &str, timeout: Duration) {
+/// **Probe URL selection** (first wins):
+///   1. `session.healthcheck_url` — a dedicated health endpoint if present.
+///   2. `session.local_url` + `frontend_url_path()` — the URL the WebView will open.
+///   3. `session.local_url` — bare upstream base.
+///
+/// **"Ready" criterion:** any valid HTTP response (2xx / 3xx / 4xx all count).
+/// The purpose is "server process is up and speaking HTTP", not "request is
+/// functionally successful". A 302 redirect to `/auth` or a 401 Unauthorized
+/// both confirm the server is running; only connection-refused / timeout means
+/// it is not yet ready.
+///
+/// The loop checks `abort` before every poll iteration so cancelled launches
+/// stop within one `poll_interval` (≈ 500 ms) rather than blocking for the
+/// full timeout.
+pub(crate) fn wait_for_session_upstream_ready(
+    session: &GuestLaunchSession,
+    abort: &AtomicBool,
+    timeout: Duration,
+) -> ProbeOutcome {
+    let probe_url = if let Some(ref hc) = session.healthcheck_url {
+        crate::netd::normalize_upstream_url(hc).into_owned()
+    } else {
+        let base = session.local_url.as_deref().unwrap_or("about:blank");
+        let with_path = match session.frontend_url_path() {
+            Some(path) => format!("{}{}", base.trim_end_matches('/'), path),
+            None => base.to_string(),
+        };
+        crate::netd::normalize_upstream_url(&with_path).into_owned()
+    };
+
     let deadline = std::time::Instant::now() + timeout;
     let poll_interval = Duration::from_millis(500);
+
+    tracing::debug!(probe_url = %probe_url, "starting upstream readiness probe");
+
     loop {
-        match ato_session_core::healthcheck::http_get_ok(url, Duration::from_millis(800)) {
-            Ok(true) => {
-                tracing::info!(upstream = %url, "upstream HTTP readiness probe passed");
-                return;
-            }
-            Ok(false) => {
-                tracing::debug!(upstream = %url, "upstream not ready yet, retrying");
-            }
-            Err(ref e) => {
-                tracing::debug!(upstream = %url, error = %e, "upstream probe error, retrying");
-            }
+        if abort.load(Ordering::Acquire) {
+            tracing::debug!(probe_url = %probe_url, "upstream probe aborted");
+            return ProbeOutcome::Aborted;
         }
+        if ato_session_core::healthcheck::http_is_responsive(&probe_url, Duration::from_millis(800)) {
+            tracing::info!(probe_url = %probe_url, "upstream HTTP readiness probe passed");
+            return ProbeOutcome::Ready;
+        }
+        tracing::debug!(probe_url = %probe_url, "upstream not ready yet, retrying");
         if std::time::Instant::now() >= deadline {
             tracing::warn!(
-                upstream = %url,
+                probe_url = %probe_url,
                 timeout_secs = timeout.as_secs(),
                 "upstream readiness probe timed out, opening WebView anyway"
             );
-            return;
+            return ProbeOutcome::TimedOut;
         }
         std::thread::sleep(poll_interval);
     }
