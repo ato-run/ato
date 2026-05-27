@@ -732,7 +732,11 @@ pub(super) fn start_runtime_session(
                 prepared
                     .launch_ctx
                     .extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
-                tracing::debug!(egress_port, "ato-netd egress proxy injected into session launch context");
+                prepared.launch_ctx.set_egress_proxy_port(egress_port);
+                tracing::debug!(
+                    egress_port,
+                    "ato-netd egress proxy injected into session launch context"
+                );
             }
             Err(crate::common::netd::EgressProxyError::NotSupported) => {}
             Err(err) => {
@@ -1145,8 +1149,8 @@ pub(super) fn start_orchestration_session_in_process(
         match crate::common::netd::ensure_egress_proxy() {
             Ok(egress_port) => {
                 let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
-                launch_ctx
-                    .extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                launch_ctx.extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                launch_ctx.set_egress_proxy_port(egress_port);
                 tracing::debug!(
                     egress_port,
                     "ato-netd egress proxy injected into orchestration session launch context"
@@ -5201,6 +5205,7 @@ mod tests {
                 aliases: vec![name.to_string()],
                 publish,
                 allow_from: vec![],
+                egress_proxy: true,
             },
             run_once: false,
             runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
@@ -5291,6 +5296,7 @@ mod tests {
                 aliases: vec!["frontend".to_string()],
                 publish: false,
                 allow_from: vec![],
+                egress_proxy: true,
             },
             run_once: false,
             runtime: ResolvedServiceRuntime::Managed(ResolvedTargetRuntime {

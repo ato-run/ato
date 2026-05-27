@@ -46,6 +46,12 @@ pub struct RuntimeLaunchContext {
     /// consumer hits EPERM on `psycopg.connect(...)` even though the
     /// provider is happily listening on the same loopback (#17).
     dep_endpoints: Vec<String>,
+    /// Egress proxy port allocated by `ato-netd` for this session.
+    ///
+    /// When `Some`, OCI executors must override proxy env vars to point at
+    /// `http://host.containers.internal:<port>` (the loopback `127.0.0.1` used
+    /// by source-native env injection cannot be reached from inside containers).
+    egress_proxy_port: Option<u16>,
 }
 
 impl RuntimeLaunchContext {
@@ -65,6 +71,7 @@ impl RuntimeLaunchContext {
                 effective_cwd_is_explicit_override: false,
                 workspace_root: None,
                 dep_endpoints: Vec::new(),
+                egress_proxy_port: None,
             }
         } else {
             Self::empty()
@@ -152,6 +159,16 @@ impl RuntimeLaunchContext {
 
     pub fn dep_endpoints(&self) -> &[String] {
         &self.dep_endpoints
+    }
+
+    /// Set the `ato-netd` egress proxy port for this session so OCI executors
+    /// can override source-native proxy env vars to use `host.containers.internal`.
+    pub fn set_egress_proxy_port(&mut self, port: u16) {
+        self.egress_proxy_port = Some(port);
+    }
+
+    pub fn egress_proxy_port(&self) -> Option<u16> {
+        self.egress_proxy_port
     }
 
     pub fn ipc(&self) -> Option<&IpcContext> {

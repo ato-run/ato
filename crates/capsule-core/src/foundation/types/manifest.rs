@@ -401,7 +401,7 @@ pub struct ServiceStateBinding {
     pub service_target: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceNetworkSpec {
     /// Additional DNS aliases for this service inside the orchestration network.
     #[serde(default)]
@@ -414,6 +414,28 @@ pub struct ServiceNetworkSpec {
     /// Restrict which services may receive connection metadata for this service.
     #[serde(default)]
     pub allow_from: Vec<String>,
+
+    /// Route this service's outbound HTTP(S) through the `ato-netd` egress proxy.
+    ///
+    /// Defaults to `true`. Set to `false` to opt out of proxy injection for this
+    /// service (e.g. for database-only services that never make external requests).
+    #[serde(default = "default_egress_proxy")]
+    pub egress_proxy: bool,
+}
+
+fn default_egress_proxy() -> bool {
+    true
+}
+
+impl Default for ServiceNetworkSpec {
+    fn default() -> Self {
+        Self {
+            aliases: Vec::new(),
+            publish: false,
+            allow_from: Vec::new(),
+            egress_proxy: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
