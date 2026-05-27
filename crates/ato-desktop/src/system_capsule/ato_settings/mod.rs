@@ -80,6 +80,11 @@ pub enum SettingsCommand {
         handle: String,
         key: String,
     },
+    /// Probe the selected OCI engine and return live diagnostic data to the UI.
+    LoadEnginesDiagnostics {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
 }
 
 // Custom Debug so `PutSecret.value` never appears in logs.
@@ -134,6 +139,7 @@ impl std::fmt::Debug for SettingsCommand {
                     request_id, handle, key
                 )
             }
+            Self::LoadEnginesDiagnostics { .. } => write!(f, "LoadEnginesDiagnostics"),
         }
     }
 }
@@ -151,6 +157,7 @@ impl SettingsCommand {
             SettingsCommand::DeleteSecret { .. } => Capability::SettingsWrite,
             SettingsCommand::GrantSecret { .. } => Capability::SettingsWrite,
             SettingsCommand::RevokeSecret { .. } => Capability::SettingsWrite,
+            SettingsCommand::LoadEnginesDiagnostics { .. } => Capability::SettingsRead,
         }
     }
 }
@@ -303,6 +310,15 @@ pub fn dispatch(
             }
             push_secrets_ok(cx, request_id.as_deref(), &store);
         }
+        SettingsCommand::LoadEnginesDiagnostics { request_id } => {
+            let diag = collect_podman_diagnostics();
+            let response = serde_json::json!({
+                "ok": true,
+                "requestId": request_id,
+                "engineDiagnostics": { "podman": diag },
+            });
+            push_to_settings_webview(cx, &response.to_string());
+        }
     }
     Ok(())
 }
@@ -334,6 +350,114 @@ fn push_secrets_error(cx: &mut App, request_id: Option<&str>, message: &str) {
         "error": { "message": message },
     });
     push_to_settings_webview(cx, &response.to_string());
+}
+
+/// Probe the local Podman installation and return structured diagnostics.
+///
+/// On macOS/Windows this checks the Podman machine state.
+/// On Linux, `podman machine` is not needed — native Podman is reported as ready.
+fn collect_podman_diagnostics() -> serde_json::Value {
+    use std::process::Command;
+
+    let binary_found = Command::new("podman")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !binary_found {
+        return serde_json::json!({
+            "binary": "missing",
+            "machine": "unknown",
+            "guidance": "Install Podman to use OCI capsules.",
+        });
+    }
+
+    // On Linux, native Podman does not use machine management.
+    if std::env::consts::OS == "linux" {
+        return serde_json::json!({
+            "binary": "found",
+            "machine": "native",
+            "guidance": null,
+        });
+    }
+
+    // macOS / Windows — inspect the machine list.
+    let list_result = Command::new("podman")
+        .args(["machine", "list", "--format", "json"])
+        .output();
+
+    let output = match list_result {
+        Err(e) => {
+            return serde_json::json!({
+                "binary": "found",
+                "machine": "unknown",
+                "guidance": format!("Could not query Podman machine state: {e}"),
+            });
+        }
+        Ok(o) if !o.status.success() => {
+            let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            return serde_json::json!({
+                "binary": "found",
+                "machine": "unknown",
+                "guidance": format!("podman machine list failed: {msg}"),
+            });
+        }
+        Ok(o) => o,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        Err(_) => serde_json::json!({
+            "binary": "found",
+            "machine": "unknown",
+            "guidance": "Podman machine list output was not recognized.",
+        }),
+        Ok(serde_json::Value::Array(machines)) if machines.is_empty() => serde_json::json!({
+            "binary": "found",
+            "machine": "not_configured",
+            "guidance": "No Podman machine found. Run: podman machine init && podman machine start",
+        }),
+        Ok(serde_json::Value::Array(machines)) => {
+            let running: Vec<&str> = machines
+                .iter()
+                .filter(|m| m.get("Running").and_then(|v| v.as_bool()).unwrap_or(false))
+                .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
+                .collect();
+            let names: Vec<&str> = machines
+                .iter()
+                .filter_map(|m| m.get("Name").and_then(|v| v.as_str()))
+                .collect();
+
+            if !running.is_empty() {
+                serde_json::json!({
+                    "binary": "found",
+                    "machine": "running",
+                    "machineNames": running,
+                    "guidance": null,
+                })
+            } else if names.len() == 1 {
+                serde_json::json!({
+                    "binary": "found",
+                    "machine": "stopped",
+                    "machineNames": names,
+                    "guidance": "Podman machine is stopped. Ato can auto-start it on next OCI launch.",
+                })
+            } else {
+                serde_json::json!({
+                    "binary": "found",
+                    "machine": "ambiguous",
+                    "machineNames": names,
+                    "guidance": "Multiple Podman machines found. Choose one or clean up: podman machine rm",
+                })
+            }
+        }
+        Ok(_) => serde_json::json!({
+            "binary": "found",
+            "machine": "unknown",
+            "guidance": "Podman machine list returned an unexpected format.",
+        }),
+    }
 }
 
 /// Deliver `payload_json` to the currently open settings window via
