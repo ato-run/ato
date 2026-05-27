@@ -31,6 +31,10 @@
 //!
 //! So calling this collector before the launch loop's provisioning
 //! phase is safe and observably side-effect-free.
+//!
+//! The exception is [`preflight_oci_provider_readiness`], which is used by
+//! the actual OCI launch path and may call `ensure_ready()`. On macOS/Windows
+//! that can auto-start a single stopped Podman machine before launch.
 
 #![allow(clippy::result_large_err)]
 
