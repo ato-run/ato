@@ -142,7 +142,10 @@ pub async fn proxy_request(
             Ok(resp) => Ok(resp),
             Err(e) => {
                 tracing::warn!("websocket proxy error: {e}");
-                Ok(error_response(StatusCode::BAD_GATEWAY, "WebSocket proxy error"))
+                Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "WebSocket proxy error",
+                ))
             }
         }
     } else {

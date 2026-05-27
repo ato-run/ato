@@ -1,8 +1,7 @@
 //! Daemon runtime state. Slice **A** ships only the bookkeeping needed
 //! to answer the `status` verb (start time, listener inventory).
 //! Slice **B** (#297) adds `IngressManager` for the ingress reverse proxy.
-//! Subsequent slices grow this with the resolver cache (**D**), the
-//! egress policy (**E**), etc.
+//! Slice **E** (#300) adds `EgressManager` for the HTTP CONNECT proxy.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,6 +9,7 @@ use std::time::Instant;
 
 use tokio::sync::{watch, Mutex};
 
+use crate::egress::{policy::EgressPolicy, EgressManager};
 use crate::ingress::IngressManager;
 
 /// Shared, cheaply-cloneable handle into the daemon's runtime state.
@@ -20,22 +20,13 @@ pub struct DaemonState {
 
 struct DaemonStateInner {
     started_at: Instant,
-    /// All active ingress routes. Replaces the old `listeners: RwLock<Vec<ListenerInfo>>`
-    /// placeholder from slice A — listener info is now derived from the
-    /// ingress manager.
+    /// All active ingress routes.
     ingress: Mutex<IngressManager>,
-    /// Non-lossy shutdown signal.
+    /// HTTP CONNECT egress proxy. `None` until `init_egress` is called.
+    egress: Mutex<Option<EgressManager>>,
+    /// Non-lossy shutdown signal (see comment below).
     ///
-    /// The previous skeleton used `tokio::sync::Notify::notify_waiters`,
-    /// which **silently drops** the wake-up if no future waiter is
-    /// registered at the exact instant `notify_waiters` is called.
-    /// With our two-loop shape (the accept loop drops its
-    /// `wait_for_shutdown` future to spawn a connection handler, then
-    /// re-creates it next iteration), there is a real window in which
-    /// `signal_shutdown` from a connection handler races against the
-    /// accept loop's re-subscribe and the wake is lost.
-    ///
-    /// `watch::channel<bool>` closes that race: the value is sticky,
+    /// `watch::channel<bool>` closes the subscribe race: the value is sticky,
     /// late receivers see it immediately via `borrow_and_update`, and
     /// `changed().await` covers the on-time case.
     shutdown_tx: watch::Sender<bool>,
@@ -51,9 +42,46 @@ impl DaemonState {
             inner: Arc::new(DaemonStateInner {
                 started_at: Instant::now(),
                 ingress: Mutex::new(ingress),
+                egress: Mutex::new(None),
                 shutdown_tx,
             }),
         })
+    }
+
+    /// Start the egress CONNECT proxy using the system DNS resolver.
+    ///
+    /// Called once by `Daemon::start` after `DaemonState::new`.
+    /// Failure here is a hard daemon startup error.
+    pub async fn init_egress(
+        &self,
+        resolver: Arc<dyn ato_net::resolver::Resolver + Send + Sync>,
+    ) -> anyhow::Result<()> {
+        let policy = Arc::new(EgressPolicy::permissive());
+        // Bounded channel — receipts are best-effort; a closed or full
+        // channel must never block the relay.  Capacity 1024 is generous
+        // for a session-scoped daemon.
+        let (receipt_tx, receipt_rx) = tokio::sync::mpsc::channel(1024);
+        // Drain receipts in a background task.  Slice E does not persist
+        // receipts to disk; that wiring lands in a follow-up.
+        tokio::spawn(async move {
+            let mut rx = receipt_rx;
+            while rx.recv().await.is_some() {}
+        });
+        let mgr = EgressManager::start(resolver, policy, receipt_tx).await?;
+        *self.inner.egress.lock().await = Some(mgr);
+        Ok(())
+    }
+
+    /// The port the egress proxy is listening on, or `None` if not started.
+    pub async fn egress_port(&self) -> Option<u16> {
+        self.inner.egress.lock().await.as_ref().map(|m| m.port())
+    }
+
+    /// Shut down the egress proxy accept loop.
+    pub async fn shutdown_egress(&self) {
+        if let Some(mgr) = self.inner.egress.lock().await.take() {
+            mgr.shutdown().await;
+        }
     }
 
     /// Seconds elapsed since [`Self::new`].
@@ -86,9 +114,7 @@ impl DaemonState {
     }
 
     /// Resolves when [`Self::signal_shutdown`] has been called, even
-    /// if the call happened before this method was invoked. The
-    /// no-race guarantee is the whole reason we picked
-    /// `watch::channel` over `Notify`.
+    /// if the call happened before this method was invoked.
     pub async fn wait_for_shutdown(&self) {
         let mut rx = self.inner.shutdown_tx.subscribe();
         // Check the current value first — handles the "signal arrived
@@ -96,10 +122,6 @@ impl DaemonState {
         if *rx.borrow_and_update() {
             return;
         }
-        // Wait until the sticky value flips. `changed()` returns `Err`
-        // only when every `Sender` has been dropped; on our shape that
-        // can only happen if the daemon is already going away, so
-        // treat it as a shutdown signal too.
         let _ = rx.changed().await;
     }
 
@@ -122,9 +144,6 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_shutdown_observes_signal_after_subscribe() {
-        // On-time case: subscriber registers first, signal arrives.
-        // Notify-based code already handled this; the test guards
-        // against a regression introducing a new ordering bug.
         let state = make_state().await;
         let waiter = state.clone();
         let task = tokio::spawn(async move { waiter.wait_for_shutdown().await });
@@ -138,11 +157,6 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_shutdown_returns_immediately_if_signal_already_fired() {
-        // Regression guard for the `Notify::notify_waiters` race that
-        // the reviewer flagged: with the old implementation, a signal
-        // fired *before* the waiter subscribed was silently lost. With
-        // `watch::channel<bool>` the sticky value lets a late
-        // subscriber observe the signal immediately.
         let state = make_state().await;
         state.signal_shutdown();
         tokio::time::timeout(

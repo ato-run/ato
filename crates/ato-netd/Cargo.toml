@@ -61,6 +61,11 @@ bytes = "1"
 # socket2: SO_REUSEADDR on ingress listener binds (avoids TIME_WAIT port conflicts on restart).
 socket2 = { version = "0.5", features = ["all"] }
 
+# Egress CONNECT proxy (slice E, #300)
+# ipnet: IpNet type for CIDR policy matching. Must be a direct dependency
+# (transitive does not work for trait bounds on the egress policy engine).
+ipnet = "2"
+
 [dev-dependencies]
 ato-net = { path = "../ato-net", version = "0.5.2" }
 tempfile = "3.8"
@@ -74,3 +79,5 @@ tokio-tungstenite = "0.28"
 bytes = "1"
 futures-util = "0.3"
 serial_test = "3"
+# async-trait: needed by fake Resolver impls in egress unit tests.
+async-trait = "0.1"

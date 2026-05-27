@@ -35,10 +35,10 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use hickory_resolver::{
-    TokioAsyncResolver,
     config::{ResolverConfig, ResolverOpts},
     error::{ResolveError, ResolveErrorKind},
     proto::rr::{RData, RecordType},
+    TokioAsyncResolver,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -99,7 +99,7 @@ pub struct ResolvedRecord {
 /// [`TransportFailure`][ResolverError::TransportFailure], and
 /// [`BackendUnavailable`][ResolverError::BackendUnavailable] as retryable
 /// (falls through to the next backend).  All other variants short-circuit.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ResolverError {
     #[error("NXDOMAIN: {0}")]
     NxDomain(String),
@@ -230,9 +230,8 @@ impl DohResolver {
 
             let upstream = upstream_url.to_string();
             // Parse the upstream URL to extract hostname and IP.
-            let url = url::Url::parse(upstream_url).map_err(|e| {
-                ResolverError::BackendUnavailable(format!("invalid DoH URL: {e}"))
-            })?;
+            let url = url::Url::parse(upstream_url)
+                .map_err(|e| ResolverError::BackendUnavailable(format!("invalid DoH URL: {e}")))?;
             let host = url
                 .host_str()
                 .ok_or_else(|| {
@@ -250,12 +249,7 @@ impl DohResolver {
                 ))
             })?;
             let port = url.port().unwrap_or(443);
-            let ns_group = NameServerConfigGroup::from_ips_https(
-                &[ip],
-                port,
-                host.clone(),
-                true,
-            );
+            let ns_group = NameServerConfigGroup::from_ips_https(&[ip], port, host.clone(), true);
             let config = ResolverConfig::from_parts(None, vec![], ns_group);
             let resolver = TokioAsyncResolver::tokio(config, ResolverOpts::default());
             Ok(Self {
@@ -327,8 +321,7 @@ impl Resolver for Chain {
             match resolver.resolve(name, opts).await {
                 Ok(mut record) => {
                     if let Some(prev) = &prev_backend {
-                        record.fallback_reason =
-                            Some(format!("fallback_from_{prev}"));
+                        record.fallback_reason = Some(format!("fallback_from_{prev}"));
                     }
                     return Ok(record);
                 }

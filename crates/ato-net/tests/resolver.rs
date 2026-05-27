@@ -101,10 +101,7 @@ async fn localhost_happy_path() {
 async fn cname_chain_stub() {
     let record = ok_record(
         "a.example.test",
-        vec![
-            "a.example.test".to_string(),
-            "b.example.test".to_string(),
-        ],
+        vec!["a.example.test".to_string(), "b.example.test".to_string()],
         vec!["192.0.2.1".parse().unwrap()],
         vec![],
         Some(60),
@@ -116,7 +113,10 @@ async fn cname_chain_stub() {
     assert_eq!(result.cname_chain.len(), 2);
     assert_eq!(result.cname_chain[0], "a.example.test");
     assert_eq!(result.cname_chain[1], "b.example.test");
-    assert_eq!(result.addrs_v4, vec!["192.0.2.1".parse::<Ipv4Addr>().unwrap()]);
+    assert_eq!(
+        result.addrs_v4,
+        vec!["192.0.2.1".parse::<Ipv4Addr>().unwrap()]
+    );
 }
 
 // ── 3. NxDomain returns typed error (stub) ────────────────────────────────────
@@ -208,7 +208,14 @@ async fn chain_no_fallback_on_nxdomain() {
         error: || ResolverError::NxDomain("nope.test".to_string()),
         name: "system",
     };
-    let secondary_record = ok_record("nope.test", vec![], vec!["1.2.3.4".parse().unwrap()], vec![], None, "doh");
+    let secondary_record = ok_record(
+        "nope.test",
+        vec![],
+        vec!["1.2.3.4".parse().unwrap()],
+        vec![],
+        None,
+        "doh",
+    );
     let secondary = OkStub(secondary_record);
     let chain = Chain::new(vec![Box::new(primary), Box::new(secondary)]);
     let opts = ResolveOptions::default();
@@ -240,7 +247,10 @@ async fn receipt_json_roundtrip() {
     let json = serde_json::to_string_pretty(&event).unwrap();
 
     // Required JSON shape checks.
-    assert!(json.contains("\"kind\": \"dns_resolution\""), "missing kind field in: {json}");
+    assert!(
+        json.contains("\"kind\": \"dns_resolution\""),
+        "missing kind field in: {json}"
+    );
     assert!(json.contains("\"name\": \"example.com\""));
     assert!(json.contains("\"ttl_seconds\": 3600"));
     assert!(json.contains("\"backend\": \"system\""));

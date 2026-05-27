@@ -23,12 +23,7 @@ pub mod allocator;
 pub mod hop_by_hop;
 pub mod proxy;
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use allocator::{AllocError, PortAllocator};
 use anyhow::Context as _;

@@ -122,6 +122,11 @@ pub struct StatusReport {
     /// populated by **B** (ingress), **E** (egress CONNECT), etc.
     #[serde(default)]
     pub listeners: Vec<ListenerInfo>,
+    /// Port the egress HTTP CONNECT proxy is listening on, if running.
+    /// Added in slice **E** (#300). Absent in older daemons; defaults
+    /// to `None` via `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_proxy_port: Option<u16>,
 }
 
 /// Description of an ingress listener owned by the running daemon.
@@ -513,6 +518,7 @@ mod tests {
                 pid: 12345,
                 uptime_secs: 7,
                 listeners: vec![],
+                egress_proxy_port: None,
             }),
         };
         let json = serde_json::to_string(&resp).unwrap();
@@ -578,8 +584,7 @@ mod tests {
             socket_path: &std::path::Path,
             respond_with: Response,
         ) -> std::thread::JoinHandle<()> {
-            let listener = UnixListener::bind(socket_path)
-                .expect("bind failed in test");
+            let listener = UnixListener::bind(socket_path).expect("bind failed in test");
             let respond_with = serde_json::to_string(&respond_with).unwrap();
             std::thread::spawn(move || {
                 let (stream, _) = listener.accept().expect("accept failed in test");
@@ -589,9 +594,7 @@ mod tests {
                 reader.read_line(&mut line).unwrap();
                 // Drop the parsed request — we just need to consume it.
                 let _: Request = serde_json::from_str(line.trim()).unwrap();
-                writer
-                    .write_all((respond_with + "\n").as_bytes())
-                    .unwrap();
+                writer.write_all((respond_with + "\n").as_bytes()).unwrap();
             })
         }
 
@@ -605,6 +608,7 @@ mod tests {
                     pid: 99,
                     uptime_secs: 3,
                     listeners: vec![],
+                    egress_proxy_port: None,
                 }),
             };
             let handle = spawn_fake_daemon(&path, resp);
@@ -625,9 +629,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("test-register.sock");
             let resp = Response::Ok {
-                result: ResponseResult::IngressRegistered(IngressInfo {
-                    port: 19000,
-                }),
+                result: ResponseResult::IngressRegistered(IngressInfo { port: 19000 }),
             };
             let handle = spawn_fake_daemon(&path, resp);
             let mut client = SyncClient::connect(&path).unwrap();
