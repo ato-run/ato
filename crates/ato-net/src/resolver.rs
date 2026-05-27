@@ -99,7 +99,7 @@ pub struct ResolvedRecord {
 /// [`TransportFailure`][ResolverError::TransportFailure], and
 /// [`BackendUnavailable`][ResolverError::BackendUnavailable] as retryable
 /// (falls through to the next backend).  All other variants short-circuit.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum ResolverError {
     #[error("NXDOMAIN: {0}")]
     NxDomain(String),
