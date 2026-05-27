@@ -148,7 +148,7 @@ async fn handle_connect_inner(
                     target: host,
                     port,
                     protocol: "tcp".to_string(),
-                    decision: EgressDecision::DenyHost,
+                    decision: EgressDecision::ResolveFailure,
                     resolved_addr: None,
                     decided_at_unix: decided_at,
                     stage: "dns".to_string(),
@@ -218,7 +218,7 @@ async fn handle_connect_inner(
                 target: host,
                 port,
                 protocol: "tcp".to_string(),
-                decision: EgressDecision::DenyHost,
+                decision: EgressDecision::ConnectFailure,
                 resolved_addr: Some(connect_ip),
                 decided_at_unix: decided_at,
                 stage: "connect".to_string(),
@@ -630,11 +630,11 @@ mod tests {
         assert_eq!(receipt.stage, "cidr");
     }
 
-    /// Test 4: NXDOMAIN → 502 Bad Gateway.
+    /// Test 4: NXDOMAIN → 502 Bad Gateway, receipt = ResolveFailure at stage "dns".
     #[tokio::test]
     async fn nxdomain_returns_502() {
         let (resolver, _) = FakeResolver::failing(ResolverError::NxDomain("nxdomain.test".into()));
-        let (receipt_tx, _receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
+        let (receipt_tx, mut receipt_rx) = mpsc::channel::<NetworkEgressDecision>(32);
 
         let policy = Arc::new(EgressPolicy::permissive());
         let resolver_arc: Arc<dyn Resolver + Send + Sync> = Arc::new(resolver);
@@ -649,6 +649,14 @@ mod tests {
 
         let (status, _) = send_connect(proxy_addr, "nxdomain.test:443").await;
         assert_eq!(status, 502, "expected 502 for NXDOMAIN");
+
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), receipt_rx.recv())
+            .await
+            .expect("receipt timed out")
+            .expect("channel closed");
+
+        assert_eq!(receipt.decision, EgressDecision::ResolveFailure);
+        assert_eq!(receipt.stage, "dns");
     }
 
     /// Test 5: TCP connect fails (unused port) → 502.
@@ -687,6 +695,7 @@ mod tests {
             .expect("channel closed");
 
         assert_eq!(receipt.stage, "connect");
+        assert_eq!(receipt.decision, EgressDecision::ConnectFailure);
     }
 
     /// Test: pre-buffered bytes are forwarded to upstream (over-read protection).
