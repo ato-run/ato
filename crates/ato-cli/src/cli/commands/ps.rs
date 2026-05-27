@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::adapters::runtime::oci_session_store::{
-    OciSessionIngressRecord, OciSessionStatus, OciSessionStore,
+    podman_machine_status, OciSessionStatus, OciSessionStore, PodmanMachineStatus,
 };
 use crate::binding;
 use crate::reporters::CliReporter;
@@ -31,6 +31,18 @@ fn runtime_display(runtime: &str) -> String {
         return format!("{} ⚠️ (Host Fallback)", base);
     }
     runtime.to_string()
+}
+
+fn oci_session_visible(status: &OciSessionStatus, all: bool) -> bool {
+    all || status.is_active()
+}
+
+fn oci_status_display(status: &OciSessionStatus) -> &'static str {
+    match status {
+        OciSessionStatus::Running => "🐳 running",
+        OciSessionStatus::Stopped => "⚪ stopped",
+        OciSessionStatus::StopFailed => "⚠️ stop_failed",
+    }
 }
 
 pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
@@ -87,9 +99,10 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .ok()
             .and_then(|s| s.list_sessions().ok())
             .unwrap_or_default();
+        let machine_status = podman_machine_status();
         let oci_json: Vec<serde_json::Value> = oci_sessions
             .iter()
-            .filter(|s| args.all || s.status == OciSessionStatus::Running)
+            .filter(|s| oci_session_visible(&s.status, args.all))
             .map(|s| {
                 let ingress_json = s.ingress.as_ref().map(|i| {
                     serde_json::json!({
@@ -142,6 +155,9 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .collect();
         combined.extend(import_preview_json);
         combined.extend(oci_json);
+        if machine_status.is_visible() {
+            combined.push(podman_machine_json(&machine_status));
+        }
 
         let output = serde_json::to_string_pretty(&combined)?;
         futures::executor::block_on(reporter.notify(output))?;
@@ -155,11 +171,29 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             .unwrap_or_default();
         let oci_visible: Vec<_> = oci_sessions
             .iter()
-            .filter(|s| args.all || s.status == OciSessionStatus::Running)
+            .filter(|s| oci_session_visible(&s.status, args.all))
             .collect();
+        let machine_status = podman_machine_status();
+        let show_machine_status = machine_status.is_visible();
 
-        if processes.is_empty() && import_previews.is_empty() && oci_visible.is_empty() {
+        if processes.is_empty()
+            && import_previews.is_empty()
+            && oci_visible.is_empty()
+            && !show_machine_status
+        {
             futures::executor::block_on(reporter.notify("No capsules found.".to_string()))?;
+            return Ok(());
+        }
+
+        if processes.is_empty()
+            && import_previews.is_empty()
+            && oci_visible.is_empty()
+            && show_machine_status
+        {
+            futures::executor::block_on(reporter.notify("Sessions: none".to_string()))?;
+            futures::executor::block_on(
+                reporter.notify(format!("Podman VM: {}", machine_status.display_status())),
+            )?;
             return Ok(());
         }
 
@@ -231,11 +265,6 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
 
         // Show OCI sessions as a separate section.
         for s in &oci_visible {
-            let status_icon = if s.status == OciSessionStatus::Running {
-                "🐳 running"
-            } else {
-                "⚪ stopped"
-            };
             let endpoint = s.main_endpoint.as_deref().unwrap_or("-");
             let id = if s.session_id.len() > 8 {
                 &s.session_id[..8]
@@ -247,7 +276,7 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
                 "—",
                 id,
                 s.import_kind,
-                status_icon,
+                oci_status_display(&s.status),
                 format!("oci/{}", s.import_kind),
                 endpoint
             )))?;
@@ -259,9 +288,25 @@ pub fn execute(args: PsArgs, reporter: Arc<CliReporter>) -> Result<()> {
             processes.len() + import_previews.len() + oci_visible.len(),
             oci_visible.len()
         )))?;
+        if show_machine_status {
+            futures::executor::block_on(
+                reporter.notify(format!("Podman VM: {}", machine_status.display_status())),
+            )?;
+        }
     }
 
     Ok(())
+}
+
+fn podman_machine_json(status: &PodmanMachineStatus) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "oci_host",
+        "id": "podman-machine",
+        "provider": "podman",
+        "status": status.status_label(),
+        "status_display": status.display_status(),
+        "machines": status.machine_names(),
+    })
 }
 
 #[cfg(test)]
@@ -309,5 +354,24 @@ mod tests {
     #[test]
     fn status_display_keeps_existing_ready_badge() {
         assert_eq!(status_display(ProcessStatus::Ready), "🟢 ready");
+    }
+
+    #[test]
+    fn ps_default_includes_stop_failed_oci_sessions() {
+        assert!(oci_session_visible(&OciSessionStatus::Running, false));
+        assert!(oci_session_visible(&OciSessionStatus::StopFailed, false));
+        assert!(!oci_session_visible(&OciSessionStatus::Stopped, false));
+    }
+
+    #[test]
+    fn ps_text_renders_stop_failed_as_stop_failed_not_stopped() {
+        assert_eq!(
+            oci_status_display(&OciSessionStatus::StopFailed),
+            "⚠️ stop_failed"
+        );
+        assert_ne!(
+            oci_status_display(&OciSessionStatus::StopFailed),
+            "⚪ stopped"
+        );
     }
 }
