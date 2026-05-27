@@ -185,6 +185,14 @@ impl OciSessionStore {
         Ok(records)
     }
 
+    pub fn active_session_count(&self) -> Result<usize> {
+        Ok(self
+            .list_sessions()?
+            .iter()
+            .filter(|session| session.status.is_active())
+            .count())
+    }
+
     pub fn find_session(&self, session_id: &str) -> Result<Option<OciSessionRecord>> {
         let path = self.record_path(session_id);
         if !path.exists() {
@@ -231,6 +239,12 @@ impl OciSessionStore {
             .with_context(|| format!("Failed to read OCI session: {}", path.display()))?;
         serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse OCI session: {}", path.display()))
+    }
+}
+
+impl OciSessionStatus {
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Running | Self::StopFailed)
     }
 }
 
@@ -376,6 +390,347 @@ pub fn apply_stop_result(store: &OciSessionStore, session_id: &str, result: &Sto
     } else {
         let _ = store.mark_stop_failed(session_id);
     }
+}
+
+// ── Podman machine helpers ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PodmanMachineStatus {
+    Running { names: Vec<String> },
+    Stopped { names: Vec<String> },
+    NotConfigured,
+    Unavailable { reason: String },
+    Unknown { reason: String },
+}
+
+impl PodmanMachineStatus {
+    pub fn display_status(&self) -> String {
+        match self {
+            Self::Running { names } => format!("running{}", display_machine_names(names)),
+            Self::Stopped { names } => format!("stopped{}", display_machine_names(names)),
+            Self::NotConfigured => "not configured".to_string(),
+            Self::Unavailable { reason } => format!("unavailable ({reason})"),
+            Self::Unknown { reason } => format!("unknown ({reason})"),
+        }
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        match self {
+            Self::Running { .. } => "running",
+            Self::Stopped { .. } => "stopped",
+            Self::NotConfigured => "not_configured",
+            Self::Unavailable { .. } => "unavailable",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+
+    pub fn machine_names(&self) -> &[String] {
+        match self {
+            Self::Running { names } | Self::Stopped { names } => names,
+            Self::NotConfigured | Self::Unavailable { .. } | Self::Unknown { .. } => &[],
+        }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        !matches!(self, Self::Unavailable { .. } | Self::NotConfigured)
+    }
+}
+
+#[derive(Debug)]
+pub struct PodmanMachineStopResult {
+    pub status_before: PodmanMachineStatus,
+    pub stopped_machines: Vec<String>,
+    pub errors: Vec<String>,
+    pub skipped_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct MachineCommandOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PodmanMachineListEntry {
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "Running", default)]
+    running: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RunningContainerGuard {
+    running_count: usize,
+    non_ato_count: usize,
+}
+
+impl RunningContainerGuard {
+    fn allows_machine_stop(&self) -> bool {
+        self.non_ato_count == 0
+    }
+}
+
+pub fn podman_machine_status() -> PodmanMachineStatus {
+    podman_machine_status_with(|args| run_podman_machine_command(args))
+}
+
+fn podman_machine_status_with<F>(mut run: F) -> PodmanMachineStatus
+where
+    F: FnMut(&[&str]) -> std::result::Result<MachineCommandOutput, String>,
+{
+    match run(&["machine", "list", "--format", "json"]) {
+        Ok(output) if output.success => parse_podman_machine_list(&output.stdout),
+        Ok(output) => PodmanMachineStatus::Unavailable {
+            reason: first_non_empty(&output.stderr, &output.stdout)
+                .unwrap_or_else(|| "podman machine list failed".to_string()),
+        },
+        Err(reason) => PodmanMachineStatus::Unavailable { reason },
+    }
+}
+
+pub fn stop_podman_machines_if_idle(store: &OciSessionStore) -> PodmanMachineStopResult {
+    stop_podman_machines_if_idle_with(
+        store,
+        |args| run_podman_machine_command(args),
+        |args| run_podman_machine_command(args),
+        |args| run_podman_machine_command(args),
+    )
+}
+
+fn stop_podman_machines_if_idle_with<F, G, H>(
+    store: &OciSessionStore,
+    mut status_run: F,
+    mut container_run: G,
+    mut stop_run: H,
+) -> PodmanMachineStopResult
+where
+    F: FnMut(&[&str]) -> std::result::Result<MachineCommandOutput, String>,
+    G: FnMut(&[&str]) -> std::result::Result<MachineCommandOutput, String>,
+    H: FnMut(&[&str]) -> std::result::Result<MachineCommandOutput, String>,
+{
+    match store.active_session_count() {
+        Ok(0) => {}
+        Ok(count) => {
+            return PodmanMachineStopResult {
+                status_before: PodmanMachineStatus::Unknown {
+                    reason: "not checked while OCI sessions are active".to_string(),
+                },
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: Some(format!("{count} active OCI session(s) remain")),
+            };
+        }
+        Err(err) => {
+            return PodmanMachineStopResult {
+                status_before: PodmanMachineStatus::Unknown {
+                    reason: "session store read failed".to_string(),
+                },
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: Some(format!("could not read OCI sessions: {err}")),
+            };
+        }
+    }
+
+    let status_before = podman_machine_status_with(&mut status_run);
+    let names = match &status_before {
+        PodmanMachineStatus::Running { names } if names.len() == 1 => names.clone(),
+        PodmanMachineStatus::Running { names } => {
+            let running_count = names.len();
+            return PodmanMachineStopResult {
+                status_before,
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: Some(format!(
+                    "{} running Podman machine(s) present; machine ownership is ambiguous",
+                    running_count
+                )),
+            };
+        }
+        PodmanMachineStatus::Stopped { .. }
+        | PodmanMachineStatus::NotConfigured
+        | PodmanMachineStatus::Unavailable { .. }
+        | PodmanMachineStatus::Unknown { .. } => {
+            return PodmanMachineStopResult {
+                status_before,
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: None,
+            };
+        }
+    };
+
+    match running_container_guard(&mut container_run) {
+        Ok(guard) if guard.allows_machine_stop() => {}
+        Ok(guard) => {
+            return PodmanMachineStopResult {
+                status_before,
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: Some(format!(
+                    "{} non-Ato running container(s) present",
+                    guard.non_ato_count
+                )),
+            };
+        }
+        Err(reason) => {
+            return PodmanMachineStopResult {
+                status_before,
+                stopped_machines: vec![],
+                errors: vec![],
+                skipped_reason: Some(format!("could not verify running containers: {reason}")),
+            };
+        }
+    }
+
+    let mut stopped_machines = Vec::new();
+    let mut errors = Vec::new();
+    for name in names {
+        match stop_run(&["machine", "stop", &name]) {
+            Ok(output) if output.success => stopped_machines.push(name),
+            Ok(output) => {
+                let detail = first_non_empty(&output.stderr, &output.stdout)
+                    .unwrap_or_else(|| "podman machine stop failed".to_string());
+                if is_already_stopped_message(&detail) {
+                    stopped_machines.push(name);
+                } else {
+                    errors.push(format!("machine stop {name}: {detail}"));
+                }
+            }
+            Err(reason) => errors.push(format!("machine stop {name}: {reason}")),
+        }
+    }
+
+    PodmanMachineStopResult {
+        status_before,
+        stopped_machines,
+        errors,
+        skipped_reason: None,
+    }
+}
+
+fn running_container_guard<F>(mut run: F) -> std::result::Result<RunningContainerGuard, String>
+where
+    F: FnMut(&[&str]) -> std::result::Result<MachineCommandOutput, String>,
+{
+    let output = run(&["ps", "--format", "json"])?;
+    if !output.success {
+        return Err(first_non_empty(&output.stderr, &output.stdout)
+            .unwrap_or_else(|| "podman ps failed".to_string()));
+    }
+    parse_running_container_guard(&output.stdout)
+}
+
+fn run_podman_machine_command(args: &[&str]) -> std::result::Result<MachineCommandOutput, String> {
+    let output = Command::new("podman")
+        .args(args)
+        .output()
+        .map_err(|err| format!("failed to run podman {}: {err}", args.join(" ")))?;
+    Ok(MachineCommandOutput {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn parse_running_container_guard(
+    stdout: &str,
+) -> std::result::Result<RunningContainerGuard, String> {
+    let containers: Vec<serde_json::Value> = serde_json::from_str(stdout)
+        .map_err(|err| format!("podman ps output was not recognized: {err}"))?;
+    let running_count = containers.len();
+    let non_ato_count = containers
+        .iter()
+        .filter(|container| !is_ato_managed_container(container))
+        .count();
+    Ok(RunningContainerGuard {
+        running_count,
+        non_ato_count,
+    })
+}
+
+fn is_ato_managed_container(container: &serde_json::Value) -> bool {
+    match container.get("Labels") {
+        Some(serde_json::Value::Object(labels)) => {
+            labels
+                .get("io.ato.managed")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                || ["io.ato.session_id", "io.ato.session", "io.ato.execution_id"]
+                    .iter()
+                    .any(|key| {
+                        labels
+                            .get(*key)
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|value| !value.is_empty())
+                    })
+        }
+        Some(serde_json::Value::String(labels)) => labels.split(',').map(str::trim).any(|label| {
+            label.eq_ignore_ascii_case("io.ato.managed=true")
+                || label.starts_with("io.ato.session_id=")
+                || label.starts_with("io.ato.session=")
+                || label.starts_with("io.ato.execution_id=")
+        }),
+        _ => false,
+    }
+}
+
+fn parse_podman_machine_list(stdout: &str) -> PodmanMachineStatus {
+    let entries: Vec<PodmanMachineListEntry> = match serde_json::from_str(stdout) {
+        Ok(entries) => entries,
+        Err(err) => {
+            return PodmanMachineStatus::Unknown {
+                reason: format!("podman machine list output was not recognized: {err}"),
+            };
+        }
+    };
+    if entries.is_empty() {
+        return PodmanMachineStatus::NotConfigured;
+    }
+
+    let running_names: Vec<String> = entries
+        .iter()
+        .filter(|entry| entry.running)
+        .map(machine_name)
+        .collect();
+    if !running_names.is_empty() {
+        return PodmanMachineStatus::Running {
+            names: running_names,
+        };
+    }
+
+    PodmanMachineStatus::Stopped {
+        names: entries.iter().map(machine_name).collect(),
+    }
+}
+
+fn machine_name(entry: &PodmanMachineListEntry) -> String {
+    if entry.name.is_empty() {
+        "<unnamed>".to_string()
+    } else {
+        entry.name.clone()
+    }
+}
+
+fn display_machine_names(names: &[String]) -> String {
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", names.join(", "))
+    }
+}
+
+fn first_non_empty(first: &str, second: &str) -> Option<String> {
+    [first.trim(), second.trim()]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn is_already_stopped_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already stopped") || lower.contains("not running")
 }
 
 // ── ISO 8601 timestamp helper ─────────────────────────────────────────────────
@@ -926,5 +1281,186 @@ mod tests {
         .unwrap();
 
         assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn active_session_count_treats_running_and_stop_failed_as_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        let running = make_record("ato-active-run-12");
+        let mut stop_failed = make_record("ato-active-fail-1");
+        stop_failed.status = OciSessionStatus::StopFailed;
+        let mut stopped = make_record("ato-active-stop-1");
+        stopped.status = OciSessionStatus::Stopped;
+
+        store.write_session(&running).unwrap();
+        store.write_session(&stop_failed).unwrap();
+        store.write_session(&stopped).unwrap();
+
+        assert_eq!(store.active_session_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn parse_podman_machine_list_reports_running_machine_names() {
+        let status = parse_podman_machine_list(
+            r#"[{"Name":"podman-machine-default","Running":true},{"Name":"old","Running":false}]"#,
+        );
+
+        assert_eq!(
+            status,
+            PodmanMachineStatus::Running {
+                names: vec!["podman-machine-default".to_string()]
+            }
+        );
+        assert_eq!(status.display_status(), "running (podman-machine-default)");
+    }
+
+    #[test]
+    fn parse_podman_machine_list_reports_configured_but_stopped() {
+        let status =
+            parse_podman_machine_list(r#"[{"Name":"podman-machine-default","Running":false}]"#);
+
+        assert_eq!(
+            status,
+            PodmanMachineStatus::Stopped {
+                names: vec!["podman-machine-default".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn stop_podman_machines_if_idle_skips_when_oci_session_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+        store
+            .write_session(&make_record("ato-active-skip-1"))
+            .unwrap();
+
+        let result = stop_podman_machines_if_idle_with(
+            &store,
+            |_| panic!("machine status must not be checked while sessions are active"),
+            |_| panic!("container state must not be checked while sessions are active"),
+            |_| panic!("machine stop must not be called while sessions are active"),
+        );
+
+        assert_eq!(
+            result.skipped_reason.as_deref(),
+            Some("1 active OCI session(s) remain")
+        );
+    }
+
+    #[test]
+    fn stop_podman_machines_if_idle_stops_running_machines() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+
+        let result = stop_podman_machines_if_idle_with(
+            &store,
+            |_| {
+                Ok(MachineCommandOutput {
+                    success: true,
+                    stdout: r#"[{"Name":"podman-machine-default","Running":true}]"#.to_string(),
+                    stderr: String::new(),
+                })
+            },
+            |_| {
+                Ok(MachineCommandOutput {
+                    success: true,
+                    stdout: r#"[{"Labels":{"io.ato.managed":"true"}}]"#.to_string(),
+                    stderr: String::new(),
+                })
+            },
+            |args| {
+                assert_eq!(args, ["machine", "stop", "podman-machine-default"]);
+                Ok(MachineCommandOutput {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            },
+        );
+
+        assert_eq!(
+            result.stopped_machines,
+            vec!["podman-machine-default".to_string()]
+        );
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn stop_podman_machines_if_idle_does_not_stop_when_non_ato_containers_are_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+
+        let result = stop_podman_machines_if_idle_with(
+            &store,
+            |_| {
+                Ok(MachineCommandOutput {
+                    success: true,
+                    stdout: r#"[{"Name":"podman-machine-default","Running":true}]"#.to_string(),
+                    stderr: String::new(),
+                })
+            },
+            |_| {
+                Ok(MachineCommandOutput {
+                    success: true,
+                    stdout: r#"[{"Labels":{"io.ato.managed":"true"}},{"Labels":{"com.example.owner":"other"}}]"#.to_string(),
+                    stderr: String::new(),
+                })
+            },
+            |_| panic!("machine stop must not run while non-Ato containers are active"),
+        );
+
+        assert_eq!(
+            result.skipped_reason.as_deref(),
+            Some("1 non-Ato running container(s) present")
+        );
+        assert!(result.stopped_machines.is_empty());
+    }
+
+    #[test]
+    fn stop_podman_machines_if_idle_does_not_stop_when_multiple_machines_are_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = OciSessionStore::with_dir(dir.path().to_path_buf());
+
+        let result = stop_podman_machines_if_idle_with(
+            &store,
+            |_| {
+                Ok(MachineCommandOutput {
+                    success: true,
+                    stdout: r#"[{"Name":"podman-machine-default","Running":true},{"Name":"work","Running":true}]"#.to_string(),
+                    stderr: String::new(),
+                })
+            },
+            |_| panic!("container state must not be checked when machine ownership is ambiguous"),
+            |_| panic!("machine stop must not run when multiple machines are running"),
+        );
+
+        assert_eq!(
+            result.skipped_reason.as_deref(),
+            Some("2 running Podman machine(s) present; machine ownership is ambiguous")
+        );
+        assert!(result.stopped_machines.is_empty());
+    }
+
+    #[test]
+    fn parse_running_container_guard_accepts_current_ato_label_forms() {
+        let guard = parse_running_container_guard(
+            r#"[
+                {"Labels":{"io.ato.managed":"true"}},
+                {"Labels":{"io.ato.session_id":"ato-session-1"}},
+                {"Labels":"io.ato.execution_id=ato-session-2,other=value"},
+                {"Labels":{"io.ato.managed":"false"}}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            guard,
+            RunningContainerGuard {
+                running_count: 4,
+                non_ato_count: 1
+            }
+        );
     }
 }
