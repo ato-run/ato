@@ -1033,14 +1033,11 @@ pub fn start_boot_launch(
             if session.display_strategy
                 == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl
             {
-                if let Some(ref local_url) = session.local_url {
-                    let upstream =
-                        crate::netd::normalize_upstream_url(local_url).into_owned();
-                    super::app_capsule_shell::wait_for_upstream_http_ready(
-                        &upstream,
-                        Duration::from_secs(60),
-                    );
-                }
+                super::app_capsule_shell::wait_for_session_upstream_ready(
+                    session,
+                    &abort_for_thread,
+                    Duration::from_secs(60),
+                );
             }
         }
         if abort_for_thread.load(Ordering::Acquire) {
