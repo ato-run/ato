@@ -814,6 +814,7 @@ build = "npm run build"
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn materializes_synthetic_env_file() {
         // `materialize_synthetic_env` calls `SecretStore::open()` which

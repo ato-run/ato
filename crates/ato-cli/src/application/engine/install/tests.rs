@@ -738,6 +738,7 @@ fn github_checkout_root_is_outside_workspace_internal_subtree() {
     );
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_checkout_root_uses_current_ato_home_tmp_root() {
     let _env_lock = acquire_test_env_lock().await;
@@ -763,6 +764,7 @@ fn github_run_success_cleanup_removes_transient_tree() {
     remove_github_run_checkout(&checkout).expect("remove remains idempotent");
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_sweep_removes_stale_tree_older_than_ttl() {
     let _env_lock = acquire_test_env_lock().await;
@@ -784,6 +786,7 @@ async fn github_run_sweep_removes_stale_tree_older_than_ttl() {
     assert!(!stale.exists());
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_sweep_preserves_fresh_tree_within_grace_period() {
     let _env_lock = acquire_test_env_lock().await;
@@ -805,6 +808,7 @@ async fn github_run_sweep_preserves_fresh_tree_within_grace_period() {
     assert!(fresh.exists());
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_sweep_preserves_checkout_with_live_owner_marker() {
     let _env_lock = acquire_test_env_lock().await;
@@ -827,6 +831,7 @@ async fn github_run_sweep_preserves_checkout_with_live_owner_marker() {
     assert!(active.exists());
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_sweep_preserves_checkout_referenced_by_active_process() {
     let _env_lock = acquire_test_env_lock().await;
@@ -878,6 +883,7 @@ async fn github_run_sweep_preserves_checkout_referenced_by_active_process() {
         .expect("cleanup pid record");
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_sweep_does_not_preserve_owner_marker_with_mismatched_start_time() {
     let _env_lock = acquire_test_env_lock().await;
@@ -910,6 +916,7 @@ async fn github_run_sweep_does_not_preserve_owner_marker_with_mismatched_start_t
     assert!(!stale.exists());
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn github_run_owner_marker_requires_matching_start_time() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2094,6 +2101,7 @@ fn test_unpack_github_tarball_rejects_path_traversal_entries() {
     assert!(err.to_string().contains("unsafe path traversal components"));
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn download_github_repository_at_ref_maps_private_repo_404_to_auth_message() {
     use axum::extract::Query;
@@ -2478,6 +2486,7 @@ run = "main.py""#,
     assert_eq!(reconstructed.payload_tar, first);
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_delta_install_false_positive_recovers_with_reuse_lease_id() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2520,6 +2529,7 @@ async fn test_delta_install_false_positive_recovers_with_reuse_lease_id() {
     assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_uses_version_resolve_for_explicit_time_travel() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2562,6 +2572,7 @@ async fn test_install_app_uses_version_resolve_for_explicit_time_travel() {
 }
 
 #[cfg(target_os = "macos")]
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn repository_ato_desktop_capsule_installs_via_native_local_derivation() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2654,6 +2665,7 @@ async fn repository_ato_desktop_capsule_installs_via_native_local_derivation() {
         .is_some_and(|projection| !projection.performed));
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_fails_closed_on_negotiate_501() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2698,6 +2710,7 @@ async fn test_install_app_fails_closed_on_negotiate_501() {
     assert!(observations.release_calls.is_empty());
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_install_app_unauthorized_manifest_fails_closed_without_fallback() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2742,6 +2755,7 @@ async fn test_install_app_unauthorized_manifest_fails_closed_without_fallback() 
     assert_eq!(observations.artifact_calls, 0);
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_manifest_api_404_falls_back_to_distribution_download() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2786,6 +2800,7 @@ async fn test_manifest_api_404_falls_back_to_distribution_download() {
     assert!(observations.release_calls.is_empty());
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_distribution_artifact_fallback_does_not_send_auth_to_presigned_url() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2824,6 +2839,7 @@ async fn test_distribution_artifact_fallback_does_not_send_auth_to_presigned_url
     assert_eq!(observations.artifact_calls, 1);
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_missing_chunks_after_retry_falls_back_to_distribution_download() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2864,6 +2880,7 @@ async fn test_missing_chunks_after_retry_falls_back_to_distribution_download() {
     assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_delta_install_releases_lease_when_chunk_download_fails() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2890,6 +2907,7 @@ async fn test_delta_install_releases_lease_when_chunk_download_fails() {
     assert_eq!(observations.release_calls, vec![TEST_LEASE_ID.to_string()]);
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_negotiate_yanked_fails_closed() {
     let _env_lock = acquire_test_env_lock().await;
@@ -2913,6 +2931,7 @@ async fn test_negotiate_yanked_fails_closed() {
     assert!(message.to_ascii_lowercase().contains("yanked"));
 }
 
+#[serial_test::serial]
 #[tokio::test(flavor = "current_thread")]
 async fn test_manifest_yanked_fails_closed_even_with_allow_unverified() {
     let _env_lock = acquire_test_env_lock().await;
