@@ -816,7 +816,29 @@ build = "npm run build"
 
     #[test]
     fn materializes_synthetic_env_file() {
+        // `materialize_synthetic_env` calls `SecretStore::open()` which
+        // resolves the store root via `nacelle_home_dir()` — i.e. the real
+        // `$ATO_HOME` or `$HOME/.ato`. Without isolation, a developer who
+        // ever ran `ato secrets set API_KEY=...` sees that real value here
+        // instead of the placeholder this test is supposed to pin. Pin
+        // `ATO_HOME` to a fresh tempdir so the secret-store lookup always
+        // hits an empty store and the placeholder fallback fires.
+        let _env_guard = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempfile::tempdir().expect("tempdir");
+        let isolated_ato_home = tempfile::tempdir().expect("ato_home tempdir");
+        let previous_ato_home = std::env::var_os("ATO_HOME");
+        std::env::set_var("ATO_HOME", isolated_ato_home.path());
+        struct AtoHomeRestore(Option<std::ffi::OsString>);
+        impl Drop for AtoHomeRestore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+            }
+        }
+        let _ato_home_restore = AtoHomeRestore(previous_ato_home);
+
         let plan = capsule_core::router::execution_descriptor_from_manifest_parts(
             toml::from_str(
                 r#"
