@@ -1,0 +1,4 @@
+// Windows resource file for ato-desktop.
+// Embeds AppIcon.ico into the executable so Explorer, the taskbar,
+// and the Start Menu shortcut all display the Ato icon.
+1 ICON "../AppIcon.ico"

@@ -116,6 +116,9 @@ objc2-web-kit = "0.3.2"
 # `addChildWindow:ordered:` for the Focus View Control Bar (#171).
 raw-window-handle = "0.6"
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 tempfile = "3"
 serial_test = { version = "3", features = ["log"] }

@@ -961,9 +961,9 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
 
 fn render_info_plist(version: &str) -> String {
     format!(
-        r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
   <dict>
     <key>CFBundleName</key>
     <string>{APP_NAME}</string>
@@ -1124,10 +1124,31 @@ mod tests {
     }
 
     #[test]
-    fn info_plist_contains_identifier() {
+    fn info_plist_is_valid_xml() {
+        let plist = render_info_plist("1.2.3");
+        assert!(
+            !plist.contains(r#"\""#),
+            "Info.plist must not contain raw-string escape artifacts (backslash-quote)"
+        );
+        assert!(
+            plist.contains(r#"<?xml version="1.0" encoding="UTF-8"?>"#),
+            "Info.plist must start with a valid XML declaration"
+        );
+    }
+
+    #[test]
+    fn info_plist_contains_icon_and_identifier() {
         let plist = render_info_plist("1.2.3");
         assert!(plist.contains("run.ato.desktop"));
         assert!(plist.contains("1.2.3"));
+        assert!(
+            plist.contains("<key>CFBundleIconFile</key>"),
+            "Info.plist must declare CFBundleIconFile"
+        );
+        assert!(
+            plist.contains("<string>AppIcon</string>"),
+            "Info.plist CFBundleIconFile value must be AppIcon"
+        );
     }
 
 }
