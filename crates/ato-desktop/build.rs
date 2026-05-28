@@ -18,10 +18,125 @@ fn main() {
 
     // ato-store system capsule (Astro desktop static build)
     check_store_dist(&manifest_dir);
+
+    // ato-cli + nacelle helpers — rebuild in lockstep with ato-desktop so
+    // `cargo run --bin ato-desktop` never picks up a stale binary.
+    rebuild_helpers(&manifest_dir);
+}
+
+/// Keep the `ato` and `nacelle` helper binaries in sync with the current
+/// source tree.
+///
+/// In the monorepo dev workflow, `cargo run --bin ato-desktop` only builds
+/// `ato-desktop` itself — `ato-cli` and `nacelle` live in the root workspace
+/// (which excludes `ato-desktop` to dodge crates.io packaging issues), so
+/// they would otherwise stay frozen at whatever version was last built
+/// manually. That lets old binaries sneak in as the desktop's helpers.
+///
+/// This build step:
+///   1. Locates the root workspace (`manifest_dir/../../`) and verifies it
+///      declares both helper crates.
+///   2. Shells out to `cargo build -p ato-cli -p nacelle` (release-gated by
+///      the current `PROFILE`) against that workspace.
+///   3. Emits `ATO_DESKTOP_DEV_HELPER_TARGET=<root>/target` so the runtime
+///      resolver can prefer the freshly-built helpers over PATH lookups.
+///
+/// Opt out with `ATO_DESKTOP_SKIP_HELPER_BUILD=1` (CI/release pipelines
+/// that pre-stage helpers, or when iterating on `ato-desktop` alone).
+fn rebuild_helpers(manifest_dir: &PathBuf) {
+    println!("cargo:rerun-if-env-changed=ATO_DESKTOP_SKIP_HELPER_BUILD");
+
+    let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) else {
+        println!(
+            "cargo:warning=could not derive root workspace from {} — skipping helper rebuild",
+            manifest_dir.display()
+        );
+        return;
+    };
+
+    let root_cargo = workspace_root.join("Cargo.toml");
+    if !root_cargo.is_file() {
+        // Source distribution without the monorepo (e.g. vendored crate
+        // tarball). Runtime resolver will fall back to PATH.
+        return;
+    }
+
+    let manifest = std::fs::read_to_string(&root_cargo).unwrap_or_default();
+    if !manifest.contains("crates/ato-cli") || !manifest.contains("crates/nacelle") {
+        // Root Cargo.toml exists but doesn't own the helpers — bail out so
+        // we never poke an unrelated workspace.
+        return;
+    }
+
+    // Watch helper crate dirs so cargo re-runs build.rs when their sources
+    // change. These watches are additive: existing rerun-if-changed entries
+    // for asset dist dirs above still apply.
+    for dir in [
+        "../ato-cli",
+        "../nacelle",
+        "../capsule-core",
+        "../capsule-wire",
+        "../ato-session-core",
+    ] {
+        println!("cargo:rerun-if-changed={dir}");
+    }
+
+    let helper_target = workspace_root.join("target");
+    println!(
+        "cargo:rustc-env=ATO_DESKTOP_DEV_HELPER_TARGET={}",
+        helper_target.display()
+    );
+
+    if env_truthy("ATO_DESKTOP_SKIP_HELPER_BUILD") {
+        println!(
+            "cargo:warning=ATO_DESKTOP_SKIP_HELPER_BUILD=1 set; not rebuilding ato-cli/nacelle"
+        );
+        return;
+    }
+
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let mut args = vec!["build", "-p", "ato-cli", "-p", "nacelle"];
+    if profile == "release" {
+        args.push("--release");
+    }
+
+    println!(
+        "cargo:warning=rebuilding ato-cli + nacelle helpers ({profile}) in {}",
+        workspace_root.display()
+    );
+
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(&cargo)
+        .args(&args)
+        .current_dir(workspace_root)
+        // Don't inherit ato-desktop's CARGO_TARGET_DIR — let the root
+        // workspace use its own `target/` so the resolver can find the
+        // produced binaries at <root>/target/{profile}/{ato,nacelle}.
+        .env_remove("CARGO_TARGET_DIR")
+        .status();
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            panic!(
+                "helper rebuild (cargo build -p ato-cli -p nacelle) failed with status {status} in {}",
+                workspace_root.display()
+            );
+        }
+        Err(error) => {
+            panic!(
+                "failed to invoke `{cargo}` for helper rebuild in {}: {error}",
+                workspace_root.display()
+            );
+        }
+    }
 }
 
 fn check_onboarding_dist(manifest_dir: &PathBuf) {
-    let capsule_dir = manifest_dir.join("assets").join("system").join("ato-onboarding");
+    let capsule_dir = manifest_dir
+        .join("assets")
+        .join("system")
+        .join("ato-onboarding");
     let dist_dir = capsule_dir.join("dist");
     let entrypoint = dist_dir.join("index.html");
 
@@ -46,9 +161,19 @@ fn check_onboarding_dist(manifest_dir: &PathBuf) {
     }
 
     if !capsule_dir.join("node_modules").exists() {
-        run_command("npm", &["install"], &capsule_dir, "ato-onboarding npm install");
+        run_command(
+            "npm",
+            &["install"],
+            &capsule_dir,
+            "ato-onboarding npm install",
+        );
     }
-    run_command("npm", &["run", "build"], &capsule_dir, "ato-onboarding vite build");
+    run_command(
+        "npm",
+        &["run", "build"],
+        &capsule_dir,
+        "ato-onboarding vite build",
+    );
     if entrypoint.exists() {
         return;
     }
@@ -114,9 +239,7 @@ fn check_dock_dist(manifest_dir: &PathBuf) {
     }
 
     if env_truthy("ATO_DESKTOP_SKIP_DOCK_BUILD") {
-        println!(
-            "cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; dock dist check skipped"
-        );
+        println!("cargo:warning=ATO_DESKTOP_SKIP_DOCK_BUILD=1 set; dock dist check skipped");
         return;
     }
 
@@ -184,16 +307,19 @@ fn check_start_dist(manifest_dir: &PathBuf) {
     }
 
     if env_truthy("ATO_DESKTOP_SKIP_START_BUILD") {
-        println!(
-            "cargo:warning=ATO_DESKTOP_SKIP_START_BUILD=1 set; start dist check skipped"
-        );
+        println!("cargo:warning=ATO_DESKTOP_SKIP_START_BUILD=1 set; start dist check skipped");
         return;
     }
 
     if !capsule_dir.join("node_modules").exists() {
         run_command("npm", &["install"], &capsule_dir, "ato-start npm install");
     }
-    run_command("npm", &["run", "build"], &capsule_dir, "ato-start astro build");
+    run_command(
+        "npm",
+        &["run", "build"],
+        &capsule_dir,
+        "ato-start astro build",
+    );
     if entrypoint.exists() {
         return;
     }
@@ -226,9 +352,7 @@ fn check_store_dist(manifest_dir: &PathBuf) {
     }
 
     if env_truthy("ATO_DESKTOP_SKIP_STORE_BUILD") {
-        println!(
-            "cargo:warning=ATO_DESKTOP_SKIP_STORE_BUILD=1 set; store dist check skipped"
-        );
+        println!("cargo:warning=ATO_DESKTOP_SKIP_STORE_BUILD=1 set; store dist check skipped");
         return;
     }
 

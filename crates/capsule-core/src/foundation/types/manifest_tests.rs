@@ -2,7 +2,7 @@ use std::fs;
 
 use super::{
     is_kebab_case, is_semver, CapsuleManifest, CapsuleType, ConfigField, ConfigKind, RouteWeight,
-    RuntimeType, ValidationError, ValidationMode,
+    RuntimeType, StateSharing, ValidationError, ValidationMode,
 };
 
 const VALID_TOML: &str = r#"
@@ -306,7 +306,7 @@ readiness_probe = { http_get = "/healthz", port = "PORT" }
         target
             .readiness_probe
             .as_ref()
-            .map(|probe| probe.port.as_str()),
+            .and_then(|probe| probe.port.as_deref()),
         Some("PORT")
     );
 }
@@ -836,7 +836,7 @@ entrypoint = "server.js"
 }
 
 #[test]
-fn test_from_toml_rejects_v03_target_legacy_cmd() {
+fn test_from_toml_rejects_v03_source_target_legacy_cmd() {
     let toml = r#"
 schema_version = "0.3"
 name = "legacy-v03"
@@ -845,15 +845,126 @@ type = "app"
 default_target = "app"
 
 [targets.app]
-runtime = "oci"
-image = "ghcr.io/example/app:latest"
-cmd = ["python", "app.py"]
+runtime = "source/node"
+run = "node server.js"
+cmd = ["node", "server.js"]
 "#;
 
-    let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 cmd must fail");
+    let error = CapsuleManifest::from_toml(toml).expect_err("v0.3 cmd on source target must fail");
     assert!(error
         .to_string()
         .contains("must not use legacy field 'cmd'"));
+}
+
+#[test]
+fn test_from_toml_allows_v03_oci_target_cmd_override() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["python", "worker.py"]
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("OCI target with cmd should parse");
+    let targets = manifest.targets.expect("targets");
+    let target = targets.named_target("app").expect("target app");
+    assert_eq!(target.cmd, vec!["python", "worker.py"]);
+}
+
+#[test]
+fn test_from_toml_rejects_v03_oci_target_empty_cmd() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = []
+"#;
+
+    let error = CapsuleManifest::from_toml(toml).expect_err("empty cmd array should be rejected");
+    assert!(error.to_string().contains("'cmd' must not be empty"));
+}
+
+#[test]
+fn test_from_toml_rejects_v03_oci_target_cmd_shell_string() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = "celery -A app.celery worker"
+"#;
+
+    let error = CapsuleManifest::from_toml(toml).expect_err("shell string cmd should be rejected");
+    assert!(error.to_string().contains("must be an array"));
+}
+
+#[test]
+fn test_from_toml_rejects_v03_oci_target_entrypoint() {
+    let toml = r#"
+schema_version = "0.3"
+name = "oci-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+entrypoint = "/bin/sh"
+"#;
+
+    let error =
+        CapsuleManifest::from_toml(toml).expect_err("entrypoint still rejected for OCI targets");
+    assert!(error
+        .to_string()
+        .contains("must not use legacy field 'entrypoint'"));
+}
+
+#[test]
+fn test_from_toml_oci_multi_target_cmd_independence() {
+    // Same image with different cmd overrides — the recipe pattern for api/worker splits
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-cmd-test"
+version = "0.1.0"
+type = "app"
+default_target = "api"
+
+[targets.api]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["gunicorn", "app:create_app()"]
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["celery", "-A", "app.celery", "worker"]
+"#;
+
+    let manifest =
+        CapsuleManifest::from_toml(toml).expect("multi-target same-image with different cmd");
+    let targets = manifest.targets.expect("targets");
+    let api = targets.named_target("api").expect("api target");
+    let worker = targets.named_target("worker").expect("worker target");
+    assert_eq!(api.cmd, vec!["gunicorn", "app:create_app()"]);
+    assert_eq!(worker.cmd, vec!["celery", "-A", "app.celery", "worker"]);
 }
 
 #[test]
@@ -1704,7 +1815,7 @@ readiness_probe = { port = "API_PORT" }
     assert!(errors.iter().any(|e| matches!(
         e,
         ValidationError::InvalidService(name, msg)
-            if name == "api" && msg.contains("http_get or tcp_connect")
+            if name == "api" && (msg.contains("http_get or tcp_connect") || msg.contains("http_get, tcp_connect, or exec"))
     )));
 }
 
@@ -1908,6 +2019,390 @@ network = { publish = true }
         ValidationError::InvalidService(name, message)
             if name == "service_binding_scope" && message.contains("cannot be empty")
     )));
+}
+
+// ── Shared state policy tests ────────────────────────────────────────────────
+
+#[test]
+fn exclusive_state_rejects_multiple_writers() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:app-uploads-v1"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::StateSharedRequiresPolicy { state, .. }
+                if state == "uploads"
+        )),
+        "expected StateSharedRequiresPolicy error, got: {errors:?}"
+    );
+
+    // Verify error message includes both service names for diagnostics.
+    let policy_error = errors
+        .iter()
+        .find(|e| matches!(e, ValidationError::StateSharedRequiresPolicy { .. }))
+        .unwrap();
+    let msg = format!("{policy_error}");
+    assert!(
+        msg.contains("app") && msg.contains("worker"),
+        "error message should include both service names, got: {msg}"
+    );
+}
+
+#[test]
+fn explicit_same_capsule_sharing_allows_multiple_writers() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:app-uploads-v1"
+sharing = "same-capsule"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(
+        manifest.validate().is_ok(),
+        "same-capsule sharing should allow multiple writers"
+    );
+}
+
+#[test]
+fn shared_state_requires_schema_id() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+sharing = "same-capsule"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::StateSharedRequiresSchemaId(name)
+                if name == "uploads"
+        )),
+        "expected StateSharedRequiresSchemaId error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn shared_state_rejects_undeclared_state_key() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.legitimate]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "data"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "undeclared-state"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "undeclared-state"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::StateKeyUndeclared(name)
+                if name == "undeclared-state"
+        )),
+        "expected StateKeyUndeclared error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn existing_single_service_state_behavior_unchanged() {
+    let toml = r#"
+schema_version = "0.3"
+name = "stateful-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "primary-data"
+attach = "explicit"
+schema_id = "vaultwarden/data/v1"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn same_service_binds_same_state_multiple_targets_still_allowed() {
+    let toml = r#"
+schema_version = "0.3"
+name = "stateful-app"
+version = "0.1.0"
+type = "app"
+
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+[state.data]
+kind = "filesystem"
+durability = "ephemeral"
+purpose = "primary-data"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/lib/app"
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/etc/config"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidStateBinding(name, msg)
+                if name == "main" && msg.contains("bound more than once")
+        )),
+        "expected duplicate binding error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn shared_state_with_sharing_same_capsule_and_writable_defaults_true() {
+    let toml = r#"
+schema_version = "0.3"
+name = "multi-service-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "ghcr.io/example/worker:latest"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:app-uploads-v1"
+sharing = "same-capsule"
+
+[services.main]
+target = "app"
+
+[services.app]
+target = "app"
+[[services.app.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(manifest.validate().is_ok());
+    let req = manifest.state.get("uploads").unwrap();
+    assert_eq!(req.sharing, StateSharing::SameCapsule);
+}
+
+#[test]
+fn dify_recipe_validates_with_shared_state() {
+    let recipe_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../samples/recipes/dify/capsule.toml"
+    );
+    let content = std::fs::read_to_string(recipe_path).expect("Dify recipe should be readable");
+    let manifest = CapsuleManifest::from_toml(&content).expect("Dify recipe should parse");
+    manifest
+        .validate()
+        .expect("Dify recipe with shared state should validate");
+}
+
+#[test]
+fn existing_batch_recipes_still_compile() {
+    let recipe_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../samples/recipes");
+    let mut parsed = 0u32;
+    let mut failed = Vec::new();
+    for entry in std::fs::read_dir(recipe_dir).expect("recipes dir readable") {
+        let entry = entry.expect("entry readable");
+        let capsule_toml = entry.path().join("capsule.toml");
+        if !capsule_toml.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&capsule_toml) {
+            Ok(c) => c,
+            Err(e) => {
+                failed.push(format!("{}: {}", entry.file_name().to_string_lossy(), e));
+                continue;
+            }
+        };
+        match CapsuleManifest::from_toml(&content) {
+            Ok(_) => parsed += 1,
+            Err(e) => failed.push(format!(
+                "{}: parse: {}",
+                entry.file_name().to_string_lossy(),
+                e
+            )),
+        }
+    }
+    if !failed.is_empty() {
+        panic!(
+            "{}/{} recipes failed to parse:\n{}",
+            failed.len(),
+            parsed + failed.len() as u32,
+            failed.join("\n")
+        );
+    }
+    assert!(parsed > 0, "at least one recipe must parse");
 }
 
 #[test]
@@ -2690,4 +3185,1012 @@ ref = "capsule://ato.run/tools/postgresql-binaries@16.4.0"
         ValidationError::ToolDependencyInvalidEnvVar { alias, env_name, .. }
             if alias == "postgres" && env_name == "1BAD_NAME"
     )));
+}
+
+// ── Exec readiness probe portless tests ──────────────────────────────────────
+
+#[test]
+fn exec_readiness_probe_parses_without_port() {
+    let toml = r#"
+schema_version = "0.3"
+name = "pg-probe-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+
+[services.main]
+entrypoint = "node server.js"
+
+[services.db]
+entrypoint = "postgres"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"] }
+"#;
+    let manifest =
+        CapsuleManifest::from_toml(toml).expect("parse manifest with portless exec probe");
+    assert!(
+        manifest.validate().is_ok(),
+        "portless exec probe should be valid"
+    );
+
+    let svc = manifest
+        .services
+        .as_ref()
+        .unwrap()
+        .get("db")
+        .expect("db service");
+    let probe = svc.readiness_probe.as_ref().expect("readiness_probe");
+    assert!(probe.exec.is_some(), "exec field must be present");
+    assert!(probe.port.is_none(), "port must be absent");
+}
+
+#[test]
+fn exec_readiness_probe_rejects_empty_argv() {
+    let toml = r#"
+schema_version = "0.3"
+name = "empty-exec-test"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+
+[services.main]
+entrypoint = "node server.js"
+
+[services.db]
+entrypoint = "postgres"
+readiness_probe = { exec = [] }
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse manifest");
+    let errors = manifest.validate().expect_err("empty exec argv must fail");
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{e:?}");
+            msg.contains("exec") || msg.contains("empty")
+        }),
+        "expected exec-empty error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn exec_probe_with_legacy_port_still_parses() {
+    let toml = r#"
+schema_version = "0.3"
+name = "legacy-exec-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+
+[services.main]
+entrypoint = "node server.js"
+
+[services.db]
+entrypoint = "postgres"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"], port = "5432" }
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse manifest with legacy exec+port");
+    assert!(
+        manifest.validate().is_ok(),
+        "legacy exec+port should still be valid"
+    );
+
+    let svc = manifest
+        .services
+        .as_ref()
+        .unwrap()
+        .get("db")
+        .expect("db service");
+    let probe = svc.readiness_probe.as_ref().expect("readiness_probe");
+    // Port is preserved but behaviorally ignored for exec probes.
+    assert_eq!(probe.port.as_deref(), Some("5432"));
+}
+
+#[test]
+fn http_readiness_probe_still_requires_port() {
+    let toml = r#"
+schema_version = "0.3"
+name = "http-probe-no-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run = "npm start"
+port = 3000
+readiness_probe = { http_get = "/healthz" }
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse manifest");
+    let errors = manifest
+        .validate()
+        .expect_err("http_get without port must fail");
+    assert!(
+        errors.iter().any(|e| {
+            let msg = format!("{e:?}");
+            msg.contains("port")
+        }),
+        "expected port-required error, got: {errors:?}"
+    );
+}
+
+// ── run_once (OCI one-shot lifecycle) ────────────────────────────────────────
+
+const RUN_ONCE_RECIPE: &str = r#"
+schema_version = "0.3"
+name = "run-once-smoke"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init-permissions]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["sh", "-c", "chown -R 1000:1000 /app/storage"]
+run_once = true
+depends_on = ["db"]
+
+[targets.db]
+runtime = "oci"
+image = "postgres:14"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+depends_on = ["init-permissions"]
+"#;
+
+#[test]
+fn run_once_target_parses() {
+    let manifest = CapsuleManifest::from_toml(RUN_ONCE_RECIPE).expect("parse manifest");
+    let targets = manifest.targets.expect("targets");
+    let init = targets
+        .named_target("init-permissions")
+        .expect("init-permissions target");
+    assert!(
+        init.run_once,
+        "run_once must round-trip to NamedTarget.run_once = true"
+    );
+    assert_eq!(
+        init.cmd,
+        vec!["sh", "-c", "chown -R 1000:1000 /app/storage"],
+        "cmd must be preserved on a run_once target"
+    );
+    let db = targets.named_target("db").expect("db target");
+    assert!(!db.run_once, "non-run_once targets default to false");
+}
+
+#[test]
+fn run_once_requires_cmd_or_rejects_missing_cmd() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-missing-cmd"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+run_once = true
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+"#;
+    let err = CapsuleManifest::from_toml(toml)
+        .expect_err("run_once without cmd must be rejected at parse time");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("cmd"),
+        "error must explain the missing cmd; got: {msg}"
+    );
+}
+
+#[test]
+fn run_once_rejects_readiness_probe_if_unsupported() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-with-probe"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["sh", "-c", "echo ok"]
+run_once = true
+readiness_probe = { http_get = "/healthz" }
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+"#;
+    let err =
+        CapsuleManifest::from_toml(toml).expect_err("run_once + readiness_probe must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("readiness_probe"),
+        "error must mention both run_once and readiness_probe; got: {msg}"
+    );
+}
+
+#[test]
+fn run_once_rejects_port() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-with-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+cmd = ["sh", "-c", "echo ok"]
+run_once = true
+port = 8080
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 9090
+"#;
+    let err = CapsuleManifest::from_toml(toml).expect_err("run_once + port must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("port"),
+        "error must mention both run_once and port; got: {msg}"
+    );
+}
+
+#[test]
+fn run_once_smoke_recipe_parses() {
+    // Pin the synthetic AODD recipe (db → init run_once → app) at the parser
+    // boundary so the docs and the runtime can never silently diverge.
+    let toml = include_str!("../../../../../samples/recipes/oci-run-once-smoke/capsule.toml");
+    let manifest = CapsuleManifest::from_toml(toml).expect("smoke recipe must parse");
+    let targets = manifest.targets.expect("targets");
+    let init = targets.named_target("init").expect("init target");
+    assert!(init.run_once, "init target must be run_once");
+    assert!(
+        init.needs.iter().any(|d| d == "db"),
+        "init must depend on db; got: {:?}",
+        init.needs
+    );
+    let app = targets.named_target("app").expect("app target");
+    assert!(
+        app.needs.iter().any(|d| d == "init"),
+        "app must depend on init (so init runs before app); got: {:?}",
+        app.needs
+    );
+    let db = targets.named_target("db").expect("db target");
+    assert!(!db.run_once, "db must NOT be run_once");
+}
+
+#[test]
+fn run_once_rejects_non_oci_runtime() {
+    let toml = r#"
+schema_version = "0.3"
+name = "run-once-non-oci"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.init]
+runtime = "source"
+driver = "node"
+run = "node init.js"
+run_once = true
+"#;
+    let err = CapsuleManifest::from_toml(toml)
+        .expect_err("run_once is OCI-only and must be rejected on a source target");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("run_once") && msg.contains("OCI"),
+        "error must mention OCI-only constraint; got: {msg}"
+    );
+}
+
+const INGRESS_BASE_TOML: &str = r#"
+schema_version = "0.3"
+name = "ingress-demo"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[targets.api]
+runtime = "oci"
+image = "api:latest"
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+listed = true
+root = true
+strip_prefix = true
+
+[ingress.routes.api]
+target = "api"
+port = 5001
+listed = false
+alias = "api"
+strip_prefix = true
+upstream_path_prefix = "/api"
+
+[ingress.env_inject]
+web.CONSOLE_API_URL = "{{ingress.routes.api.url}}"
+"#;
+
+#[test]
+fn ingress_route_model_parses() {
+    let manifest = CapsuleManifest::from_toml(INGRESS_BASE_TOML).unwrap();
+    let ingress = manifest.ingress.as_ref().expect("ingress must parse");
+
+    assert!(matches!(ingress.mode, super::IngressMode::Path));
+    assert_eq!(ingress.routes.len(), 2);
+
+    let web = &ingress.routes["web"];
+    assert_eq!(web.target, "web");
+    assert_eq!(web.port, 3000);
+    assert!(web.listed);
+    assert!(web.root);
+    assert!(web.strip_prefix);
+
+    let api = &ingress.routes["api"];
+    assert_eq!(api.target, "api");
+    assert_eq!(api.port, 5001);
+    assert!(!api.listed);
+    assert_eq!(api.alias.as_deref(), Some("api"));
+    assert_eq!(api.upstream_path_prefix.as_deref(), Some("/api"));
+
+    let web_env = &ingress.env_inject["web"];
+    assert_eq!(
+        web_env.get("CONSOLE_API_URL"),
+        Some(&"{{ingress.routes.api.url}}".to_string())
+    );
+
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn ingress_host_mode_rejected_in_v1() {
+    let toml = INGRESS_BASE_TOML.replace("mode = \"path\"", "mode = \"host\"");
+    let manifest = CapsuleManifest::from_toml(&toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("host mode must be rejected in v1");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("host") && msg.contains("v1")
+        )),
+        "expected host-mode rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_duplicate_alias_rejected() {
+    let toml = r#"
+schema_version = "0.3"
+name = "dup-alias"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[targets.api]
+runtime = "oci"
+image = "api:latest"
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "shared"
+
+[ingress.routes.api]
+target = "api"
+port = 5001
+alias = "shared"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("duplicate alias must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("duplicate") && msg.contains("shared")
+        )),
+        "expected duplicate alias rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_root_route_with_alias_rejected() {
+    let toml = r#"
+schema_version = "0.3"
+name = "root-alias"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+alias = "www"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("root route with alias must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("root") && msg.contains("alias")
+        )),
+        "expected root-with-alias rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_env_inject_missing_route_rejected() {
+    let toml = r#"
+schema_version = "0.3"
+name = "missing-route-ref"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+
+[ingress.env_inject]
+web.API_URL = "{{ingress.routes.nonexistent.url}}"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("missing route reference must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("nonexistent")
+        )),
+        "expected missing route rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_template_shape_changes_identity() {
+    use std::collections::BTreeMap;
+
+    let mut env_a = BTreeMap::new();
+    env_a.insert(
+        "CONSOLE_API_URL".to_string(),
+        "{{ingress.routes.api.url}}".to_string(),
+    );
+
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "api".to_string(),
+        super::IngressRoute {
+            target: "api".to_string(),
+            port: 5001,
+            listed: false,
+            alias: Some("api".to_string()),
+            strip_prefix: true,
+            upstream_path_prefix: Some("/api".to_string()),
+            root: false,
+        },
+    );
+
+    let ingress_a = super::IngressConfig {
+        mode: super::IngressMode::Path,
+        routes: routes.clone(),
+        env_inject: {
+            let mut m = BTreeMap::new();
+            m.insert("web".to_string(), env_a);
+            m
+        },
+    };
+
+    let mut env_b = BTreeMap::new();
+    env_b.insert(
+        "CONSOLE_API_URL".to_string(),
+        "{{ingress.routes.api.base_url}}".to_string(),
+    );
+
+    let ingress_b = super::IngressConfig {
+        mode: super::IngressMode::Path,
+        routes,
+        env_inject: {
+            let mut m = BTreeMap::new();
+            m.insert("web".to_string(), env_b);
+            m
+        },
+    };
+
+    let json_a = serde_json::to_string(&ingress_a).unwrap();
+    let json_b = serde_json::to_string(&ingress_b).unwrap();
+
+    let hash_a = format!("blake3:{}", blake3::hash(json_a.as_bytes()).to_hex());
+    let hash_b = format!("blake3:{}", blake3::hash(json_b.as_bytes()).to_hex());
+
+    assert_ne!(
+        hash_a, hash_b,
+        "different env_inject templates must produce different identity hashes"
+    );
+}
+
+#[test]
+fn resolved_ingress_url_not_in_execution_identity() {
+    use std::collections::BTreeMap;
+
+    let mut routes = BTreeMap::new();
+    routes.insert(
+        "web".to_string(),
+        super::IngressRoute {
+            target: "web".to_string(),
+            port: 3000,
+            listed: true,
+            alias: None,
+            strip_prefix: true,
+            upstream_path_prefix: None,
+            root: true,
+        },
+    );
+
+    let ingress = super::IngressConfig {
+        mode: super::IngressMode::Path,
+        routes,
+        env_inject: BTreeMap::new(),
+    };
+
+    let json = serde_json::to_string(&ingress).unwrap();
+    assert!(
+        !json.contains("127.0.0.1"),
+        "resolved URLs (localhost addresses) must not appear in ingress identity"
+    );
+    assert!(
+        !json.contains("/i/"),
+        "session-scoped path prefixes must not appear in ingress identity"
+    );
+    assert!(
+        json.contains("\"target\":\"web\""),
+        "declared target must be present in identity"
+    );
+    assert!(
+        json.contains("\"port\":3000"),
+        "declared port must be present in identity"
+    );
+}
+
+#[test]
+fn existing_recipes_without_ingress_unchanged() {
+    let manifest = CapsuleManifest::from_toml(VALID_TOML).unwrap();
+    assert!(
+        manifest.ingress.is_none(),
+        "manifests without [ingress] must parse with ingress = None"
+    );
+    assert!(manifest.validate().is_ok());
+}
+
+#[test]
+fn ingress_route_name_used_as_alias_must_be_url_safe() {
+    let toml = r#"
+schema_version = "0.3"
+name = "route-name-alias"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[targets.api]
+runtime = "oci"
+image = "api:latest"
+
+[services.web]
+target = "web"
+
+[services.api]
+target = "api"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes."api/v1"]
+target = "api"
+port = 5001
+listed = false
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("route name with slash must be rejected when used as alias");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("api/v1") && msg.contains("URL-safe")
+        )),
+        "expected route name fallback alias validation; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_quoted_route_name_with_percent_rejected_when_alias_missing() {
+    let toml = r#"
+schema_version = "0.3"
+name = "percent-route"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes."api%20v1"]
+target = "web"
+port = 3000
+listed = true
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("route name with percent must be rejected when used as alias");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("URL-safe")
+        )),
+        "expected percent-encoded route name rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_upstream_prefix_rejects_parent_traversal() {
+    let toml = r#"
+schema_version = "0.3"
+name = "prefix-traversal"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "web"
+strip_prefix = true
+upstream_path_prefix = "/../admin"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("upstream_path_prefix with .. must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("parent-traversal")
+        )),
+        "expected traversal rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_upstream_prefix_rejects_percent_encoded_slash() {
+    let toml = r#"
+schema_version = "0.3"
+name = "prefix-pct"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "web"
+strip_prefix = true
+upstream_path_prefix = "/api%2fv1"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("upstream_path_prefix with %2f must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("percent-encoded")
+        )),
+        "expected percent-encoded rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_upstream_prefix_rejects_backslash() {
+    let toml = r#"
+schema_version = "0.3"
+name = "prefix-bs"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+alias = "web"
+strip_prefix = true
+upstream_path_prefix = "/api\\v1"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("upstream_path_prefix with backslash must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains("backslash")
+        )),
+        "expected backslash rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_env_inject_rejects_unknown_template_field() {
+    let toml = r#"
+schema_version = "0.3"
+name = "bad-template-field"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+
+[ingress.env_inject]
+web.API_URL = "{{ingress.routes.web.bad}}"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest
+        .validate()
+        .expect_err("unknown template field must be rejected");
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidTarget(msg) if msg.contains(".bad") && msg.contains("unsupported")
+        )),
+        "expected unknown field rejection; got: {errors:?}"
+    );
+}
+
+#[test]
+fn ingress_env_inject_accepts_url_base_url_path_origin() {
+    let toml = r#"
+schema_version = "0.3"
+name = "valid-template-fields"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+
+[ingress]
+mode = "path"
+
+[ingress.routes.web]
+target = "web"
+port = 3000
+root = true
+
+[ingress.env_inject]
+web.API_URL = "{{ingress.routes.web.url}}"
+web.BASE_URL = "{{ingress.routes.web.base_url}}"
+web.PATH = "{{ingress.routes.web.path}}"
+web.ORIGIN = "{{ingress.routes.web.origin}}"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    assert!(
+        manifest.validate().is_ok(),
+        "all four allowed template suffixes must pass validation"
+    );
+}
+
+#[test]
+fn manifest_ingress_changes_declared_execution_id() {
+    let toml_no_ingress = r#"
+schema_version = "0.3"
+name = "id-test"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "oci"
+image = "nginx:latest"
+
+[services.web]
+target = "web"
+
+[services.main]
+target = "web"
+"#;
+
+    let toml_with_ingress = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        toml_no_ingress.trim(),
+        "[ingress]",
+        "mode = \"path\"",
+        "",
+        "[ingress.routes.web]",
+        "target = \"web\"",
+        "port = 3000",
+        "root = true",
+        "",
+        "[ingress.env_inject]",
+        "web.API_URL = \"{{ingress.routes.web.url}}\"",
+    );
+
+    let m_no = CapsuleManifest::from_toml(toml_no_ingress).unwrap();
+    let m_with = CapsuleManifest::from_toml(&toml_with_ingress).unwrap();
+
+    assert!(m_no.ingress.is_none());
+    assert!(m_with.ingress.is_some());
+
+    assert!(m_no.validate().is_ok());
+    assert!(m_with.validate().is_ok());
 }

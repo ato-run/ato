@@ -243,6 +243,23 @@
   .confirm-body { font-size: 13px; color: var(--muted); margin: 0; }
   .confirm-key { font-family: ui-monospace, "SF Mono", monospace; font-weight: 700; color: var(--text); }
   .confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ENGINES TAB — diagnostics */
+  .diag-row { display: flex; align-items: center; gap: 8px; min-height: 26px; }
+  .diag-label { font-size: 13px; color: var(--muted); min-width: 72px; }
+  .diag-value { font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .diag-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .diag-dot.green  { background: #22c55e; }
+  .diag-dot.red    { background: #ef4444; }
+  .diag-dot.yellow { background: #f59e0b; }
+  .diag-dot.gray   { background: var(--soft); }
+  .diag-guidance {
+    font-size: 12px; color: var(--muted);
+    padding: 8px 10px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 4px;
+  }
+  .diag-divider { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
 </style>
 </head>
 <body>
@@ -256,6 +273,7 @@
       <div class="nav-item" data-tab="updates" data-i18n="settings.nav.updates">更新</div>
       <div class="nav-item" data-tab="developer">Developer</div>
       <div class="nav-item" data-tab="secrets">Secrets</div>
+      <div class="nav-item" data-tab="engines">Engines</div>
     </div>
 
     <!-- MAIN PANEL -->
@@ -482,6 +500,86 @@
           </div>
         </div>
       </div>
+
+      <!-- ── Engines ── -->
+      <div class="tab-content" id="tab-engines">
+
+        <!-- Source Engine -->
+        <div class="block">
+          <div class="block-title">Source Engine</div>
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label">Source Runtime</span>
+              <span class="row-sublabel">Runs source capsules (scripts, projects)</span>
+            </div>
+            <select class="setting-select" id="sel-sourceEngine">
+              <option value="nacelle">Nacelle — Recommended</option>
+              <option value="host" disabled>Host Fallback — Advanced (disabled)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- OCI Engine -->
+        <div class="block">
+          <div class="block-title">OCI Engine</div>
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label">Container Runtime</span>
+              <span class="row-sublabel">Runs OCI (Docker-format) capsules</span>
+            </div>
+            <select class="setting-select" id="sel-ociEngine">
+              <option value="podman">Podman — Recommended</option>
+              <option value="docker" disabled>Docker-compatible — Experimental (disabled)</option>
+              <option value="youki" disabled>Youki — Experimental (disabled)</option>
+            </select>
+          </div>
+
+          <!-- Podman Diagnostics (shown when OCI engine = podman) -->
+          <hr class="diag-divider">
+          <div id="podman-diag-section">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+              <span style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;">Podman Diagnostics</span>
+              <button class="btn" id="diag-refresh-btn" style="font-size:12px; padding:2px 10px;">Refresh</button>
+            </div>
+            <div class="diag-row">
+              <span class="diag-label">Binary</span>
+              <span class="diag-value" id="diag-binary"><span class="diag-dot gray"></span>—</span>
+            </div>
+            <div class="diag-row">
+              <span class="diag-label">Machine</span>
+              <span class="diag-value" id="diag-machine"><span class="diag-dot gray"></span>—</span>
+            </div>
+            <div class="diag-guidance" id="diag-guidance" style="display:none;"></div>
+          </div>
+        </div>
+
+        <!-- Wasm Engine -->
+        <div class="block">
+          <div class="block-title">Wasm Engine</div>
+          <div class="row">
+            <div class="row-label-group">
+              <span class="row-label">WebAssembly Runtime</span>
+              <span class="row-sublabel">Runs WebAssembly capsules</span>
+            </div>
+            <select class="setting-select" id="sel-wasmEngine">
+              <option value="wasmtime">Wasmtime — Recommended</option>
+            </select>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Engine change confirmation modal -->
+<div id="engine-confirm-modal" class="confirm-overlay" style="display:none;" role="dialog" aria-modal="true">
+  <div class="confirm-box">
+    <p class="confirm-title">Change engine?</p>
+    <p class="confirm-body" id="engine-confirm-body">Changing the engine affects how capsules are executed and requires a reload. Continue?</p>
+    <div class="confirm-actions">
+      <button class="btn" id="engine-confirm-cancel-btn">Cancel</button>
+      <button class="btn btn-primary" id="engine-confirm-ok-btn">Change engine</button>
     </div>
   </div>
 </div>
@@ -505,7 +603,7 @@
 const POST = (window.ipc && window.ipc.postMessage)
   ? (m) => window.ipc.postMessage(JSON.stringify(m))
   : (m) => console.log('[no bridge]', m);
-const BRIDGE = (command) => POST({ capsule: 'ato-settings', command });
+const BRIDGE = (command) => POST({ capsule: 'settings', command });
 
 let _reqId = 0;
 function nextReqId() { return String(++_reqId); }
@@ -521,6 +619,7 @@ const TAB_KEYS = {
   updates:   'settings.nav.updates',
   developer: 'settings.nav.developer',
   secrets:   'settings.nav.secrets',
+  engines:   'settings.nav.engines',
 };
 
 function showTab(tabId) {
@@ -535,6 +634,9 @@ function showTab(tabId) {
   BRIDGE({ kind: 'navigateTab', tab: tabId });
   if (tabId === 'secrets' && !_secretsLoaded) {
     BRIDGE({ kind: 'loadSecretsSnapshot', requestId: nextReqId() });
+  }
+  if (tabId === 'engines') {
+    BRIDGE({ kind: 'loadEnginesDiagnostics', requestId: nextReqId() });
   }
 }
 
@@ -575,6 +677,47 @@ function bindSelect(id, patchKey) {
   });
 }
 
+// ── Engine select (requires confirmation + reload) ────────────────────────────
+let _enginePendingPatchKey = null;
+let _enginePendingValue = null;
+let _enginePendingEl = null;
+
+function bindEngineSelect(id, patchKey) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', () => {
+    _enginePendingPatchKey = patchKey;
+    _enginePendingValue = el.value;
+    _enginePendingEl = el;
+    const modal = document.getElementById('engine-confirm-modal');
+    if (modal) modal.style.display = '';
+  });
+}
+
+function closeEngineConfirm(revert) {
+  if (revert && _enginePendingEl) {
+    // Revert the select to the last saved value
+    const saved = _enginePendingEl.dataset.savedValue;
+    if (saved !== undefined) _enginePendingEl.value = saved;
+  }
+  _enginePendingPatchKey = null;
+  _enginePendingValue = null;
+  _enginePendingEl = null;
+  const modal = document.getElementById('engine-confirm-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+document.getElementById('engine-confirm-cancel-btn').addEventListener('click', () => closeEngineConfirm(true));
+document.getElementById('engine-confirm-ok-btn').addEventListener('click', () => {
+  if (!_enginePendingPatchKey || !_enginePendingValue) { closeEngineConfirm(false); return; }
+  const key = _enginePendingPatchKey;
+  const val = _enginePendingValue;
+  const el = _enginePendingEl;
+  closeEngineConfirm(false);
+  if (el) el.dataset.savedValue = val;
+  BRIDGE({ kind: 'patchGlobalSettings', requestId: nextReqId(), patch: { [key]: val, confirmed: true } });
+});
+
 // ── Wire up controls ──────────────────────────────────────────────────────────
 bindToggle('tog-launchAtLogin',             'launchAtLogin');
 bindToggle('tog-showInTray',                'showInTray');
@@ -597,6 +740,10 @@ bindToggle('tog-automaticUpdates',          'automaticUpdates');
 bindSelect('sel-logLevel',                  'logLevel');
 bindToggle('tog-telemetry',                 'telemetry');
 bindToggle('tog-autoOpenDevtools',          'autoOpenDevtools');
+
+bindEngineSelect('sel-sourceEngine',        'sourceEngine');
+bindEngineSelect('sel-ociEngine',           'ociEngine');
+bindEngineSelect('sel-wasmEngine',          'wasmEngine');
 
 // ── Hydrate from snapshot ─────────────────────────────────────────────────────
 function hydrateFromSnapshot(snap) {
@@ -634,6 +781,11 @@ function hydrateFromSnapshot(snap) {
   setOptionalSelect('sel-logLevel',       val(r, 'developer', 'logLevel'));
   setToggleEl('tog-telemetry',            val(r, 'developer', 'telemetry'));
   setToggleEl('tog-autoOpenDevtools',     val(r, 'developer', 'autoOpenDevtools'));
+
+  // Engines
+  hydrateEngineSelect('sel-sourceEngine', val(r, 'runtime', 'backendEngines', 'source'));
+  hydrateEngineSelect('sel-ociEngine',    val(r, 'runtime', 'backendEngines', 'oci'));
+  hydrateEngineSelect('sel-wasmEngine',   val(r, 'runtime', 'backendEngines', 'wasm'));
 }
 
 function setToggleEl(id, value) {
@@ -651,6 +803,50 @@ function setOptionalSelect(id, value) {
   }
 }
 
+function hydrateEngineSelect(id, value) {
+  const el = document.getElementById(id);
+  if (!el || value === undefined || value === null) return;
+  const strVal = String(value).toLowerCase().replace(/_/g, '-');
+  for (const opt of el.options) {
+    if (opt.value === strVal) { el.value = strVal; break; }
+  }
+  el.dataset.savedValue = el.value;
+}
+
+// ── Podman diagnostics renderer ───────────────────────────────────────────────
+function updatePodmanDiagnostics(podman) {
+  const binaryEl  = document.getElementById('diag-binary');
+  const machineEl = document.getElementById('diag-machine');
+  const guidanceEl = document.getElementById('diag-guidance');
+  if (!binaryEl || !machineEl || !guidanceEl) return;
+
+  function dot(color) { return '<span class="diag-dot ' + color + '"></span>'; }
+
+  if (podman.binary === 'found') {
+    binaryEl.innerHTML = dot('green') + 'Found';
+  } else {
+    binaryEl.innerHTML = dot('red') + 'Not found';
+  }
+
+  const machineMap = {
+    'running':        [dot('green'),  'Running'],
+    'stopped':        [dot('yellow'), 'Stopped'],
+    'not_configured': [dot('gray'),   'Not configured'],
+    'ambiguous':      [dot('yellow'), 'Multiple machines'],
+    'native':         [dot('green'),  'Native (Linux)'],
+    'unknown':        [dot('gray'),   'Unknown'],
+  };
+  const [dotHtml, label] = machineMap[podman.machine] || [dot('gray'), podman.machine || 'Unknown'];
+  machineEl.innerHTML = dotHtml + label;
+
+  if (podman.guidance) {
+    guidanceEl.textContent = podman.guidance;
+    guidanceEl.style.display = '';
+  } else {
+    guidanceEl.style.display = 'none';
+  }
+}
+
 // ── Hydrate callback (used by both init and Rust-push) ────────────────────────
 window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
   const loading = document.getElementById('loading');
@@ -664,6 +860,11 @@ window.__ATO_SETTINGS_HYDRATE__ = function(payload) {
   }
   if (payload && payload.secrets) {
     hydrateSecrets(payload.secrets);
+  }
+  if (payload && payload.engineDiagnostics) {
+    if (payload.engineDiagnostics.podman) {
+      updatePodmanDiagnostics(payload.engineDiagnostics.podman);
+    }
   }
   if (payload && !payload.ok && payload.error) {
     showSecretsError(payload.error.message || String(payload.error));
@@ -842,6 +1043,10 @@ document.getElementById('grant-btn').addEventListener('click', () => {
   if (!key) { showSecretsError(window.__ATO_T__ ? window.__ATO_T__('settings.grant.error.no_key') : 'Grant する Key を選択してください'); return; }
   BRIDGE({ kind: 'grantSecret', requestId: nextReqId(), handle, key });
   handleEl.value = '';
+});
+
+document.getElementById('diag-refresh-btn').addEventListener('click', () => {
+  BRIDGE({ kind: 'loadEnginesDiagnostics', requestId: nextReqId() });
 });
 
 (function init() {

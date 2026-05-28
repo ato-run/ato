@@ -1,0 +1,62 @@
+schema_version = "0.3"
+name = "outline"
+version = "0.82.0"
+type = "app"
+description = "Open-source wiki and knowledge base for teams"
+homepage = "https://github.com/outline/outline"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "outline", POSTGRES_USER = "outline", POSTGRES_PASSWORD = "outline-secret" }
+
+[targets.redis]
+runtime = "oci"
+image = "redis:7-alpine"
+port = 6379
+
+[targets.app]
+runtime = "oci"
+image = "outlinewiki/outline:0.82.0"
+port = 3000
+env = { DATABASE_URL = "postgres://outline:outline-secret@db:5432/outline", REDIS_URL = "redis://redis:6379", SECRET_KEY = "changeme-demo-secret", UTILS_SECRET = "changeme-demo-utils-secret", URL = "http://localhost:3000", FORCE_HTTPS = "false", PGSSLMODE = "disable", FILE_STORAGE = "local", DEFAULT_LANGUAGE = "en_US" }
+depends_on = ["db", "redis"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Outline PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:outline-pgdata-v1"
+
+[state.storage]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Outline local file storage"
+attach = "explicit"
+schema_id = "sha256:outline-storage-v1"
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "outline"] }
+
+[services.redis]
+target = "redis"
+readiness_probe = { exec = ["redis-cli", "ping"], initial_delay_seconds = 2 }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", timeout_seconds = 180, initial_delay_seconds = 10 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
+
+[[services.main.state_bindings]]
+state = "storage"
+target = "/var/lib/outline/data"
+service_target = "app"

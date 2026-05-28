@@ -25,6 +25,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale, tr};
 use crate::system_capsule::ato_start::build_start_snapshot;
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::content_windows::{ContentWindowEntry, ContentWindowKind, OpenContentWindows};
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
@@ -190,7 +191,10 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
             )
             .with_url(&start_url)
             .with_initialization_script(&init_script)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue.clone()))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoStart,
+                queue.clone(),
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Start WebView");
@@ -216,6 +220,8 @@ pub fn open_start_window(cx: &mut App) -> Result<()> {
         },
     );
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoStart, *handle);
     system_ipc::spawn_drain_loop(cx, queue_for_drain, *handle);
 
     Ok(())

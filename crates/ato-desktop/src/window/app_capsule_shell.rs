@@ -31,7 +31,9 @@ use gpui::{
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
-use crate::orchestrator::{GuestLaunchSession, LaunchError};
+use capsule_wire::handle::CapsuleDisplayStrategy;
+
+use crate::orchestrator::{DesktopLaunchInput, GuestLaunchSession, LaunchError};
 use crate::state::session::{
     CapsuleLaunchContext, CapsuleOpenSource, CapsuleSession, SessionClient, SessionClientId,
     SessionClientKind, SessionClientState, SessionRegistry,
@@ -49,6 +51,10 @@ use crate::{impl_focusable_via_paste, paste_render_wrap};
 pub enum CapsuleBootInput {
     Start {
         handle: String,
+        configs: Vec<(String, String)>,
+    },
+    Launch {
+        input: DesktopLaunchInput,
         configs: Vec<(String, String)>,
     },
     MaterializedRestart {
@@ -85,6 +91,9 @@ pub struct AppCapsuleShell {
     /// immediately stopped rather than displayed.
     abort_flag: Arc<AtomicBool>,
     pub paste: WebViewPasteSupport,
+    /// ato-netd stable ingress key registered for this shell's WebUrl session,
+    /// if any. Deregistered on Drop.
+    stable_ingress_key: Option<String>,
 }
 
 impl_focusable_via_paste!(AppCapsuleShell, paste);
@@ -103,6 +112,9 @@ impl AppCapsuleShell {
     ) -> Self {
         match input {
             CapsuleBootInput::Start { handle, configs } => Self::new(handle, configs, window, cx),
+            CapsuleBootInput::Launch { input, configs } => {
+                Self::new_with_launch_input(input, configs, window, cx)
+            }
             CapsuleBootInput::MaterializedRestart {
                 handle,
                 record_path,
@@ -154,6 +166,21 @@ impl AppCapsuleShell {
                     let _ = prog.send(step);
                 })),
             );
+            // For WebUrl sessions (e.g. OCI/Docker Compose), the CLI returns as
+            // soon as the port is allocated, but the web server inside the
+            // container may still be initializing. Opening the WebView too early
+            // causes a thundering-herd: the browser loads the HTML (via our 503
+            // auto-refresh), then immediately fires ~150 parallel sub-resource
+            // requests that overwhelm the barely-started server → all 503.
+            //
+            // Probe the upstream directly until it responds to HTTP (up to 60s),
+            // checking the abort flag on every iteration so a cancelled launch
+            // exits within ~500 ms.
+            if let Ok(ref session) = result {
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+                }
+            }
             // If already aborted and the session started, stop it immediately.
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
@@ -286,6 +313,126 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag,
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
+        }
+    }
+
+    pub fn new_with_launch_input(
+        input: DesktopLaunchInput,
+        configs: Vec<(String, String)>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let handle = input.source_handle().to_string();
+        let win_size = window.bounds().size;
+        let abort_flag = Arc::new(AtomicBool::new(false));
+
+        let secret_store = crate::config::load_secrets();
+        let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
+
+        let boot_shell_weak: Option<WeakEntity<LaunchWindowShell>> = cx
+            .try_global::<PendingBootShell>()
+            .and_then(|g| g.0.clone());
+        cx.set_global(PendingBootShell(None));
+
+        let launch_configs = configs.clone();
+        let configs_for_thread = configs.clone();
+        let abort_clone = Arc::clone(&abort_flag);
+        std::thread::spawn(move || {
+            let prog = progress_tx;
+            let result = crate::orchestrator::resolve_and_start_guest_with_input(
+                &input,
+                &secrets,
+                &configs_for_thread,
+                Some(Box::new(move |step| {
+                    let _ = prog.send(step);
+                })),
+            );
+            if let Ok(ref session) = result {
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+                }
+            }
+            if abort_clone.load(Ordering::Acquire) {
+                if let Ok(ref session) = result {
+                    let sid = session.session_id.clone();
+                    let _ = crate::orchestrator::stop_guest_session(&sid);
+                }
+                return;
+            }
+            let _ = tx.send(result);
+        });
+
+        let entity = cx.entity().downgrade();
+        let abort_poll = Arc::clone(&abort_flag);
+        let async_app = cx.to_async();
+        async_app
+            .foreground_executor()
+            .spawn({
+                let be = async_app.background_executor().clone();
+                let aa = async_app.clone();
+                async move {
+                    loop {
+                        be.timer(Duration::from_millis(100)).await;
+
+                        let steps: Vec<u8> = {
+                            let mut v = Vec::new();
+                            while let Ok(s) = progress_rx.try_recv() {
+                                v.push(s);
+                            }
+                            v
+                        };
+                        if !steps.is_empty() {
+                            let boot = boot_shell_weak.clone();
+                            aa.update(move |cx| {
+                                if let Some(shell) = boot.and_then(|w| w.upgrade()) {
+                                    let _ = shell.update(cx, |shell, _| {
+                                        for s in &steps {
+                                            shell.push_step(*s);
+                                        }
+                                    });
+                                }
+                            });
+                        }
+
+                        match rx.try_recv() {
+                            Ok(res) => {
+                                if let Some(ent) = entity.upgrade() {
+                                    aa.update(move |cx| {
+                                        let _ = ent.update(cx, |shell, cx| {
+                                            shell.pending_result = Some(res);
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                                break;
+                            }
+                            Err(TryRecvError::Disconnected) => break,
+                            Err(TryRecvError::Empty) => {
+                                if abort_poll.load(Ordering::Acquire) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+
+        Self {
+            handle,
+            launch_configs,
+            boot_state: CapsuleBootState::Booting,
+            webview: None,
+            content_window_id: None,
+            pending_result: None,
+            window_size: win_size,
+            abort_flag,
+            paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -339,6 +486,11 @@ impl AppCapsuleShell {
                     None,
                 )
             });
+            if let Ok(ref session) = result {
+                if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    wait_for_session_upstream_ready(session, &abort_clone, Duration::from_secs(60));
+                }
+            }
             if abort_clone.load(Ordering::Acquire) {
                 if let Ok(ref session) = result {
                     let sid = session.session_id.clone();
@@ -454,6 +606,7 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag,
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -475,6 +628,7 @@ impl AppCapsuleShell {
             window_size: win_size,
             abort_flag: Arc::new(AtomicBool::new(false)),
             paste: WebViewPasteSupport::new(cx),
+            stable_ingress_key: None,
         }
     }
 
@@ -525,11 +679,46 @@ impl AppCapsuleShell {
                 registry.attach_client(client);
 
                 let url = session_current_url(&session);
+                // For WebUrl sessions, register a stable ato-netd ingress route
+                // so the WebView URL is stable across backend restarts.
+                let effective_url = if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
+                    let key = ato_net::stable_origin::logical_key_for_handle(&self.handle);
+                    tracing::info!(
+                        handle = %self.handle,
+                        session_id = %session.session_id,
+                        upstream_url = %url,
+                        ingress_key = %key,
+                        "AppCapsuleShell: registering ato-netd stable ingress"
+                    );
+                    match crate::netd::register_stable_ingress(&key, &url) {
+                        Ok(port) => {
+                            self.stable_ingress_key = Some(key);
+                            let after_scheme = url
+                                .trim_start_matches("http://")
+                                .trim_start_matches("https://");
+                            let path = after_scheme
+                                .find('/')
+                                .map(|i| &after_scheme[i..])
+                                .unwrap_or("/");
+                            format!("http://127.0.0.1:{port}{path}")
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                handle = %self.handle,
+                                error = %err,
+                                "AppCapsuleShell: netd ingress registration failed, using direct URL"
+                            );
+                            url
+                        }
+                    }
+                } else {
+                    url
+                };
                 let win_size = window.bounds().size;
                 let w = f32::from(win_size.width) as u32;
                 let h = f32::from(win_size.height) as u32;
                 match WebViewBuilder::new()
-                    .with_url(&url)
+                    .with_url(&effective_url)
                     .with_bounds(Rect {
                         position: LogicalPosition::new(0i32, 0i32).into(),
                         size: LogicalSize::new(w, h).into(),
@@ -539,7 +728,7 @@ impl AppCapsuleShell {
                     Ok(webview) => {
                         tracing::info!(
                             handle = %self.handle,
-                            url = %url,
+                            url = %effective_url,
                             session_id = %session.session_id,
                             "AppCapsuleShell: WebView created for running session"
                         );
@@ -599,6 +788,11 @@ impl Drop for AppCapsuleShell {
         // arrives after the entity is gone.
         self.abort_flag.store(true, Ordering::Release);
 
+        // Deregister stable ingress route if one was registered.
+        if let Some(key) = self.stable_ingress_key.take() {
+            crate::netd::deregister_stable_ingress(&key);
+        }
+
         // Session lifecycle is now owned by the SessionRegistry.
         // on_window_closed in app.rs handles detach_client / stop_session_once
         // based on windowCloseBehavior. Drop is only a safety net: log
@@ -638,6 +832,77 @@ impl Render for AppCapsuleShell {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Outcome returned by [`wait_for_session_upstream_ready`].
+#[derive(Debug, PartialEq)]
+pub(crate) enum ProbeOutcome {
+    /// Upstream answered HTTP within the timeout.
+    Ready,
+    /// Timeout elapsed without a successful probe.
+    TimedOut,
+    /// The `abort` flag was set; the probe stopped early.
+    Aborted,
+}
+
+/// Probe the upstream for a `WebUrl` session until it responds to HTTP, the
+/// `abort` flag fires, or `timeout` elapses.
+///
+/// **Probe URL selection** (first wins):
+///   1. `session.healthcheck_url` — a dedicated health endpoint if present.
+///   2. `session.local_url` + `frontend_url_path()` — the URL the WebView will open.
+///   3. `session.local_url` — bare upstream base.
+///
+/// **"Ready" criterion:** any valid HTTP response (2xx / 3xx / 4xx all count).
+/// The purpose is "server process is up and speaking HTTP", not "request is
+/// functionally successful". A 302 redirect to `/auth` or a 401 Unauthorized
+/// both confirm the server is running; only connection-refused / timeout means
+/// it is not yet ready.
+///
+/// The loop checks `abort` before every poll iteration so cancelled launches
+/// stop within one `poll_interval` (≈ 500 ms) rather than blocking for the
+/// full timeout.
+pub(crate) fn wait_for_session_upstream_ready(
+    session: &GuestLaunchSession,
+    abort: &AtomicBool,
+    timeout: Duration,
+) -> ProbeOutcome {
+    let probe_url = if let Some(ref hc) = session.healthcheck_url {
+        crate::netd::normalize_upstream_url(hc).into_owned()
+    } else {
+        let base = session.local_url.as_deref().unwrap_or("about:blank");
+        let with_path = match session.frontend_url_path() {
+            Some(path) => format!("{}{}", base.trim_end_matches('/'), path),
+            None => base.to_string(),
+        };
+        crate::netd::normalize_upstream_url(&with_path).into_owned()
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(500);
+
+    tracing::debug!(probe_url = %probe_url, "starting upstream readiness probe");
+
+    loop {
+        if abort.load(Ordering::Acquire) {
+            tracing::debug!(probe_url = %probe_url, "upstream probe aborted");
+            return ProbeOutcome::Aborted;
+        }
+        if ato_session_core::healthcheck::http_is_responsive(&probe_url, Duration::from_millis(800)) {
+            tracing::info!(probe_url = %probe_url, "upstream HTTP readiness probe passed");
+            return ProbeOutcome::Ready;
+        }
+        tracing::debug!(probe_url = %probe_url, "upstream not ready yet, retrying");
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                probe_url = %probe_url,
+                timeout_secs = timeout.as_secs(),
+                "upstream readiness probe timed out, opening WebView anyway"
+            );
+            return ProbeOutcome::TimedOut;
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
 
 fn session_current_url(session: &GuestLaunchSession) -> String {
     let base = session.local_url.as_deref().unwrap_or("about:blank");

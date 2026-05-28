@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 
 function bridge(cmd) {
-  const msg = JSON.stringify({ capsule: "ato-launch", command: cmd });
+  const msg = JSON.stringify({ capsule: "launch", command: cmd });
   if (window.ipc && window.ipc.postMessage) window.ipc.postMessage(msg);
   else console.log("[no bridge]", cmd);
 }
@@ -52,7 +52,7 @@ entry = ""
 `,
 };
 
-export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
+export function CreateTomlScreen({ initialContent, repo, onSave, onCancel }) {
   const isCliInference = initialContent === "__cli_inference__";
 
   const [tab, setTab] = useState(isCliInference ? "inference" : initialContent !== null && initialContent !== "" ? "editor" : "template");
@@ -62,36 +62,48 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
   const [selectedTemplate, setSelectedTemplate] = useState("web");
   const [inferring, setInferring] = useState(false);
   const [inferred, setInferred] = useState(false);
+  const [manifestSource, setManifestSource] = useState(isCliInference ? "inferred_fallback" : "user_edited");
+  const [inferenceError, setInferenceError] = useState(null);
 
   // When tab switches to template, sync content
   useEffect(() => {
-    if (tab === "template") setContent(TEMPLATES[selectedTemplate]);
+    if (tab === "template") {
+      setContent(TEMPLATES[selectedTemplate]);
+      setManifestSource("user_edited");
+    }
   }, [tab, selectedTemplate]);
 
   const handleTemplateSelect = (key) => {
     setSelectedTemplate(key);
     setContent(TEMPLATES[key]);
+    setManifestSource("user_edited");
   };
 
   const runCliInference = () => {
     setInferring(true);
-    bridge({ kind: "github_cli_inference" });
-    // Rust calls window.__ato_cli_inference_result(toml_string)
-    window.__ato_cli_inference_result = (toml) => {
-      setContent(toml || TEMPLATES.blank);
-      setInferring(false);
-      setInferred(true);
-      setTab("editor");
+    setInferenceError(null);
+    bridge({ kind: "github_cli_inference", repo: repo || "" });
+    window.__ato_cli_inference_result = (result) => {
+      if (result && result.ok && result.toml) {
+        setContent(result.toml);
+        setInferring(false);
+        setInferred(true);
+        setManifestSource("inferred_fallback");
+        setInferenceError(null);
+        setTab("editor");
+      } else {
+        const msg = (result && result.message) || "推論に失敗しました。もう一度お試しいただくか、手動で作成してください。";
+        setInferenceError(msg);
+        setInferring(false);
+        setInferred(false);
+      }
       delete window.__ato_cli_inference_result;
     };
-    // Fallback timeout
     setTimeout(() => {
       if (window.__ato_cli_inference_result) {
         delete window.__ato_cli_inference_result;
-        setContent(TEMPLATES.blank);
+        setInferenceError("推論がタイムアウトしました。ネットワーク接続を確認してください。");
         setInferring(false);
-        setInferred(false);
-        setTab("editor");
       }
     }, 30000);
   };
@@ -169,6 +181,7 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
                 Ato CLI がリポジトリのソースを解析して<br />capsule.toml の下書きを自動生成します。<br />生成後にエディタで編集できます。
               </div>
               {inferred && <div style={{ fontSize: 12, color: "var(--ok)", marginTop: 8, fontWeight: 600 }}>✓ 推論完了 — エディタで確認してください</div>}
+              {inferenceError && <div style={{ fontSize: 11.5, color: "var(--danger)", marginTop: 8, lineHeight: 1.6, maxWidth: 280 }}>{inferenceError}</div>}
             </div>
             <button
               onClick={inferring ? undefined : runCliInference}
@@ -192,7 +205,10 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
             </div>
             <textarea
               value={content}
-              onChange={e => setContent(e.target.value)}
+              onChange={e => {
+                setContent(e.target.value);
+                setManifestSource("user_edited");
+              }}
               spellCheck={false}
               style={{
                 flex: 1, minHeight: 260, padding: "12px 14px", borderRadius: 9, resize: "none",
@@ -211,7 +227,7 @@ export function CreateTomlScreen({ initialContent, onSave, onCancel }) {
           キャンセル
         </button>
         <button
-          onClick={() => onSave(content)}
+          onClick={() => onSave(content, { manifest_source: manifestSource })}
           disabled={!content.trim()}
           style={{
             flex: 1, padding: "9px 0", borderRadius: 8, border: "none",

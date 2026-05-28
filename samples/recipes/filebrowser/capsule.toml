@@ -1,0 +1,42 @@
+schema_version = "0.3"
+name = "filebrowser"
+version = "1.0.0"
+type = "app"
+description = "Web-based file browser with upload, delete, preview, and user management. Default admin credentials are displayed in container logs on first run."
+homepage = "https://github.com/filebrowser/filebrowser"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Pin note: proposed pin to filebrowser/filebrowser:v2.32.0 — not yet AODD-confirmed
+# AODD digest (2026-05-23): sha256:9ffebe23dc98...
+image = "filebrowser/filebrowser:latest"
+port = 8080
+env = { FB_PORT = "8080", FB_ADDRESS = "0.0.0.0" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "FileBrowser database (SQLite) and settings"
+attach = "explicit"
+schema_id = "sha256:f651cd294826a1436f5eddb477ccdbbe65d7321f8c8329ccf0224fabaf3e25ed"
+
+[state.files]
+kind = "filesystem"
+durability = "persistent"
+purpose = "User files served by FileBrowser"
+attach = "explicit"
+schema_id = "sha256:c55e99e8f7d2958bf3f3000476e75456f60deb9890aa6dc042ba805b21345223"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8080" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/database"
+
+[[services.main.state_bindings]]
+state = "files"
+target = "/srv"

@@ -543,7 +543,7 @@
   const POST = (window.ipc && window.ipc.postMessage)
     ? m => window.ipc.postMessage(JSON.stringify(m))
     : m => console.log('[no bridge]', m);
-  const BRIDGE = cmd => POST({ capsule: 'ato-launch', command: cmd });
+  const BRIDGE = cmd => POST({ capsule: 'launch', command: cmd });
 
   // Track last-focused text input for paste handler
   window.__ato_last_focused = null;

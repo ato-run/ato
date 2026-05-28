@@ -1,0 +1,32 @@
+schema_version = "0.3"
+name = "excalidraw"
+# Recipe revision marker (semver required by manifest validator). The image
+# itself is digest-pinned below because excalidraw/excalidraw does not publish
+# semver-tagged images on Docker Hub. Bumped from "0.17.6" — the version PR
+# #254 documented as unpullable — to indicate the recipe content changed.
+version = "0.18.0"
+type = "app"
+description = "Virtual collaborative whiteboard for sketching hand-drawn diagrams"
+homepage = "https://github.com/excalidraw/excalidraw"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# `excalidraw/excalidraw` does not publish semver-tagged images on Docker Hub —
+# only `latest` and dev-build `sha-*` tags from 2021. PR #254 documented the
+# original `:0.17.6` pin as unpullable (Docker Hub returned `manifest unknown`).
+# Pin by digest to keep the demo reproducible while upstream only offers a
+# floating `latest`. Digest below is the `:latest` image as of 2026-05-06;
+# refresh together with version bumps to a newer upstream build.
+image = "excalidraw/excalidraw@sha256:0faa2324e70d2331952550c0f29ea20af63ffcfd146fbb2ffd5bacdc7f8d8a6b"
+# The upstream image runs nginx on port 80 (privileged on host). Rewrite the
+# listen directive in /etc/nginx/conf.d/default.conf before launching so the
+# main service can publish at an unprivileged host port. Keeps us on the
+# upstream image (no third-party fork) per the task brief.
+cmd = ["sh", "-c", "sed -i 's/listen[[:space:]]*80;/listen 8080;/' /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
+port = 8080
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8080" }

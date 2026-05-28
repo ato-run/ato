@@ -352,7 +352,7 @@ pub struct IsolationConfig {
 /// Service specification for Supervisor Mode (multi-process orchestration).
 ///
 /// This is intentionally minimal in Step 1: schema + dependency graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServiceSpec {
     /// Command line to execute.
     ///
@@ -395,9 +395,13 @@ pub struct ServiceSpec {
 pub struct ServiceStateBinding {
     pub state: String,
     pub target: String,
+    /// Name of the service whose container receives this mount. Defaults to
+    /// the enclosing service when omitted.
+    #[serde(default)]
+    pub service_target: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceNetworkSpec {
     /// Additional DNS aliases for this service inside the orchestration network.
     #[serde(default)]
@@ -410,6 +414,28 @@ pub struct ServiceNetworkSpec {
     /// Restrict which services may receive connection metadata for this service.
     #[serde(default)]
     pub allow_from: Vec<String>,
+
+    /// Route this service's outbound HTTP(S) through the `ato-netd` egress proxy.
+    ///
+    /// Defaults to `true`. Set to `false` to opt out of proxy injection for this
+    /// service (e.g. for database-only services that never make external requests).
+    #[serde(default = "default_egress_proxy")]
+    pub egress_proxy: bool,
+}
+
+fn default_egress_proxy() -> bool {
+    true
+}
+
+impl Default for ServiceNetworkSpec {
+    fn default() -> Self {
+        Self {
+            aliases: Vec::new(),
+            publish: false,
+            allow_from: Vec::new(),
+            egress_proxy: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -420,8 +446,38 @@ pub struct ReadinessProbe {
     #[serde(default)]
     pub tcp_connect: Option<String>,
 
+    /// Command to run inside the container; success (exit 0) means ready.
+    /// Example: `exec = ["pg_isready", "-U", "postgres"]`
+    #[serde(default)]
+    pub exec: Option<Vec<String>>,
+
     /// Placeholder name that resolves to a concrete port (e.g., "PORT").
-    pub port: String,
+    /// Required for `http_get` and `tcp_connect` probes; ignored for `exec` probes.
+    /// Legacy exec recipes that include `port` are accepted but the value is not used.
+    #[serde(default)]
+    pub port: Option<String>,
+
+    /// Seconds to wait before the first probe attempt (default: 0).
+    #[serde(default)]
+    pub initial_delay_seconds: u32,
+
+    /// Total seconds before the probe is considered failed (default: 180).
+    /// Must be > 0 and >= initial_delay_seconds.
+    #[serde(default = "default_readiness_timeout_seconds")]
+    pub timeout_seconds: u32,
+
+    /// Seconds between consecutive probe attempts (default: 2).
+    /// Must be > 0.
+    #[serde(default = "default_readiness_interval_seconds")]
+    pub interval_seconds: u32,
+}
+
+fn default_readiness_timeout_seconds() -> u32 {
+    180
+}
+
+fn default_readiness_interval_seconds() -> u32 {
+    2
 }
 
 /// Host integration capability names.
@@ -658,6 +714,108 @@ pub struct CapsuleManifest {
     /// that correspond to each capability name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub host_capabilities: Vec<HostCapabilitySpec>,
+
+    /// Local ingress route configuration for multi-service OCI sessions.
+    ///
+    /// When present, Ato starts a session-scoped reverse proxy that routes
+    /// requests by path prefix to upstream container services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress: Option<IngressConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressMode {
+    Path,
+    Host,
+}
+
+impl IngressMode {
+    pub fn validate_v1(&self) -> Result<(), IngressError> {
+        match self {
+            IngressMode::Path => Ok(()),
+            IngressMode::Host => Err(IngressError::UnsupportedInV1 {
+                mode: "host".to_string(),
+                message: "hostname-based ingress is deferred to v2".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressConfig {
+    pub mode: IngressMode,
+    pub routes: BTreeMap<String, IngressRoute>,
+    #[serde(default)]
+    pub env_inject: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngressRoute {
+    pub target: String,
+    pub port: u16,
+    #[serde(default)]
+    pub listed: bool,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default = "default_true")]
+    pub strip_prefix: bool,
+    #[serde(default)]
+    pub upstream_path_prefix: Option<String>,
+    #[serde(default)]
+    pub root: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressError {
+    #[error("ingress mode '{mode}' is unsupported in v1: {message}")]
+    UnsupportedInV1 { mode: String, message: String },
+    #[error("duplicate ingress alias '{alias}' on routes '{route_a}' and '{route_b}'")]
+    DuplicateAlias {
+        alias: String,
+        route_a: String,
+        route_b: String,
+    },
+    #[error("invalid ingress alias '{alias}': {reason}")]
+    InvalidAlias { alias: String, reason: String },
+    #[error("root route '{route}' must not set alias")]
+    RootWithAlias { route: String },
+    #[error("multiple root routes: '{route_a}' and '{route_b}'")]
+    MultipleRootRoutes { route_a: String, route_b: String },
+    #[error("non-root route '{route}' must have an alias or use the route name as alias")]
+    NonRootWithoutAlias { route: String },
+    #[error("ingress route '{route}' references missing service '{target}'")]
+    MissingService { route: String, target: String },
+    #[error("ingress route '{route}' has invalid port {port}")]
+    InvalidPort { route: String, port: u16 },
+    #[error("ingress route '{route}' declares upstream_path_prefix but strip_prefix is false")]
+    UpstreamPrefixWithoutStrip { route: String },
+    #[error("ingress route '{route}' upstream_path_prefix '{prefix}' must start with '/'")]
+    UpstreamPrefixMissingSlash { route: String, prefix: String },
+    #[error("ingress route '{route}' upstream_path_prefix '{prefix}' is invalid: {reason}")]
+    InvalidUpstreamPrefix {
+        route: String,
+        prefix: String,
+        reason: String,
+    },
+    #[error("ingress env_inject target '{target}' does not reference a declared service")]
+    EnvInjectTargetMissing { target: String },
+    #[error("ingress env_inject template '{template}' references unknown route '{route_name}'")]
+    EnvInjectMissingRoute {
+        target: String,
+        env_name: String,
+        route_name: String,
+        template: String,
+    },
+    #[error("ingress env_inject template '{template}' has unsupported field '.{field}' (allowed: url, base_url, path, origin)")]
+    EnvInjectUnknownField {
+        target: String,
+        env_name: String,
+        template: String,
+        field: String,
+    },
+    #[error("ingress env_inject has invalid env var name '{name}'")]
+    InvalidEnvVarName { name: String },
 }
 
 /// Foundation conformance requirements (§3.6, Part I of the Capsule Protocol spec).
@@ -946,6 +1104,15 @@ pub enum StateAttach {
     Explicit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum StateSharing {
+    #[default]
+    Exclusive,
+    #[serde(alias = "same-capsule")]
+    SameCapsule,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateRequirement {
     pub kind: StateKind,
@@ -957,6 +1124,8 @@ pub struct StateRequirement {
     pub attach: StateAttach,
     #[serde(default)]
     pub schema_id: Option<String>,
+    #[serde(default)]
+    pub sharing: StateSharing,
 }
 
 /// Human-readable metadata
@@ -1384,9 +1553,9 @@ pub struct NamedTarget {
     pub required_env: Vec<String>,
 
     /// Service dependencies that must be ready before this target is started.
-    /// Each entry must be either a top-level `[dependencies.*]` alias or a
-    /// sibling target label (`CAPSULE_DEPENDENCY_CONTRACTS.md` §8).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Each entry must be a sibling target label. Accepted as either `needs`
+    /// (legacy) or `depends_on` in TOML.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "depends_on")]
     pub needs: Vec<String>,
 
     /// Optional rich schema for user-facing config inputs. When populated,
@@ -1471,6 +1640,28 @@ pub struct NamedTarget {
     /// `EnvironmentMode::Closed`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env_allowlist: Vec<String>,
+
+    /// Opt-in to OCI platform emulation for this target.
+    ///
+    /// When `true`, the runtime is allowed to pull and run images whose platform
+    /// does not match the host (e.g., linux/amd64 on an arm64 macOS host).
+    /// Emulation may be slower. Default is `false` (native-only).
+    ///
+    /// Example: set to `true` for images that are only published as linux/amd64.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_emulation: bool,
+
+    /// One-shot lifecycle: run this OCI container to completion before
+    /// starting dependent services.  Exit code 0 = success (dependents
+    /// may start).  Non-zero or timeout = typed error, dependents blocked.
+    ///
+    /// Only supported for OCI targets.  `readiness_probe` and `port` must
+    /// not be set together with `run_once`.  `cmd` is required.
+    ///
+    /// Typical uses: DB migrations, permission init, bucket creation,
+    /// bootstrap seed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_once: bool,
 }
 
 impl NamedTarget {
@@ -1796,9 +1987,7 @@ impl CapsuleManifest {
     ///
     /// The returned set is what the host MUST grant at session creation time
     /// (after user consent) for the capsule to operate correctly.
-    pub fn host_capability_grants(
-        &self,
-    ) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
+    pub fn host_capability_grants(&self) -> Vec<crate::foundation::types::bridge::CapabilityGrant> {
         self.host_capabilities
             .iter()
             .filter_map(|spec| match spec.name {
@@ -1892,8 +2081,14 @@ run = "node index.js"
 "#;
         let manifest = CapsuleManifest::from_toml(toml).unwrap();
         assert_eq!(manifest.host_capabilities.len(), 2);
-        assert_eq!(manifest.host_capabilities[0].name, HostCapabilityName::OpenEditor);
-        assert_eq!(manifest.host_capabilities[1].name, HostCapabilityName::RevealWorkspace);
+        assert_eq!(
+            manifest.host_capabilities[0].name,
+            HostCapabilityName::OpenEditor
+        );
+        assert_eq!(
+            manifest.host_capabilities[1].name,
+            HostCapabilityName::RevealWorkspace
+        );
     }
 
     #[test]
@@ -1938,13 +2133,17 @@ runtime = "source/node"
 run = "node index.js"
 "#;
         let manifest = CapsuleManifest::from_toml(toml).unwrap();
-        let errors = manifest.validate().expect_err("empty reason must fail validation");
+        let errors = manifest
+            .validate()
+            .expect_err("empty reason must fail validation");
         let details = errors
             .iter()
             .map(|err| err.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(details.contains("host_capability 'open-file' must have a non-empty `reason` field"));
+        assert!(
+            details.contains("host_capability 'open-file' must have a non-empty `reason` field")
+        );
     }
 
     #[test]

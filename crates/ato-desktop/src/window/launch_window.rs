@@ -43,20 +43,16 @@ use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{Rect, WebView, WebViewBuilder};
 
 use crate::localization::{compose_init_script, resolve_locale};
+use crate::orchestrator::DesktopLaunchInput;
 use crate::state::GuestRoute;
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
+use crate::system_capsule::static_resolver::resolve_system_capsule_protocol_response;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
 
-/// Single-file React SPA that covers all launch wizard screens
-/// (consent, boot, github_run, candidates, candidate_detail,
-///  no_candidates, create_toml). Built from `assets/system/ato-launch/`
-/// with `vite-plugin-singlefile`; all JS/CSS is inlined.
-const LAUNCH_APP_HTML: &str = include_str!("../../assets/system/ato-launch/dist/index.html");
-
-// Legacy plain-HTML builds kept for reference; no longer loaded into WebViews.
-const _CONSENT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/consent.html");
-const _BOOT_HTML_LEGACY: &str = include_str!("../../assets/system/ato-launch/boot.html");
+const LAUNCH_SCHEME: &str = "capsule-launch";
+const LAUNCH_SLUG: &str = "ato-launch";
 
 /// Pending capsule-launch target — set when `open_consent_window_for_route`
 /// opens the consent wizard, consumed by `ato_launch::dispatch` on
@@ -322,11 +318,28 @@ impl LaunchWindowShell {
         );
         let _ = self._webview.evaluate_script(&script);
     }
+
+    pub fn inject_cli_inference_result(&self, result: &serde_json::Value) {
+        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "typeof window.__ato_cli_inference_result==='function'&&window.__ato_cli_inference_result({})",
+            json
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
+
+    pub fn inject_github_proceed_result(&self, result: &serde_json::Value) {
+        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+        let script = format!(
+            "typeof window.__ato_github_proceed_result==='function'&&window.__ato_github_proceed_result({})",
+            json
+        );
+        let _ = self._webview.evaluate_script(&script);
+    }
 }
 
 fn open_wizard(
     cx: &mut App,
-    html: &'static str,
     w: f32,
     h: f32,
     init_script: Option<String>,
@@ -354,11 +367,20 @@ fn open_wizard(
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let queue_for_ipc = queue.clone();
         let webview = WebViewBuilder::new()
-            .with_html(html)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_ipc))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_ipc,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Launch wizard WebView");
@@ -373,6 +395,8 @@ fn open_wizard(
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     Ok(*handle)
 }
@@ -492,6 +516,7 @@ pub fn open_consent_window_for_route_with_client(
                 .to_string();
             (pretty_name, handle.clone())
         }
+        GuestRoute::LocalManifest(local) => (local.label.clone(), local.source_handle.clone()),
         GuestRoute::ExternalUrl(url) => (
             url.host_str().unwrap_or("external").to_string(),
             url.as_str().to_string(),
@@ -510,7 +535,7 @@ pub fn open_consent_window_for_route_with_client(
     };
 
     let stashed = StashedLaunch {
-        route,
+        route: route.clone(),
         requested_client,
     };
     let mut launches = cx.global_mut::<PendingLaunches>();
@@ -551,6 +576,7 @@ pub fn open_consent_window_for_route_with_client(
     })));
 
     // Spawn background preflight; hydrate on completion.
+    let launch_input = launch_input_for_route(&route);
     let handle_clone = display_handle.clone();
     let name_clone = display_name.clone();
     let id_clone = preview_id.clone();
@@ -560,9 +586,13 @@ pub fn open_consent_window_for_route_with_client(
     let aa = async_app.clone();
     fe.spawn(async move {
         let preflight_handle = handle_clone.clone();
+        let preflight_input = launch_input.clone();
         let (preflight_result, secrets_store) = be
             .spawn(async move {
-                let data = crate::orchestrator::collect_preflight_for_consent(&preflight_handle);
+                let data = match preflight_input.as_ref() {
+                    Some(input) => crate::orchestrator::collect_preflight_for_consent_with_input(input),
+                    None => crate::orchestrator::collect_preflight_for_consent(&preflight_handle),
+                };
                 let store = crate::config::load_secrets();
                 (data, store)
             })
@@ -696,24 +726,16 @@ fn build_consent_preview(
             }
         }
         Err(err) => {
-            let preflight_failed = !is_non_blocking_remote_preflight_error(handle, &err);
-            if preflight_failed {
-                tracing::warn!(
-                    error = %err,
-                    "consent preflight failed — wizard shows error state"
-                );
-            } else {
-                tracing::warn!(
-                    handle,
-                    error = %err,
-                    "consent preflight unavailable for remote handle — continuing with launch fallback"
-                );
-            }
+            tracing::warn!(
+                handle,
+                error = %err,
+                "consent preflight failed — wizard shows error state"
+            );
             LaunchConsentPreview {
                 preview_id: preview_id.to_string(),
                 loading: false,
-                preflight_failed,
-                preflight_error: preflight_failed.then(|| format!("{err:#}")),
+                preflight_failed: true,
+                preflight_error: Some(format!("{err:#}")),
                 name: name.to_string(),
                 handle: handle.to_string(),
                 capsule_id: String::new(),
@@ -723,15 +745,6 @@ fn build_consent_preview(
             }
         }
     }
-}
-
-fn is_non_blocking_remote_preflight_error(handle: &str, err: &anyhow::Error) -> bool {
-    if !looks_like_remote_launch_handle(handle) {
-        return false;
-    }
-
-    let message = format!("{err:#}");
-    message.contains("manifest path does not exist")
 }
 
 /// Normalize a user-supplied GitHub repo input into the canonical
@@ -753,25 +766,6 @@ pub fn normalize_github_handle(repo: &str) -> String {
     } else {
         format!("github.com/{s}")
     }
-}
-
-fn looks_like_remote_launch_handle(handle: &str) -> bool {
-    let trimmed = handle.trim();
-    if trimmed.is_empty()
-        || trimmed.starts_with('/')
-        || trimmed.starts_with("~/")
-        || trimmed.starts_with("./")
-        || trimmed.starts_with("../")
-    {
-        return false;
-    }
-
-    trimmed.starts_with("github.com/")
-        || trimmed.starts_with("capsule://github.com/")
-        || trimmed.starts_with("capsule://ato.run/")
-        || trimmed.starts_with("capsule://localhost:")
-        || trimmed.starts_with("capsule://127.0.0.1:")
-        || trimmed.starts_with("capsule://[::1]:")
 }
 
 /// Internal helper: opens the consent wizard window and returns both the
@@ -811,10 +805,19 @@ fn open_consent_wizard_inner(
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let webview = WebViewBuilder::new()
-            .with_html(LAUNCH_APP_HTML)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the consent WebView");
@@ -830,6 +833,8 @@ fn open_consent_wizard_inner(
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()
@@ -935,10 +940,19 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let webview = WebViewBuilder::new()
-            .with_html(LAUNCH_APP_HTML)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the github_run WebView");
@@ -954,6 +968,8 @@ pub fn open_github_run_window(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()
@@ -987,7 +1003,7 @@ pub fn start_boot_launch(
         });
     }
 
-    let Some(handle) = launch_handle_for_route(&route) else {
+    let Some(launch_input) = launch_input_for_route(&route) else {
         show_boot_failure(
             cx,
             &boot_shell_weak,
@@ -995,23 +1011,35 @@ pub fn start_boot_launch(
         );
         return;
     };
+    let handle = launch_input.source_handle().to_string();
 
     let secret_store = crate::config::load_secrets();
     let secrets: Vec<_> = secret_store.secrets_for_capsule(&handle);
     let launch_configs_for_result = configs.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<u8>();
-    let handle_for_thread = handle.clone();
+    let launch_input_for_thread = launch_input.clone();
     let abort_for_thread = Arc::clone(&abort_flag);
     std::thread::spawn(move || {
-        let result = crate::orchestrator::resolve_and_start_guest(
-            &handle_for_thread,
+        let result = crate::orchestrator::resolve_and_start_guest_with_input(
+            &launch_input_for_thread,
             &secrets,
             &configs,
             Some(Box::new(move |step| {
                 let _ = progress_tx.send(step);
             })),
         );
+        if let Ok(ref session) = result {
+            if session.display_strategy
+                == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl
+            {
+                super::app_capsule_shell::wait_for_session_upstream_ready(
+                    session,
+                    &abort_for_thread,
+                    Duration::from_secs(60),
+                );
+            }
+        }
         if abort_for_thread.load(Ordering::Acquire) {
             if let Ok(ref session) = result {
                 let _ = crate::orchestrator::stop_guest_session(&session.session_id);
@@ -1110,6 +1138,8 @@ pub fn start_boot_launch(
                                             process_state: SessionProcessState::Ready,
                                             local_url: session.local_url.clone(),
                                             healthcheck_url: session.healthcheck_url.clone(),
+                                            session_kind:
+                                                crate::state::session::DesktopSessionKind::NativeSource,
                                             launch_context: CapsuleLaunchContext {
                                                 handle_or_url: session.handle.clone(),
                                                 target: Some(session.target_label.clone()),
@@ -1221,12 +1251,15 @@ pub fn start_boot_launch(
         .detach();
 }
 
-fn launch_handle_for_route(route: &GuestRoute) -> Option<String> {
+fn launch_input_for_route(route: &GuestRoute) -> Option<DesktopLaunchInput> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
-            Some(handle.clone())
+            Some(DesktopLaunchInput::from_handle(handle.clone()))
         }
-        GuestRoute::Capsule { session, .. } => Some(session.clone()),
+        GuestRoute::LocalManifest(local) => Some(DesktopLaunchInput::from_local_manifest(local)),
+        GuestRoute::Capsule { session, .. } => {
+            Some(DesktopLaunchInput::from_handle(session.clone()))
+        }
         _ => None,
     }
 }
@@ -1261,9 +1294,15 @@ fn stop_session_async(session_id: String) {
 }
 
 fn record_start_history(route: &GuestRoute) {
-    if let GuestRoute::CapsuleHandle { handle, label }
-    | GuestRoute::CapsuleUrl { handle, label, .. } = route
-    {
+    let item = match route {
+        GuestRoute::CapsuleHandle { handle, label }
+        | GuestRoute::CapsuleUrl { handle, label, .. } => Some((handle.as_str(), label.as_str())),
+        GuestRoute::LocalManifest(local) => {
+            Some((local.source_handle.as_str(), local.label.as_str()))
+        }
+        _ => None,
+    };
+    if let Some((handle, label)) = item {
         let mut store = crate::system_capsule::ato_start::StartPageHistoryStore::load();
         store.record_open(handle, label);
         if let Err(err) = store.save() {
@@ -1310,10 +1349,19 @@ fn open_boot_wizard_inner(
             )
             .into(),
         };
+        let launch_url = format!("{LAUNCH_SCHEME}://localhost/");
         let webview = WebViewBuilder::new()
-            .with_html(LAUNCH_APP_HTML)
+            .with_asynchronous_custom_protocol(LAUNCH_SCHEME.to_string(), |_id, req, responder| {
+                let response =
+                    resolve_system_capsule_protocol_response(LAUNCH_SLUG, req.uri().path());
+                responder.respond(response);
+            })
+            .with_url(&launch_url)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoLaunch,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the boot WebView");
@@ -1329,6 +1377,8 @@ fn open_boot_wizard_inner(
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoLaunch, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
     let shell = shell_slot
         .lock()
@@ -1343,23 +1393,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_manifest_missing_preflight_is_non_blocking() {
+    fn remote_manifest_missing_preflight_blocks_approve() {
         let err = anyhow::anyhow!(
             "ato internal preflight failed: preflight collection failed: manifest path does not exist: github.com/owner/repo"
         );
-
-        assert!(is_non_blocking_remote_preflight_error(
+        let preview = build_consent_preview(
+            "Repo",
             "github.com/owner/repo",
-            &err
-        ));
-        assert!(is_non_blocking_remote_preflight_error(
-            "capsule://github.com/Koh0920/cupbear",
-            &err
-        ));
-        assert!(is_non_blocking_remote_preflight_error(
-            "capsule://ato.run/koh0920/byok-ai-chat",
-            &err
-        ));
+            "preview-1",
+            Err(err),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(preview.preflight_failed);
+        assert!(preview.preflight_error.is_some());
+        assert!(preview.requirements.is_empty());
+        assert!(preview.capsule_id.is_empty());
     }
 
     #[test]
@@ -1367,23 +1416,16 @@ mod tests {
         let err = anyhow::anyhow!(
             "ato internal preflight failed: preflight collection failed: manifest path does not exist: /missing/capsule.toml"
         );
-
-        assert!(!is_non_blocking_remote_preflight_error(
+        let preview = build_consent_preview(
+            "Local",
             "/missing/capsule.toml",
-            &err
-        ));
-        assert!(!is_non_blocking_remote_preflight_error(
-            "./samples/demo",
-            &err
-        ));
-        assert!(!is_non_blocking_remote_preflight_error(
-            "crates/ato-cli/samples/foo",
-            &err
-        ));
-        assert!(!is_non_blocking_remote_preflight_error(
-            "koh0920/flatnotes",
-            &err
-        ));
+            "preview-1",
+            Err(err),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(preview.preflight_failed);
+        assert!(preview.preflight_error.is_some());
     }
 
     #[test]
@@ -1391,24 +1433,64 @@ mod tests {
         let err = anyhow::anyhow!(
             "ato internal preflight failed: preflight collection failed: failed to route manifest"
         );
-
-        assert!(!is_non_blocking_remote_preflight_error(
+        let preview = build_consent_preview(
+            "Repo",
             "koh0920/flatnotes",
-            &err
-        ));
+            "preview-1",
+            Err(err),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(preview.preflight_failed);
+        assert!(preview.preflight_error.is_some());
+    }
+
+    #[test]
+    fn consent_preview_allows_successful_sample_recipe_preflight() {
+        let preview = build_consent_preview(
+            "Blinko",
+            "capsule://github.com/blinkospace/blinko",
+            "preview-1",
+            Ok(crate::orchestrator::ConsentPreflightData {
+                capsule_id: "blinko".to_string(),
+                capsule_version: "0.1.0".to_string(),
+                visited_targets: vec!["db".to_string(), "app".to_string()],
+                requirements: vec![],
+            }),
+            &crate::config::SecretStore::default(),
+        );
+
+        assert!(!preview.preflight_failed);
+        assert!(preview.preflight_error.is_none());
+        assert_eq!(preview.capsule_id, "blinko");
+        assert_eq!(preview.capsule_version, "0.1.0");
+        assert_eq!(
+            preview.visited_targets,
+            vec!["db".to_string(), "app".to_string()]
+        );
     }
 
     #[test]
     fn consent_config_inputs_allow_selection() {
-        assert!(_CONSENT_HTML_LEGACY.contains("-webkit-user-select: text;"));
-        assert!(_CONSENT_HTML_LEGACY.contains("user-select: text;"));
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/system/ato-launch/consent.html"
+        ))
+        .expect("legacy consent html should be readable");
+        assert!(html.contains("-webkit-user-select: text;"));
+        assert!(html.contains("user-select: text;"));
     }
 
     #[test]
     fn consent_preview_supports_network_identity_allowlists() {
-        assert!(_CONSENT_HTML_LEGACY.contains("networkIds"));
-        assert!(_CONSENT_HTML_LEGACY.contains("case 'network_ids':"));
-        assert!(_CONSENT_HTML_LEGACY.contains("Network IDs"));
+        let html = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/system/ato-launch/consent.html"
+        ))
+        .expect("legacy consent html should be readable");
+        assert!(html.contains("networkIds"));
+        assert!(html.contains("case 'network_ids':"));
+        assert!(html.contains("Network IDs"));
     }
 
     #[test]

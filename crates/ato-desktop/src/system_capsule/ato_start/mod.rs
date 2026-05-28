@@ -92,6 +92,7 @@ pub enum QueryIntent {
 /// - `capsule://...` or `github.com/...` → `CapsuleHandle`
 /// - `http://...` or `https://...` → `ExternalUrl`
 /// - `~/...` or an absolute `/...` path → `LocalPath`
+/// - known featured sample aliases → `CapsuleHandle`
 /// - Anything else → `Invalid`
 pub fn classify_query(value: &str) -> QueryIntent {
     let v = value.trim();
@@ -101,9 +102,15 @@ pub fn classify_query(value: &str) -> QueryIntent {
         QueryIntent::ExternalUrl(v.to_string())
     } else if v.starts_with("~/") || v.starts_with('/') {
         QueryIntent::LocalPath(v.to_string())
+    } else if is_featured_sample_alias(v) {
+        QueryIntent::CapsuleHandle(v.to_string())
     } else {
         QueryIntent::Invalid(format!("'{}' は有効な入力ではありません。capsule:// / github.com/owner/repo / https:// / ~/path のいずれかで入力してください。", v))
     }
+}
+
+fn is_featured_sample_alias(value: &str) -> bool {
+    matches!(value, "affine" | "open-webui" | "excalidraw")
 }
 
 // ─── StartPageHistoryStore ───────────────────────────────────────────────────
@@ -339,42 +346,42 @@ fn expand_tilde(path: &str) -> PathBuf {
 fn static_featured_apps(locale: LocaleCode) -> Vec<FeaturedApp> {
     vec![
         FeaturedApp {
-            handle: "github.com/ato-run/demo-weather".to_string(),
-            label: "Weather Demo".to_string(),
-            description: tr(locale, "start.featured.weather_desc"),
-            icon: "⛅".to_string(),
-            icon_bg: "linear-gradient(135deg,#0ea5e9,#38bdf8)".to_string(),
+            handle: "capsule://github.com/usememos/memos".to_string(),
+            label: "Memos".to_string(),
+            description: tr(locale, "start.featured.memos_desc"),
+            icon: "📝".to_string(),
+            icon_bg: "linear-gradient(135deg,#f59e0b,#f97316)".to_string(),
             tags: vec![
                 tr(locale, "start.featured.tag.local_run"),
                 tr(locale, "start.featured.tag.offline"),
             ],
-            rating: 4.8,
-            installs: 412,
+            rating: 4.7,
+            installs: 3200,
             installed: false,
         },
         FeaturedApp {
-            handle: "github.com/ato-run/demo-todo".to_string(),
-            label: "Todo App Demo".to_string(),
-            description: tr(locale, "start.featured.todo_desc"),
-            icon: "✅".to_string(),
-            icon_bg: "linear-gradient(135deg,#10b981,#34d399)".to_string(),
+            handle: "capsule://github.com/louislam/uptime-kuma".to_string(),
+            label: "Uptime Kuma".to_string(),
+            description: tr(locale, "start.featured.uptime_kuma_desc"),
+            icon: "🟢".to_string(),
+            icon_bg: "linear-gradient(135deg,#10b981,#059669)".to_string(),
             tags: vec![
                 tr(locale, "start.featured.tag.local_run"),
                 tr(locale, "start.featured.tag.privacy"),
             ],
-            rating: 4.6,
-            installs: 387,
+            rating: 4.8,
+            installs: 5800,
             installed: false,
         },
         FeaturedApp {
-            handle: "github.com/ato-run/demo-markdown".to_string(),
-            label: "Markdown Editor".to_string(),
-            description: tr(locale, "start.featured.markdown_desc"),
-            icon: "📝".to_string(),
-            icon_bg: "linear-gradient(135deg,#8b5cf6,#a78bfa)".to_string(),
+            handle: "capsule://github.com/excalidraw/excalidraw".to_string(),
+            label: "Excalidraw".to_string(),
+            description: tr(locale, "start.featured.excalidraw_desc"),
+            icon: "✏️".to_string(),
+            icon_bg: "linear-gradient(135deg,#f472b6,#e11d48)".to_string(),
             tags: vec![tr(locale, "start.featured.tag.local_run")],
-            rating: 4.7,
-            installs: 298,
+            rating: 4.6,
+            installs: 1600,
             installed: false,
         },
     ]
@@ -557,8 +564,7 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
             }
         }
         Ok(None) => {
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
             }
@@ -569,8 +575,7 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
                 handle,
                 "ato_start: session fast-path failed; falling back to consent"
             );
-            if let Err(err) =
-                crate::window::launch_window::open_consent_window_for_route(cx, route)
+            if let Err(err) = crate::window::launch_window::open_consent_window_for_route(cx, route)
             {
                 tracing::error!(error = %err, handle, "ato_start: open_capsule consent fallback failed");
             }
@@ -625,6 +630,22 @@ mod tests {
         assert_eq!(
             classify_query("/Users/alice/dev/capsule"),
             QueryIntent::LocalPath("/Users/alice/dev/capsule".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_featured_sample_aliases() {
+        assert_eq!(
+            classify_query("affine"),
+            QueryIntent::CapsuleHandle("affine".to_string())
+        );
+        assert_eq!(
+            classify_query("open-webui"),
+            QueryIntent::CapsuleHandle("open-webui".to_string())
+        );
+        assert_eq!(
+            classify_query("excalidraw"),
+            QueryIntent::CapsuleHandle("excalidraw".to_string())
         );
     }
 

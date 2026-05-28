@@ -21,13 +21,16 @@ pub(crate) use ato_session_core::{
 };
 use capsule_core::ato_lock;
 use capsule_core::handle::{
-    normalize_capsule_handle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
-    TrustState,
+    normalize_capsule_handle, CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor,
+    ResolvedSnapshot, TrustState,
 };
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::routing::input_resolver::ATO_LOCK_FILE_NAME;
 use serde::Serialize;
 
+use crate::adapters::runtime::oci_provider::{
+    DefaultOciProviderSelector, OciProvider, OciProviderSelector,
+};
 #[cfg(unix)]
 use crate::application::orchestration_teardown::{collect_descendant_pids, listener_pids_on_port};
 use crate::application::pipeline::phases::run::{
@@ -49,7 +52,105 @@ use crate::runtime::tree as runtime_tree;
 use crate::runtime::{overrides as runtime_overrides, port_manager::PortManager};
 use crate::ProviderToolchain;
 
+use super::guest_contract::GuestContract;
 use super::resolve::resolve_local_plan;
+
+/// Thread-local install lifecycle context set by `ato launch` before calling
+/// `execute_run_command`. Using thread-local (rather than process-global OnceLock)
+/// means:
+/// - Multiple sequential launches in the same process work correctly (daemon / Desktop)
+/// - Test isolation: each test thread gets its own slot; no cross-test leakage
+/// - The context is automatically cleared when the thread terminates
+///
+/// Always use [`ScopedInstallLifecycleGuard`] to set/clear the context so it is
+/// guaranteed to be cleaned up on return, even if the run pipeline panics.
+thread_local! {
+    static INSTALL_LIFECYCLE_CONTEXT: std::cell::RefCell<
+        Option<crate::cli::commands::run::InstallLifecycleContext>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn set_install_lifecycle_context(
+    ctx: crate::cli::commands::run::InstallLifecycleContext,
+) {
+    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = Some(ctx);
+    });
+}
+
+pub(crate) fn clear_install_lifecycle_context() {
+    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+/// RAII guard that sets the thread-local install lifecycle context on construction
+/// and clears it on `Drop`. Use this instead of calling `set_install_lifecycle_context`
+/// directly to guarantee cleanup on all return paths (including early returns and panics).
+///
+/// # Example
+///
+/// ```rust
+/// let _guard = ScopedInstallLifecycleGuard::set(lifecycle_ctx);
+/// execute_run_command(...)?;
+/// // Context is cleared here automatically.
+/// ```
+pub(crate) struct ScopedInstallLifecycleGuard;
+
+impl ScopedInstallLifecycleGuard {
+    pub(crate) fn set(ctx: crate::cli::commands::run::InstallLifecycleContext) -> Self {
+        set_install_lifecycle_context(ctx);
+        ScopedInstallLifecycleGuard
+    }
+}
+
+impl Drop for ScopedInstallLifecycleGuard {
+    fn drop(&mut self) {
+        clear_install_lifecycle_context();
+    }
+}
+
+fn with_install_lifecycle_context<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&crate::cli::commands::run::InstallLifecycleContext>) -> R,
+{
+    INSTALL_LIFECYCLE_CONTEXT.with(|slot| {
+        let guard = slot.borrow();
+        f(guard.as_ref())
+    })
+}
+
+/// Stamp install lifecycle IDs onto `record` if a lifecycle context was set
+/// (i.e., we are running via `ato launch`).
+///
+/// `CapsuleInstanceKey` is derived here from the session's own `execution_id`
+/// (the receipt identity assigned by the run pipeline) so CIK, session record,
+/// and receipt all share the same execution identity.
+fn apply_install_lifecycle(record: &mut StoredSessionInfo) {
+    with_install_lifecycle_context(|ctx| {
+        if let Some(ctx) = ctx {
+            record.installed_app_id = Some(ctx.installed_app_id.clone());
+            record.install_profile_id = Some(ctx.install_profile_id.clone());
+            record.install_profile_key = Some(ctx.install_profile_key.clone());
+            record.install_revision_id = Some(ctx.install_revision_id.clone());
+
+            // Derive CIK from the session's real execution_id so the key
+            // reflects the actual receipt/execution closure, not a random id.
+            if let Some(exec_id_str) = &record.execution_id {
+                use capsule_core::foundation::install_lifecycle::{
+                    derive_capsule_instance_key, ExecutionId, InstallProfileKey, InstallRevisionId,
+                };
+                let ipk = InstallProfileKey::new(ctx.install_profile_key.clone());
+                let rev_id = InstallRevisionId::new(ctx.install_revision_id.clone());
+                let exec = ExecutionId::new(exec_id_str.clone());
+                let cik = derive_capsule_instance_key(&ipk, &rev_id, &exec);
+                record.capsule_instance_key = Some(cik.as_str().to_string());
+            }
+            // If execution_id is not yet set at write time, capsule_instance_key
+            // stays None. It can be back-filled when the receipt is finalized.
+        }
+    });
+}
 
 const SESSION_ACTION_START: &str = "session_start";
 const SESSION_ACTION_STOP: &str = "session_stop";
@@ -121,6 +222,11 @@ struct SessionStopEnvelope {
     action: &'static str,
     session_id: String,
     stopped: bool,
+    /// Set when network removal was attempted but failed. Includes the
+    /// network name and the last error seen so callers can retry cleanup
+    /// manually (`podman network rm <name>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -573,6 +679,11 @@ pub(super) fn start_guest_session(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -608,10 +719,32 @@ pub(super) fn start_runtime_session(
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "prepare_session_execution");
     let PreparedSessionExecution {
-        prepared,
+        mut prepared,
         dep_contracts,
     } = prepare_session_execution(plan, raw_manifest)?;
     timer.finish_ok();
+
+    #[cfg(unix)]
+    {
+        match crate::common::netd::ensure_egress_proxy() {
+            Ok(egress_port) => {
+                let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
+                prepared
+                    .launch_ctx
+                    .extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                prepared.launch_ctx.set_egress_proxy_port(egress_port);
+                tracing::debug!(
+                    egress_port,
+                    "ato-netd egress proxy injected into session launch context"
+                );
+            }
+            Err(crate::common::netd::EgressProxyError::NotSupported) => {}
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context("failed to start ato-netd egress proxy for session"));
+            }
+        }
+    }
 
     let session_web_port = if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
         if plan.execution_port().is_some() || runtime_overrides::override_port(None).is_some() {
@@ -866,6 +999,11 @@ pub(super) fn start_runtime_session(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root, &session)?;
     timer.finish_ok();
@@ -1006,6 +1144,26 @@ pub(super) fn start_orchestration_session_in_process(
         .map_err(|err| err.context("failed to set up dependency contracts for session start"))?;
     timer.finish_ok();
 
+    #[cfg(unix)]
+    {
+        match crate::common::netd::ensure_egress_proxy() {
+            Ok(egress_port) => {
+                let proxy = crate::common::proxy::proxy_env_for_http_connect(egress_port, &[]);
+                launch_ctx.extend_injected_env(crate::common::proxy::proxy_env_to_pairs(&proxy));
+                launch_ctx.set_egress_proxy_port(egress_port);
+                tracing::debug!(
+                    egress_port,
+                    "ato-netd egress proxy injected into orchestration session launch context"
+                );
+            }
+            Err(crate::common::netd::EgressProxyError::NotSupported) => {}
+            Err(err) => {
+                return Err(anyhow::Error::from(err)
+                    .context("failed to start ato-netd egress proxy for orchestration session"));
+            }
+        }
+    }
+
     // Step 2: [services] orchestration in detach mode. The detach API runs
     // ServicePhaseCoordinator (the same one foreground `ato run` uses) and
     // returns control after readiness instead of entering monitor_until_exit.
@@ -1019,11 +1177,27 @@ pub(super) fn start_orchestration_session_in_process(
         dangerously_skip_permissions: allow_unsafe,
         assume_yes: true,
         nacelle: None,
+        // Desktop sessions consume the leaf via their own WebView only, so
+        // they want podman to pick a free host port instead of grabbing the
+        // recipe's declared port. Without this, two recipes that both declare
+        // `[services.main]` with the same port (e.g. Open WebUI + Excalidraw
+        // both at 8080) collide on host:8080 and the second session's WebView
+        // ends up rendering whichever container still owns the port (#289).
+        publish_policy: crate::executors::orchestrator::PublishPolicy::EphemeralMainService,
     };
 
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "orchestration_start_until_ready");
-    let bollard_client = capsule_core::runtime::oci::BollardOciRuntimeClient::connect_default()
-        .context("failed to connect to OCI engine for orchestration session start")?;
+    let oci_provider = DefaultOciProviderSelector.select_provider();
+    // Ensure the OCI provider is ready before touching networks or containers.
+    // On macOS/Windows this auto-starts a stopped Podman machine.  Without
+    // this gate, a stopped machine only surfaces as partial-setup failures deep
+    // inside `execute_until_ready_and_detach` (regression #289 / #328).
+    runtime_handle
+        .block_on(async { oci_provider.ensure_ready().await })
+        .map_err(|err| {
+            anyhow::Error::from(err)
+                .context("OCI provider not ready before session start")
+        })?;
     let detached = runtime_handle
         .block_on(
             crate::executors::orchestrator::execute_until_ready_and_detach(
@@ -1033,20 +1207,40 @@ pub(super) fn start_orchestration_session_in_process(
                 &launch_ctx,
                 &options,
                 None,
-                bollard_client,
+                oci_provider,
             ),
         )
         .context("orchestration services failed to start in-process")?;
     timer.finish_ok();
 
     // Step 3: leaf service URL — ServicePhaseCoordinator already ran the
-    // per-service readiness probes, so the leaf is reachable. We only need
-    // the public URL for the session record.
-    let local_url = format!("http://127.0.0.1:{}/", leaf_port);
+    // per-service readiness probes, so the leaf is reachable. We bind the
+    // WebView to the *actual* published host port from the detached snapshot
+    // rather than the declared `leaf_port`. For OCI leaves these can differ
+    // (and for two recipes that both declare 8080, e.g. Open WebUI and
+    // Excalidraw, the declared port is not even unique). Local leaves don't
+    // populate `host_ports`, so we fall back to the declared port — that
+    // path's container_port and host_port are the same by construction.
+    let leaf_snapshot = detached
+        .services
+        .iter()
+        .find(|s| s.name == leaf_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "orchestration leaf service '{}' missing from detached snapshot",
+                leaf_name
+            )
+        })?;
+    let leaf_host_port = leaf_snapshot
+        .host_ports
+        .get(&leaf_port)
+        .copied()
+        .unwrap_or(leaf_port);
+    let local_url = format!("http://127.0.0.1:{leaf_host_port}/");
 
     notes.push(format!(
-        "Orchestration mode: launched in-process; WebView bound to leaf service '{}' (target='{}', port={}).",
-        leaf_name, leaf_target_label, leaf_port
+        "Orchestration mode: launched in-process; WebView bound to leaf service '{}' (target='{}', container_port={}, host_port={}).",
+        leaf_name, leaf_target_label, leaf_port, leaf_host_port
     ));
 
     let runtime_descriptor = CapsuleRuntimeDescriptor {
@@ -1054,7 +1248,7 @@ pub(super) fn start_orchestration_session_in_process(
         runtime: Some(leaf_runtime),
         driver: Some(leaf_driver.clone()),
         language: None,
-        port: Some(leaf_port),
+        port: Some(leaf_host_port),
     };
 
     // Surface the leaf process to ProcessManager so `stop_session` can find
@@ -1063,13 +1257,7 @@ pub(super) fn start_orchestration_session_in_process(
     // matches the legacy supervisor's behavior of using the spawned `ato run`
     // PID. PR-D wires the full materialized graph (including OCI container
     // ids) through SessionRecord.dependency_contracts.
-    let leaf_local_pid = detached
-        .services
-        .iter()
-        .find(|s| s.name == leaf_name)
-        .and_then(|s| s.local_pid)
-        .map(|pid| pid as i32)
-        .unwrap_or(0);
+    let leaf_local_pid = leaf_snapshot.local_pid.map(|pid| pid as i32).unwrap_or(0);
 
     let session_id_seed = if leaf_local_pid > 0 {
         leaf_local_pid as u32
@@ -1120,8 +1308,11 @@ pub(super) fn start_orchestration_session_in_process(
             legacy_dependency_contracts.as_ref(),
             provider_needs.as_ref(),
         );
-    let orchestration_services =
-        orchestration_services_for_session_record(std::process::id() as i32, &detached.services);
+    let orchestration_services = orchestration_services_for_session_record(
+        std::process::id() as i32,
+        &detached.services,
+        detached.network_name.clone(),
+    );
     let graph =
         crate::application::session_graph_populate::append_orchestration_services_to_graph_with_deps(
             graph,
@@ -1177,6 +1368,11 @@ pub(super) fn start_orchestration_session_in_process(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root_path, &session)?;
 
@@ -1392,6 +1588,11 @@ pub(super) fn start_orchestration_session_supervisor(
         schema_version: None,
         launch_digest: None,
         process_start_time_unix_ms: None,
+        installed_app_id: None,
+        install_profile_id: None,
+        install_profile_key: None,
+        install_revision_id: None,
+        capsule_instance_key: None,
     };
     write_session_record(&session_root, &session)?;
 
@@ -1405,8 +1606,9 @@ pub(super) fn start_orchestration_session_supervisor(
 /// + frontend with `web depends_on main`), this is the user-facing UI.
 ///
 /// If multiple leaves exist, prefer one whose target driver is `node` /
-/// runtime is `web` (front-end candidates), then fall back to the
-/// alphabetically last name.
+/// runtime is `web` (front-end candidates), then prefer one with
+/// `network.publish = true` (the public-facing service, auto-set for `main`
+/// when it has a port), then fall back to the alphabetically last name.
 fn pick_orchestration_leaf_service(
     orchestration: &capsule_core::foundation::types::OrchestrationPlan,
 ) -> Result<&capsule_core::foundation::types::ResolvedService> {
@@ -1440,6 +1642,9 @@ fn pick_orchestration_leaf_service(
             }) {
                 return Ok(*web_leaf);
             }
+            if let Some(published_leaf) = leaves.iter().find(|service| service.network.publish) {
+                return Ok(*published_leaf);
+            }
             Ok(*leaves
                 .iter()
                 .max_by_key(|service| service.name.clone())
@@ -1461,9 +1666,14 @@ fn pick_orchestration_leaf_service(
 /// materialized the orchestration graph (`std::process::id()` at the
 /// call site). It is recorded so `stop_session` can defend against
 /// PID reuse when validating the record.
+///
+/// `network_name` is the Docker/Podman network created by the OCI
+/// orchestrator for this session, stored so `stop_session` can remove
+/// it after all containers stop (closes #273).
 fn orchestration_services_for_session_record(
     wrapper_pid: i32,
     snapshots: &[crate::executors::orchestrator::DetachedServiceSnapshot],
+    network_name: Option<String>,
 ) -> Option<StoredOrchestrationServices> {
     if snapshots.is_empty() {
         return None;
@@ -1482,6 +1692,7 @@ fn orchestration_services_for_session_record(
     Some(StoredOrchestrationServices {
         wrapper_pid,
         services,
+        network_name,
     })
 }
 
@@ -1659,6 +1870,63 @@ pub(super) fn resolve_session_launch_plan(
     capsule_core::launch_spec::LaunchSpec,
     Vec<String>,
 )> {
+    if !super::resolve::input_is_existing_local_path(handle) {
+        if let Some(resolved) = super::sample_recipes::resolve_sample_recipe_for_input(handle)? {
+            let manifest_path = resolved.manifest_path;
+            let mut notes = vec![format!(
+                "Resolved via bundled sample recipe '{}'.",
+                resolved.slug
+            )];
+            let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+                &manifest_path,
+                target_label,
+                Some(resolved.slug.as_str()),
+            )?;
+            notes.extend(plan_notes);
+            let launch = derive_launch_spec(&plan).with_context(|| {
+                format!(
+                    "failed to derive launch spec for sample recipe '{}' at {}",
+                    resolved.slug,
+                    manifest_path.display()
+                )
+            })?;
+            return Ok((manifest_path, plan, launch, notes));
+        }
+    }
+
+    if let Ok(canonical) = normalize_capsule_handle(handle) {
+        if let CanonicalHandle::GithubRepo {
+            ref owner,
+            ref repo,
+            ..
+        } = canonical
+        {
+            if let Some(resolved) =
+                super::sample_recipes::resolve_sample_recipe_for_github(owner, repo)?
+            {
+                let manifest_path = resolved.manifest_path;
+                let mut notes = vec![format!(
+                    "Resolved via bundled sample recipe '{}' for github.com/{}/{}.",
+                    resolved.slug, owner, repo
+                )];
+                let (plan, _guest, plan_notes) = resolve_local_plan_for_session_start(
+                    &manifest_path,
+                    target_label,
+                    Some(resolved.slug.as_str()),
+                )?;
+                notes.extend(plan_notes);
+                let launch = derive_launch_spec(&plan).with_context(|| {
+                    format!(
+                        "failed to derive launch spec for sample recipe '{}' at {}",
+                        resolved.slug,
+                        manifest_path.display()
+                    )
+                })?;
+                return Ok((manifest_path, plan, launch, notes));
+            }
+        }
+    }
+
     let resolved_path = match normalize_capsule_handle(handle) {
         Ok(canonical) => {
             let cli_ref = canonical
@@ -1703,6 +1971,65 @@ pub(super) fn resolve_session_launch_plan(
         )
     })?;
     Ok((manifest_path, plan, launch, notes))
+}
+
+pub(super) fn resolve_local_plan_for_session_start(
+    manifest_path: &Path,
+    target_label: Option<&str>,
+    sample_recipe_slug: Option<&str>,
+) -> Result<(
+    capsule_core::router::ManifestData,
+    Option<GuestContract>,
+    Vec<String>,
+)> {
+    let (mut plan, guest, mut notes) = resolve_local_plan(manifest_path, target_label)?;
+    if let Some(slug) = sample_recipe_slug {
+        let bindings = auto_state_bindings_for_sample_recipe_manifest(manifest_path, slug)?;
+        if !bindings.is_empty() {
+            plan.state_source_overrides = bindings;
+            notes.push(format!(
+                "Auto-bound persistent sample recipe state under ~/.ato/state/sample-recipes/{slug}."
+            ));
+        }
+    }
+    Ok((plan, guest, notes))
+}
+
+fn auto_state_bindings_for_sample_recipe_manifest(
+    manifest_path: &Path,
+    slug: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    use capsule_core::types::StateDurability;
+
+    let raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let manifest = capsule_core::types::CapsuleManifest::from_toml(&raw)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let state_root = capsule_core::common::paths::ato_state_dir()
+        .join("sample-recipes")
+        .join(slug);
+    let mut bindings = std::collections::HashMap::new();
+    for (state_name, _requirement) in manifest
+        .state
+        .iter()
+        .filter(|(_, requirement)| requirement.durability == StateDurability::Persistent)
+    {
+        let path = state_root.join(state_name);
+        fs::create_dir_all(&path).with_context(|| {
+            format!(
+                "failed to create sample recipe state directory {}",
+                path.display()
+            )
+        })?;
+        bindings.insert(
+            state_name.clone(),
+            path.canonicalize()
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+    Ok(bindings)
 }
 
 /// Try to load `ato.lock.json` from the workspace root.
@@ -2067,8 +2394,16 @@ fn web_served_by(plan: &capsule_core::router::ManifestData) -> String {
 // parent's exit, so detached children continue logging normally.
 
 fn read_session_record(path: &Path) -> Option<StoredSessionInfo> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(_) => {
+            return None;
+        }
+    };
+    match serde_json::from_slice::<StoredSessionInfo>(&bytes) {
+        Ok(record) => Some(record),
+        Err(_) => None,
+    }
 }
 
 /// Tear down the `[services]` graph subset persisted on the session record
@@ -2193,6 +2528,7 @@ fn orchestration_services_from_graph(
     Some(StoredOrchestrationServices {
         wrapper_pid: record.pid,
         services: services.into_iter().map(|(_, service)| service).collect(),
+        network_name: None,
     })
 }
 
@@ -2524,9 +2860,6 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         // behavior on `stop_session`.
         match stop_recorded_orchestration_services(session_record.as_ref(), true) {
             Ok(record_stopped) => {
-                if record_stopped {
-                    let _ = process_manager.delete_pid(session_id);
-                }
                 stopped |= record_stopped;
             }
             Err(err) => {
@@ -2536,30 +2869,44 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
             }
         }
     }
-    // Orchestration `[services]` graph teardown (#73 PR-D, closes #28
-    // phase 2). Independent of the dep-contract sidecar — orchestration
-    // sessions persist their services subset on the record and there is
-    // no sidecar form. `force=true` matches the dep-contract path's
-    // behavior on `stop_session`.
-    match stop_recorded_orchestration_services(session_record.as_ref(), true) {
-        Ok(record_stopped) => {
-            stopped |= record_stopped;
-        }
-        Err(err) => {
-            if stop_error.is_none() {
-                stop_error = Some(err);
-            }
-        }
-    }
     if let Some(err) = stop_error {
         if !stopped {
             return Err(err);
         }
     }
 
-    if session_path.exists() {
+    // Prune the OCI network created for this session (#273). Runs
+    // after all containers have been removed so the network is no
+    // longer in use. Returns an observable outcome so callers can
+    // surface failures rather than silently losing retryability.
+    let network_cleanup_warning: Option<String> = if stopped {
+        if let Some(network_name) = session_record
+            .as_ref()
+            .and_then(|r| r.orchestration_services.as_ref())
+            .and_then(|s| s.network_name.as_deref())
+        {
+            use crate::application::orchestration_teardown::{
+                remove_network_if_present, NetworkRemovalOutcome,
+            };
+            match remove_network_if_present(network_name) {
+                NetworkRemovalOutcome::Removed | NetworkRemovalOutcome::AlreadyGone => None,
+                NetworkRemovalOutcome::SkippedNotAtoManaged => None,
+                NetworkRemovalOutcome::Failed(err) => Some(format!(
+                    "network cleanup failed for {network_name}: {err}; \
+                     run `podman network rm {network_name}` to clean up manually"
+                )),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if stopped && session_path.exists() {
         fs::remove_file(&session_path)
             .with_context(|| format!("failed to remove session file {}", session_path.display()))?;
+        crate::common::netd::try_shutdown_if_last_session();
     }
 
     if json {
@@ -2571,6 +2918,7 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
                 action: SESSION_ACTION_STOP,
                 session_id: session_id.to_string(),
                 stopped,
+                network_cleanup_warning: network_cleanup_warning.clone(),
             })?
         );
         return Ok(());
@@ -2580,6 +2928,9 @@ pub fn stop_session(session_id: &str, json: bool) -> Result<()> {
         println!("Stopped session: {session_id}");
     } else {
         println!("Session was not active: {session_id}");
+    }
+    if let Some(warn) = &network_cleanup_warning {
+        eprintln!("ATO-WARN {warn}");
     }
     Ok(())
 }
@@ -2621,6 +2972,11 @@ fn maybe_spawn_parent_death_watcher(session_id: &str) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Forward ATO_HOME so the watcher subprocess resolves session files
+    // from the same root as the caller.
+    if let Ok(ato_home) = std::env::var("ATO_HOME") {
+        command.env("ATO_HOME", ato_home);
+    }
     if let Some(start_time) = parent_start_time {
         command
             .arg("--parent-start-time-unix-ms")
@@ -2663,6 +3019,15 @@ pub(crate) fn session_root() -> Result<PathBuf> {
 /// record. Replaces the legacy `fs::write` call (RFC v0.3 §9.4
 /// prerequisite for Phase 1).
 fn write_session_record(root: &Path, session: &StoredSessionInfo) -> Result<()> {
+    // If this process was started via `ato launch`, stamp the install lifecycle
+    // IDs onto every session record so dashboards and replay tools can correlate
+    // sessions with installed app instances.
+    let has_ctx = with_install_lifecycle_context(|c| c.is_some());
+    if has_ctx {
+        let mut patched = session.clone();
+        apply_install_lifecycle(&mut patched);
+        return write_session_record_atomic(root, &patched);
+    }
     write_session_record_atomic(root, session)
 }
 
@@ -3003,7 +3368,10 @@ mod tests {
     }
 
     impl TestEnvGuard {
-        fn capture_and_set(ato_home_path: &std::path::Path, session_root: &std::path::Path) -> Self {
+        fn capture_and_set(
+            ato_home_path: &std::path::Path,
+            session_root: &std::path::Path,
+        ) -> Self {
             let guard = Self {
                 ato_home: std::env::var("ATO_HOME").ok(),
                 home: std::env::var("HOME").ok(),
@@ -3248,6 +3616,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         // Provider-set parity: graph providers ≡ dependency_contracts providers.
@@ -3388,6 +3761,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3457,6 +3835,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let plan = super::dependency_teardown_plan(&record)
@@ -3549,6 +3932,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -3620,6 +4008,11 @@ mod tests {
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_dependency_contracts(Some(&record), true)
@@ -3646,10 +4039,51 @@ mod tests {
         );
     }
 
+    #[test]
+    #[serial]
+    fn sample_recipe_session_start_auto_binds_explicit_state() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_root = temp.path().join("sessions");
+        fs::create_dir_all(&session_root).expect("create session root");
+        let _guard = TestEnvGuard::capture_and_set(temp.path(), &session_root);
+
+        let resolved = crate::app_control::sample_recipes::resolve_sample_recipe_for_input("memos")
+            .expect("resolve sample recipe")
+            .expect("memos recipe");
+        let (plan, _guest, notes) = resolve_local_plan_for_session_start(
+            &resolved.manifest_path,
+            None,
+            Some(resolved.slug.as_str()),
+        )
+        .expect("resolve session plan");
+
+        let state_path = plan
+            .state_source_overrides
+            .get("data")
+            .expect("data state override");
+        assert!(
+            state_path.ends_with("/state/sample-recipes/memos/data"),
+            "unexpected state path: {state_path}"
+        );
+        assert!(std::path::Path::new(state_path).exists());
+        assert!(notes.iter().any(|note| note.contains("Auto-bound")));
+
+        let services = plan
+            .resolve_services()
+            .expect("explicit state should be bound");
+        let main = services.service("main").expect("main service");
+        assert!(main
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .any(|mount| mount.source == *state_path && mount.target == "/var/opt/memos"));
+    }
+
     #[cfg(unix)]
     #[test]
     #[serial]
-    #[ignore = "flaky: races SIGTERM delivery against try_wait, and shares HOME/ATO_DESKTOP_SESSION_ROOT with sibling tests; tracked in #82"]
     fn stop_session_uses_record_dependency_contracts_when_sidecar_is_missing() {
         let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempfile::tempdir().expect("tempdir");
@@ -3742,6 +4176,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -3842,6 +4281,11 @@ mod tests {
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -3959,10 +4403,16 @@ mod tests {
                         published_port: None,
                     },
                 ],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4116,10 +4566,16 @@ mod tests {
                             published_port: None,
                         },
                     ],
+                    network_name: None,
                 }),
                 schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
                 launch_digest: Some("digest".repeat(8)),
                 process_start_time_unix_ms: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             },
         )
         .expect("write session record");
@@ -4279,10 +4735,16 @@ mod tests {
                     host_ports: BTreeMap::new(),
                     published_port: Some(port),
                 }],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4542,10 +5004,16 @@ mod tests {
                     host_ports: BTreeMap::new(),
                     published_port: Some(port),
                 }],
+                network_name: None,
             }),
             schema_version: Some(ato_session_core::SCHEMA_VERSION_V2),
             launch_digest: Some("digest".repeat(8)),
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         let stopped = super::stop_recorded_orchestration_services(Some(&record), true)
@@ -4579,5 +5047,304 @@ mod tests {
         panic!(
             "wrapper (pid {wrapper_pid}) and/or its child listener on port {port} were not reaped within 1s of pgroup stop"
         );
+    }
+    // ── CIK backfill tests ──────────────────────────────────────────────────
+
+    fn minimal_session_record_with_exec(exec_id: Option<&str>) -> StoredSessionInfo {
+        // Build the minimal required JSON and deserialize — avoids constructing
+        // StoredSessionInfo via struct literal when the schema has many required fields.
+        let exec_field = match exec_id {
+            Some(id) => format!(r#","execution_id":"{id}""#),
+            None => String::new(),
+        };
+        let json = format!(
+            r#"{{
+            "session_id":"test_session",
+            "handle":"test/handle",
+            "normalized_handle":"test/handle",
+            "trust_state":"trusted",
+            "restricted":false,
+            "runtime":{{"target_label":"main","runtime":null,"driver":null,"language":null,"port":null}},
+            "display_strategy":"guest_webview",
+            "pid":0,
+            "log_path":"",
+            "manifest_path":"",
+            "target_label":"",
+            "notes":[],
+            "guest":null,"web":null,"terminal":null,"service":null
+            {exec_field}
+        }}"#
+        );
+        serde_json::from_str(&json).expect("failed to build minimal session record")
+    }
+
+    /// `apply_install_lifecycle` should stamp all 5 lifecycle fields and derive
+    /// `capsule_instance_key` from the session's `execution_id` when the
+    /// thread-local context is active.
+    #[test]
+    fn apply_install_lifecycle_stamps_all_fields_and_derives_cik() {
+        use capsule_core::foundation::install_lifecycle::{
+            derive_capsule_instance_key, ExecutionId, InstallProfileKey, InstallRevisionId,
+        };
+
+        let ipk_str = "ipk_aabbccdd1122334455667788aabbccdd";
+        let rev_str = "rev_aabbccdd1122334455667788aabbccdd";
+        let exec_id_str = "exec_deadbeef1234567890abcdef0123456789ab";
+
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_aabbccdd1122334455667788aabbccdd".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: ipk_str.to_string(),
+            install_revision_id: rev_str.to_string(),
+        };
+
+        // Build a session record that already has execution_id set (simulating
+        // the case where the receipt assigned it before write_session_record).
+        let mut record = minimal_session_record_with_exec(Some(exec_id_str));
+
+        // Apply under scoped guard.
+        let _guard = ScopedInstallLifecycleGuard::set(ctx.clone());
+        apply_install_lifecycle(&mut record);
+
+        // All 4 identity fields must be stamped.
+        assert_eq!(
+            record.installed_app_id.as_deref(),
+            Some(ctx.installed_app_id.as_str())
+        );
+        assert_eq!(
+            record.install_profile_id.as_deref(),
+            Some(ctx.install_profile_id.as_str())
+        );
+        assert_eq!(
+            record.install_profile_key.as_deref(),
+            Some(ctx.install_profile_key.as_str())
+        );
+        assert_eq!(
+            record.install_revision_id.as_deref(),
+            Some(ctx.install_revision_id.as_str())
+        );
+
+        // CIK must be derived from (profile_key, revision_id, execution_id).
+        let expected_cik = derive_capsule_instance_key(
+            &InstallProfileKey::new(ipk_str.to_string()),
+            &InstallRevisionId::new(rev_str.to_string()),
+            &ExecutionId::new(exec_id_str.to_string()),
+        );
+        assert_eq!(
+            record.capsule_instance_key.as_deref(),
+            Some(expected_cik.as_str()),
+            "capsule_instance_key must be derived from the session execution_id"
+        );
+    }
+
+    /// When `execution_id` is absent at write time, `capsule_instance_key` stays
+    /// `None` (it will be back-filled when the receipt assigns the execution_id).
+    #[test]
+    fn apply_install_lifecycle_leaves_cik_none_when_no_execution_id() {
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_001".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_001".to_string(),
+            install_revision_id: "rev_001".to_string(),
+        };
+
+        let mut record = minimal_session_record_with_exec(None);
+
+        let _guard = ScopedInstallLifecycleGuard::set(ctx);
+        apply_install_lifecycle(&mut record);
+
+        assert!(
+            record.capsule_instance_key.is_none(),
+            "CIK should be None when execution_id has not been assigned yet"
+        );
+    }
+
+    /// Verify `ScopedInstallLifecycleGuard` clears the context after it is dropped.
+    #[test]
+    fn scoped_guard_clears_context_on_drop() {
+        let ctx = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_002".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_002".to_string(),
+            install_revision_id: "rev_002".to_string(),
+        };
+
+        {
+            let _guard = ScopedInstallLifecycleGuard::set(ctx);
+            // Context is active inside this block.
+            let has_ctx = with_install_lifecycle_context(|c| c.is_some());
+            assert!(has_ctx, "context should be active after set");
+        }
+        // After drop, context must be cleared.
+        let has_ctx = with_install_lifecycle_context(|c| c.is_some());
+        assert!(
+            !has_ctx,
+            "ScopedInstallLifecycleGuard must clear context on drop"
+        );
+    }
+
+    // ── pick_orchestration_leaf_service ───────────────────────────────────────
+
+    fn make_leaf_service(
+        name: &str,
+        publish: bool,
+        port: Option<u16>,
+        depends_on: Vec<String>,
+    ) -> capsule_core::foundation::types::ResolvedService {
+        use capsule_core::foundation::types::{
+            ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
+        };
+        ResolvedService {
+            name: name.to_string(),
+            depends_on,
+            connections: vec![],
+            readiness_probe: None,
+            network: ResolvedServiceNetwork {
+                aliases: vec![name.to_string()],
+                publish,
+                allow_from: vec![],
+                egress_proxy: true,
+            },
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                target: name.to_string(),
+                runtime: "oci".to_string(),
+                driver: None,
+                runtime_version: None,
+                image: Some(format!("{}:latest", name)),
+                entrypoint: String::new(),
+                run_command: None,
+                cmd: vec![],
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port,
+                required_env: vec![],
+                mounts: vec![],
+            }),
+        }
+    }
+
+    /// Dify-shaped plan: `main` (published, port 3000) and `worker`
+    /// (unpublished, port 5001) are both leaves (neither is depended on).
+    /// Should pick `main`, not `worker` (alphabetically last).
+    #[test]
+    fn pick_leaf_prefers_published_over_alphabetically_last_for_dify_shape() {
+        use capsule_core::foundation::types::OrchestrationPlan;
+
+        let db = make_leaf_service("db", false, Some(5432), vec![]);
+        let redis = make_leaf_service("redis", false, Some(6379), vec![]);
+        let weaviate = make_leaf_service("weaviate", false, Some(8080), vec![]);
+        let api = make_leaf_service(
+            "api",
+            false,
+            Some(5001),
+            vec![
+                "db".to_string(),
+                "redis".to_string(),
+                "weaviate".to_string(),
+            ],
+        );
+        let worker = make_leaf_service(
+            "worker",
+            false,
+            Some(5001),
+            vec!["db".to_string(), "redis".to_string()],
+        );
+        // main: published (auto-set by resolve_services for `main` with a port)
+        let main = make_leaf_service("main", true, Some(3000), vec!["api".to_string()]);
+
+        let plan = OrchestrationPlan {
+            startup_order: vec![
+                "db".to_string(),
+                "redis".to_string(),
+                "weaviate".to_string(),
+                "api".to_string(),
+                "worker".to_string(),
+                "main".to_string(),
+            ],
+            services: vec![db, redis, weaviate, api, worker, main],
+        };
+
+        let leaf = pick_orchestration_leaf_service(&plan).expect("leaf service");
+        assert_eq!(
+            leaf.name, "main",
+            "published leaf `main` (port 3000) should be preferred over unpublished `worker` (port 5001)"
+        );
+    }
+
+    /// node/web runtime still wins over `network.publish`.
+    #[test]
+    fn pick_leaf_node_driver_beats_published_oci() {
+        use capsule_core::foundation::types::{
+            OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
+            ResolvedTargetRuntime,
+        };
+
+        let api = make_leaf_service("api", false, Some(5001), vec![]);
+        // published OCI leaf
+        let main_oci = make_leaf_service("main", true, Some(3000), vec![]);
+        // node-driver leaf (unpublished)
+        let frontend = ResolvedService {
+            name: "frontend".to_string(),
+            depends_on: vec![],
+            connections: vec![],
+            readiness_probe: None,
+            network: ResolvedServiceNetwork {
+                aliases: vec!["frontend".to_string()],
+                publish: false,
+                allow_from: vec![],
+                egress_proxy: true,
+            },
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Managed(ResolvedTargetRuntime {
+                target: "frontend".to_string(),
+                runtime: "web".to_string(),
+                driver: Some("node".to_string()),
+                runtime_version: None,
+                image: None,
+                entrypoint: "src/index.js".to_string(),
+                run_command: None,
+                cmd: vec![],
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port: Some(8080),
+                required_env: vec![],
+                mounts: vec![],
+            }),
+        };
+
+        let plan = OrchestrationPlan {
+            startup_order: vec![
+                "api".to_string(),
+                "main".to_string(),
+                "frontend".to_string(),
+            ],
+            services: vec![api, main_oci, frontend],
+        };
+
+        let leaf = pick_orchestration_leaf_service(&plan).expect("leaf service");
+        assert_eq!(
+            leaf.name, "frontend",
+            "node-driver leaf should be preferred over published OCI leaf"
+        );
+    }
+
+    /// Single leaf — trivial case is unchanged.
+    #[test]
+    fn pick_leaf_single_leaf_is_returned_directly() {
+        use capsule_core::foundation::types::OrchestrationPlan;
+
+        let db = make_leaf_service("db", false, Some(5432), vec![]);
+        let main = make_leaf_service("main", true, Some(3000), vec!["db".to_string()]);
+
+        let plan = OrchestrationPlan {
+            startup_order: vec!["db".to_string(), "main".to_string()],
+            services: vec![db, main],
+        };
+
+        let leaf = pick_orchestration_leaf_service(&plan).expect("leaf service");
+        assert_eq!(leaf.name, "main");
     }
 }

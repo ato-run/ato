@@ -1,6 +1,7 @@
 mod canonicalize;
 mod closure;
 mod hash;
+pub mod oci;
 mod schema;
 mod validate;
 
@@ -26,6 +27,12 @@ pub use closure::{
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
     compute_lock_id, recompute_lock_id,
+};
+pub use oci::{
+    construct_resolved_ref_from_sidecar, oci_images_from_main_lock, oci_imports_from_main_lock,
+    parse_platform_str as parse_oci_platform_str, read_oci_lock, upsert_oci_lock_facts,
+    write_oci_facts_to_main_lock, OciImageLockEntry, OciImportEntry, OciLockReadResult,
+    OciLockReadWarning, OciLockSource, OciMainLockError,
 };
 pub use schema::{
     delivery_environment, parse_delivery_environment_value, AtoLock, AttestationsSection,

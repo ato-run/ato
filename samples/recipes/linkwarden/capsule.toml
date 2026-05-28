@@ -1,0 +1,73 @@
+schema_version = "0.3"
+name = "linkwarden"
+version = "2.14.1"
+type = "app"
+description = "Collaborative bookmark and archive manager with full-page archiving and link rot detection"
+homepage = "https://github.com/linkwarden/linkwarden"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "linkwarden", POSTGRES_USER = "linkwarden", POSTGRES_PASSWORD = "linkwarden_secret" }
+
+[targets.search]
+runtime = "oci"
+image = "getmeili/meilisearch:v1.44.0"
+port = 7700
+env = { MEILI_NO_ANALYTICS = "true" }
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/linkwarden/linkwarden:v2.14.1"
+port = 3000
+env = { DATABASE_URL = "postgresql://linkwarden:linkwarden_secret@db:5432/linkwarden", NEXTAUTH_URL = "http://localhost:3000", NEXTAUTH_SECRET = "changeme_replace_with_generated", NEXT_PUBLIC_DISABLE_REGISTRATION = "false", MEILI_HOST = "http://search:7700" }
+
+[state.pgdata]
+kind = "filesystem"
+durability = "persistent"
+purpose = "PostgreSQL data directory"
+attach = "explicit"
+schema_id = "sha256:8b3e5f1a9c2d4b7e0f6a8c3d5e7b9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1b3"
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "linkwarden archived pages and uploads"
+attach = "explicit"
+schema_id = "sha256:2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c8e0b2d4"
+
+[state.meili]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Meilisearch index data"
+attach = "explicit"
+schema_id = "sha256:9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a7c9e1"
+
+[services.db]
+target = "db"
+readiness_probe = { http_get = "/", port = "5432" }
+
+[[services.db.state_bindings]]
+state = "pgdata"
+target = "/var/lib/postgresql/data"
+
+[services.search]
+target = "search"
+depends_on = ["db"]
+readiness_probe = { http_get = "/health", port = "7700" }
+
+[[services.search.state_bindings]]
+state = "meili"
+target = "/meili_data"
+
+[services.main]
+target = "app"
+depends_on = ["db", "search"]
+readiness_probe = { http_get = "/", port = "3000" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/data/data"

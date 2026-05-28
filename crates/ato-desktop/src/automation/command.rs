@@ -143,6 +143,12 @@ pub enum AutomationCommand {
     /// at dispatch time, mirroring the keybind. `pane_id` on the
     /// JSON-RPC params is ignored.
     StopActiveSession,
+    /// Stop and restart the active Focus-mode capsule session with the same
+    /// route and launch configs. The root Focus View window remains open.
+    ///
+    /// Restricted to restartable routes (`CapsuleHandle` / `CapsuleUrl`).
+    /// Returns `{ok, restarted, had_active_session, session_id, handle}`.
+    RestartActiveSession,
     /// Dispatch a host-level GPUI action by name (e.g.
     /// "OpenAppWindowExperiment"). The dispatcher just enqueues the
     /// name onto `AppState::pending_host_actions`; `DesktopShell::render`

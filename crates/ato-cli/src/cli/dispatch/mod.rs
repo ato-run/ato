@@ -1,4 +1,5 @@
 mod app;
+mod app_update;
 mod attest;
 mod binding;
 mod cache;
@@ -6,12 +7,14 @@ mod config;
 mod engine;
 mod explain_hash;
 mod fetch;
+mod gc;
 mod import_cmd;
 mod inspect;
 mod install;
 mod internal;
 mod ipc;
 mod key;
+mod launch;
 mod package;
 mod profile;
 mod project;
@@ -19,6 +22,8 @@ pub(crate) mod publish;
 mod reconstruct;
 pub(crate) mod registry;
 mod replay;
+mod revisions;
+mod rollback;
 mod run;
 mod scaffold;
 mod secrets;
@@ -100,6 +105,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             rebuild,
             no_build,
             plan_only,
+            oci_compose,
+            oci_install_sh,
             read,
             write,
             read_write,
@@ -146,6 +153,8 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             cache_strategy: cache,
             deprecation_warning: None,
             plan_only,
+            oci_compose,
+            oci_install_sh,
             reporter: Arc::new(reporters::CliReporter::new_run(json)),
         }),
 
@@ -314,7 +323,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
             Ok(())
         }
 
-        Commands::Update => {
+        Commands::SelfUpdate => {
             commands::update::update()?;
             Ok(())
         }
@@ -423,6 +432,61 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 auto_fix_src,
                 auto_fix_all,
             ),
+        }),
+
+        Commands::Launch {
+            install_profile_key,
+            yes,
+            verbose,
+            json: command_json,
+            nacelle,
+        } => launch::execute_launch_command(
+            launch::LaunchArgs {
+                install_profile_key,
+                yes,
+                verbose,
+                json: json || command_json,
+                nacelle,
+            },
+            reporter,
+        ),
+
+        Commands::Revisions {
+            install_profile_key,
+            json: command_json,
+        } => revisions::execute_revisions_command(revisions::RevisionsArgs {
+            install_profile_key,
+            json: json || command_json,
+        }),
+
+        Commands::Rollback {
+            install_profile_key,
+            revision_id,
+        } => rollback::execute_rollback_command(rollback::RollbackArgs {
+            install_profile_key,
+            revision_id,
+        }),
+
+        Commands::AppUpdate {
+            install_profile_key,
+            yes,
+            json: command_json,
+        } => app_update::execute_app_update_command(app_update::AppUpdateArgs {
+            install_profile_key,
+            yes,
+            json: json || command_json,
+        }),
+
+        Commands::Gc {
+            dry_run,
+            keep_last,
+            retention_days,
+            json: command_json,
+        } => gc::execute_gc_command(gc::GcArgs {
+            dry_run,
+            keep_last,
+            retention_days,
+            json: json || command_json,
         }),
 
         Commands::Search {
@@ -547,13 +611,14 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         ),
 
         Commands::Stop {
+            target,
             id,
             name,
             all,
             force,
         } => commands::close::execute(
             commands::close::CloseArgs {
-                id,
+                id: id.or(target),
                 name,
                 all,
                 force,

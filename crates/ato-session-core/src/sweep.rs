@@ -9,7 +9,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::debug;
 
-use crate::process::{current_user_owns_process, pid_is_alive, process_start_time_unix_ms};
+use crate::process::{
+    current_user_owns_process, oci_container_is_running, pid_is_alive, process_start_time_unix_ms,
+};
 use crate::record::StoredSessionInfo;
 use crate::store::session_root;
 
@@ -397,6 +399,13 @@ fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
     }
     if let Some(snapshot) = record.orchestration_services.as_ref() {
         for service in &snapshot.services {
+            // OCI services: addressed by container_id, not local_pid.
+            if let Some(container_id) = service.container_id.as_deref() {
+                if oci_container_is_running(container_id) {
+                    return true;
+                }
+            }
+            // Managed (non-OCI) services: addressed by local_pid.
             if let Some(pid) = service.local_pid.and_then(i32_to_pid) {
                 if pid_is_alive(pid) && current_user_owns_process(pid) {
                     return true;
@@ -408,6 +417,17 @@ fn session_record_is_alive(record: &StoredSessionInfo) -> bool {
         for provider in &snapshot.providers {
             if let Some(pid) = i32_to_pid(provider.pid) {
                 if pid_is_alive(pid) && current_user_owns_process(pid) {
+                    return true;
+                }
+            }
+        }
+    }
+    // ExecutionGraph nodes may carry container_ids for OCI services even
+    // when orchestration_services is absent (older record format).
+    if let Some(graph) = record.graph.as_ref() {
+        for node in &graph.nodes {
+            if let Some(container_id) = node.container_id.as_deref() {
+                if oci_container_is_running(container_id) {
                     return true;
                 }
             }
@@ -791,6 +811,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
             orchestration_services: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-dead.json");
@@ -872,10 +897,16 @@ mod tests {
                     host_ports: std::collections::BTreeMap::new(),
                     published_port: Some(5173),
                 }],
+                network_name: None,
             }),
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-orch.json");
         fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");
@@ -956,6 +987,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
         let record_path = options.session_root.join("ato-desktop-session-dep.json");
         fs::write(&record_path, serde_json::to_vec(&record).expect("record")).expect("write");

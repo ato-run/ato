@@ -1,3 +1,9 @@
+//! LEGACY: Docker-compatible/Bollard OCI execution path.
+//!
+//! New OCI execution must use `oci_single_target` with `PodmanProvider`.
+//! This module is retained for backward compatibility and migration only.
+//! Do not route new OCI capsule execution here.
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
@@ -97,6 +103,8 @@ pub async fn execute_with_client<C: OciRuntimeClient>(
             ports,
             network: None,
             aliases: Vec::new(),
+            platform: None,
+            extra_hosts: vec![],
         })
         .await?;
     client.start_container(&container_id).await?;

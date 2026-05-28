@@ -413,6 +413,26 @@ mod tests {
     }
 
     #[test]
+    fn tools_list_includes_restart_active_session_with_no_required_args() {
+        let tools: serde_json::Value =
+            serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
+        let arr = tools.as_array().expect("array");
+        let entry = arr
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("restart_active_session"))
+            .expect("restart_active_session registered");
+        let required = entry
+            .get("inputSchema")
+            .and_then(|s| s.get("required"))
+            .and_then(|r| r.as_array())
+            .expect("required[]");
+        assert!(
+            required.is_empty(),
+            "restart_active_session must take no required args, got: {required:?}"
+        );
+    }
+
+    #[test]
     fn tools_list_includes_host_take_screenshot_with_optional_region() {
         let tools: serde_json::Value =
             serde_json::from_str(super::TOOLS).expect("TOOLS is valid JSON");
@@ -479,6 +499,24 @@ mod tests {
     }
 
     #[test]
+    fn map_tool_restart_active_session_emits_method_with_default_pane_id() {
+        let args = serde_json::json!({});
+        let (method, params) =
+            super::map_tool_to_command("restart_active_session", &args).expect("map");
+        assert_eq!(method, "restart_active_session");
+        assert_eq!(params.get("pane_id").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn map_tool_restart_active_session_does_not_require_handle() {
+        let result = super::map_tool_to_command("restart_active_session", &serde_json::json!({}));
+        assert!(
+            result.is_ok(),
+            "restart_active_session must accept empty args, got: {result:?}"
+        );
+    }
+
+    #[test]
     fn discover_socket_trusts_pidless_current_json() {
         // Backward-compat: discovery files written by older instances may
         // omit `pid`. We can't prove liveness then, so trust the file and
@@ -510,7 +548,10 @@ mod tests {
             .expect("auth_status registered");
         let schema = entry.get("inputSchema").expect("inputSchema");
         let props = schema.get("properties").expect("properties");
-        assert!(props.get("token").is_none(), "auth_status must not expose token field");
+        assert!(
+            props.get("token").is_none(),
+            "auth_status must not expose token field"
+        );
     }
 
     #[test]
@@ -535,7 +576,10 @@ mod tests {
         let (method, params) =
             super::map_tool_to_command("auth_status", &serde_json::json!({})).expect("map");
         assert_eq!(method, "auth_status");
-        assert!(params.as_object().is_some(), "params must be object (pane_id injected)");
+        assert!(
+            params.as_object().is_some(),
+            "params must be object (pane_id injected)"
+        );
     }
 }
 
@@ -1149,6 +1193,7 @@ fn map_tool_to_command(
         // but `transport::parse_command` discards it.
         "auth_status" => ("auth_status", serde_json::json!({})),
         "stop_active_session" => ("stop_active_session", serde_json::json!({})),
+        "restart_active_session" => ("restart_active_session", serde_json::json!({})),
         "host_dispatch_action" => {
             let action = s("action")?;
             let url = args["url"].as_str().map(|s| s.to_string());
@@ -1193,7 +1238,10 @@ fn map_tool_to_command(
                 return Err("NavigateToUrl requires a `url` parameter".into());
             }
             if action == "GithubRunFindCandidates" && url.is_none() {
-                return Err("GithubRunFindCandidates requires a `url` parameter (owner/repo or GitHub URL)".into());
+                return Err(
+                    "GithubRunFindCandidates requires a `url` parameter (owner/repo or GitHub URL)"
+                        .into(),
+                );
             }
             if action == "GithubRunProceedToConsent" && url.is_none() {
                 return Err("GithubRunProceedToConsent requires a `url` parameter (owner/repo or GitHub URL)".into());
@@ -1321,6 +1369,7 @@ static TOOLS: &str = r#"[
   {"name":"set_capsule_secrets","description":"Persist one or more secrets for a capsule handle, grant them to that handle, and (default) dismiss any open `missing_required_env` (E103) modal so the launch re-arms with the freshly stored secrets. Mirrors the modal Save handler — disk-write failures (e.g. ~/.ato/secrets.json mode/parent-dir errors) are returned as MCP errors instead of being silently swallowed.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_config / launch state (e.g. 'github.com/Koh0920/WasedaP2P')."},"secrets":{"type":"object","description":"Map of env-var-name → secret value (strings only).","additionalProperties":{"type":"string"}},"clear_pending_config":{"type":"boolean","description":"If true (default), clears AppState.pending_config when its handle matches, re-arming the launch."}},"required":["handle","secrets"]}},
   {"name":"approve_execution_plan_consent","description":"Approve the open ExecutionPlan consent modal for `handle`. Goes through the same handler as the UI's Approve button — `apply_capsule_consent` invokes `ato internal consent approve-execution-plan` (CLI owns the JSONL append; desktop never writes the consent file directly), records the per-handle retry-once budget, and clears `pending_consent` so `ensure_pending_local_launch` re-arms the launch on the next render. Errors surface as MCP errors when no matching pending_consent exists or the CLI write fails — the modal is left open so the caller can retry.","inputSchema":{"type":"object","properties":{"handle":{"type":"string","description":"Capsule handle as it appears in pending_consent (the same handle the user typed in the omnibar / ato-desktop opened, e.g. 'capsule://github.com/Koh0920/WasedaP2P')."}},"required":["handle"]}},
   {"name":"stop_active_session","description":"Stop the active pane's underlying capsule session, mirroring the `Cmd+Shift+W` keybind and the omnibar 'stop session' suggestion. Routes through `WebViewManager::stop_active_session` — the same method `DesktopShell::on_stop_active_session` dispatches — so providers (postgres, etc.) and consumers (uvicorn / vite / ...) shut down via `ato app session stop` exactly as a UI-initiated stop would. Returns `{ok:true, stopped, had_active_session, session_id, handle}`; `stopped:false` with `had_active_session:false` means there was nothing to stop (idempotent), `stopped:false` with `had_active_session:true` means the underlying `stop_guest_session` returned a non-success outcome and the caller should inspect ports/processes (refs #92 AC-step 6).","inputSchema":{"type":"object","properties":{},"required":[]}},
+  {"name":"restart_active_session","description":"Stop and restart the active Focus-mode capsule session with the same route and launch configs. Restricted to CapsuleHandle/CapsuleUrl routes. The root Focus View window stays open. Returns `{ok:true, restarted, had_active_session, session_id, handle}`; `restarted:false` with `had_active_session:false` means nothing was running (idempotent). If stop fails, reopen is skipped and an error is returned.","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"auth_status","description":"Returns the current ato-desktop sign-in state for AODD agents. Does NOT expose the session token.","inputSchema":{"type":"object","properties":{},"required":[]}},
   {"name":"host_take_screenshot","description":"Captures the full macOS display as PNG (via `screencapture -t png -x`) and writes it to a hermetic temp file under `${ATO_HOME:-~/.ato}/aodd/`. Returns `{ok:true, path:'<abs>'}`. This is the AODD-visual-inspection primitive for ato-desktop's GPUI host surfaces (Control Bar, AppWindow, Launcher, Card Switcher); those surfaces are NOT reachable via the `browser_*` tools because those target WKWebView page content only. macOS only. Requires Screen Recording permission for the terminal running the MCP — the first invocation will trigger a system permission prompt.","inputSchema":{"type":"object","properties":{"region":{"type":"string","description":"Optional region in 'x,y,w,h' format. When omitted captures the whole main display."}},"required":[]}},
   {"name":"host_activate_app","description":"Brings an application to the foreground via osascript + System Events. Required before host_press_key so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success. Requires Accessibility permission for the terminal running the MCP — the first invocation triggers a system prompt.","inputSchema":{"type":"object","properties":{"process_name":{"type":"string","description":"Process name as shown in Activity Monitor (default: 'ato-desktop')."}},"required":[]}},

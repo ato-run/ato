@@ -7,16 +7,21 @@
 //! background task and pushing the transient "running" snapshot to
 //! the UI.
 
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{AnyWindowHandle, App};
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use gpui::{AnyWindowHandle, App, BackgroundExecutor};
 use serde::Deserialize;
 
-use crate::source_import_api::{discover as discover_api_creds, ApiClient, ApiCreds, AttemptStatus};
-use crate::source_import_runner::{infer as runner_infer, run_with_recipe as runner_run};
+use crate::source_import_api::{
+    discover as discover_api_creds, ApiClient, ApiCreds, AttemptStatus,
+};
+use crate::source_import_runner::{
+    infer as runner_infer, run_with_recipe as runner_run,
+    stop_import_preview_session as runner_stop_import_preview,
+};
 use crate::source_import_session::{GitHubImportSessionState, ImportOutput};
 use crate::system_capsule::broker::{BrokerError, Capability};
 use crate::window::import_window::{push_current_snapshot, session_arc, ImportApiCreds};
@@ -73,6 +78,7 @@ pub fn dispatch(
         ImportCommand::RetryInference => handle_retry_inference(cx),
         ImportCommand::ConfirmUnsafeExecution => handle_confirm_unsafe(cx),
         ImportCommand::Close => {
+            stop_active_import_preview(cx, "window_close");
             let _ = host.update(cx, |_, window, _| window.remove_window());
         }
     }
@@ -95,6 +101,7 @@ fn store_creds(cx: &mut App, creds: Option<ApiCreds>) {
 /// ato-dock modal, ato-start search) can kick off an import after
 /// opening the window, without going through the IPC envelope.
 pub fn begin_open(cx: &mut App, url: String) {
+    stop_active_import_preview(cx, "new_import");
     let session_arc = session_arc(cx);
     // begin_resolve fully resets the session; signed_in and
     // source_import_id come back to false / None. Clear any cached
@@ -138,9 +145,7 @@ pub fn begin_open(cx: &mut App, url: String) {
             (Ok(output), Some(creds)) => {
                 let creds = creds.clone();
                 let source = output.source.clone();
-                Some(be.spawn(async move {
-                    ApiClient::new(creds).create_source_import(&source)
-                }))
+                Some(be.spawn(async move { ApiClient::new(creds).create_source_import(&source) }))
             }
             _ => None,
         };
@@ -162,7 +167,10 @@ pub fn begin_open(cx: &mut App, url: String) {
                             match result {
                                 Ok(id) => session.set_source_import_id(id),
                                 Err(error) => {
-                                    tracing::warn!(?error, "ato-import: create_source_import failed");
+                                    tracing::warn!(
+                                        ?error,
+                                        "ato-import: create_source_import failed"
+                                    );
                                 }
                             }
                         }
@@ -214,6 +222,7 @@ fn handle_edit(cx: &mut App, toml: String) {
 }
 
 fn handle_retry_inference(cx: &mut App) {
+    stop_active_import_preview(cx, "retry_inference");
     let session_arc = session_arc(cx);
     let repo_url = {
         let mut session = match session_arc.lock() {
@@ -240,9 +249,8 @@ fn handle_retry_inference(cx: &mut App) {
     let aa = async_app.clone();
     let session_for_bg = session_arc.clone();
     fe.spawn(async move {
-        let outcome: Result<ImportOutput, anyhow::Error> = be
-            .spawn(async move { runner_infer(&repo_url) })
-            .await;
+        let outcome: Result<ImportOutput, anyhow::Error> =
+            be.spawn(async move { runner_infer(&repo_url) }).await;
         let _ = aa.update(move |cx| {
             match outcome {
                 Ok(output) => {
@@ -285,7 +293,10 @@ pub(crate) fn handle_run(cx: &mut App) {
                 return;
             }
         };
-        let toml = session.editable_recipe_toml().unwrap_or_default().to_string();
+        let toml = session
+            .editable_recipe_toml()
+            .unwrap_or_default()
+            .to_string();
         let allow_unsafe = session.unsafe_execution_confirmed();
         (repo, toml, allow_unsafe)
     };
@@ -311,7 +322,11 @@ pub(crate) fn handle_run(cx: &mut App) {
         // foreground executor. The session may have advanced since
         // we started; we only post when it lands cleanly in
         // Verified / FailedAwaitingRecipeEdit.
-        let attempt_input: Option<(String, AttemptStatus, crate::source_import_session::ImportRun)> = {
+        let attempt_input: Option<(
+            String,
+            AttemptStatus,
+            crate::source_import_session::ImportRun,
+        )> = {
             let session_id = session_for_bg
                 .lock()
                 .ok()
@@ -320,6 +335,9 @@ pub(crate) fn handle_run(cx: &mut App) {
                 (Ok(output), Some(_), Some(id)) => {
                     let status = match output.run.status.as_str() {
                         "passed" => AttemptStatus::Verified,
+                        "running" if output.run.readiness_state.as_deref() == Some("ready") => {
+                            AttemptStatus::Verified
+                        }
                         "failed" => AttemptStatus::Failed,
                         _ => AttemptStatus::Running,
                     };
@@ -328,15 +346,16 @@ pub(crate) fn handle_run(cx: &mut App) {
                 _ => None,
             }
         };
-        let attempt_task = match (attempt_input, creds.as_ref()) {
-            (Some((id, status, run)), Some(creds)) => {
-                let creds = creds.clone();
-                Some(be.spawn(async move {
-                    ApiClient::new(creds).record_attempt(&id, status, &run)
-                }))
-            }
-            _ => None,
-        };
+        let attempt_task =
+            match (attempt_input, creds.as_ref()) {
+                (Some((id, status, run)), Some(creds)) => {
+                    let creds = creds.clone();
+                    Some(be.spawn(async move {
+                        ApiClient::new(creds).record_attempt(&id, status, &run)
+                    }))
+                }
+                _ => None,
+            };
         if let Some(task) = attempt_task {
             if let Err(error) = task.await {
                 tracing::warn!(?error, "ato-import: record_attempt failed");
@@ -377,6 +396,17 @@ pub(crate) fn handle_run(cx: &mut App) {
                                 command_mode: None,
                                 requires_host_shell: None,
                                 shell_kind: None,
+                                cleanup_status: None,
+                                cleanup_error: None,
+                                log_path: None,
+                                run_session_id: None,
+                                pid: None,
+                                process_group_ids: Vec::new(),
+                                primary_port: None,
+                                primary_url: None,
+                                shadow_dir: None,
+                                readiness_state: None,
+                                cleanup_policy: None,
                             },
                             recipe_resolution: None,
                         };
@@ -449,10 +479,21 @@ fn handle_submit_intent(cx: &mut App) {
         let _ = aa.update(move |cx| {
             match result {
                 Ok(()) => {
+                    let run_session_id = session_for_bg
+                        .lock()
+                        .ok()
+                        .and_then(|session| session.active_run_session_id().map(str::to_string));
                     if let Ok(mut session) = session_for_bg.lock() {
                         if let Err(error) = session.mark_submitted() {
                             tracing::warn!(?error, "ato-import: mark_submitted rejected");
                         }
+                    }
+                    if let Some(run_session_id) = run_session_id {
+                        stop_import_preview_in_background(
+                            be.clone(),
+                            run_session_id,
+                            "submit_complete",
+                        );
                     }
                 }
                 Err(error) => {
@@ -467,13 +508,72 @@ fn handle_submit_intent(cx: &mut App) {
     .detach();
 }
 
+pub(crate) fn stop_active_import_preview(cx: &mut App, reason: &'static str) {
+    let run_session_id = active_import_preview_session_id(cx);
+    let Some(run_session_id) = run_session_id else {
+        return;
+    };
+    let be = cx.to_async().background_executor().clone();
+    stop_import_preview_in_background(be, run_session_id, reason);
+}
+
+pub(crate) fn stop_active_import_preview_blocking(cx: &mut App, reason: &'static str) {
+    let Some(run_session_id) = active_import_preview_session_id(cx) else {
+        return;
+    };
+    match runner_stop_import_preview(&run_session_id) {
+        Ok(()) => {
+            tracing::info!(%run_session_id, reason, "ato-import: stopped preview session");
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                %run_session_id,
+                reason,
+                "ato-import: failed to stop preview session"
+            );
+        }
+    }
+}
+
+fn active_import_preview_session_id(cx: &mut App) -> Option<String> {
+    let session_arc = session_arc(cx);
+    session_arc
+        .lock()
+        .ok()
+        .and_then(|session| session.active_run_session_id().map(str::to_string))
+}
+
+fn stop_import_preview_in_background(
+    be: BackgroundExecutor,
+    run_session_id: String,
+    reason: &'static str,
+) {
+    be.spawn(async move {
+        match runner_stop_import_preview(&run_session_id) {
+            Ok(()) => {
+                tracing::info!(%run_session_id, reason, "ato-import: stopped preview session");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    %run_session_id,
+                    reason,
+                    "ato-import: failed to stop preview session"
+                );
+            }
+        }
+    })
+    .detach();
+}
+
 fn write_temp_recipe(toml: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let pid = std::process::id();
-    let dir = env::temp_dir().join(format!("ato-import-{pid}-{ts}"));
+    let dir = ato_path_or_workspace_tmp(format!("tmp/desktop/import-recipes/ato-import-{pid}-{ts}"));
     fs::create_dir_all(&dir)?;
     let path = dir.join("recipe.toml");
     fs::write(&path, toml)?;

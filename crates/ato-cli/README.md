@@ -346,6 +346,25 @@ run     = "python main.py"
 image = "ghcr.io/owner/repo:latest"
 ```
 
+Target-level `install` declares the dependency install lifecycle for the
+target's dependency root. When at least one target sharing a dependency root
+declares `install`, ato runs the explicit command once for that root and skips
+the inferred package-manager provision command (`npm install`, `pnpm install`,
+`yarn install`, `bun install`, etc.). Identical install commands on the same
+root are deduped; conflicting commands on the same root are rejected.
+
+For Bun monorepos that need to avoid root lifecycle scripts during dependency
+installation, declare that explicitly:
+
+```toml
+[targets.app]
+runtime = "source"
+driver = "node"
+install = "bun install --ignore-scripts"
+build = "bunx prisma generate && bun run build:web && bun run build:seed"
+run = "bun run prisma:migrate:deploy && bun run seed && bun run start:server:production"
+```
+
 ### `[services]` — supervisor mode (multi-process)
 
 Run multiple processes as a single capsule, with dependency ordering.
