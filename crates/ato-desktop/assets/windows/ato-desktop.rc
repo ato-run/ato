@@ -1,4 +1,5 @@
 // Windows resource file for ato-desktop.
 // Embeds AppIcon.ico into the executable so Explorer, the taskbar,
 // and the Start Menu shortcut all display the Ato icon.
-1 ICON "../AppIcon.ico"
+// Path is relative to the crate root (build.rs cwd), not this file.
+1 ICON "assets/AppIcon.ico"
