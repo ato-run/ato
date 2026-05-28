@@ -169,10 +169,14 @@ use stage::*;
 /// `--plan-only` is sufficient to detect a regression that flips that
 /// invariant.
 fn invoke_plan_only_run(stage: &RunStage) -> std::process::Output {
+    // `--json` is a top-level `ato` flag (sets the reporter), not a `run`
+    // subcommand option. Placing it after `run` would fail clap parsing —
+    // exactly the kind of vacuous-pass failure that `assert_plan_only_run_succeeds`
+    // is here to catch.
     ato_cmd()
+        .arg("--json")
         .arg("run")
         .arg("--plan-only")
-        .arg("--json")
         .arg(&stage.capsule_path)
         .env("HOME", stage.home.path())
         .env("ATO_HOME", stage.ato_home.path())
@@ -183,10 +187,54 @@ fn invoke_plan_only_run(stage: &RunStage) -> std::process::Output {
         .expect("failed to invoke ato run --plan-only")
 }
 
+/// Invoke `ato run --plan-only --json` and assert it actually reached the
+/// run dispatch: exit 0 plus a parseable JSON object on stdout. Without this
+/// check the install-state assertions are vacuous — a binary that exits early
+/// (missing fixture, arg-parse change, `--plan-only` removed) writes no install
+/// state for trivial reasons unrelated to the invariant we want to pin.
+///
+/// We deliberately do not assert the JSON envelope's schema beyond "is an
+/// object" so this guardrail does not couple to the `--plan-only` payload
+/// shape; that belongs to a dedicated CLI test.
+fn assert_plan_only_run_succeeds(stage: &RunStage) -> std::process::Output {
+    let output = invoke_plan_only_run(stage);
+
+    assert!(
+        output.status.success(),
+        "ato run --plan-only --json must reach the run dispatch and exit 0\n\
+         status: {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // The reporter writes the plan envelope plus may write follow-up notify
+    // lines (e.g. "Share it next: ato encap"), so stdout is JSONL. We only
+    // need to confirm at least one line is a JSON object — i.e. the run
+    // dispatch reached its emit site instead of bailing out early.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let saw_json_object = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .map(|value| value.is_object())
+                .unwrap_or(false)
+        });
+    assert!(
+        saw_json_object,
+        "ato run --plan-only --json must emit at least one JSON object line on stdout\n\
+         stdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    output
+}
+
 #[test]
 fn run_does_not_create_installed_app_registry_entry() {
     let stage = stage_minimal_capsule();
-    let _ = invoke_plan_only_run(&stage);
+    let _output = assert_plan_only_run_succeeds(&stage);
 
     assert!(
         !has_installed_app_registry_entry(stage.ato_home.path()),
@@ -200,7 +248,7 @@ fn run_does_not_create_installed_app_registry_entry() {
 #[test]
 fn run_does_not_create_install_profile() {
     let stage = stage_minimal_capsule();
-    let _ = invoke_plan_only_run(&stage);
+    let _output = assert_plan_only_run_succeeds(&stage);
 
     assert!(
         !has_install_profile(stage.ato_home.path()),
@@ -214,7 +262,7 @@ fn run_does_not_create_install_profile() {
 #[test]
 fn run_does_not_create_install_revision() {
     let stage = stage_minimal_capsule();
-    let _ = invoke_plan_only_run(&stage);
+    let _output = assert_plan_only_run_succeeds(&stage);
 
     assert!(
         !has_install_revision(stage.ato_home.path()),
