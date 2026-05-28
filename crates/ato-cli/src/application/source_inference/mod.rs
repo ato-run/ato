@@ -4817,6 +4817,7 @@ mod tests {
         assert!(dir.path().join("uv.lock").exists());
     }
 
+    #[serial_test::serial]
     #[test]
     fn javascript_single_script_virtual_workspace_generates_deno_lock() {
         if std::process::Command::new("deno")
@@ -4876,6 +4877,7 @@ mod tests {
         assert!(materialized.project_root.join("deno.lock").exists());
     }
 
+    #[serial_test::serial]
     #[test]
     fn single_script_run_materialization_reuses_cached_workspace_root() {
         if std::process::Command::new("deno")
@@ -4921,6 +4923,7 @@ mod tests {
         assert!(!first.lock_path.starts_with(&first.project_root));
     }
 
+    #[serial_test::serial]
     #[test]
     fn typescript_single_script_bare_imports_become_deno_imports() {
         if std::process::Command::new("deno")
@@ -4973,6 +4976,7 @@ mod tests {
         assert!(materialized.project_root.join("deno.lock").exists());
     }
 
+    #[serial_test::serial]
     #[test]
     fn jsx_single_script_virtual_workspace_writes_jsx_compiler_options() {
         if std::process::Command::new("deno")
@@ -6296,6 +6300,7 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn single_script_workspace_adapter_is_materialization_scoped() {
         if std::process::Command::new("deno")
@@ -6343,6 +6348,7 @@ print('ok')
         assert_eq!(metadata.dependencies, vec!["httpx>=0.27", "rich"]);
     }
 
+    #[serial_test::serial]
     #[test]
     fn typescript_single_script_virtual_workspace_generates_deno_lock() {
         if std::process::Command::new("deno")
@@ -6394,6 +6400,7 @@ print('ok')
         assert!(materialized.project_root.join("deno.lock").exists());
     }
 
+    #[serial_test::serial]
     #[test]
     fn tsx_single_script_virtual_workspace_writes_jsx_compiler_options() {
         if std::process::Command::new("deno")
@@ -6722,6 +6729,7 @@ target = "worker"
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn workspace_root_pnpm_yaml_error_includes_subpackages() {
         let dir = tempdir().expect("tempdir");
@@ -6760,6 +6768,7 @@ target = "worker"
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn workspace_root_package_json_workspaces_error_includes_subpackages() {
         let dir = tempdir().expect("tempdir");
@@ -6793,6 +6802,7 @@ target = "worker"
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn static_html_source_only_materializes_as_web_static_target() {
         let dir = tempdir().expect("tempdir");
@@ -6836,6 +6846,7 @@ target = "worker"
         assert!(port.is_some(), "static site must have a port assigned");
     }
 
+    #[serial_test::serial]
     #[test]
     fn go_source_only_materializes_with_go_hint_diagnostic() {
         let dir = tempdir().expect("tempdir");

@@ -2050,6 +2050,7 @@ mod tests {
         assert!(normalized_path.exists());
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_uses_selected_target() {
         let dir = tempdir().unwrap();
@@ -2086,6 +2087,7 @@ mod tests {
         assert!(normalized.contains("version = \"3.12\""));
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_anchors_single_script_entrypoint_for_cwd_override() {
         let dir = tempdir().unwrap();
@@ -2112,6 +2114,7 @@ mod tests {
         assert!(normalized.contains(&format!("command = \"run python3 {expected_entrypoint}\"")));
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_respects_runtime_version_for_anchored_python_targets() {
         let dir = tempdir().unwrap();
@@ -2140,6 +2143,7 @@ mod tests {
         assert!(normalized.contains("UV_PYTHON = \"3.11.10\""));
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_omits_python_selector_without_runtime_version() {
         let dir = tempdir().unwrap();
@@ -2165,6 +2169,7 @@ mod tests {
         assert!(!normalized.contains("UV_PYTHON"));
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_preserves_python_module_invocation() {
         let dir = tempdir().unwrap();
@@ -2204,6 +2209,7 @@ mod tests {
     /// aren't dropped, and (b) include each provider endpoint that the
     /// orchestrator allocated, so the resulting Seatbelt profile permits
     /// the loopback connection rather than emitting a deny.
+    #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_carries_network_egress_and_dep_endpoints() {
         let dir = tempdir().unwrap();
@@ -2262,6 +2268,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_adapter_includes_ipc_socket_paths() {
         let dir = tempdir().unwrap();
@@ -2305,6 +2312,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_adapter_includes_mounts_and_trailing_args() {
         let dir = tempdir().unwrap();
