@@ -7,6 +7,8 @@ members = [
     "crates/ato-cli/lock-draft-engine",
     "crates/ato-session-core",
     "crates/nacelle",
+    "crates/ato-net",
+    "crates/ato-netd",
 ]
 
 # `ato-desktop` (and its xtask) are kept OUT of the workspace because their

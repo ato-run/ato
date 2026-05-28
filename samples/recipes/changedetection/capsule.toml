@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "changedetection"
+version = "0.49.0"
+type = "app"
+description = "Website change detection, monitoring and notification service"
+homepage = "https://github.com/dgtlmoon/changedetection.io"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/dgtlmoon/changedetection.io:0.49.0"
+port = 5000
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "watched URLs, change history, snapshots"
+attach = "explicit"
+schema_id = "sha256:changedetection-datastore-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "5000" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/datastore"

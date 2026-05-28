@@ -1,9 +1,13 @@
 mod dependency_root;
 mod diagnose;
+pub(crate) mod lifecycle_path;
 mod shadow;
 mod types;
 
 pub(crate) use dependency_root::{dependency_root, relative_dependency_root_from_manifest};
+pub(crate) use lifecycle_path::{
+    build_lifecycle_path_plan, materialize_lifecycle_toolchains, LifecyclePathPlan, LifecyclePhase,
+};
 
 use std::sync::Arc;
 

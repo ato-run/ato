@@ -75,6 +75,123 @@ pub struct RuntimeSettings {
     /// Maximum number of concurrent terminal sessions.
     #[serde(default = "default_terminal_max_sessions")]
     pub terminal_max_sessions: usize,
+    /// Backend engine selection for source / OCI / Wasm capsules.
+    /// Note: Podman is an OCI host dependency; Ato does not bundle it.
+    /// PostgreSQL is NOT a backend engine — it is a per-capsule tool artifact
+    /// fetched on-demand when a recipe/lock explicitly requires it.
+    #[serde(default)]
+    pub backend_engines: BackendEngineSettings,
+}
+
+/// Backend engine selection for the three capsule execution categories.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackendEngineSettings {
+    /// Engine for source-execution capsules (e.g. nacelle).
+    #[serde(default)]
+    pub source: SourceBackendEngine,
+    /// Engine for OCI capsules (e.g. podman).
+    #[serde(default)]
+    pub oci: OciBackendEngine,
+    /// Engine for Wasm capsules (e.g. wasmtime).
+    #[serde(default)]
+    pub wasm: WasmBackendEngine,
+}
+
+impl Default for BackendEngineSettings {
+    fn default() -> Self {
+        Self {
+            source: SourceBackendEngine::default(),
+            oci: OciBackendEngine::default(),
+            wasm: WasmBackendEngine::default(),
+        }
+    }
+}
+
+/// Source execution engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceBackendEngine {
+    /// Nacelle sandboxed runtime (default, recommended).
+    #[default]
+    Nacelle,
+    /// Host process fallback (advanced / unsafe).
+    Host,
+}
+
+impl<'de> Deserialize<'de> for SourceBackendEngine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d).unwrap_or_default();
+        match s.as_str() {
+            "nacelle" => Ok(Self::Nacelle),
+            "host" => Ok(Self::Host),
+            other => {
+                warn!(
+                    value = other,
+                    "Unknown source backend engine in config; using default (nacelle)"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
+}
+
+/// OCI execution engine.
+///
+/// Podman is an OCI backend host dependency. Ato does not bundle or install
+/// Podman automatically.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OciBackendEngine {
+    /// Podman (default, recommended). Must be installed on the host.
+    #[default]
+    Podman,
+    /// Docker-compatible daemon (experimental — not yet wired to runtime).
+    Docker,
+    /// Youki OCI runtime (experimental — not yet wired to runtime).
+    Youki,
+}
+
+impl<'de> Deserialize<'de> for OciBackendEngine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d).unwrap_or_default();
+        match s.as_str() {
+            "podman" => Ok(Self::Podman),
+            "docker" => Ok(Self::Docker),
+            "youki" => Ok(Self::Youki),
+            other => {
+                warn!(
+                    value = other,
+                    "Unknown OCI backend engine in config; using default (podman)"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
+}
+
+/// Wasm execution engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WasmBackendEngine {
+    /// Wasmtime (default, only supported option currently).
+    #[default]
+    Wasmtime,
+}
+
+impl<'de> Deserialize<'de> for WasmBackendEngine {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d).unwrap_or_default();
+        match s.as_str() {
+            "wasmtime" => Ok(Self::Wasmtime),
+            other => {
+                warn!(
+                    value = other,
+                    "Unknown Wasm backend engine in config; using default (wasmtime)"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -551,6 +668,7 @@ impl Default for RuntimeSettings {
             allow_unsafe_env: false,
             terminal_font_size: default_terminal_font_size(),
             terminal_max_sessions: default_terminal_max_sessions(),
+            backend_engines: BackendEngineSettings::default(),
         }
     }
 }
@@ -806,11 +924,7 @@ impl SecretStore {
         }
     }
 
-    pub fn grant_secret(
-        &mut self,
-        capsule_handle: &str,
-        key: &str,
-    ) -> Result<(), BridgeError> {
+    pub fn grant_secret(&mut self, capsule_handle: &str, key: &str) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
         let mut allow = self.current_allow_list(key)?;
         if !allow.contains(&canonical) {
@@ -819,11 +933,7 @@ impl SecretStore {
         crate::secret_bridge::CliSecretBridge::update_acl(key, Some(allow), None)
     }
 
-    pub fn revoke_secret(
-        &mut self,
-        capsule_handle: &str,
-        key: &str,
-    ) -> Result<(), BridgeError> {
+    pub fn revoke_secret(&mut self, capsule_handle: &str, key: &str) -> Result<(), BridgeError> {
         let canonical = Self::canonicalize_handle(capsule_handle).to_string();
         let mut allow = self.current_allow_list(key)?;
         allow.retain(|h| h != &canonical);
@@ -849,10 +959,7 @@ impl SecretStore {
         for e in &entries {
             if let Some(ref allow) = e.allow {
                 for handle in allow {
-                    cache
-                        .entry(handle.clone())
-                        .or_default()
-                        .push(e.key.clone());
+                    cache.entry(handle.clone()).or_default().push(e.key.clone());
                 }
             }
         }
@@ -942,9 +1049,9 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
 
     // Step 1: migrate secrets (key → value entries).
     for entry in &legacy.secrets {
-        if let Err(e) = crate::secret_bridge::CliSecretBridge::set(
-            &entry.key, &entry.value, None, None, None,
-        ) {
+        if let Err(e) =
+            crate::secret_bridge::CliSecretBridge::set(&entry.key, &entry.value, None, None, None)
+        {
             tracing::warn!(key = %entry.key, error = %e, "Migration: failed to set secret, aborting");
             return None;
         }
@@ -967,9 +1074,7 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
     }
     for (key, allow_set) in per_key_allows {
         let allow: Vec<String> = allow_set.into_iter().collect();
-        if let Err(e) =
-            crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None)
-        {
+        if let Err(e) = crate::secret_bridge::CliSecretBridge::update_acl(&key, Some(allow), None) {
             tracing::warn!(key = %key, error = %e, "Migration: failed to update ACL, aborting");
             return None;
         }
@@ -990,7 +1095,6 @@ pub fn migrate_legacy_secrets_if_present() -> Option<usize> {
 
     Some(migrated)
 }
-
 
 // ── Capsule Config Store (non-secret) ─────────────────────────────────────────
 
@@ -1495,6 +1599,122 @@ mod tests {
 
     // ── canonicalize_handle (#56) ────────────────────────────────
 
+    // ── backend engine config (#329) ──────────────────────────────
+
+    #[test]
+    fn backend_engine_defaults_are_nacelle_podman_wasmtime() {
+        let config = DesktopConfig::default();
+        assert_eq!(
+            config.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle
+        );
+        assert_eq!(
+            config.runtime.backend_engines.oci,
+            OciBackendEngine::Podman
+        );
+        assert_eq!(
+            config.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
+    }
+
+    #[test]
+    fn backend_engine_roundtrip_json() {
+        let mut config = DesktopConfig::default();
+        config.runtime.backend_engines.source = SourceBackendEngine::Host;
+        config.runtime.backend_engines.oci = OciBackendEngine::Docker;
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DesktopConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.runtime.backend_engines.source,
+            SourceBackendEngine::Host
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.oci,
+            OciBackendEngine::Docker
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
+    }
+
+    #[test]
+    fn backend_engine_missing_field_defaults() {
+        // Pre-existing configs without backend_engines must load cleanly.
+        let json = r#"{"general": {"theme": "dark"}}"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.oci,
+            OciBackendEngine::Podman
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime
+        );
+    }
+
+    #[test]
+    fn backend_engine_unknown_value_warns_and_defaults() {
+        // Unknown engine values must not cause a parse error; they fall back to
+        // the default and emit a tracing::warn! (lenient-on-load policy).
+        let json = r#"{
+            "runtime": {
+                "backend_engines": {
+                    "source": "unknown-engine",
+                    "oci": "unsupported-runtime",
+                    "wasm": "bad-value"
+                }
+            }
+        }"#;
+        let parsed: DesktopConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.runtime.backend_engines.source,
+            SourceBackendEngine::Nacelle,
+            "unknown source engine must fall back to nacelle"
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.oci,
+            OciBackendEngine::Podman,
+            "unknown OCI engine must fall back to podman"
+        );
+        assert_eq!(
+            parsed.runtime.backend_engines.wasm,
+            WasmBackendEngine::Wasmtime,
+            "unknown Wasm engine must fall back to wasmtime"
+        );
+    }
+
+    #[test]
+    fn backend_engine_snapshot_contains_backend_engines() {
+        use crate::settings::settings_snapshot_from_config;
+        let config = DesktopConfig::default();
+        let snapshot = settings_snapshot_from_config(&config);
+        let engines = snapshot
+            .get("resolved")
+            .and_then(|r| r.get("runtime"))
+            .and_then(|r| r.get("backendEngines"))
+            .expect("resolved.runtime.backendEngines must exist in snapshot");
+        assert!(
+            engines.get("source").is_some(),
+            "snapshot must include source engine"
+        );
+        assert!(
+            engines.get("oci").is_some(),
+            "snapshot must include oci engine"
+        );
+        assert!(
+            engines.get("wasm").is_some(),
+            "snapshot must include wasm engine"
+        );
+    }
+
+    // ── canonicalize_handle (#56) ────────────────────────────────
+
     #[test]
     fn canonicalize_strips_at_version_from_last_path_segment() {
         assert_eq!(
@@ -1535,21 +1755,33 @@ mod tests {
     fn migration_grants_inversion_output_canonical_keys() {
         let legacy_grants: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::from([
-                ("capsule://org/app@1.2.3".into(), vec!["API_KEY".into(), "OTHER_KEY".into()]),
+                (
+                    "capsule://org/app@1.2.3".into(),
+                    vec!["API_KEY".into(), "OTHER_KEY".into()],
+                ),
                 ("capsule://org/app".into(), vec!["API_KEY".into()]),
             ]);
         let canonical = SecretStore::canonicalize_handle;
-        let mut per_key_allows: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
+        let mut per_key_allows: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
         for (raw_handle, allowed_keys) in &legacy_grants {
             let ch = canonical(raw_handle).to_string();
             for key in allowed_keys {
-                per_key_allows.entry(key.clone()).or_default().insert(ch.clone());
+                per_key_allows
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(ch.clone());
             }
         }
         let api_key_allows = per_key_allows.get("API_KEY").unwrap();
         assert!(api_key_allows.contains("capsule://org/app"));
-        assert_eq!(api_key_allows.len(), 1, "versioned grant must merge to canonical");
+        assert_eq!(
+            api_key_allows.len(),
+            1,
+            "versioned grant must merge to canonical"
+        );
         let other_allows = per_key_allows.get("OTHER_KEY").unwrap();
         assert!(other_allows.contains("capsule://org/app"));
     }

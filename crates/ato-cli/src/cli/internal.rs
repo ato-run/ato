@@ -56,6 +56,18 @@ pub(crate) enum InternalCommands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Sweep stale import preview sessions left behind by a crashed
+    /// Desktop/CLI owner.
+    #[command(hide = true, about = "Sweep stale import preview sessions")]
+    ImportPreviewSweep {
+        /// Escalate directly to SIGKILL/taskkill force mode.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Emit machine-readable JSON output on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

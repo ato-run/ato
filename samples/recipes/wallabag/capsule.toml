@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "wallabag"
+version = "2.6.10"
+type = "app"
+description = "Self-hosted read-it-later application"
+homepage = "https://github.com/wallabag/wallabag"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "wallabag/wallabag:2.6.10"
+port = 80
+env = { SYMFONY__ENV__DATABASE_DRIVER = "pdo_sqlite", SYMFONY__ENV__DATABASE_PATH = "/var/www/wallabag/data/db/wallabag.sqlite", SYMFONY__ENV__SECRET = "changeme-demo-secret", SYMFONY__ENV__DOMAIN_NAME = "http://localhost", POPULATE_DATABASE = "true" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "SQLite database, images, assets"
+attach = "explicit"
+schema_id = "sha256:wallabag-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "80", timeout_seconds = 120 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/www/wallabag/data"

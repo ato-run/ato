@@ -491,12 +491,6 @@ impl CapsuleManifest {
             }
 
             if let Some(probe) = target.readiness_probe.as_ref() {
-                if probe.port.trim().is_empty() {
-                    errors.push(ValidationError::InvalidTarget(format!(
-                        "target '{}': readiness_probe.port must be a non-empty placeholder name",
-                        label
-                    )));
-                }
                 let has_http_get = probe
                     .http_get
                     .as_ref()
@@ -507,10 +501,50 @@ impl CapsuleManifest {
                     .as_ref()
                     .map(|v| !v.trim().is_empty())
                     .unwrap_or(false);
-                if !has_http_get && !has_tcp_connect {
+                let has_exec = probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                // port is required for HTTP/TCP probes; exec probes do not need it.
+                if (has_http_get || has_tcp_connect) && !has_exec {
+                    if probe
+                        .port
+                        .as_deref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                    {
+                        errors.push(ValidationError::InvalidTarget(format!(
+                            "target '{}': readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes",
+                            label
+                        )));
+                    }
+                }
+                if !has_http_get && !has_tcp_connect && !has_exec {
                     errors.push(ValidationError::InvalidTarget(format!(
-                        "target '{}': readiness_probe must define http_get or tcp_connect",
+                        "target '{}': readiness_probe must define http_get, tcp_connect, or exec",
                         label
+                    )));
+                }
+                if has_exec && probe.exec.as_ref().map(|v| v.is_empty()).unwrap_or(false) {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.exec must be a non-empty command list",
+                        label
+                    )));
+                }
+                if probe.timeout_seconds == 0 {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.timeout_seconds must be > 0",
+                        label
+                    )));
+                }
+                if probe.interval_seconds == 0 {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.interval_seconds must be > 0",
+                        label
+                    )));
+                }
+                if probe.initial_delay_seconds >= probe.timeout_seconds && probe.timeout_seconds > 0
+                {
+                    errors.push(ValidationError::InvalidTarget(format!(
+                        "target '{}': readiness_probe.initial_delay_seconds ({}) must be less than timeout_seconds ({})",
+                        label, probe.initial_delay_seconds, probe.timeout_seconds
                     )));
                 }
             }
@@ -698,13 +732,6 @@ impl CapsuleManifest {
                     }
 
                     if let Some(probe) = service.readiness_probe.as_ref() {
-                        if probe.port.trim().is_empty() {
-                            errors.push(ValidationError::InvalidService(
-                                name.to_string(),
-                                "readiness_probe.port must be a non-empty placeholder name"
-                                    .to_string(),
-                            ));
-                        }
                         let has_http_get = probe
                             .http_get
                             .as_ref()
@@ -715,10 +742,51 @@ impl CapsuleManifest {
                             .as_ref()
                             .map(|v| !v.trim().is_empty())
                             .unwrap_or(false);
-                        if !has_http_get && !has_tcp_connect {
+                        let has_exec_svc =
+                            probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                        // port is required for HTTP/TCP probes; exec probes do not need it.
+                        if (has_http_get || has_tcp_connect) && !has_exec_svc {
+                            if probe
+                                .port
+                                .as_deref()
+                                .map(|s| s.trim().is_empty())
+                                .unwrap_or(true)
+                            {
+                                errors.push(ValidationError::InvalidService(
+                                    name.to_string(),
+                                    "readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
-                                "readiness_probe must define http_get or tcp_connect".to_string(),
+                                "readiness_probe must define http_get, tcp_connect, or exec"
+                                    .to_string(),
+                            ));
+                        }
+                        if probe.timeout_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.timeout_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.interval_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.interval_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.initial_delay_seconds >= probe.timeout_seconds
+                            && probe.timeout_seconds > 0
+                        {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                format!(
+                                    "readiness_probe.initial_delay_seconds ({}) must be less than timeout_seconds ({})",
+                                    probe.initial_delay_seconds, probe.timeout_seconds
+                                ),
                             ));
                         }
                     }
@@ -825,13 +893,6 @@ impl CapsuleManifest {
                     }
 
                     if let Some(probe) = service.readiness_probe.as_ref() {
-                        if probe.port.trim().is_empty() {
-                            errors.push(ValidationError::InvalidService(
-                                name.to_string(),
-                                "readiness_probe.port must be a non-empty placeholder name"
-                                    .to_string(),
-                            ));
-                        }
                         let has_http_get = probe
                             .http_get
                             .as_ref()
@@ -842,10 +903,51 @@ impl CapsuleManifest {
                             .as_ref()
                             .map(|v| !v.trim().is_empty())
                             .unwrap_or(false);
-                        if !has_http_get && !has_tcp_connect {
+                        let has_exec_svc =
+                            probe.exec.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+                        // port is required for HTTP/TCP probes; exec probes do not need it.
+                        if (has_http_get || has_tcp_connect) && !has_exec_svc {
+                            if probe
+                                .port
+                                .as_deref()
+                                .map(|s| s.trim().is_empty())
+                                .unwrap_or(true)
+                            {
+                                errors.push(ValidationError::InvalidService(
+                                    name.to_string(),
+                                    "readiness_probe.port must be a non-empty placeholder name for http_get/tcp_connect probes"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                        if !has_http_get && !has_tcp_connect && !has_exec_svc {
                             errors.push(ValidationError::InvalidService(
                                 name.to_string(),
-                                "readiness_probe must define http_get or tcp_connect".to_string(),
+                                "readiness_probe must define http_get, tcp_connect, or exec"
+                                    .to_string(),
+                            ));
+                        }
+                        if probe.timeout_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.timeout_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.interval_seconds == 0 {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                "readiness_probe.interval_seconds must be > 0".to_string(),
+                            ));
+                        }
+                        if probe.initial_delay_seconds >= probe.timeout_seconds
+                            && probe.timeout_seconds > 0
+                        {
+                            errors.push(ValidationError::InvalidService(
+                                name.to_string(),
+                                format!(
+                                    "readiness_probe.initial_delay_seconds ({}) must be less than timeout_seconds ({})",
+                                    probe.initial_delay_seconds, probe.timeout_seconds
+                                ),
                             ));
                         }
                     }
@@ -1029,13 +1131,38 @@ impl CapsuleManifest {
                                 .insert(state_name.to_string(), service_name.clone())
                             {
                                 if previous_service != *service_name {
-                                    errors.push(ValidationError::InvalidStateBinding(
-                                        service_name.clone(),
-                                        format!(
-                                            "state '{}' is already bound by service '{}'; shared mutable state is not supported in this PoC",
-                                            state_name, previous_service
-                                        ),
-                                    ));
+                                    let state_requirement = self.state.get(state_name);
+                                    match state_requirement {
+                                        Some(req) if req.sharing == StateSharing::SameCapsule => {
+                                            if req
+                                                .schema_id
+                                                .as_deref()
+                                                .map(str::trim)
+                                                .filter(|v| !v.is_empty())
+                                                .is_none()
+                                            {
+                                                errors.push(
+                                                    ValidationError::StateSharedRequiresSchemaId(
+                                                        state_name.to_string(),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        Some(_) => {
+                                            errors.push(
+                                                ValidationError::StateSharedRequiresPolicy {
+                                                    state: state_name.to_string(),
+                                                    first_service: previous_service,
+                                                    second_service: service_name.clone(),
+                                                },
+                                            );
+                                        }
+                                        None => {
+                                            errors.push(ValidationError::StateKeyUndeclared(
+                                                state_name.to_string(),
+                                            ));
+                                        }
+                                    }
                                 }
                             }
 
@@ -1062,6 +1189,10 @@ impl CapsuleManifest {
                     }
                 }
             }
+        }
+
+        if let Some(ingress) = &self.ingress {
+            validate_ingress(self, ingress, &mut errors);
         }
 
         if errors.is_empty() {
@@ -1191,6 +1322,249 @@ impl CapsuleManifest {
                 (!name.is_empty()).then(|| name.to_string())
             })
     }
+}
+
+fn validate_ingress(
+    manifest: &CapsuleManifest,
+    ingress: &IngressConfig,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Err(err) = ingress.mode.validate_v1() {
+        errors.push(ValidationError::InvalidTarget(err.to_string()));
+    }
+
+    let service_names: std::collections::HashSet<&str> = manifest
+        .services
+        .as_ref()
+        .map(|s| s.keys().map(|k| k.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut seen_aliases: HashMap<&str, &str> = HashMap::new();
+    let mut root_route: Option<&str> = None;
+
+    for (route_name, route) in &ingress.routes {
+        if route.root && route.alias.is_some() {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::RootWithAlias {
+                    route: route_name.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
+        if route.root {
+            if let Some(previous) = root_route {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::MultipleRootRoutes {
+                        route_a: previous.to_string(),
+                        route_b: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            root_route = Some(route_name);
+        }
+
+        if !route.root {
+            let effective_alias = route
+                .alias
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty());
+            if effective_alias.is_none() && route.alias.is_some() {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::NonRootWithoutAlias {
+                        route: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+
+        if let Some(alias) = route.alias.as_deref() {
+            if !is_valid_ingress_alias(alias) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidAlias {
+                        alias: alias.to_string(),
+                        reason: "alias must be a URL-safe path segment (lowercase alphanumeric, hyphens, underscores; no '/', '..', '%2f', '%5c', or percent-encoded characters)"
+                            .to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
+            if let Some(previous) = seen_aliases.get(alias) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::DuplicateAlias {
+                        alias: alias.to_string(),
+                        route_a: previous.to_string(),
+                        route_b: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            seen_aliases.insert(alias, route_name);
+        } else if !route.root {
+            if !is_valid_ingress_alias(route_name) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidAlias {
+                        alias: route_name.clone(),
+                        reason: "route name used as fallback alias must be URL-safe (lowercase alphanumeric, hyphens, underscores; no '/', '..', '%2f', '%5c', or percent-encoded characters)"
+                            .to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
+            if let Some(previous) = seen_aliases.get(route_name.as_str()) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::DuplicateAlias {
+                        alias: route_name.clone(),
+                        route_a: previous.to_string(),
+                        route_b: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            seen_aliases.insert(route_name.as_str(), route_name);
+        }
+
+        if !service_names.contains(route.target.as_str()) {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::MissingService {
+                    route: route_name.clone(),
+                    target: route.target.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
+        if route.port == 0 {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::InvalidPort {
+                    route: route_name.clone(),
+                    port: route.port,
+                }
+                .to_string(),
+            ));
+        }
+
+        if let Some(prefix) = route.upstream_path_prefix.as_deref() {
+            if !route.strip_prefix {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::UpstreamPrefixWithoutStrip {
+                        route: route_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+            if !prefix.starts_with('/') {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::UpstreamPrefixMissingSlash {
+                        route: route_name.clone(),
+                        prefix: prefix.to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
+            if let Some(reason) = validate_upstream_prefix_segments(prefix) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidUpstreamPrefix {
+                        route: route_name.clone(),
+                        prefix: prefix.to_string(),
+                        reason,
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+    }
+
+    for (target, env_vars) in &ingress.env_inject {
+        if !service_names.contains(target.as_str()) {
+            errors.push(ValidationError::InvalidTarget(
+                IngressError::EnvInjectTargetMissing {
+                    target: target.clone(),
+                }
+                .to_string(),
+            ));
+        }
+
+        for (env_name, template) in env_vars {
+            if !is_valid_env_var_name(env_name) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::InvalidEnvVarName {
+                        name: env_name.clone(),
+                    }
+                    .to_string(),
+                ));
+            }
+
+            for route_ref in extract_ingress_route_refs(template) {
+                if !ingress.routes.contains_key(&route_ref) {
+                    errors.push(ValidationError::InvalidTarget(
+                        IngressError::EnvInjectMissingRoute {
+                            target: target.clone(),
+                            env_name: env_name.clone(),
+                            route_name: route_ref,
+                            template: template.clone(),
+                        }
+                        .to_string(),
+                    ));
+                }
+            }
+            if let Some(field) = extract_invalid_template_field(template) {
+                errors.push(ValidationError::InvalidTarget(
+                    IngressError::EnvInjectUnknownField {
+                        target: target.clone(),
+                        env_name: env_name.clone(),
+                        template: template.clone(),
+                        field,
+                    }
+                    .to_string(),
+                ));
+            }
+        }
+    }
+}
+
+fn is_valid_ingress_alias(alias: &str) -> bool {
+    if alias.is_empty() {
+        return false;
+    }
+    if alias.contains('/') || alias.contains("..") {
+        return false;
+    }
+    let lower = alias.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return false;
+    }
+    if alias.as_bytes().iter().any(|b| *b == b'%') {
+        return false;
+    }
+    alias
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+fn extract_ingress_route_refs(template: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let mut search_from = 0;
+    let prefix = "{{ingress.routes.";
+    while let Some(start) = template[search_from..].find(prefix) {
+        let abs_start = search_from + start;
+        let rest = &template[abs_start + prefix.len()..];
+        if let Some(end) = rest.find("}}") {
+            let route_name = rest[..end].trim();
+            if let Some(dot_pos) = route_name.find('.') {
+                refs.push(route_name[..dot_pos].to_string());
+            } else {
+                refs.push(route_name.to_string());
+            }
+            search_from = abs_start + prefix.len() + end + 2;
+        } else {
+            break;
+        }
+    }
+    refs
 }
 
 fn validate_dependency_contracts(
@@ -1337,6 +1711,22 @@ pub enum ValidationError {
     InvalidState(String, String),
     #[error("Invalid state binding for service '{0}': {1}")]
     InvalidStateBinding(String, String),
+    #[error("State '{state}' is bound by both service '{first_service}' and '{second_service}'; shared mutable state requires sharing=\"same-capsule\" on the state declaration")]
+    StateSharedRequiresPolicy {
+        state: String,
+        first_service: String,
+        second_service: String,
+    },
+    #[error("Shared state '{0}' requires schema_id to be set")]
+    StateSharedRequiresSchemaId(String),
+    #[error("Shared state '{0}' has conflicting mount modes across services")]
+    StateSharedConflictingMountMode(String),
+    #[error("Shared state across different capsules is forbidden: state '{0}'")]
+    StateSharedCrossCapsuleForbidden(String),
+    #[error("Shared state '{0}' cannot use absolute host path bind mounts")]
+    StateSharedHostBindForbidden(String),
+    #[error("State key '{0}' is not declared under [state]")]
+    StateKeyUndeclared(String),
     #[error("type='tool' capsule must declare at least one [platforms.<os>-<arch>] entry")]
     ToolMissingPlatforms,
     #[error(
@@ -1517,4 +1907,44 @@ fn detect_service_cycle(services: &HashMap<String, ServiceSpec>) -> Result<(), S
         visit(name, services, &mut visiting, &mut visited, &mut stack)?;
     }
     Ok(())
+}
+
+fn validate_upstream_prefix_segments(prefix: &str) -> Option<String> {
+    if prefix.contains("..") {
+        return Some("must not contain parent-traversal component '..'".to_string());
+    }
+    if prefix.contains('\\') {
+        return Some("must not contain backslash".to_string());
+    }
+    let lower = prefix.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return Some("must not contain percent-encoded slash or backslash".to_string());
+    }
+    if prefix.as_bytes().iter().any(|b| *b == b'%') {
+        return Some("must not contain percent-encoded characters".to_string());
+    }
+    None
+}
+
+fn extract_invalid_template_field(template: &str) -> Option<String> {
+    let allowed: &[&str] = &["url", "base_url", "path", "origin"];
+    let mut search_from = 0;
+    let prefix = "{{ingress.routes.";
+    while let Some(start) = template[search_from..].find(prefix) {
+        let abs_start = search_from + start;
+        let rest = &template[abs_start + prefix.len()..];
+        if let Some(end) = rest.find("}}") {
+            let full_ref = &rest[..end];
+            if let Some(dot_pos) = full_ref.find('.') {
+                let field = &full_ref[dot_pos + 1..];
+                if !allowed.contains(&field) {
+                    return Some(field.to_string());
+                }
+            }
+            search_from = abs_start + prefix.len() + end + 2;
+        } else {
+            break;
+        }
+    }
+    None
 }

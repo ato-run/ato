@@ -1,0 +1,30 @@
+schema_version = "0.3"
+name = "open-webui"
+version = "0.6.13"
+type = "app"
+description = "Self-hosted AI chat UI — works with Ollama and OpenAI-compatible backends"
+homepage = "https://github.com/open-webui/open-webui"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/open-webui/open-webui:main"
+port = 8080
+env = { PORT = "8080", WEBUI_AUTH = "False", OLLAMA_BASE_URL = "http://host.containers.internal:11434" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "chat history, models, settings"
+attach = "explicit"
+schema_id = "sha256:30197708b842cf1fd2af30e30c22fafa5e6cab05866a01fafdcb8240c35d2af1"
+
+[services.main]
+target = "app"
+# No readiness_probe: first-run downloads ~30 HuggingFace embedding model files
+# which takes several minutes. Service URL is shown immediately; browse when ready.
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/app/backend/data"

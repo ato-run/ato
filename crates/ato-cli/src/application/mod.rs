@@ -1,4 +1,6 @@
 pub(crate) mod agent;
+pub(crate) mod artifact_build_producer;
+pub(crate) mod artifact_build_worker_sim;
 pub(crate) mod attestation;
 pub(crate) mod auth;
 pub(crate) mod build_materialization;
@@ -20,6 +22,8 @@ pub(crate) mod graph_views;
 pub(crate) mod launch_materialization;
 pub(crate) mod managed_service_receipt;
 pub(crate) mod orchestration_teardown;
+pub(crate) mod phase_materializer;
+pub(crate) mod phase_materializer_remote;
 pub(crate) mod pipeline;
 pub(crate) mod ports;
 pub(crate) mod preflight;

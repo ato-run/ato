@@ -1,0 +1,18 @@
+schema_version = "0.3"
+name = "stirling-pdf"
+version = "2.11.0"
+type = "app"
+description = "Self-hosted PDF tools — merge, split, compress, convert, and annotate PDFs in the browser"
+homepage = "https://github.com/Stirling-Tools/Stirling-PDF"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "frooodle/s-pdf:2.11.0"
+port = 8080
+
+[services.main]
+target = "app"
+# Note: / returns 401 (auth required); /login returns 200 — use login page as readiness target
+readiness_probe = { http_get = "/login", port = "8080" }

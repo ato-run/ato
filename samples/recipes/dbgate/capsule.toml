@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "dbgate"
+version = "6.5.0"
+type = "app"
+description = "Universal database client with web UI — MySQL, PostgreSQL, SQLite, MongoDB and more"
+homepage = "https://github.com/dbgate/dbgate"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "dbgate/dbgate:6.5.0"
+port = 3000
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "connection configs, query history"
+attach = "explicit"
+schema_id = "sha256:dbgate-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3000" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/root/.dbgate"

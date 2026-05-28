@@ -17,7 +17,7 @@
 //! focused on closing the build-skip gap. They will be filled in once the
 //! desktop has a UX for consent prompts and sandbox preflight.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -43,11 +43,11 @@ use crate::executors::target_runner;
 use crate::reporters::CliReporter;
 
 use super::guest_contract::parse_guest_contract;
-use super::resolve::{build_resolution, resolve_local_plan, HandleResolution};
+use super::resolve::{build_resolution, HandleResolution};
 use super::session::{
-    redirect_stdout_to_stderr, resolve_session_launch_plan, restore_stdout, start_guest_session,
-    start_orchestration_session_in_process, start_orchestration_session_supervisor,
-    start_runtime_session, SessionInfo,
+    redirect_stdout_to_stderr, resolve_local_plan_for_session_start, resolve_session_launch_plan,
+    restore_stdout, start_guest_session, start_orchestration_session_in_process,
+    start_orchestration_session_supervisor, start_runtime_session, SessionInfo,
 };
 
 /// Env var fence for the legacy opaque orchestration supervisor (#73 PR-C).
@@ -71,6 +71,36 @@ pub(crate) fn legacy_supervisor_enabled() -> bool {
 /// `Some("yes")`, etc. all keep the in-process path.
 pub(crate) fn legacy_supervisor_enabled_for_value(value: Option<&str>) -> bool {
     matches!(value, Some("1"))
+}
+
+fn try_remote_build_output_projection(
+    plan: &ManifestData,
+    workspace_root: &Path,
+    observation: &bm::BuildObservation,
+    suppress_recommendation: bool,
+) -> Result<bool> {
+    let Some(layer) =
+        crate::application::phase_materializer_remote::lookup_remote_build_output_layer(
+            workspace_root,
+            observation,
+        )?
+    else {
+        return Ok(false);
+    };
+    crate::application::phase_materializer::project_build_outputs(
+        workspace_root,
+        observation,
+        &layer,
+    )
+    .context("failed to project imported remote build output layer")?;
+    bm::persist_after_remote_project(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        layer,
+    );
+    Ok(true)
 }
 
 #[derive(Clone)]
@@ -289,8 +319,18 @@ impl SessionStartPhaseRunner {
         resolution.restricted = record.restricted;
         resolution.snapshot = record.snapshot.clone();
 
-        let (plan, _guest, mut notes) =
-            resolve_local_plan(&manifest_path, Some(record.target_label.as_str()))?;
+        let sample_recipe_slug = record
+            .source
+            .as_deref()
+            .filter(|source| *source == "sample_recipe")
+            .and_then(|_| manifest_path.parent())
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str());
+        let (plan, _guest, mut notes) = resolve_local_plan_for_session_start(
+            &manifest_path,
+            Some(record.target_label.as_str()),
+            sample_recipe_slug,
+        )?;
         let expected_app_root = PathBuf::from(&record.app_root)
             .canonicalize()
             .with_context(|| format!("failed to resolve app root {}", record.app_root))?;
@@ -618,11 +658,88 @@ impl SessionStartPhaseRunner {
         );
         self.build_observation = prepared.observation.clone();
         self.build_decision_kind = Some(prepared.decision.result_kind);
+        let build_output_lock = if matches!(
+            &prepared.decision.action,
+            bm::DecisionAction::Project(_) | bm::DecisionAction::Execute | bm::DecisionAction::Fail
+        ) {
+            prepared
+                .observation
+                .as_ref()
+                .map(
+                    crate::application::phase_materializer::acquire_build_output_lock_for_observation,
+                )
+                .transpose()?
+        } else {
+            None
+        };
 
         match prepared.decision.action {
             bm::DecisionAction::Skip => return Ok(()),
+            bm::DecisionAction::Project(layer) => {
+                let Some(observation) = prepared.observation.as_ref() else {
+                    anyhow::bail!("build output projection requires a build observation");
+                };
+                match crate::application::phase_materializer::project_build_outputs(
+                    &workspace_root,
+                    observation,
+                    &layer,
+                ) {
+                    Ok(()) => {
+                        drop(build_output_lock);
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "ATO-WARN failed to project build output layer; trying remote \
+                             materialization before local build: {}",
+                            error
+                        );
+                        match try_remote_build_output_projection(
+                            plan,
+                            &workspace_root,
+                            observation,
+                            self.json,
+                        ) {
+                            Ok(true) => {
+                                drop(build_output_lock);
+                                self.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                                return Ok(());
+                            }
+                            Ok(false) => {}
+                            Err(remote_error) => {
+                                eprintln!(
+                                    "ATO-WARN remote build output materialization unavailable; \
+                                     build will execute: {remote_error:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             bm::DecisionAction::Fail => return Err(bm::no_build_error(&prepared.decision)),
-            bm::DecisionAction::Execute => {}
+            bm::DecisionAction::Execute => {
+                if let Some(observation) = prepared.observation.as_ref() {
+                    match try_remote_build_output_projection(
+                        plan,
+                        &workspace_root,
+                        observation,
+                        self.json,
+                    ) {
+                        Ok(true) => {
+                            drop(build_output_lock);
+                            self.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                            return Ok(());
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "ATO-WARN remote build output materialization unavailable; \
+                                 build will execute: {error:#}"
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // In `--json` mode the caller (Desktop orchestrator) parses the
@@ -653,7 +770,29 @@ impl SessionStartPhaseRunner {
         lifecycle_result?;
 
         if let Some(observation) = self.build_observation.as_ref() {
-            bm::persist_after_execute(plan, &workspace_root, observation, self.json);
+            // Capture while the lock is still held so that workspace-output
+            // reading (capture) and state-record writing are inside the same
+            // lock region as the build executor.
+            // session_runner always uses BuildPolicy::IfStale; NoBuild is
+            // not reachable here, so no hard-fail branch is needed.
+            let output_layer = build_output_lock.as_ref().and_then(|lock| {
+                match crate::application::phase_materializer::capture_build_outputs_locked(
+                    lock,
+                    &workspace_root,
+                    observation,
+                ) {
+                    Ok(layer) => layer,
+                    Err(err) => {
+                        eprintln!(
+                            "ATO-WARN failed to capture build output layer for local \
+                             materialization: {err}"
+                        );
+                        None
+                    }
+                }
+            });
+            bm::persist_after_execute(plan, &workspace_root, observation, self.json, output_layer);
+            drop(build_output_lock);
         }
         self.build_decision_kind = Some(bm::BuildResultKind::Executed);
         Ok(())

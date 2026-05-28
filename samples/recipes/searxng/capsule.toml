@@ -1,0 +1,19 @@
+schema_version = "0.3"
+name = "searxng"
+version = "1.0.0"
+type = "app"
+description = "Privacy-respecting metasearch engine aggregating results from multiple sources"
+homepage = "https://github.com/searxng/searxng"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Pin note: proposed pin to searxng/searxng:2025.04.03 — not yet AODD-confirmed
+image = "searxng/searxng:latest"
+port = 8080
+env = { SEARXNG_SECRET = "changeme-demo-secret" }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8080" }

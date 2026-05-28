@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::config::SecretEntry;
+use crate::state::session::{OciImportKind, OciSessionSnapshot, OciSessionStatus};
+use crate::state::{LocalManifestRoute, ManifestSource};
 use crate::surface_timing::{ClickOrigin, SurfaceStageTimer};
 use crate::terminal::{TerminalCore, TryRecvOutput};
 
@@ -107,6 +109,76 @@ pub fn take_pending_cli_command(session_id: &str) -> Option<CliLaunchSpec> {
         .lock()
         .ok()
         .and_then(|mut map| map.remove(session_id))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DesktopLaunchInput {
+    Handle(String),
+    LocalManifestPath(LocalManifestLaunchInput),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalManifestLaunchInput {
+    pub manifest_path: PathBuf,
+    pub source_handle: String,
+    pub requested_ref: String,
+    pub resolved_commit: String,
+    pub manifest_source: ManifestSource,
+    pub manifest_hash: String,
+    pub draft_id: String,
+}
+
+impl DesktopLaunchInput {
+    pub fn from_handle(handle: impl Into<String>) -> Self {
+        Self::Handle(handle.into())
+    }
+
+    pub fn from_local_manifest(route: &LocalManifestRoute) -> Self {
+        Self::LocalManifestPath(LocalManifestLaunchInput {
+            manifest_path: route.manifest_path.clone(),
+            source_handle: route.source_handle.clone(),
+            requested_ref: route.requested_ref.clone(),
+            resolved_commit: route.resolved_commit.clone(),
+            manifest_source: route.manifest_source.clone(),
+            manifest_hash: route.manifest_hash.clone(),
+            draft_id: route.draft_id.clone(),
+        })
+    }
+
+    pub fn launch_input_kind(&self) -> &'static str {
+        match self {
+            Self::Handle(_) => "handle",
+            Self::LocalManifestPath(_) => "local_manifest_path",
+        }
+    }
+
+    pub fn boundary_arg(&self) -> String {
+        match self {
+            Self::Handle(handle) => handle.clone(),
+            Self::LocalManifestPath(local) => local.manifest_path.display().to_string(),
+        }
+    }
+
+    pub fn source_handle(&self) -> &str {
+        match self {
+            Self::Handle(handle) => handle,
+            Self::LocalManifestPath(local) => &local.source_handle,
+        }
+    }
+
+    pub fn manifest_path_for_log(&self) -> Option<&Path> {
+        match self {
+            Self::Handle(_) => None,
+            Self::LocalManifestPath(local) => Some(local.manifest_path.as_path()),
+        }
+    }
+
+    pub fn manifest_source_for_log(&self) -> Option<&'static str> {
+        match self {
+            Self::Handle(_) => None,
+            Self::LocalManifestPath(local) => Some(local.manifest_source.as_str()),
+        }
+    }
 }
 
 const ATO_BIN_ENV: &str = "ATO_DESKTOP_ATO_BIN";
@@ -314,6 +386,20 @@ pub fn resolve_and_start_guest(
     plain_configs: &[(String, String)],
     on_step: Option<Box<dyn Fn(u8) + Send>>,
 ) -> Result<GuestLaunchSession, LaunchError> {
+    resolve_and_start_guest_with_input(
+        &DesktopLaunchInput::from_handle(handle.to_string()),
+        secrets,
+        plain_configs,
+        on_step,
+    )
+}
+
+pub fn resolve_and_start_guest_with_input(
+    input: &DesktopLaunchInput,
+    secrets: &[SecretEntry],
+    plain_configs: &[(String, String)],
+    on_step: Option<Box<dyn Fn(u8) + Send>>,
+) -> Result<GuestLaunchSession, LaunchError> {
     // Step 0: validating (emitted before preflight so the boot wizard shows
     // "検証中" immediately, even if the page fires the callback before the
     // WebView has fully loaded — the JS buffers it via DOMContentLoaded).
@@ -330,7 +416,20 @@ pub fn resolve_and_start_guest(
     // already satisfied) or returns a "ref not supported" error
     // (e.g. uncached remote ref), fall through to the legacy launch
     // loop which still drains lazily via `merge_*_into_resolution`.
-    match collect_preflight_requirements(handle) {
+    let boundary_arg = input.boundary_arg();
+    let source_handle = input.source_handle().to_string();
+    tracing::info!(
+        launch_input.kind = input.launch_input_kind(),
+        source_handle = %source_handle,
+        manifest_source = input.manifest_source_for_log().unwrap_or("handle"),
+        manifest_path = input
+            .manifest_path_for_log()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        "desktop launch input selected"
+    );
+
+    match collect_preflight_requirements_with_input(input) {
         Ok(envelopes) => {
             // Preflight emits "what the manifest requires" — it has no
             // visibility into the desktop's per-handle SecretStore.
@@ -350,7 +449,7 @@ pub fn resolve_and_start_guest(
             let filtered = filter_already_provided_secrets(envelopes, secrets, plain_configs);
             if !filtered.is_empty() {
                 return Err(LaunchError::PreflightAggregate {
-                    handle: handle.to_string(),
+                    handle: source_handle,
                     requirements: filtered,
                     original_secrets: secrets.to_vec(),
                 });
@@ -366,14 +465,21 @@ pub fn resolve_and_start_guest(
             // requirements lazily. Logged at warn so we can spot
             // patterns without spamming under expected conditions.
             warn!(
-                handle = %handle,
+                handle = %boundary_arg,
                 error = %error,
                 "preflight collection skipped; falling back to lazy aggregation"
             );
         }
     }
 
-    resolve_and_start_capsule(handle, secrets, plain_configs, on_step)
+    let mut session = resolve_and_start_capsule(&boundary_arg, secrets, plain_configs, on_step)?;
+    if let DesktopLaunchInput::LocalManifestPath(local) = input {
+        session.handle = local.source_handle.clone();
+        session.normalized_handle = local.source_handle.clone();
+        session.source = Some(local.source_handle.clone());
+        session.manifest_path = local.manifest_path.clone();
+    }
+    Ok(session)
 }
 
 pub fn resolve_and_start_guest_from_materialized_record(
@@ -467,7 +573,13 @@ fn filter_already_provided_secrets(
 fn collect_preflight_requirements(
     handle: &str,
 ) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
-    Ok(collect_preflight_envelope(handle)?.requirements)
+    collect_preflight_requirements_with_input(&DesktopLaunchInput::from_handle(handle.to_string()))
+}
+
+fn collect_preflight_requirements_with_input(
+    input: &DesktopLaunchInput,
+) -> Result<Vec<capsule_core::interactive_resolution::InteractiveResolutionEnvelope>> {
+    Ok(collect_preflight_envelope_for_input(input)?.requirements)
 }
 
 /// Full capsule identity + requirements returned by `ato internal preflight --json`.
@@ -482,8 +594,13 @@ pub(crate) struct ConsentPreflightData {
 /// Collect full preflight data for the consent wizard UI.
 /// Normalizes the handle (adds `capsule://` prefix for bare `github.com/` handles).
 pub(crate) fn collect_preflight_for_consent(handle: &str) -> Result<ConsentPreflightData> {
-    let normalized = normalize_preflight_handle(handle);
-    let envelope = collect_preflight_envelope(&normalized)?;
+    collect_preflight_for_consent_with_input(&DesktopLaunchInput::from_handle(handle.to_string()))
+}
+
+pub(crate) fn collect_preflight_for_consent_with_input(
+    input: &DesktopLaunchInput,
+) -> Result<ConsentPreflightData> {
+    let envelope = collect_preflight_envelope_for_input(input)?;
     Ok(ConsentPreflightData {
         capsule_id: envelope.capsule_id,
         capsule_version: envelope.capsule_version,
@@ -500,6 +617,20 @@ fn normalize_preflight_handle(handle: &str) -> String {
         format!("capsule://{handle}")
     } else {
         handle.to_string()
+    }
+}
+
+fn collect_preflight_envelope_for_input(
+    input: &DesktopLaunchInput,
+) -> Result<PreflightAggregateEnvelope> {
+    match input {
+        DesktopLaunchInput::Handle(handle) => {
+            let normalized = normalize_preflight_handle(handle);
+            collect_preflight_envelope(&normalized)
+        }
+        DesktopLaunchInput::LocalManifestPath(local) => {
+            collect_preflight_envelope(&local.manifest_path.display().to_string())
+        }
     }
 }
 
@@ -1142,19 +1273,14 @@ fn start_capsule(
 ) -> Result<SessionStartInfo, LaunchError> {
     let ato_bin = resolve_ato_binary().map_err(LaunchError::from)?;
     debug!(bin = %ato_bin.display(), handle, "spawning ato helper for session start");
-    let mut cmd = Command::new(&ato_bin);
+    // Use ato_helper_command so ATO_HOME is forwarded to the subprocess.
+    // Without this, session records are written to ~/.ato/apps/ato-desktop/sessions/
+    // while stop_capsule_session (which uses run_ato_json/ato_helper_command) looks
+    // in the ATO_HOME-relative path, causing stop to return stopped=false.
+    let mut cmd = ato_helper_command(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
     let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
     cmd.arg("--run-config-hash").arg(&run_config_hash);
-
-    let desktop_pid = std::process::id();
-    cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
-    if let Some(start_time) = ato_session_core::process::process_start_time_unix_ms(desktop_pid) {
-        cmd.env(
-            "ATO_DESKTOP_PARENT_START_TIME_UNIX_MS",
-            start_time.to_string(),
-        );
-    }
 
     let desktop_pid = std::process::id();
     cmd.env("ATO_DESKTOP_PARENT_PID", desktop_pid.to_string());
@@ -1212,7 +1338,8 @@ fn start_capsule_from_materialized_record(
         record_path = %record_path.display(),
         "spawning ato helper for materialized session start"
     );
-    let mut cmd = Command::new(&ato_bin);
+    // Use ato_helper_command so ATO_HOME is forwarded consistently with stop/query helpers.
+    let mut cmd = ato_helper_command(&ato_bin);
     cmd.args(["app", "session", "start", handle, "--json"]);
     cmd.arg("--from-materialized-record").arg(record_path);
     let run_config_hash = desktop_run_config_hash(secrets, plain_configs);
@@ -1338,13 +1465,8 @@ fn run_session_start_command(
         // failed; both are worth a noisy entry.
         error!(handle, stderr = %stderr, stdout = %stdout, "ato session start failed");
 
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            extract_json_error_message(&stdout).unwrap_or(stdout)
-        } else {
-            format!("exit status {}", output.status)
-        };
+        let detail = extract_user_facing_error(&stderr, &stdout)
+            .unwrap_or_else(|| format!("exit status {}", output.status));
         return Err(LaunchError::Other(format!(
             "ato session start failed: {detail}"
         )));
@@ -1424,7 +1546,7 @@ where
 {
     let ato_bin = resolve_ato_binary()?;
     debug!(bin = %ato_bin.display(), args = %args.join(" "), "spawning ato helper");
-    let output = Command::new(&ato_bin)
+    let output = ato_helper_command(&ato_bin)
         .args(args)
         .output()
         .with_context(|| {
@@ -1454,6 +1576,107 @@ where
     })
 }
 
+/// Read OCI sessions from the CLI session projection instead of Desktop walking
+/// OCI state files directly.
+pub fn list_oci_sessions() -> Result<Vec<OciSessionSnapshot>> {
+    let entries: Vec<PsJsonEntry> = run_ato_json(&["ps", "--all", "--json"])?;
+    Ok(oci_sessions_from_ps_entries(entries))
+}
+
+pub fn stop_oci_session(session_id: &str) -> Result<()> {
+    let ato_bin = resolve_ato_binary()?;
+    let args = oci_stop_args(session_id);
+    debug!(bin = %ato_bin.display(), session_id, "stopping OCI session through ato");
+    let output = ato_helper_command(&ato_bin)
+        .args(args)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run ato helper '{}' with args {}",
+                ato_bin.display(),
+                args.join(" ")
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = extract_json_error_message(&stdout)
+            .or_else(|| (!stderr.is_empty()).then(|| stderr.clone()))
+            .or_else(|| (!stdout.is_empty()).then(|| stdout.clone()))
+            .unwrap_or_else(|| format!("exit status {}", output.status));
+        bail!("ato stop OCI session failed: {detail}");
+    }
+    Ok(())
+}
+
+fn oci_stop_args(session_id: &str) -> [&str; 3] {
+    ["stop", "--id", session_id]
+}
+
+fn ato_helper_command(ato_bin: &Path) -> Command {
+    let mut command = Command::new(ato_bin);
+    apply_desktop_ato_home(&mut command, std::env::var_os("ATO_HOME"));
+    command
+}
+
+fn apply_desktop_ato_home(command: &mut Command, ato_home: Option<std::ffi::OsString>) {
+    if let Some(ato_home) = ato_home {
+        command.env("ATO_HOME", ato_home);
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PsJsonEntry {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    import_kind: Option<OciImportKind>,
+    #[serde(default)]
+    service_count: Option<usize>,
+    #[serde(default)]
+    main_endpoint: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    source_hash: Option<String>,
+}
+
+fn oci_sessions_from_ps_entries(entries: Vec<PsJsonEntry>) -> Vec<OciSessionSnapshot> {
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            if entry.kind.as_deref() != Some("oci") {
+                return None;
+            }
+            Some(OciSessionSnapshot {
+                id: entry.session_id.or(entry.id)?,
+                import_kind: entry.import_kind?,
+                status: oci_status_from_ps(entry.status.as_deref())?,
+                endpoint_url: entry.main_endpoint,
+                service_count: entry.service_count?,
+                source_path: entry.source_path,
+                source_hash: entry.source_hash,
+            })
+        })
+        .collect()
+}
+
+fn oci_status_from_ps(status: Option<&str>) -> Option<OciSessionStatus> {
+    match status? {
+        "running" => Some(OciSessionStatus::Running),
+        "stopped" => Some(OciSessionStatus::Stopped),
+        "stop_failed" => Some(OciSessionStatus::StopFailed),
+        _ => None,
+    }
+}
+
 fn extract_json_error_message(stdout: &str) -> Option<String> {
     let trimmed = stdout.trim();
     if !trimmed.starts_with('{') {
@@ -1470,6 +1693,93 @@ fn extract_json_error_message(stdout: &str) -> Option<String> {
         (true, true) => return None,
     };
     Some(combined)
+}
+
+/// Extract a user-facing error message from CLI output, filtering tracing/debug
+/// noise so Desktop launch errors show the actual cause rather than internal
+/// diagnostic lines like "Provision command path diagnostics phase=run runtime=oci".
+///
+/// Priority:
+/// 1. JSON error envelope from stdout (structured, intentional)
+/// 2. Actionable error lines from stderr (filtered for noise)
+/// 3. Last few non-noise lines from stderr as a tail
+/// 4. None — caller should fall back to exit status or a generic message
+fn extract_user_facing_error(stderr: &str, stdout: &str) -> Option<String> {
+    // 1. JSON envelope on stdout takes priority — it is structured and intentional.
+    if let Some(msg) = extract_json_error_message(stdout) {
+        return Some(msg);
+    }
+
+    // 2. Filter tracing noise from stderr and look for actionable lines.
+    let non_noise: Vec<&str> = stderr
+        .lines()
+        .filter(|l| !is_tracing_noise_line(l))
+        .collect();
+
+    if !non_noise.is_empty() {
+        // Prefer lines that contain recognisable error indicators.
+        let error_lines: Vec<&str> = non_noise
+            .iter()
+            .copied()
+            .filter(|l| is_actionable_error_line(l))
+            .collect();
+        if let Some(last) = error_lines.last() {
+            return Some((*last).to_string());
+        }
+        // No error-specific line; surface the last few non-noise lines as context.
+        let tail_start = non_noise.len().saturating_sub(3);
+        return Some(non_noise[tail_start..].join("\n"));
+    }
+
+    // 3. All stderr was tracing noise — let the caller fall back to exit status.
+    None
+}
+
+/// Returns true when a line is pure tracing/logging diagnostic output that
+/// carries no user-facing information (DEBUG, TRACE, or INFO level records).
+fn is_tracing_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // The specific "Provision command path diagnostics" event is always noise
+    // regardless of level — it is only useful to ato-cli developers.
+    if trimmed.contains("Provision command path diagnostics") {
+        return true;
+    }
+    // tracing_subscriber formats:
+    //   "YYYY-MM-DDTHH:MM:SS.ffffffZ DEBUG target: message key=val"
+    //   "  DEBUG target: message key=val"   (compact without timestamp)
+    // Strip the optional ISO-8601 timestamp so the level keyword is first.
+    let without_ts = strip_tracing_timestamp(trimmed);
+    matches!(
+        without_ts.split_whitespace().next(),
+        Some("DEBUG") | Some("TRACE") | Some("INFO")
+    )
+}
+
+/// Returns true for lines that contain user-actionable error information.
+fn is_actionable_error_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("timeout")
+        || lower.contains("readiness")
+        || lower.contains("fatal")
+        || lower.contains("panic")
+}
+
+/// Strip a leading ISO-8601 timestamp from a tracing output line so the level
+/// keyword can be checked at position 0.  Timestamps end with 'Z' followed by
+/// a space; if the prefix does not match that shape the line is returned as-is.
+fn strip_tracing_timestamp(line: &str) -> &str {
+    if let Some(idx) = line.find('Z') {
+        if idx > 10 && line.as_bytes().get(idx + 1) == Some(&b' ') {
+            return &line[idx + 2..];
+        }
+    }
+    line
 }
 
 /// Fire-and-forget: spawn `ato app session start <handle> --json` in the
@@ -1490,7 +1800,7 @@ fn spawn_background_receipt_refresh(handle: &str) {
             return;
         }
     };
-    let mut cmd = Command::new(&ato_bin);
+    let mut cmd = ato_helper_command(&ato_bin);
     cmd.arg("app")
         .arg("session")
         .arg("start")
@@ -1526,6 +1836,15 @@ pub fn resolve_ato_binary() -> Result<PathBuf> {
         return Ok(path);
     }
 
+    // Monorepo dev workflow: prefer the root-workspace `target/{profile}/ato`
+    // produced by ato-desktop's build.rs (see `rebuild_helpers`). This wins
+    // over `sibling_ato_binary` because a stale sibling could have been left
+    // by a prior bundle step, and over PATH because a globally-installed
+    // `ato` is almost always older than the working tree.
+    if let Some(path) = dev_workspace_binary("ato") {
+        return Ok(path);
+    }
+
     if let Some(path) = sibling_ato_binary()? {
         return Ok(path);
     }
@@ -1538,6 +1857,50 @@ pub fn resolve_ato_binary() -> Result<PathBuf> {
         "ato helper binary was not found. Bundle Helpers/ato, set {}, or install 'ato' on PATH.",
         ATO_BIN_ENV
     )
+}
+
+/// Resolve the `nacelle` sandbox helper binary.
+///
+/// Precedence mirrors `resolve_ato_binary`:
+///   1. `NACELLE_PATH` env var (explicit override).
+///   2. Monorepo dev target (`<root>/target/{profile}/nacelle`), kept fresh by
+///      this crate's build.rs.
+///   3. PATH lookup (globally installed `nacelle`).
+///
+/// Returning `None` means no helper was found anywhere; callers should
+/// surface a clear error rather than silently spawning a missing binary.
+pub fn resolve_nacelle_binary() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("NACELLE_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    if let Some(path) = dev_workspace_binary("nacelle") {
+        return Some(path);
+    }
+
+    which_in_path("nacelle")
+}
+
+/// `target/{profile}/<name>` inside the root workspace that ships ato-cli
+/// and nacelle. The path is embedded by build.rs via `rustc-env=…` so it's
+/// only populated when ato-desktop was built from the monorepo.
+fn dev_workspace_binary(name: &str) -> Option<PathBuf> {
+    let target_root = option_env!("ATO_DESKTOP_DEV_HELPER_TARGET")?;
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let bin_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    let candidate = PathBuf::from(target_root).join(profile).join(bin_name);
+    candidate.is_file().then_some(candidate)
 }
 
 fn bundled_ato_binary() -> Result<Option<PathBuf>> {
@@ -2634,7 +2997,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
             cols: 120,
             rows: 40,
         },
-        nacelle_path: std::env::var("NACELLE_PATH").ok().map(PathBuf::from),
+        nacelle_path: resolve_nacelle_binary(),
         ato_path: std::env::var("ATO_DESKTOP_ATO_BIN")
             .ok()
             .map(PathBuf::from)
@@ -2721,8 +3084,8 @@ mod tests {
     use super::{
         allows_registry_guest_recovery, build_launch_session, collect_dev_script_dirs,
         detect_package_manager, extract_localhost_url, find_capsule_root, find_dev_script_dir,
-        pop_last_codepoint_width, url_port, which_in_path_entries, ResolvePayload,
-        SessionStartInfo,
+        pop_last_codepoint_width, url_port, which_in_path_entries, DesktopLaunchInput,
+        ResolvePayload, SessionStartInfo,
     };
 
     fn resolved_payload(
@@ -3544,10 +3907,12 @@ pub fn spawn_terminal_session(
     cols: u16,
     rows: u16,
 ) -> Result<TerminalProcess> {
-    // Locate nacelle binary
-    let nacelle_bin = std::env::var("NACELLE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("nacelle"));
+    // Locate nacelle binary: NACELLE_PATH → dev workspace target → PATH.
+    let nacelle_bin = resolve_nacelle_binary().ok_or_else(|| {
+        anyhow!(
+            "nacelle helper binary was not found. Set NACELLE_PATH or install 'nacelle' on PATH."
+        )
+    })?;
 
     // Write ExecEnvelope to a temp file so stdin stays free for TerminalCommands
     let tmp_dir = PathBuf::from(".tmp");
@@ -4940,6 +5305,11 @@ mod fast_path_tests {
             process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
                 std::process::id(),
             ),
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         }
     }
 
@@ -5111,5 +5481,246 @@ mod fast_path_tests {
         let err = resolve_ato_binary().unwrap_err();
         assert!(format!("{err:#}").contains("missing ato helper"));
         std::env::remove_var("ATO_DESKTOP_ATO_BIN");
+    }
+
+    #[test]
+    fn local_manifest_launch_input_uses_path_as_boundary_not_handle() {
+        let route = crate::state::LocalManifestRoute {
+            manifest_path: PathBuf::from("/ato/desktop/github-drafts/o/r/sha/draft/capsule.toml"),
+            source_handle: "github.com/owner/repo".to_string(),
+            label: "repo".to_string(),
+            requested_ref: "main".to_string(),
+            resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            manifest_source: crate::state::ManifestSource::UserEdited,
+            manifest_hash: "hash".to_string(),
+            draft_id: "draft".to_string(),
+        };
+        let input = DesktopLaunchInput::from_local_manifest(&route);
+
+        assert_eq!(input.launch_input_kind(), "local_manifest_path");
+        assert_eq!(input.source_handle(), "github.com/owner/repo");
+        assert!(input.boundary_arg().ends_with("/capsule.toml"));
+        assert_ne!(input.boundary_arg(), input.source_handle());
+    }
+
+    #[test]
+    fn handle_launch_input_keeps_handle_as_boundary() {
+        let input = DesktopLaunchInput::from_handle("github.com/owner/repo");
+        assert_eq!(input.launch_input_kind(), "handle");
+        assert_eq!(input.source_handle(), "github.com/owner/repo");
+        assert_eq!(input.boundary_arg(), "github.com/owner/repo");
+        assert!(input.manifest_path_for_log().is_none());
+    }
+
+    #[test]
+    fn parses_oci_sessions_from_ps_json() {
+        let entries: Vec<PsJsonEntry> = serde_json::from_str(
+            r#"[
+                {"id":"native-session","status":"ready","runtime":"source/node"},
+                {
+                    "kind":"oci",
+                    "id":"fallback-id",
+                    "session_id":"oci-session-1",
+                    "import_kind":"docker-run-script",
+                    "service_count":2,
+                    "main_endpoint":"http://127.0.0.1:43123/",
+                    "status":"running",
+                    "source_path":"/work/blinko/install.sh",
+                    "source_hash":"blake3:abc"
+                }
+            ]"#,
+        )
+        .expect("ps json fixture");
+
+        let sessions = oci_sessions_from_ps_entries(entries);
+
+        assert_eq!(
+            sessions,
+            vec![OciSessionSnapshot {
+                id: "oci-session-1".to_string(),
+                import_kind: OciImportKind::DockerRunScript,
+                status: OciSessionStatus::Running,
+                endpoint_url: Some("http://127.0.0.1:43123/".to_string()),
+                service_count: 2,
+                source_path: Some("/work/blinko/install.sh".to_string()),
+                source_hash: Some("blake3:abc".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn desktop_stop_oci_session_invokes_cli_stop_id() {
+        assert_eq!(
+            oci_stop_args("oci-session-42"),
+            ["stop", "--id", "oci-session-42"]
+        );
+    }
+
+    #[test]
+    fn desktop_uses_ato_home_for_cli_env() {
+        let mut command = Command::new("ato");
+        apply_desktop_ato_home(
+            &mut command,
+            Some(std::ffi::OsString::from("/desktop/test-home")),
+        );
+
+        let ato_home = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("ATO_HOME"))
+            .and_then(|(_, value)| value);
+        assert_eq!(ato_home, Some(std::ffi::OsStr::new("/desktop/test-home")));
+    }
+
+    #[test]
+    fn desktop_does_not_display_secret_values() {
+        let entries: Vec<PsJsonEntry> = serde_json::from_str(
+            r#"[
+                {
+                    "kind":"oci",
+                    "session_id":"oci-session-1",
+                    "import_kind":"compose",
+                    "service_count":1,
+                    "status":"running",
+                    "DATABASE_URL":"postgres://private-value",
+                    "generated_password":"do-not-render"
+                }
+            ]"#,
+        )
+        .expect("ps json fixture");
+        let mut registry = crate::state::session::SessionRegistry::default();
+        registry.sync_oci_sessions(oci_sessions_from_ps_entries(entries));
+
+        let rendered = serde_json::to_string(&registry.view_entries()).expect("session json");
+
+        assert!(!rendered.contains("private-value"));
+        assert!(!rendered.contains("do-not-render"));
+    }
+}
+
+#[cfg(test)]
+mod launch_error_display_tests {
+    use super::*;
+
+    // Helper to make a tracing-formatted DEBUG line.
+    fn debug_line(msg: &str) -> String {
+        format!(
+            "2024-01-01T12:00:00.000000Z DEBUG ato_cli::commands::run::preflight: {msg} phase=\"run\" runtime=\"oci\""
+        )
+    }
+
+    #[test]
+    fn extract_launch_error_ignores_debug_provision_diagnostics() {
+        let stderr = debug_line("Provision command path diagnostics");
+        let result = extract_user_facing_error(&stderr, "");
+        // All stderr is noise; no stdout either — should return None.
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn extract_launch_error_ignores_all_debug_lines_no_signal() {
+        let stderr = [
+            debug_line("Provision command path diagnostics"),
+            debug_line("another debug event key=val"),
+            "  INFO ato_cli::run: starting provisioner".to_string(),
+        ]
+        .join("\n");
+        assert_eq!(extract_user_facing_error(&stderr, ""), None);
+    }
+
+    #[test]
+    fn extract_launch_error_prefers_final_failure_line() {
+        let stderr = [
+            debug_line("Provision command path diagnostics"),
+            "ERROR ato_cli::run: docker-compose: command not found".to_string(),
+        ]
+        .join("\n");
+        let result = extract_user_facing_error(&stderr, "");
+        assert_eq!(
+            result.as_deref(),
+            Some("ERROR ato_cli::run: docker-compose: command not found")
+        );
+    }
+
+    #[test]
+    fn extract_launch_error_surfaces_timeout_line() {
+        let stderr = [
+            debug_line("some debug event"),
+            "readiness check timed out after 120s for service web".to_string(),
+        ]
+        .join("\n");
+        let result = extract_user_facing_error(&stderr, "");
+        assert!(result.unwrap().contains("readiness check timed out"));
+    }
+
+    #[test]
+    fn extract_launch_error_includes_tail_when_no_typed_error() {
+        let stderr = [
+            "some plain output line 1".to_string(),
+            "some plain output line 2".to_string(),
+            "some plain output line 3".to_string(),
+            "some plain output line 4".to_string(),
+        ]
+        .join("\n");
+        let result = extract_user_facing_error(&stderr, "");
+        let msg = result.unwrap();
+        // Should contain the last lines, not all four.
+        assert!(msg.contains("line 2"));
+        assert!(msg.contains("line 3"));
+        assert!(msg.contains("line 4"));
+    }
+
+    #[test]
+    fn extract_launch_error_prefers_stdout_json_envelope() {
+        let stderr = debug_line("Provision command path diagnostics");
+        let stdout = r#"{"error":{"code":"E103","message":"OPENAI_API_KEY is not set"}}"#;
+        let result = extract_user_facing_error(&stderr, stdout);
+        assert_eq!(result.as_deref(), Some("E103: OPENAI_API_KEY is not set"));
+    }
+
+    #[test]
+    fn desktop_launch_failure_shows_actionable_error_not_debug_line() {
+        // Simulate the exact problem: stderr is only a DEBUG provision line,
+        // stdout is empty. The result should be None (not the debug line).
+        let stderr =
+            "  DEBUG ato_cli::commands::run::preflight: Provision command path diagnostics phase=\"run\" runtime=\"oci\" driver=\"docker-compose\"";
+        let result = extract_user_facing_error(stderr, "");
+        assert!(
+            result.is_none(),
+            "debug-only stderr should yield None, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn strip_tracing_timestamp_removes_iso8601_prefix() {
+        let line = "2024-06-15T08:23:45.123456Z DEBUG target: message";
+        assert_eq!(strip_tracing_timestamp(line), "DEBUG target: message");
+    }
+
+    #[test]
+    fn strip_tracing_timestamp_leaves_line_without_timestamp() {
+        let line = "plain error message";
+        assert_eq!(strip_tracing_timestamp(line), "plain error message");
+    }
+
+    #[test]
+    fn is_tracing_noise_line_detects_debug() {
+        assert!(is_tracing_noise_line(
+            "2024-01-01T00:00:00.000000Z DEBUG ato_cli: some message"
+        ));
+        assert!(is_tracing_noise_line("  DEBUG ato_cli: some message"));
+        assert!(is_tracing_noise_line("TRACE ato_cli: fine grained"));
+        assert!(is_tracing_noise_line(
+            "INFO ato_cli: informational only"
+        ));
+    }
+
+    #[test]
+    fn is_tracing_noise_line_keeps_error_and_warn() {
+        assert!(!is_tracing_noise_line("ERROR ato_cli: something failed"));
+        assert!(!is_tracing_noise_line(
+            "2024-01-01T00:00:00.000000Z ERROR ato_cli: bad"
+        ));
+        assert!(!is_tracing_noise_line("docker-compose: command not found"));
     }
 }

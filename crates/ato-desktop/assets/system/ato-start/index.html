@@ -447,7 +447,7 @@
   // ── IPC helper ──────────────────────────────────────────
   function ipc(command) {
     if (window.ipc) {
-      window.ipc.postMessage(JSON.stringify({ capsule: 'ato-start', command }));
+      window.ipc.postMessage(JSON.stringify({ capsule: 'start', command }));
     }
   }
 
