@@ -11,6 +11,7 @@ When a draft becomes authoritative, move it into `../accepted/`.
 - engine / workload / provider-toolchain boundaries
 - discovery, identity, and association
 - automation and desktop surfaces
+- run/install ownership semantics before `ato dev`
 
 The draft set is still mixed-language. Keep each individual document internally
 consistent and prefer English for new public-facing additions.
