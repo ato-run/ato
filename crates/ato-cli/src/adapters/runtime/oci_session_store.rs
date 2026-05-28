@@ -866,6 +866,7 @@ mod tests {
 
     /// OciSessionStore::new() must write under ${ATO_HOME}/oci-sessions/, not
     /// under HOME/.ato/oci-sessions/ when ATO_HOME is set to a different path.
+    #[serial_test::serial]
     #[test]
     fn oci_session_store_uses_ato_home_not_home() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -906,6 +907,7 @@ mod tests {
 
     /// list/mark_stopped/delete in OciSessionStore::new() must also resolve
     /// through ATO_HOME.
+    #[serial_test::serial]
     #[test]
     fn stop_all_oci_sessions_reads_from_ato_home() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -929,6 +931,7 @@ mod tests {
     }
 
     /// Secret values must not appear in session records regardless of ATO_HOME.
+    #[serial_test::serial]
     #[test]
     fn secret_values_not_written_to_ato_home_session_record() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -956,6 +959,7 @@ mod tests {
     }
 
     /// A clean ATO_HOME starts with no OCI sessions.
+    #[serial_test::serial]
     #[test]
     fn clean_ato_home_has_no_cross_contamination_from_default_home() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
