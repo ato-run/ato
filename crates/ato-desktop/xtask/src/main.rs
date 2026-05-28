@@ -7,6 +7,8 @@ use anyhow::{bail, Context, Result};
 const APP_NAME: &str = "Ato Desktop";
 const APP_IDENTIFIER: &str = "run.ato.desktop";
 const DEFAULT_TARGET: &str = "darwin-arm64";
+const BUNDLED_SYSTEM_ASSET_EXCLUDED_DIRS: &[&str] =
+    &["node_modules", ".vite", ".astro", ".next", "target"];
 
 fn main() -> Result<()> {
     let all: Vec<String> = std::env::args().skip(1).collect();
@@ -157,7 +159,6 @@ fn print_help() {
     );
 }
 
-
 /// Build the `ato-desktop` and `ato` binaries for a given Rust target.
 /// Returns the *target staging root*, populated as either:
 ///   - macOS:   `dist/<target>/Ato Desktop.app/Contents/...`
@@ -207,7 +208,7 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
         .with_context(|| format!("failed to copy {} to staging", helper_exe.display()))?;
     fs::copy(&nacelle_exe, bin_dir.join("nacelle.exe"))
         .with_context(|| format!("failed to copy {} to staging", nacelle_exe.display()))?;
-    copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
+    copy_bundled_assets(&paths.desktop_root.join("assets"), &assets_dir)?;
 
     println!("Staged Windows install tree at {}", staging.display());
     Ok(staging)
@@ -296,7 +297,7 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
         fs::create_dir_all(&icon_share_dir)?;
         fs::copy(&icon_file, icon_share_dir.join("ato-desktop.png"))?;
     }
-    copy_dir_recursive(&paths.desktop_root.join("assets"), &assets_dir)?;
+    copy_bundled_assets(&paths.desktop_root.join("assets"), &assets_dir)?;
 
     println!("Staged Linux AppDir at {}", staging.display());
     Ok(staging)
@@ -825,7 +826,7 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     copy_executable(&nacelle_binary, &nacelle_path)?;
     strip_macos_binary(&nacelle_path)?;
 
-    copy_dir_recursive(
+    copy_bundled_assets(
         &paths.desktop_root.join("assets"),
         &resources_dir.join("assets"),
     )?;
@@ -899,6 +900,40 @@ fn run_cargo_build(
     Ok(())
 }
 
+fn copy_bundled_assets(from: &Path, to: &Path) -> Result<()> {
+    if !from.is_dir() {
+        bail!("directory does not exist: {}", from.display());
+    }
+
+    fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let destination = to.join(entry.file_name());
+        if path.is_dir() {
+            if entry.file_name() == "system" {
+                copy_dir_recursive_excluding(
+                    &path,
+                    &destination,
+                    BUNDLED_SYSTEM_ASSET_EXCLUDED_DIRS,
+                )?;
+            } else {
+                copy_dir_recursive(&path, &destination)?;
+            }
+        } else {
+            fs::copy(&path, &destination).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    path.display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
 fn copy_executable(from: &Path, to: &Path) -> Result<()> {
     fs::copy(from, to)
         .with_context(|| format!("failed to copy {} to {}", from.display(), to.display()))?;
@@ -934,6 +969,10 @@ fn strip_macos_binary(path: &Path) -> Result<()> {
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    copy_dir_recursive_excluding(from, to, &[])
+}
+
+fn copy_dir_recursive_excluding(from: &Path, to: &Path, excluded_dirs: &[&str]) -> Result<()> {
     if !from.is_dir() {
         bail!("directory does not exist: {}", from.display());
     }
@@ -942,9 +981,14 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
         let entry = entry?;
         let path = entry.path();
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if path.is_dir() && excluded_dirs.iter().any(|excluded| *excluded == file_name) {
+            continue;
+        }
         let destination = to.join(entry.file_name());
         if path.is_dir() {
-            copy_dir_recursive(&path, &destination)?;
+            copy_dir_recursive_excluding(&path, &destination, excluded_dirs)?;
         } else {
             fs::copy(&path, &destination).with_context(|| {
                 format!(
@@ -1114,7 +1158,21 @@ impl MacTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_info_plist, MacTarget};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{copy_bundled_assets, render_info_plist, MacTarget};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
 
     #[test]
     fn parses_supported_targets() {
@@ -1130,4 +1188,61 @@ mod tests {
         assert!(plist.contains("1.2.3"));
     }
 
+    #[test]
+    fn bundled_assets_exclude_build_time_directories_but_keep_runtime_files() {
+        let source = temp_dir("ato-desktop-assets-src");
+        let dest = temp_dir("ato-desktop-assets-dst");
+
+        fs::create_dir_all(source.join("system/ato-start/dist"))
+            .expect("dist dir should be created");
+        fs::create_dir_all(source.join("system/ato-start/node_modules/react"))
+            .expect("node_modules dir should be created");
+        fs::create_dir_all(source.join("system/ato-start/.astro/cache"))
+            .expect(".astro dir should be created");
+        fs::create_dir_all(source.join("system/node_modules/vite"))
+            .expect("workspace node_modules dir should be created");
+        fs::create_dir_all(source.join("preload")).expect("preload dir should be created");
+
+        fs::write(
+            source.join("system/ato-start/capsule.toml"),
+            "run = \"dist\"\n",
+        )
+        .expect("capsule manifest should be written");
+        fs::write(
+            source.join("system/ato-start/dist/index.html"),
+            "<html></html>",
+        )
+        .expect("dist index should be written");
+        fs::write(
+            source.join("system/ato-start/node_modules/react/index.js"),
+            "export {};",
+        )
+        .expect("react placeholder should be written");
+        fs::write(
+            source.join("system/ato-start/.astro/cache/manifest.json"),
+            "{}",
+        )
+        .expect(".astro placeholder should be written");
+        fs::write(
+            source.join("system/node_modules/vite/index.js"),
+            "export {};",
+        )
+        .expect("workspace node_modules placeholder should be written");
+        fs::write(source.join("preload/host_bridge.js"), "console.log('ok');")
+            .expect("preload script should be written");
+        fs::write(source.join("AppIcon.icns"), "icon").expect("icon should be written");
+
+        copy_bundled_assets(&source, &dest).expect("asset copy should succeed");
+
+        assert!(dest.join("system/ato-start/capsule.toml").is_file());
+        assert!(dest.join("system/ato-start/dist/index.html").is_file());
+        assert!(dest.join("preload/host_bridge.js").is_file());
+        assert!(dest.join("AppIcon.icns").is_file());
+        assert!(!dest.join("system/ato-start/node_modules").exists());
+        assert!(!dest.join("system/ato-start/.astro").exists());
+        assert!(!dest.join("system/node_modules").exists());
+
+        let _ = fs::remove_dir_all(source);
+        let _ = fs::remove_dir_all(dest);
+    }
 }
