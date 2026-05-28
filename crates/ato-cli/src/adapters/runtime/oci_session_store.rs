@@ -1350,9 +1350,13 @@ mod tests {
             |_| panic!("machine stop must not run when multiple machines are running"),
         );
 
+        // Production message intentionally changed in commit 1537c672
+        // ("fix(ato): align Podman mixed-state handling"): the count is now
+        // `configured` (all machines, regardless of running/stopped) so the
+        // ambiguity warning fires consistently in mixed-state scenarios.
         assert_eq!(
             result.skipped_reason.as_deref(),
-            Some("2 running Podman machine(s) present; machine ownership is ambiguous")
+            Some("2 configured Podman machine(s) present; machine ownership is ambiguous")
         );
         assert!(result.stopped_machines.is_empty());
     }
