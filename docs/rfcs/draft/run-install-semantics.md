@@ -374,6 +374,77 @@ installed-app state and emit a receipt for that promotion.
 - `ato run` is documented as ephemeral local production rehearsal.
 - `ato install` is documented as durable local app registration.
 
+## 11. Conformance Snapshot (as of #335 + run/install guardrails)
+
+This snapshot captures the observable shapes that distinguish run-owned and
+install-owned state under `ATO_HOME` at the time these guardrails were added.
+It is meant to be read alongside §5 (state boundaries) and §7 (JSON/receipt
+implications), and to be kept honest by
+[`crates/ato-cli/tests/run_install_semantics.rs`][guardrails].
+
+### 11.1 File shapes that mark install-owned state
+
+A regression check that wants to assert "this command did not install
+anything" looks for any of the following under `ATO_HOME`:
+
+- `instances/<installed_app_id>/app.json` — installed-app registry entry
+- `instances/<installed_app_id>/profiles/<profile_id>/profile.json` — install profile
+- `instances/<installed_app_id>/profiles/<profile_id>/current_revision` — profile revision pointer
+- `revisions/<install_revision_id>/…` — immutable revision tree
+
+Paths are produced by
+[`capsule_core::foundation::install_lifecycle::store::InstallInstanceStore`][store].
+The exact directory names may move in a later layout refactor; the file-shape
+predicates in the guardrail test are deliberately structural rather than
+hard-coded to a single path.
+
+### 11.2 Run-owned state that `ato run` may create
+
+A run-owned launch may write under:
+
+- `runs/`, `run-sessions/` — CLI-owned session sidecars and ephemeral state
+- `apps/ato-desktop/sessions/` — Desktop direct-read session records
+- `cache/`, `toolchains/`, `runtimes/`, `engines/`, `store/`, `projections/` — caches
+- `executions/` — execution receipts
+
+These paths must never imply the user has kept the app.
+
+### 11.3 Session record discriminator
+
+`ato_session_core::record::StoredSessionInfo` already carries the
+discriminator described in §7. Until a normative helper crystallizes,
+treat the following predicate as the canonical run-vs-install check on a
+session record:
+
+```rust
+fn is_run_owned(record: &StoredSessionInfo) -> bool {
+    record.installed_app_id.is_none()
+        && record.install_profile_id.is_none()
+        && record.install_profile_key.is_none()
+        && record.install_revision_id.is_none()
+}
+```
+
+`capsule_instance_key` is derived from the four identifiers above plus
+`execution_id` and so cannot meaningfully be set on a run-owned record.
+
+A regression that promotes any of the four primary identifiers to
+non-`Option`, or to a non-`null` default on the wire, would silently make
+every `ato run` session look install-owned to receipt consumers and to the
+Desktop fast path. The guardrail test pins both shapes — run-owned and
+install-owned — against this predicate.
+
+### 11.4 Out of scope for the guardrails
+
+These remain documented but unverified by the current guardrails:
+
+- OS shortcut records (no normative storage layout yet)
+- Update channel records (deferred until update flow lands)
+- "App card" surfaces in Desktop (UI-level, covered by Desktop tests)
+
+[guardrails]: ../../../crates/ato-cli/tests/run_install_semantics.rs
+[store]: ../../../crates/capsule-core/src/foundation/install_lifecycle/store.rs
+
 ## References
 
 - `docs/rfcs/accepted/ATO_CLI_SPEC.md`
@@ -383,3 +454,4 @@ installed-app state and emit a receipt for that promotion.
 - `docs/execution-identity.md`
 - `crates/capsule-core/src/foundation/install_lifecycle/ids.rs`
 - `crates/capsule-core/src/foundation/install_lifecycle/store.rs`
+- `crates/ato-cli/tests/run_install_semantics.rs`
