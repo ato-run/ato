@@ -22,9 +22,12 @@
 //! callers fall back to the direct `local_url`.
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use ato_net::control::SyncClient;
 
 use crate::state::GuestRoute;
