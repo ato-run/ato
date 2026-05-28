@@ -183,12 +183,6 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
         rust_target,
         &paths.target_root,
     )?;
-    run_cargo_build(
-        &paths.netd_manifest,
-        "ato-netd",
-        rust_target,
-        &paths.target_root,
-    )?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("Ato");
     if staging.exists() {
@@ -237,6 +231,12 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
     run_cargo_build(
         &paths.nacelle_manifest,
         "nacelle",
+        rust_target,
+        &paths.target_root,
+    )?;
+    run_cargo_build(
+        &paths.netd_manifest,
+        "ato-netd",
         rust_target,
         &paths.target_root,
     )?;
