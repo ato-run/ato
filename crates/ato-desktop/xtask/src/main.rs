@@ -159,11 +159,11 @@ fn print_help() {
     );
 }
 
-/// Build the `ato-desktop` and `ato` binaries for a given Rust target.
+/// Build the `ato-desktop` and helper binaries for a given Rust target.
 /// Returns the *target staging root*, populated as either:
 ///   - macOS:   `dist/<target>/Ato Desktop.app/Contents/...`
 ///   - Windows: `dist/<target>/Ato/{ato-desktop.exe, bin/ato.exe, assets/}`
-///   - Linux:   `dist/<target>/AppDir/usr/{bin/{ato-desktop,ato},share/applications/...}`
+///   - Linux:   `dist/<target>/AppDir/usr/{bin/{ato-desktop,ato,ato-netd},share/applications/...}`
 fn bundle_windows_app(target: &str) -> Result<PathBuf> {
     let rust_target = match target {
         "windows-x86_64" => "x86_64-pc-windows-msvc",
@@ -268,6 +268,11 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
         bin_dir.join("nacelle"),
     )
     .context("failed to stage nacelle binary")?;
+    copy_executable(
+        &paths.target_root.join(&profile_dir).join("ato-netd"),
+        &bin_dir.join("ato-netd"),
+    )
+    .context("failed to stage ato-netd binary")?;
 
     // Copy declarative installer metadata if present. These ship from
     // PR-8's installer/ folder and let `xdg-mime` pick up our URL
@@ -298,6 +303,15 @@ fn bundle_linux_app(target: &str) -> Result<PathBuf> {
         fs::copy(&icon_file, icon_share_dir.join("ato-desktop.png"))?;
     }
     copy_bundled_assets(&paths.desktop_root.join("assets"), &assets_dir)?;
+    assert_required_paths(
+        &staging,
+        &[
+            "usr/bin/ato",
+            "usr/bin/nacelle",
+            "usr/bin/ato-netd",
+            "usr/share/ato-desktop/assets",
+        ],
+    )?;
 
     println!("Staged Linux AppDir at {}", staging.display());
     Ok(staging)
@@ -506,6 +520,7 @@ fn codesign_bundle(bundle: &Path) -> Result<()> {
     let entitlements = locate_entitlements()?;
     let helper = bundle.join("Contents").join("Helpers").join("ato");
     let nacelle = bundle.join("Contents").join("Helpers").join("nacelle");
+    let netd = bundle.join("Contents").join("Helpers").join("ato-netd");
     let main_binary = bundle.join("Contents").join("MacOS").join("ato-desktop");
 
     if !helper.exists() {
@@ -520,13 +535,20 @@ fn codesign_bundle(bundle: &Path) -> Result<()> {
             nacelle.display()
         );
     }
+    if !netd.exists() {
+        bail!(
+            "expected ato-netd binary at {} — did `bundle` complete successfully?",
+            netd.display()
+        );
+    }
     if !main_binary.exists() {
         bail!("expected main binary at {}", main_binary.display());
     }
 
-    // Inside-out: Helpers/{ato,nacelle} → MacOS/ato-desktop → outer .app
+    // Inside-out: Helpers/{ato,nacelle,ato-netd} → MacOS/ato-desktop → outer .app
     codesign_path(&helper, &mode, &entitlements)?;
     codesign_path(&nacelle, &mode, &entitlements)?;
+    codesign_path(&netd, &mode, &entitlements)?;
     codesign_path(&main_binary, &mode, &entitlements)?;
     codesign_path(bundle, &mode, &entitlements)?;
     println!(
@@ -787,6 +809,12 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
         &spec.rust_target,
         &paths.target_root,
     )?;
+    run_cargo_build(
+        &paths.netd_manifest,
+        "ato-netd",
+        &spec.rust_target,
+        &paths.target_root,
+    )?;
 
     let bundle_root = paths
         .desktop_root
@@ -815,16 +843,20 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     let desktop_binary = paths.target_root.join(&profile_dir).join("ato-desktop");
     let helper_binary = paths.target_root.join(&profile_dir).join("ato");
     let nacelle_binary = paths.target_root.join(&profile_dir).join("nacelle");
+    let netd_binary = paths.target_root.join(&profile_dir).join("ato-netd");
 
     let app_binary_path = macos_dir.join("ato-desktop");
     let helper_path = helpers_dir.join("ato");
     let nacelle_path = helpers_dir.join("nacelle");
+    let netd_path = helpers_dir.join("ato-netd");
     copy_executable(&desktop_binary, &app_binary_path)?;
     strip_macos_binary(&app_binary_path)?;
     copy_executable(&helper_binary, &helper_path)?;
     strip_macos_binary(&helper_path)?;
     copy_executable(&nacelle_binary, &nacelle_path)?;
     strip_macos_binary(&nacelle_path)?;
+    copy_executable(&netd_binary, &netd_path)?;
+    strip_macos_binary(&netd_path)?;
 
     copy_bundled_assets(
         &paths.desktop_root.join("assets"),
@@ -841,6 +873,16 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
             .context("failed to copy AppIcon.icns to Contents/Resources")?;
     }
 
+    assert_required_paths(
+        &bundle_root,
+        &[
+            "Contents/Helpers/ato",
+            "Contents/Helpers/nacelle",
+            "Contents/Helpers/ato-netd",
+            "Contents/Resources/assets",
+        ],
+    )?;
+
     let plist = render_info_plist(&spec.bundle_version);
     fs::write(contents_dir.join("Info.plist"), plist).context("failed to write Info.plist")?;
 
@@ -848,6 +890,7 @@ fn bundle_macos_app(target: &str) -> Result<PathBuf> {
     println!("  app binary: {}", app_binary_path.display());
     println!("  helper: {}", helper_path.display());
     println!("  nacelle: {}", nacelle_path.display());
+    println!("  netd: {}", netd_path.display());
     println!("  assets: {}", resources_dir.join("assets").display());
 
     Ok(bundle_root)
@@ -968,6 +1011,20 @@ fn strip_macos_binary(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn assert_required_paths(root: &Path, required_paths: &[&str]) -> Result<()> {
+    for relative_path in required_paths {
+        let path = root.join(relative_path);
+        if !path.exists() {
+            bail!(
+                "expected bundled path at {} — staging is incomplete",
+                path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     copy_dir_recursive_excluding(from, to, &[])
 }
@@ -1061,6 +1118,7 @@ struct WorkspacePaths {
     desktop_manifest: PathBuf,
     ato_manifest: PathBuf,
     nacelle_manifest: PathBuf,
+    netd_manifest: PathBuf,
     target_root: PathBuf,
     store_root: PathBuf,
     store_dist_source: PathBuf,
@@ -1106,6 +1164,7 @@ impl WorkspacePaths {
         let ato_manifest = ato_root.join("Cargo.toml");
         // nacelle lives at <repo>/crates/nacelle in the monorepo.
         let nacelle_manifest = repo_root.join("crates").join("nacelle").join("Cargo.toml");
+        let netd_manifest = repo_root.join("crates").join("ato-netd").join("Cargo.toml");
         let target_root = repo_root.join("target");
         // ato-web lives as a sibling of the ato repo root
         // (apps/ato-web alongside apps/ato).
@@ -1125,6 +1184,7 @@ impl WorkspacePaths {
             desktop_manifest,
             ato_manifest,
             nacelle_manifest,
+            netd_manifest,
             target_root,
             store_root,
             store_dist_source,
@@ -1159,10 +1219,10 @@ impl MacTarget {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{copy_bundled_assets, render_info_plist, MacTarget};
+    use super::{copy_bundled_assets, render_info_plist, MacTarget, WorkspacePaths};
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1244,5 +1304,17 @@ mod tests {
 
         let _ = fs::remove_dir_all(source);
         let _ = fs::remove_dir_all(dest);
+    }
+
+    #[test]
+    fn workspace_paths_include_netd_manifest() {
+        let paths = WorkspacePaths::discover().expect("workspace paths should resolve");
+        assert!(
+            paths
+                .netd_manifest
+                .ends_with(Path::new("crates/ato-netd/Cargo.toml")),
+            "expected ato-netd manifest path, got {}",
+            paths.netd_manifest.display()
+        );
     }
 }
