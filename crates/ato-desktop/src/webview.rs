@@ -220,9 +220,19 @@ struct ManagedWebView {
     webview: WebView,
     #[cfg(target_os = "macos")]
     frame_host: Option<Retained<NSView>>,
-    // _context removed: WebContext is now shared on WebViewManager
-    // (persistent on-disk store) so it outlives every ManagedWebView
-    // by definition.
+    /// Ephemeral per-capsule WebContext.  `Some` for capsule routes
+    /// (Capsule, CapsuleHandle, CapsuleUrl, LocalManifest) — each
+    /// gets its own in-memory WKWebsiteDataStore so cookies,
+    /// localStorage, and service-worker storage are fully isolated per
+    /// instance.  `None` for system routes (ExternalUrl, Terminal)
+    /// that share the persistent `WebViewManager::web_context` so
+    /// ato.run sign-in state survives tab close/reopen.
+    ///
+    /// The field name is prefixed with `_` to signal that it is kept
+    /// alive only for its Drop side-effect (the native WKWebsiteDataStore
+    /// object is released when both the WebView and this WebContext are
+    /// dropped together).
+    _ephemeral_ctx: Option<WebContext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2196,11 +2206,31 @@ impl WebViewManager {
         };
 
         let webview_bounds = content_bounds(pane.bounds);
-        // Shared persistent WebContext — see WebViewManager.web_context
-        // for rationale (cookie persistence + cross-pane sharing for
-        // ato.run sign-in state).
-        let mut builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
-            .with_bounds(bounds_to_rect(webview_bounds));
+
+        // Capsule routes (CapsuleHandle, CapsuleUrl, LocalManifest, Capsule)
+        // each get an isolated ephemeral WebContext — a fresh in-memory
+        // WKWebsiteDataStore — so cookies, localStorage, and service-worker
+        // registrations from one capsule can never bleed into another.
+        //
+        // System routes (ExternalUrl, Terminal) share the persistent
+        // WebViewManager::web_context so ato.run sign-in cookies survive
+        // tab close/reopen and cross-pane (dock ↔ store ↔ settings).
+        //
+        // `is_webview_retention_eligible_route` maps exactly to the set
+        // of routes that represent user-launched capsules, so we reuse it
+        // here rather than duplicating the match arms.
+        let mut ephemeral_ctx: Option<WebContext> =
+            if is_webview_retention_eligible_route(&pane.route) {
+                Some(WebContext::new(None))
+            } else {
+                None
+            };
+        let mut builder = if let Some(ctx) = ephemeral_ctx.as_mut() {
+            WebViewBuilder::new_with_web_context(ctx)
+        } else {
+            WebViewBuilder::new_with_web_context(&mut self.web_context)
+        }
+        .with_bounds(bounds_to_rect(webview_bounds));
 
         // Layer 1: tag every Desktop WebView with a custom UA suffix
         // so ato.run server can render Desktop-specific UX (Launch
@@ -2546,6 +2576,7 @@ impl WebViewManager {
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
+            _ephemeral_ctx: ephemeral_ctx,
         })
     }
 
