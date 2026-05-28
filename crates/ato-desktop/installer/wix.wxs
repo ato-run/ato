@@ -117,7 +117,9 @@
                 Name="Ato Desktop"
                 Description="Capsule runner"
                 Target="[INSTALLFOLDER]ato-desktop.exe"
-                WorkingDirectory="INSTALLFOLDER" />
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon.ico"
+                IconIndex="0" />
       <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
       <RegistryValue Root="HKCU"
                      Key="Software\ato-run\AtoDesktop"
