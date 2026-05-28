@@ -1,0 +1,43 @@
+schema_version = "0.3"
+name = "umami"
+version = "2.17.0"
+type = "app"
+description = "Privacy-focused analytics — simple, fast, open-source"
+homepage = "https://github.com/umami-software/umami"
+
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+env = { POSTGRES_DB = "umami", POSTGRES_USER = "umami", POSTGRES_PASSWORD = "umami-secret" }
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/umami-software/umami:postgresql-v2.17.0"
+port = 3000
+env = { DATABASE_URL = "postgresql://umami:umami-secret@db:5432/umami", APP_SECRET = "changeme-demo-secret" }
+depends_on = ["db"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "PostgreSQL data for Umami analytics"
+attach = "explicit"
+schema_id = "sha256:umami-pgdata-v1"
+
+# Explicit db service: exec probe waits until postgres is truly ready for connections.
+# TCP probe alone fires too early (postgres binds port before accepting queries).
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "umami"] }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/api/heartbeat", timeout_seconds = 300, initial_delay_seconds = 10 }
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"

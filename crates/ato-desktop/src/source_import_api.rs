@@ -74,7 +74,10 @@ pub(crate) fn discover() -> Option<ApiCreds> {
     let parsed: AuthHandoffResponse = match serde_json::from_slice(&output.stdout) {
         Ok(v) => v,
         Err(error) => {
-            tracing::warn!(?error, "ato-import api: desktop-auth-handoff returned unparseable JSON");
+            tracing::warn!(
+                ?error,
+                "ato-import api: desktop-auth-handoff returned unparseable JSON"
+            );
             return None;
         }
     };
@@ -206,7 +209,10 @@ impl ApiClient {
         let response = self
             .agent
             .post(url)
-            .set("Authorization", &format!("Bearer {}", self.creds.session_token))
+            .set(
+                "Authorization",
+                &format!("Bearer {}", self.creds.session_token),
+            )
             .set("Content-Type", "application/json")
             .set("Accept", "application/json")
             .send_string(&serde_json::to_string(body).context("serialize request body")?);
@@ -214,7 +220,10 @@ impl ApiClient {
             Ok(resp) => parse_success(resp),
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                bail!("ato-api {url} returned HTTP {code}: {}", head_lines(&body, 5))
+                bail!(
+                    "ato-api {url} returned HTTP {code}: {}",
+                    head_lines(&body, 5)
+                )
             }
             Err(other) => Err(anyhow!("ato-api {url} request failed: {other}")),
         }
@@ -370,10 +379,8 @@ mod tests {
 
     #[test]
     fn attempt_response_parses_with_or_without_row() {
-        let with_row: AttemptResponse = serde_json::from_str(
-            r#"{"source_import": {"id": "si_abc"}}"#,
-        )
-        .expect("with row");
+        let with_row: AttemptResponse =
+            serde_json::from_str(r#"{"source_import": {"id": "si_abc"}}"#).expect("with row");
         assert!(with_row.source_import.is_some());
 
         let empty: AttemptResponse = serde_json::from_str(r#"{}"#).expect("empty");

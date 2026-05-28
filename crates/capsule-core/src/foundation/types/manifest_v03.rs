@@ -178,7 +178,35 @@ fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleE
             let Some(target_table) = target_value.as_table() else {
                 continue;
             };
+            let is_oci_target = target_table
+                .get("runtime")
+                .and_then(toml::Value::as_str)
+                .map(str::trim)
+                .is_some_and(|r| r == "oci" || r.starts_with("oci/"));
             for field in ["entrypoint", "cmd"] {
+                // OCI targets may use `cmd` to override the container CMD;
+                // only source/native targets must use `run` instead.
+                if field == "cmd" && is_oci_target {
+                    // Validate that cmd is a non-empty array, not a shell string.
+                    if let Some(cmd_value) = target_table.get("cmd") {
+                        match cmd_value {
+                            toml::Value::Array(arr) if arr.is_empty() => {
+                                return Err(CapsuleError::ParseError(format!(
+                                    "schema_version=0.3 target '{}': 'cmd' must not be empty",
+                                    target_name
+                                )));
+                            }
+                            toml::Value::String(_) => {
+                                return Err(CapsuleError::ParseError(format!(
+                                    "schema_version=0.3 target '{}': 'cmd' must be an array, not a shell string",
+                                    target_name
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 if target_table
                     .get(field)
                     .is_some_and(is_non_empty_legacy_value)
@@ -186,6 +214,43 @@ fn reject_v03_legacy_fields(table: &Table, context: &str) -> Result<(), CapsuleE
                     return Err(CapsuleError::ParseError(format!(
                         "schema_version=0.3 target '{}' must not use legacy field '{}'; use 'run' instead",
                         target_name, field
+                    )));
+                }
+            }
+
+            // run_once validation
+            if target_table
+                .get("run_once")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+            {
+                if !is_oci_target {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' is only supported for OCI targets (runtime = \"oci\")",
+                        target_name
+                    )));
+                }
+                if target_table.get("readiness_probe").is_some() {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' targets must not define 'readiness_probe' (exit code 0 is the readiness condition)",
+                        target_name
+                    )));
+                }
+                if target_table.get("port").is_some() {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' targets must not define 'port' (one-shot services are not user-facing)",
+                        target_name
+                    )));
+                }
+                let has_cmd = target_table
+                    .get("cmd")
+                    .and_then(toml::Value::as_array)
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                if !has_cmd {
+                    return Err(CapsuleError::ParseError(format!(
+                        "schema_version=0.3 target '{}': 'run_once' requires 'cmd' to be set (prevents accidental long-running server behavior)",
+                        target_name
                     )));
                 }
             }

@@ -1,0 +1,31 @@
+schema_version = "0.3"
+name = "homepage"
+version = "1.0.0"
+type = "app"
+description = "A highly customizable personal start page / dashboard with service widgets"
+homepage = "https://github.com/gethomepage/homepage"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Pin note: proposed pin to ghcr.io/gethomepage/homepage:v1.2.1 — not yet AODD-confirmed
+# AODD digest (2026-05-23): sha256:8e5f595273f0...
+image = "ghcr.io/gethomepage/homepage:latest"
+port = 3000
+env = {}
+
+[state.config]
+kind = "filesystem"
+durability = "persistent"
+purpose = "Homepage YAML config files (services, bookmarks, widgets, settings)"
+attach = "explicit"
+schema_id = "sha256:98f1408a12fb512cfd5662074092fa2d5258e48fd51fa582576ae6599df7649b"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3000" }
+
+[[services.main.state_bindings]]
+state = "config"
+target = "/app/config"

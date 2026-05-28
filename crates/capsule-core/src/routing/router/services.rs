@@ -36,11 +36,43 @@ impl ManifestData {
         }
 
         let typed_manifest = self.typed_manifest()?;
-        let services = self.services();
+        let mut services = self.services();
         if services.is_empty() {
             return Err(CapsuleError::Config(
                 "top-level [services] must define at least one service".into(),
             ));
+        }
+
+        // Auto-create implicit service entries for dependency targets referenced
+        // via [targets.X] depends_on / needs that have no explicit [services.X].
+        {
+            // Collect all target-level needs across all targets.
+            let all_targets = self.all_targets();
+            let mut implicit: Vec<(String, ServiceSpec)> = Vec::new();
+            for (service_name, service) in &services {
+                let target_label = service.target.as_deref().unwrap_or(service_name.as_str());
+                if let Some(target) = all_targets.get(target_label) {
+                    for dep_label in &target.needs {
+                        // Only auto-create if not already an explicit service.
+                        if !services.contains_key(dep_label) {
+                            implicit.push((
+                                dep_label.clone(),
+                                ServiceSpec {
+                                    target: Some(dep_label.clone()),
+                                    // Inherit readiness_probe from the dependency target.
+                                    readiness_probe: all_targets
+                                        .get(dep_label.as_str())
+                                        .and_then(|t| t.readiness_probe.clone()),
+                                    ..ServiceSpec::default()
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+            for (name, spec) in implicit {
+                services.entry(name).or_insert(spec);
+            }
         }
 
         let mut dependencies = HashMap::new();
@@ -62,11 +94,31 @@ impl ManifestData {
                 )));
             }
 
-            let target_label = self.target_for_service(name)?.ok_or_else(|| {
-                CapsuleError::Config(format!("services.{}.target is required", name))
-            })?;
+            let target_label = service
+                .target
+                .as_ref()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .or_else(|| {
+                    // Legacy: service named "main" without explicit target falls
+                    // back to default_target, same as target_for_service().
+                    if name == "main" && service.entrypoint.trim().is_empty() {
+                        self.default_target_label().ok()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| {
+                    CapsuleError::Config(format!("services.{}.target is required", name))
+                })?;
             let target = self.target_named(name, &target_label)?;
-            let depends_on = service.depends_on.clone().unwrap_or_default();
+            // Merge service-level and target-level (needs/depends_on) dependencies.
+            let mut depends_on = service.depends_on.clone().unwrap_or_default();
+            for dep in &target.needs {
+                if !depends_on.contains(dep) {
+                    depends_on.push(dep.clone());
+                }
+            }
             let runtime_kind = parse_runtime_kind(&target.runtime).ok_or_else(|| {
                 CapsuleError::Config(format!(
                     "services.{}.target '{}' has unsupported runtime '{}'",
@@ -130,8 +182,17 @@ impl ManifestData {
                 .iter()
                 .filter_map(|dependency| {
                     let dependency_service = services.get(dependency)?;
-                    let dependency_target = self.target_for_service(dependency).ok().flatten()?;
-                    let dependency_port = self.target_port(&dependency_target);
+                    let dependency_target_label = services
+                        .get(dependency)
+                        .and_then(|s| s.target.clone())
+                        .filter(|t| !t.trim().is_empty())?;
+                    let dependency_target = self
+                        .target_named(dependency, &dependency_target_label)
+                        .ok()?;
+                    if dependency_target.run_once {
+                        return None;
+                    }
+                    let dependency_port = self.target_port(&dependency_target_label);
                     let dependency_network = dependency_service.network.as_ref();
                     let default_host = dependency_network
                         .and_then(|network| network.aliases.first())
@@ -159,6 +220,11 @@ impl ManifestData {
                     .as_ref()
                     .map(|network| network.allow_from.clone())
                     .unwrap_or_default(),
+                egress_proxy: service
+                    .network
+                    .as_ref()
+                    .map(|network| network.egress_proxy)
+                    .unwrap_or(true),
             };
             if name == "main" && runtime.runtime().port.is_some() {
                 network.publish = true;
@@ -170,8 +236,13 @@ impl ManifestData {
                 name: name.clone(),
                 depends_on,
                 connections,
-                readiness_probe: service.readiness_probe.clone(),
+                // Service-level probe takes priority; fall back to target-level probe.
+                readiness_probe: service
+                    .readiness_probe
+                    .clone()
+                    .or_else(|| target.readiness_probe.clone()),
                 network,
+                run_once: target.run_once,
                 runtime,
             });
         }
@@ -238,33 +309,37 @@ fn state_mounts_for_service(
     service_name: &str,
     state_source_overrides: &HashMap<String, String>,
 ) -> Result<Vec<Mount>> {
-    let Some(service) = manifest
-        .services
-        .as_ref()
-        .and_then(|services| services.get(service_name))
-    else {
-        return Ok(Vec::new());
+    let services = match manifest.services.as_ref() {
+        Some(s) => s,
+        None => return Ok(Vec::new()),
     };
 
-    service
-        .state_bindings
-        .iter()
-        .map(|binding| {
-            let state_name = binding.state.trim();
-            let requirement = manifest.state.get(state_name).ok_or_else(|| {
-                CapsuleError::Config(format!(
-                    "services.{}.state_bindings references unknown state '{}'",
-                    service_name, state_name
-                ))
-            })?;
-
-            Ok(Mount {
-                source: manifest
-                    .state_source_path(state_name, requirement, Some(state_source_overrides))
-                    .map_err(|e| CapsuleError::Runtime(e.to_string()))?,
-                target: binding.target.trim().to_string(),
-                readonly: false,
-            })
-        })
-        .collect()
+    // Collect bindings from ALL service entries where `service_target` matches
+    // `service_name` (or is absent and the binding belongs to `service_name` itself).
+    let mut mounts = Vec::new();
+    for (svc_name, service) in services {
+        for binding in &service.state_bindings {
+            let effective_target = binding
+                .service_target
+                .as_deref()
+                .unwrap_or(svc_name.as_str());
+            if effective_target == service_name {
+                let state_name = binding.state.trim();
+                let requirement = manifest.state.get(state_name).ok_or_else(|| {
+                    CapsuleError::Config(format!(
+                        "services.{}.state_bindings references unknown state '{}'",
+                        svc_name, state_name
+                    ))
+                })?;
+                mounts.push(Mount {
+                    source: manifest
+                        .state_source_path(state_name, requirement, Some(state_source_overrides))
+                        .map_err(|e| CapsuleError::Runtime(e.to_string()))?,
+                    target: binding.target.trim().to_string(),
+                    readonly: false,
+                });
+            }
+        }
+    }
+    Ok(mounts)
 }

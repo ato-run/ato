@@ -51,7 +51,8 @@ struct ManifestReadinessProbe {
     http_get: Option<String>,
     #[serde(default)]
     tcp_connect: Option<String>,
-    port: String,
+    #[serde(default)]
+    port: Option<String>,
 }
 
 pub(super) fn build_config_json(
@@ -567,13 +568,13 @@ fn execution_signals(manifest: &toml::Value) -> Option<SignalsConfig> {
 /// Same heuristic as `run_command_should_be_entrypoint` but for the
 /// `ResolvedTargetRuntime` carried by target-based services. We trust the
 /// resolved driver/runtime metadata rather than the un-normalized manifest
-/// tree, but apply the same shell-metadata / interpreter-prefix rules.
+/// tree, but apply the same shell / interpreter-prefix rules.
 fn target_run_command_should_be_entrypoint(command: &str, runtime: &ResolvedTargetRuntime) -> bool {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>']) {
+    if run_command_requires_shell(trimmed) {
         return false;
     }
     if let Some(first_token) = trimmed.split_whitespace().next() {
@@ -626,11 +627,8 @@ fn resolve_target_command(
     let entrypoint = run_command.unwrap_or(runtime.entrypoint.as_str());
     let (program, tokens) = command_tokens(entrypoint, None);
 
-    let language = runtime
-        .driver
-        .as_deref()
-        .map(normalize_language)
-        .or_else(|| detect_language_from_program(&program))
+    let language = detect_language_from_program(&program)
+        .or_else(|| runtime.driver.as_deref().map(normalize_language))
         .or_else(|| detect_language_from_entrypoint(entrypoint));
 
     let mut env = runtime.env.clone();
@@ -827,7 +825,7 @@ fn read_entrypoint(manifest: &toml::Value) -> Result<String> {
 /// instead of a shell-style command (routed through `sh -c`).
 ///
 /// We treat it as an entrypoint when:
-/// - it has no shell metacharacters AND one of:
+/// - it has no shell syntax or package-manager script shorthand AND one of:
 ///   - the manifest declares a known interpreter language;
 ///   - the (single) token's extension implies an interpreter;
 ///   - the (single) token is a local binary path (`./...`, `/abs/...`,
@@ -840,7 +838,7 @@ fn run_command_should_be_entrypoint(command: &str, manifest: &toml::Value) -> bo
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>']) {
+    if run_command_requires_shell(trimmed) {
         return false;
     }
     if let Some(first_token) = trimmed.split_whitespace().next() {
@@ -860,6 +858,41 @@ fn run_command_should_be_entrypoint(command: &str, manifest: &toml::Value) -> bo
         return true;
     }
     trimmed.starts_with("./") || trimmed.starts_with('/') || trimmed.starts_with("runtime/")
+}
+
+fn run_command_requires_shell(command: &str) -> bool {
+    command.contains(['$', '|', '&', ';', '`', '(', ')', '<', '>', '\n', '\r'])
+        || has_shell_env_assignment(command)
+        || uses_package_manager_script(command)
+}
+
+fn has_shell_env_assignment(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .is_some_and(is_shell_env_assignment)
+}
+
+fn is_shell_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn uses_package_manager_script(command: &str) -> bool {
+    let mut tokens = command.split_whitespace();
+    match (tokens.next(), tokens.next()) {
+        (Some("bunx" | "npx"), _) => true,
+        (Some("bun" | "npm"), Some("run")) => true,
+        (Some("pnpm" | "yarn"), Some(_)) => true,
+        _ => false,
+    }
 }
 
 fn resolve_shell_command(command: &str, manifest: &toml::Value) -> CommandResolution {
@@ -912,7 +945,7 @@ fn read_health_check(manifest: &toml::Value) -> Option<HealthCheck> {
     Some(HealthCheck {
         http_get,
         tcp_connect: None,
-        port: port?,
+        port,
         interval_secs: None,
         timeout_secs: None,
     })
@@ -1160,8 +1193,8 @@ fn resolve_command(
 ) -> CommandResolution {
     let (program, tokens) = command_tokens(entrypoint, command);
 
-    let language = read_language(manifest)
-        .or_else(|| detect_language_from_program(&program))
+    let language = detect_language_from_program(&program)
+        .or_else(|| read_language(manifest))
         .or_else(|| detect_language_from_entrypoint(entrypoint));
 
     let mut env = merged_manifest_env(manifest);

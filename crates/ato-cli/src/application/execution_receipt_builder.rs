@@ -15,6 +15,10 @@ use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::derive_launch_spec;
 use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ManifestData;
+use capsule_core::types::{
+    OciLaunchEnvelope, OciPolicyEnforcementLevel, OciPolicyEnforcementMode, OciPolicyEnvelope,
+    OciProviderKind, OciProviderMode, OciProviderSemantics, OciProviderSubstrate,
+};
 use serde::Serialize;
 
 use crate::application::build_materialization::BuildObservation;
@@ -258,6 +262,28 @@ pub(crate) fn build_prelaunch_receipt_v2_with_graph(
         &identity_input,
         Some(&launch_graph_bundle.resolved_graph),
     );
+
+    if let Some(ingress) = &plan.ingress {
+        let envelope = OciLaunchEnvelope::new(
+            OciProviderSemantics {
+                kind: OciProviderKind::AtoNative,
+                mode: OciProviderMode::Unknown,
+                substrate: OciProviderSubstrate::Unknown,
+                policy_profile: "ingress-declared-v1".to_string(),
+            },
+            vec![],
+            OciPolicyEnvelope {
+                enforcement_mode: OciPolicyEnforcementMode::Strict,
+                enforcement_level: OciPolicyEnforcementLevel::Enforced,
+                network_policy_hash: None,
+                filesystem_policy_hash: None,
+                capability_policy_hash: None,
+                unsupported_policy: vec![],
+            },
+        )
+        .with_ingress(Some(ingress.clone()));
+        identity_input = identity_input.with_oci_launch_envelope(Some(envelope));
+    }
 
     // For classification, derive v1-compatible Tracked fields from the v2
     // observations and reuse the existing classifier so v1 and v2 receipts

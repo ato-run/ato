@@ -225,6 +225,19 @@ pub struct SelectSettingsTab {
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = ato_desktop, no_json)]
+pub struct SelectInstalledApp {
+    pub installed_app_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
+pub struct SelectInstalledProfile {
+    pub installed_app_id: String,
+    pub profile_id: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = ato_desktop, no_json)]
 pub struct SelectRouteMetadataTab {
     pub tab: crate::state::CapsuleDetailTab,
 }
@@ -347,6 +360,26 @@ impl AssetSource for LocalAssetSource {
 
 pub fn run(skip_onboarding: bool) {
     let assets_dir = resolve_assets_dir().expect("failed to resolve ato-desktop assets directory");
+    match crate::system_capsule::materializer::bootstrap_from_assets(&assets_dir) {
+        Ok(report) => {
+            tracing::info!(
+                materialized = report.materialized.len(),
+                reused = report.reused.len(),
+                degraded = report.degraded.len(),
+                "system capsule seeds bootstrapped"
+            );
+            for degraded in &report.degraded {
+                tracing::warn!(
+                    capsule = degraded.capsule,
+                    error = degraded.error,
+                    "system capsule entered degraded state during bootstrap"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(?error, "system capsule bootstrap failed before startup");
+        }
+    }
     let open_url_bridge = Arc::new(OpenUrlBridge::default());
     let application = gpui_platform::application().with_assets(LocalAssetSource(assets_dir));
     application.on_open_urls({
@@ -365,11 +398,16 @@ pub fn run(skip_onboarding: bool) {
         cx.set_global(crate::window::content_windows::OpenContentWindows::default());
         cx.set_global(crate::state::session::SessionRegistry::default());
         cx.set_global(crate::window::launch_window::PendingLaunches::default());
+        cx.set_global(crate::state::capsule_state::CapsuleStateStore::default());
+        cx.set_global(
+            crate::system_capsule::window_registry::SystemCapsuleWindowRegistry::default(),
+        );
         crate::window::install_control_bar_controller(cx);
         // Slot tracking the currently-open Card Switcher window so
         // the Control Bar's switcher button can toggle (open → close)
         // rather than stack overlays.
         cx.set_global(crate::window::card_switcher::CardSwitcherWindowSlot::default());
+        cx.set_global(crate::window::card_switcher::CardSwitcherEntitySlot::default());
         // Slot tracking the currently-open Launcher window so the
         // Stage D retired the Launcher window — the focused
         // settings cog now opens an `ato-settings` system capsule
@@ -381,6 +419,7 @@ pub fn run(skip_onboarding: bool) {
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
+        cx.set_global(crate::window::dock::DockIdentityCache::default());
         cx.set_global(crate::window::capsule_panel::CapsulePanelWindowSlot::default());
         cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot::default());
         // Slot tracking the control bar info popup.
@@ -468,6 +507,10 @@ pub fn run(skip_onboarding: bool) {
         // user to keep or clear persisted tabs. ConfirmQuitKeep /
         // ConfirmQuitClear / CancelQuit are the resolution actions.
         cx.on_action(|_: &ConfirmQuitKeep, cx| {
+            crate::system_capsule::ato_import::stop_active_import_preview_blocking(
+                cx,
+                "desktop_shutdown",
+            );
             if crate::window::is_multi_window_enabled() {
                 let count = cx
                     .global_mut::<crate::state::session::SessionRegistry>()
@@ -477,6 +520,10 @@ pub fn run(skip_onboarding: bool) {
             cx.quit();
         });
         cx.on_action(|_: &ConfirmQuitClear, cx| {
+            crate::system_capsule::ato_import::stop_active_import_preview_blocking(
+                cx,
+                "desktop_shutdown",
+            );
             if crate::window::is_multi_window_enabled() {
                 let count = cx
                     .global_mut::<crate::state::session::SessionRegistry>()
@@ -489,6 +536,11 @@ pub fn run(skip_onboarding: bool) {
             cx.quit();
         });
         cx.on_action(|_: &ConfirmQuitWithCleanup, cx| {
+            crate::system_capsule::ato_import::stop_active_import_preview_blocking(
+                cx,
+                "desktop_shutdown",
+            );
+            crate::window::dock::cleanup_dock_window(cx);
             let report = crate::orchestrator::cleanup_host_resources();
             tracing::info!(?report, "Host resource cleanup completed on quit");
             cx.quit();
@@ -544,6 +596,9 @@ pub fn run(skip_onboarding: bool) {
                 cx.set_global(
                     crate::window::card_switcher::CardSwitcherWindowSlot(None),
                 );
+                cx.set_global(
+                    crate::window::card_switcher::CardSwitcherEntitySlot(None),
+                );
                 tracing::info!("Card Switcher window closed; slot cleared");
             }
             let settings_slot = cx
@@ -584,12 +639,6 @@ pub fn run(skip_onboarding: bool) {
                 .unwrap_or(false)
             {
                 cx.set_global(crate::window::control_bar::InfoPopupWindowSlot(None));
-                if let Some(shell) = cx.global::<crate::window::ControlBarController>().shell.clone()
-                {
-                    shell.update(cx, |shell, _| {
-                        shell.info_popup_open = false;
-                    });
-                }
                 tracing::info!("Info popup window closed; slot cleared");
             }
             let store_slot = cx
@@ -598,6 +647,17 @@ pub fn run(skip_onboarding: bool) {
             if store_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
                 cx.set_global(crate::window::store::StoreWindowSlot(None));
                 tracing::info!("Store window closed; slot cleared");
+            }
+            let import_slot = cx
+                .try_global::<crate::window::import_window::ImportWindowSlot>()
+                .and_then(|slot| slot.window);
+            if import_slot
+                .map(|h| h.window_id() == window_id)
+                .unwrap_or(false)
+            {
+                crate::system_capsule::ato_import::stop_active_import_preview(cx, "window_close");
+                cx.set_global(crate::window::import_window::ImportWindowSlot::default());
+                tracing::info!("Import window closed; slot cleared");
             }
             let dock_slot = cx
                 .global::<crate::window::dock::DockWindowSlot>()
@@ -610,30 +670,41 @@ pub fn run(skip_onboarding: bool) {
                 tracing::info!("Dock window closed; slot cleared");
             }
 
+            // Unregister system capsule window binding on close.
+            cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+                .unregister_window(window_id);
+            tracing::debug!(?window_id, "SystemCapsuleWindowRegistry: binding removed on window close");
+
             // Session lifecycle handling based on windowCloseBehavior.
             // The AppCapsuleShell Drop will detach the client; we decide
             // whether to also stop the process here.
             let close_behavior =
                 crate::config::load_config().desktop.window_close_behavior;
-            let mut registry =
-                cx.global_mut::<crate::state::session::SessionRegistry>();
-            let affected_session_ids =
-                registry.detach_clients_by_window_id(closed_id);
-            match close_behavior {
-                crate::config::WindowCloseBehavior::StopSession => {
-                    for sid in &affected_session_ids {
+            let affected_session_ids = {
+                let mut registry =
+                    cx.global_mut::<crate::state::session::SessionRegistry>();
+                let ids = registry.detach_clients_by_window_id(closed_id);
+                if close_behavior == crate::config::WindowCloseBehavior::StopSession {
+                    for sid in &ids {
                         registry.stop_session_once(sid);
                     }
                     tracing::info!(
-                        ?affected_session_ids,
+                        ?ids,
                         "windowCloseBehavior=stop-session: stopping sessions"
                     );
-                }
-                crate::config::WindowCloseBehavior::KeepSessionRunning => {
+                } else {
                     tracing::info!(
-                        ?affected_session_ids,
+                        ?ids,
                         "windowCloseBehavior=keep-session-running: sessions detached"
                     );
+                }
+                ids
+            };
+            if close_behavior == crate::config::WindowCloseBehavior::StopSession {
+                // Clear ephemeral capsule state for stopped sessions.
+                for sid in &affected_session_ids {
+                    cx.global_mut::<crate::state::capsule_state::CapsuleStateStore>()
+                        .clear_session(sid);
                 }
             }
 
@@ -727,6 +798,7 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) =
                 crate::window::capsule_panel::open_capsule_settings_window(cx, action.window_id)
             {
@@ -795,6 +867,7 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::settings_window::open_settings_window(cx) {
                 tracing::error!(error = %err, "ShowSettings: open_settings_window failed");
             }
@@ -983,6 +1056,7 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::open_card_switcher_window(cx) {
                 tracing::error!(error = %err, "failed to open card switcher window");
             }
@@ -1005,8 +1079,26 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::store::open_store_window(cx) {
                 tracing::error!(error = %err, "failed to open store window");
+            }
+        });
+
+        // Toggle Dock visibility. If the dock window exists, close it.
+        // If not, open it. The identity cache makes re-opening fast.
+        cx.on_action(|_: &ToggleDock, cx: &mut App| {
+            if !crate::window::is_multi_window_enabled() {
+                tracing::debug!(
+                    "ToggleDock dispatched but multi-window flag is off"
+                );
+                return;
+            }
+            let slot = cx.global::<crate::window::dock::DockWindowSlot>();
+            if let Some(handle) = slot.0 {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            } else {
+                let _ = crate::window::dock::open_dock_window(cx);
             }
         });
 
@@ -1018,6 +1110,7 @@ pub fn run(skip_onboarding: bool) {
                 );
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::dock::open_dock_window(cx) {
                 tracing::error!(error = %err, "failed to open dock window");
             }
@@ -1043,6 +1136,7 @@ pub fn run(skip_onboarding: bool) {
             if !crate::window::is_multi_window_enabled() {
                 return;
             }
+            crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::capsule_panel::open_capsule_panel_window(cx) {
                 tracing::error!(error = %err, "failed to open capsule panel window");
             }
@@ -1128,11 +1222,20 @@ pub fn run(skip_onboarding: bool) {
                             return;
                         }
                         match crate::window::open_configured_startup_surface(cx, startup_surface) {
-                            Ok(_) => tracing::info!(?startup_surface, "Startup surface opened"),
+                            Ok(_) => {
+                                tracing::info!(?startup_surface, "Startup surface opened");
+                            }
                             Err(err) => {
                                 tracing::error!(error = %err, ?startup_surface, "Startup surface failed")
                             }
                         }
+                        // Background-refresh the installed-apps cache after the
+                        // surface is open so the launcher has data on first paint.
+                        cx.background_executor()
+                            .spawn(async move {
+                                crate::install_lifecycle_dashboard::DashboardCache::refresh();
+                            })
+                            .detach();
                     });
                 })
                 .detach();

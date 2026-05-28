@@ -4,10 +4,17 @@ use gpui::{
     ObjectFit,
 };
 use gpui_component::input::{Input, InputState};
+use gpui_component::scroll::ScrollableElement;
 
 use super::super::theme::Theme;
 use crate::app::{NavigateToUrl, OpenCloudDock, OpenLocalRegistry, ShowSettings, SignInToAtoRun};
+use crate::install_lifecycle_dashboard::{
+    DashboardCache, InstalledAppDashboardItem, InstalledAppsActionStatus,
+};
 use crate::state::{AppState, DesktopAuthStatus, LauncherAction, ThemeMode};
+
+use super::installed_app_detail::render_installed_app_detail_panel;
+use super::installed_apps::render_installed_apps_section;
 
 pub(in crate::ui) fn render_launcher_panel_v2(
     state: &AppState,
@@ -51,7 +58,8 @@ pub(in crate::ui) fn render_launcher_panel_v2(
                         .child(render_search_bar(launcher_search))
                         .child(render_primary_actions(state))
                         .child(render_status_card(state))
-                        .child(render_app_grid()),
+                        .child(render_app_grid())
+                        .child(render_installed_apps_section_wrapper(state, theme)),
                 )
                 .child(render_bottom_bar()),
         )
@@ -538,6 +546,154 @@ fn bottom_action(label: &'static str) -> AnyElement {
         .text_size(px(10.5))
         .text_color(hsla(0.0, 0.0, 0.333, 1.0))
         .child(label)
+        .into_any_element()
+}
+
+fn render_installed_apps_section_wrapper(state: &AppState, theme: &Theme) -> gpui::AnyElement {
+    let ui = &state.installed_apps_ui;
+    let selected_installed_app_id = ui.selected_installed_app_id.as_deref();
+
+    match DashboardCache::get() {
+        Ok(items) => {
+            let selected: Option<&InstalledAppDashboardItem> = selected_installed_app_id
+                .and_then(|id| items.iter().find(|item| item.installed_app_id == id))
+                .or_else(|| {
+                    items
+                        .first()
+                        .filter(|_| ui.selected_installed_app_id.is_none())
+                });
+
+            let selected_profile_id = ui.selected_profile_id.as_deref();
+
+            let selected_missing = selected_installed_app_id.is_some()
+                && selected_installed_app_id
+                    .map(|id| !items.iter().any(|item| item.installed_app_id == id))
+                    .unwrap_or(false);
+
+            if let Some(error) = &ui.detail_error {
+                div()
+                    .py(px(16.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_tertiary)
+                    .child(format!("Unable to read installed apps: {error}"))
+                    .into_any_element()
+            } else if selected_missing {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .py(px(16.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.text_tertiary)
+                            .child("Selected app is no longer installed."),
+                    )
+                    .child(div().text_size(px(12.0)).child(render_refresh_button()))
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(12.0))
+                    .w(px(560.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .w(px(240.0))
+                            .child(render_installed_apps_section(
+                                &items,
+                                selected_installed_app_id,
+                                theme,
+                            ))
+                            .child(div().pt(px(4.0)).child(render_refresh_button())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .bg(hsla(0.0, 0.0, 1.0, 0.94))
+                            .border_1()
+                            .border_color(hsla(60.0 / 360.0, 0.05, 0.847, 1.0))
+                            .rounded(px(10.0))
+                            .p(px(12.0))
+                            .overflow_y_scrollbar()
+                            .child(render_installed_app_detail_panel(
+                                selected,
+                                selected_profile_id,
+                                theme,
+                            ))
+                            .when_some(DashboardCache::action_status(), |this, status| {
+                                let color = match &status {
+                                    InstalledAppsActionStatus::Error { .. } => {
+                                        hsla(0.0, 0.7, 0.5, 1.0)
+                                    }
+                                    InstalledAppsActionStatus::Success { .. } => {
+                                        hsla(130.0 / 360.0, 0.7, 0.5, 1.0)
+                                    }
+                                    _ => theme.text_tertiary,
+                                };
+                                this.child(
+                                    div()
+                                        .pt(px(8.0))
+                                        .text_size(px(10.0))
+                                        .text_color(color)
+                                        .child(status.display_text()),
+                                )
+                            }),
+                    )
+                    .into_any_element()
+            }
+        }
+        Err(e) => div()
+            .py(px(16.0))
+            .text_size(px(12.0))
+            .text_color(theme.text_tertiary)
+            .child(format!("Unable to read installed apps: {e}"))
+            .into_any_element(),
+    }
+}
+
+fn render_refresh_button() -> gpui::AnyElement {
+    div()
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(hsla(60.0 / 360.0, 0.05, 0.93, 1.0))
+        .border_1()
+        .border_color(hsla(60.0 / 360.0, 0.05, 0.86, 1.0))
+        .text_size(px(10.0))
+        .text_color(hsla(217.0 / 360.0, 0.75, 0.45, 1.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(hsla(217.0 / 360.0, 0.75, 0.45, 0.10)))
+        .child("Refresh")
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            DashboardCache::set_action_status(Some(InstalledAppsActionStatus::Refreshing));
+            // GPUI auto-repaints after event handler; pending status is visible
+            // on the next frame before the background work completes.
+            let async_cx = cx.to_async();
+            // GPUI's foreground_executor runs on a tokio multi-thread runtime (not the
+            // UI thread), so blocking FS I/O here does not block rendering.
+            cx.foreground_executor()
+                .spawn(async move {
+                    let result = DashboardCache::refresh();
+                    DashboardCache::set_action_status(Some(match result {
+                        Ok(()) => InstalledAppsActionStatus::Success {
+                            message: "Installed apps refreshed".to_string(),
+                        },
+                        Err(e) => InstalledAppsActionStatus::Error {
+                            message: format!("Refresh failed: {e}"),
+                        },
+                    }));
+                    let _ = async_cx.update(|app| {
+                        app.refresh_windows();
+                    });
+                })
+                .detach();
+        })
         .into_any_element()
 }
 

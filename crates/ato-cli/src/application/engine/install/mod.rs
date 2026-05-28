@@ -19,6 +19,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
+use capsule_core::common::paths::ato_path_or_workspace_tmp;
+use capsule_core::foundation::install_lifecycle::{
+    path_safe_app_id, AppRecord, ArtifactBuildId, FinalizerInput, InstallInstanceStore,
+    InstallProfileKey, InstallRevisionFinalizer, InstallRevisionId, InstalledAppId, LaunchProfile,
+    ProfileId,
+};
+
 use capsule_core::packers::payload as manifest_payload;
 use capsule_core::resource::cas::LocalCasIndex;
 use capsule_core::types::identity::public_key_to_did;
@@ -61,6 +68,15 @@ const DEFAULT_GITHUB_DRAFT_NODE_RUNTIME_VERSION: &str = "22.14.0";
 const DEFAULT_GITHUB_DRAFT_PYTHON_RUNTIME_VERSION: &str = "3.11.10";
 
 #[derive(Debug, Serialize)]
+pub struct InstallLifecycleInfo {
+    pub installed_app_id: InstalledAppId,
+    pub profile_id: ProfileId,
+    pub install_profile_key: InstallProfileKey,
+    pub install_revision_id: InstallRevisionId,
+    pub current_revision_path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
 pub struct InstallResult {
     pub capsule_id: String,
     pub scoped_id: String,
@@ -75,6 +91,9 @@ pub struct InstallResult {
     pub projection: Option<ProjectionInfo>,
     pub managed_environment: Option<ManagedEnvironmentInfo>,
     pub promotion: Option<PromotionInfo>,
+    /// Lifecycle IDs registered in the install instance store.
+    /// `None` if lifecycle registration failed (non-fatal) or was skipped.
+    pub install_lifecycle: Option<InstallLifecycleInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1439,6 +1458,13 @@ fn complete_native_install_from_bytes(
         projection.performed,
     )?;
 
+    let install_lifecycle = try_register_lifecycle(
+        &scoped_ref.scoped_id,
+        version.as_str(),
+        computed_blake3,
+        &output_path,
+    );
+
     Ok(InstallResult {
         capsule_id,
         scoped_id: scoped_ref.scoped_id.clone(),
@@ -1463,6 +1489,7 @@ fn complete_native_install_from_bytes(
         projection: Some(projection),
         managed_environment,
         promotion,
+        install_lifecycle,
     })
 }
 
@@ -1496,6 +1523,13 @@ fn complete_standard_install_from_bytes(
         keep_progressive_flow_open,
     )?;
 
+    let install_lifecycle = try_register_lifecycle(
+        &scoped_ref.scoped_id,
+        version.as_str(),
+        computed_blake3,
+        &output_path,
+    );
+
     Ok(InstallResult {
         capsule_id,
         scoped_id: scoped_ref.scoped_id.clone(),
@@ -1512,6 +1546,7 @@ fn complete_standard_install_from_bytes(
         projection: None,
         managed_environment: None,
         promotion,
+        install_lifecycle,
     })
 }
 
@@ -2204,3 +2239,112 @@ pub async fn suggest_scoped_capsules(
 
 #[cfg(test)]
 mod tests;
+
+/// Try to register the install with the lifecycle instance store.
+///
+/// Returns `Some(InstallLifecycleInfo)` on success, `None` on any failure
+/// (non-fatal — lifecycle registration is best-effort for now).
+fn try_register_lifecycle(
+    scoped_id: &str,
+    version: &str,
+    content_hash: &str,
+    installed_path: &Path,
+) -> Option<InstallLifecycleInfo> {
+    // Derive a build_<64hex> artifact ID from the content hash (blake3:<64hex>).
+    let hex_part = content_hash.strip_prefix("blake3:").unwrap_or(content_hash);
+    if hex_part.len() != 64 || !hex_part.bytes().all(|b| b.is_ascii_hexdigit()) {
+        tracing::debug!(
+            "install_lifecycle: skipping registration — content_hash not a full blake3 hex: {}",
+            content_hash
+        );
+        return None;
+    }
+    let build_id = ArtifactBuildId::new(format!("build_{hex_part}"));
+
+    let instances_root = ato_path_or_workspace_tmp("instances");
+    let store = match InstallInstanceStore::new(&instances_root) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!("install_lifecycle: store init failed: {e}");
+            return None;
+        }
+    };
+
+    // Use a path-safe, deterministic app id derived from the scoped_id
+    // (e.g. "publisher/slug" contains '/' which would break directory layout).
+    let installed_app_id = path_safe_app_id(scoped_id);
+    let profile_id = ProfileId::default();
+
+    // 1. Ensure app record exists. If one already exists, preserve `installed_at`
+    //    and only update `version` / `updated_at`.
+    let (publisher, slug) = scoped_id.split_once('/').unwrap_or(("", scoped_id));
+    let now = chrono::Utc::now().to_rfc3339();
+    let app_record = match store.read_app_record(&installed_app_id) {
+        Ok(existing) => AppRecord {
+            installed_app_id: installed_app_id.clone(),
+            publisher: publisher.to_owned(),
+            slug: slug.to_owned(),
+            capsule_handle: scoped_id.to_owned(),
+            version: version.to_owned(),
+            installed_at: existing.installed_at, // preserve original install time
+            updated_at: now,
+        },
+        Err(_) => AppRecord {
+            installed_app_id: installed_app_id.clone(),
+            publisher: publisher.to_owned(),
+            slug: slug.to_owned(),
+            capsule_handle: scoped_id.to_owned(),
+            version: version.to_owned(),
+            installed_at: now.clone(),
+            updated_at: now,
+        },
+    };
+    if let Err(e) = store.write_app_record(&app_record) {
+        tracing::debug!("install_lifecycle: write_app_record failed: {e}");
+        return None;
+    }
+
+    // 2. Ensure default launch profile exists (do not overwrite if present).
+    if store.read_profile(&installed_app_id, &profile_id).is_err() {
+        let launch_profile = LaunchProfile {
+            profile_id: profile_id.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = store.write_profile(&installed_app_id, &launch_profile) {
+            tracing::debug!("install_lifecycle: write_profile failed: {e}");
+            return None;
+        }
+    }
+
+    let output_dir = installed_path
+        .parent()
+        .unwrap_or(installed_path)
+        .to_path_buf();
+
+    // 3. Finalize: copy build output → immutable revision, swap current_revision.
+    let finalizer = InstallRevisionFinalizer::new(&store);
+    let output = match finalizer.finalize(FinalizerInput {
+        installed_app_id: installed_app_id.clone(),
+        profile_id: profile_id.clone(),
+        artifact_build_id: build_id,
+        output_dir,
+        artifact_manifest_json: None,
+        source_provenance_json: None,
+        oci_lock_json: None,
+    }) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::debug!("install_lifecycle: finalize failed: {e}");
+            return None;
+        }
+    };
+
+    let current_revision_path = output.revision_dir.clone();
+    Some(InstallLifecycleInfo {
+        installed_app_id: output.installed_app_id,
+        profile_id: output.profile_id,
+        install_profile_key: output.install_profile_key,
+        install_revision_id: output.install_revision_id,
+        current_revision_path,
+    })
+}
