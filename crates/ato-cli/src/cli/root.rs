@@ -28,7 +28,7 @@ use super::state::StateCommands;
 Usage: {usage}
 
 Primary Commands:
-  run      Try something now
+  run      Rehearse a capsule in an ephemeral local session
   decap    Set up a workspace locally
   encap    Share your current workspace
 
@@ -59,7 +59,7 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(
         next_help_heading = "Primary Commands",
-        about = "Try something now",
+        about = "Rehearse a capsule in an ephemeral local session",
         trailing_var_arg = true
     )]
     Run {
@@ -83,7 +83,7 @@ pub(crate) enum Commands {
         #[arg(long = "prompt-env", default_value_t = false)]
         prompt_env: bool,
 
-        /// Run in development mode (foreground) with hot-reloading on file changes
+        /// Watch files and restart/re-run when supported (experimental)
         #[arg(long)]
         watch: bool,
 
@@ -362,7 +362,7 @@ pub(crate) enum Commands {
         strict: bool,
     },
 
-    #[command(hide = true, about = "Install a package from the store")]
+    #[command(hide = true, about = "Register a durable local app from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
         #[arg(required_unless_present = "from_gh_repo")]
