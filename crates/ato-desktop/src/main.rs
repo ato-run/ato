@@ -1,6 +1,7 @@
 mod app;
 mod automation;
 mod bridge;
+mod bundle_paths;
 mod cli_envelope;
 mod cli_install;
 mod config;
