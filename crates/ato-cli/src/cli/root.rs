@@ -210,6 +210,16 @@ pub(crate) enum Commands {
         #[arg(long = "plan-only", default_value_t = false)]
         plan_only: bool,
 
+        /// Import from docker-compose.yml and run as an Ato OCI service graph
+        /// through PodmanProvider (experimental, requires Podman)
+        #[arg(long = "oci-compose", default_value_t = false, hide = true)]
+        oci_compose: bool,
+
+        /// Import docker run commands from install.sh and run as an Ato OCI
+        /// service graph through PodmanProvider (experimental, requires Podman)
+        #[arg(long = "oci-install-sh", default_value_t = false, hide = true)]
+        oci_install_sh: bool,
+
         /// Grant read-only access to a host file or directory in sandbox mode
         #[arg(long = "read", value_name = "PATH")]
         read: Vec<String>,
@@ -440,6 +450,86 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
+        about = "Launch an installed app by its stable install profile key"
+    )]
+    Launch {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` output
+        install_profile_key: String,
+
+        /// Skip interactive prompts and assume yes
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Print verbose output including resolved lifecycle IDs
+        #[arg(short = 'v', long = "verbose", default_value_t = false)]
+        verbose: bool,
+
+        /// Emit machine-readable JSON with resolved lifecycle IDs before launch
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Override the nacelle runtime binary path
+        #[arg(long, hide = true)]
+        nacelle: Option<PathBuf>,
+    },
+
+    #[command(about = "List install revisions for an installed app profile")]
+    Revisions {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` or `ato launch` output
+        install_profile_key: String,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    #[command(about = "Rollback an installed app profile to a previous revision")]
+    Rollback {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` or `ato launch` output
+        install_profile_key: String,
+
+        /// Specific revision ID to rollback to. If omitted, rolls back to the previous revision.
+        revision_id: Option<String>,
+    },
+
+    #[command(
+        name = "update",
+        about = "Update an installed app to its latest release"
+    )]
+    AppUpdate {
+        /// Install profile key (`ipk_<32hex>`) from `ato install` or `ato launch` output
+        install_profile_key: String,
+
+        /// Skip interactive prompts and assume yes
+        #[arg(short = 'y', long = "yes", default_value_t = false)]
+        yes: bool,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    #[command(about = "Collect unused install revisions")]
+    Gc {
+        /// Report what would be deleted without removing anything
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Keep at least this many recent revisions per profile (default: 2)
+        #[arg(long, default_value_t = 2)]
+        keep_last: usize,
+
+        /// Keep revisions finalized within this many days (default: 14)
+        #[arg(long, default_value_t = 14)]
+        retention_days: u64,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    #[command(
+        hide = true,
         about = "Fetch declared development dependencies for a local project"
     )]
     Setup {
@@ -532,8 +622,12 @@ pub(crate) enum Commands {
         json: bool,
     },
 
-    #[command(hide = true, about = "Update ato CLI to the latest version")]
-    Update,
+    #[command(
+        hide = true,
+        name = "self-update",
+        about = "Update ato CLI to the latest version"
+    )]
+    SelfUpdate,
 
     #[command(
         hide = true,
@@ -690,6 +784,8 @@ pub(crate) enum Commands {
         alias = "close"
     )]
     Stop {
+        #[arg(value_name = "ID")]
+        target: Option<String>,
         #[arg(long)]
         id: Option<String>,
         #[arg(long)]

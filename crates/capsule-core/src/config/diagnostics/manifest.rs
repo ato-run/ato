@@ -429,19 +429,11 @@ fn validate_web_services_mode(
                     format!("services.{name}.readiness_probe must be a table"),
                 )
             })?;
-            let port = probe
-                .get("port")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    manifest_err(
-                        manifest_path,
-                        format!("services.{name}.readiness_probe.port must be a non-empty string"),
-                    )
-                })?;
-            let _ = port;
-
+            let has_exec = probe
+                .get("exec")
+                .and_then(|v| v.as_array())
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
             let has_http_get = probe
                 .get("http_get")
                 .and_then(|v| v.as_str())
@@ -454,10 +446,59 @@ fn validate_web_services_mode(
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .is_some();
-            if !has_http_get && !has_tcp_connect {
+            // port is required for HTTP/TCP probes; exec probes do not need it.
+            if (has_http_get || has_tcp_connect) && !has_exec {
+                let port = probe
+                    .get("port")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| {
+                        manifest_err(
+                            manifest_path,
+                            format!("services.{name}.readiness_probe.port must be a non-empty string for http_get/tcp_connect probes"),
+                        )
+                    })?;
+                let _ = port;
+            }
+            if !has_http_get && !has_tcp_connect && !has_exec {
                 return Err(manifest_err(
                     manifest_path,
-                    format!("services.{name}.readiness_probe must define http_get or tcp_connect"),
+                    format!("services.{name}.readiness_probe must define http_get, tcp_connect, or exec"),
+                ));
+            }
+
+            // Validate timing fields if present.
+            if let Some(timeout) = probe.get("timeout_seconds").and_then(|v| v.as_integer()) {
+                if timeout <= 0 {
+                    return Err(manifest_err(
+                        manifest_path,
+                        format!("services.{name}.readiness_probe.timeout_seconds must be > 0"),
+                    ));
+                }
+            }
+            if let Some(interval) = probe.get("interval_seconds").and_then(|v| v.as_integer()) {
+                if interval <= 0 {
+                    return Err(manifest_err(
+                        manifest_path,
+                        format!("services.{name}.readiness_probe.interval_seconds must be > 0"),
+                    ));
+                }
+            }
+            let initial_delay = probe
+                .get("initial_delay_seconds")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0);
+            let timeout = probe
+                .get("timeout_seconds")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(180);
+            if timeout > 0 && initial_delay >= timeout {
+                return Err(manifest_err(
+                    manifest_path,
+                    format!(
+                        "services.{name}.readiness_probe.initial_delay_seconds ({initial_delay}) must be less than timeout_seconds ({timeout})"
+                    ),
                 ));
             }
         }

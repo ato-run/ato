@@ -165,7 +165,7 @@
   const POST = (window.ipc && window.ipc.postMessage)
     ? (m) => window.ipc.postMessage(JSON.stringify(m))
     : (m) => console.log('[no bridge]', m);
-  const SEND = (command) => POST({ capsule: 'ato-import', command });
+  const SEND = (command) => POST({ capsule: 'import', command });
 
   // ─── Snapshot ──────────────────────────────────────────────────────────────
   let snapshot = window.__ATO_IMPORT_SNAPSHOT || {

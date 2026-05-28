@@ -10,8 +10,8 @@ use crate::lock_runtime::{self, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::orchestration;
 use crate::types::{
-    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, Mount, NamedTarget,
-    OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceNetwork,
+    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, IngressConfig, Mount,
+    NamedTarget, OrchestrationPlan, ReadinessProbe, ResolvedService, ResolvedServiceNetwork,
     ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo, ServiceSpec,
     ValidationMode,
 };
@@ -300,6 +300,7 @@ pub struct ExecutionDescriptor {
     pub selected_target: String,
     pub runtime_model: ResolvedLockRuntimeModel,
     pub state_source_overrides: HashMap<String, String>,
+    pub ingress: Option<IngressConfig>,
 }
 
 pub type ManifestData = ExecutionDescriptor;
@@ -434,6 +435,12 @@ pub fn execution_descriptor_from_manifest_parts(
         (target, model)
     };
 
+    let ingress = manifest.get("ingress").and_then(|v| {
+        toml::to_string(v)
+            .ok()
+            .and_then(|s| toml::from_str::<IngressConfig>(&s).ok())
+    });
+
     Ok(ExecutionDescriptor {
         manifest: manifest.clone(),
         compat_manifest: CompatManifestBridge::from_manifest_value(&manifest).ok(),
@@ -446,6 +453,7 @@ pub fn execution_descriptor_from_manifest_parts(
         selected_target,
         runtime_model,
         state_source_overrides,
+        ingress,
     })
 }
 
@@ -485,6 +493,11 @@ pub fn route_lock_with_state_overrides(
     })?;
     let compat_manifest = CompatManifestBridge::from_lock(lock, &runtime_model)?;
     let manifest = compat_manifest.raw_value()?;
+    let ingress = manifest.get("ingress").and_then(|v| {
+        toml::to_string(v)
+            .ok()
+            .and_then(|s| toml::from_str::<IngressConfig>(&s).ok())
+    });
     let plan = ExecutionDescriptor {
         manifest,
         compat_manifest: Some(compat_manifest),
@@ -497,6 +510,7 @@ pub fn route_lock_with_state_overrides(
         selected_target: runtime_model.selected.target_label.clone(),
         runtime_model,
         state_source_overrides,
+        ingress,
     };
     Ok(RuntimeDecision {
         kind: chosen,
@@ -785,6 +799,28 @@ impl ExecutionDescriptor {
         })
     }
 
+    /// Returns `true` when every service in the orchestration plan declares `runtime = "oci"`.
+    /// Used to route to the Podman-backed multi-service executor instead of the legacy Bollard path.
+    pub fn all_services_are_oci(&self) -> bool {
+        let services = self.services();
+        if services.is_empty() {
+            return false;
+        }
+        services.values().all(|service| {
+            let Some(target_label) = service
+                .target
+                .as_ref()
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+            else {
+                return false;
+            };
+            self.compat_str(&["targets", target_label, "runtime"])
+                .map(|r| r.eq_ignore_ascii_case("oci"))
+                .unwrap_or(false)
+        })
+    }
+
     pub fn is_web_services_mode(&self) -> bool {
         self.execution_runtime()
             .map(|runtime| runtime.eq_ignore_ascii_case("web"))
@@ -873,9 +909,7 @@ impl ExecutionDescriptor {
     /// Resolve a command value from a target-level field, handling both
     /// string and object (table) forms.
     fn resolve_target_field(&self, field: &str) -> Option<String> {
-        let target = self.manifest
-            .get("targets")?
-            .get(&self.selected_target)?;
+        let target = self.manifest.get("targets")?.get(&self.selected_target)?;
         let value = target.get(field)?;
         match value {
             toml::Value::String(s) => Some(s.clone()),
@@ -1301,6 +1335,21 @@ impl ExecutionDescriptor {
                 target_label
             ))
         })
+    }
+
+    /// Returns all named targets as a map from label → `NamedTarget`.
+    fn all_targets(&self) -> HashMap<String, NamedTarget> {
+        self.compat_table(&["targets"])
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(|(name, raw)| {
+                        let target: NamedTarget = raw.clone().try_into().ok()?;
+                        Some((name.to_string(), target))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn compat_value(&self, path: &[&str]) -> Option<toml::Value> {
@@ -1947,5 +1996,553 @@ port = 8000
             super::manifest_routing::split_v03_runtime("source/go"),
             ("source".to_string(), Some("native".to_string()))
         );
+    }
+
+    // ── depends_on tests ─────────────────────────────────────────────────────
+
+    fn make_multi_service_manifest(extra: &str) -> String {
+        format!(
+            r#"schema_version = "0.3"
+name = "multi-svc"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+{extra}
+[services.main]
+target = "app"
+readiness_probe = {{ http_get = "/health", port = "3000" }}
+"#
+        )
+    }
+
+    #[test]
+    fn recipe_depends_on_parses_list_form_on_target() {
+        let manifest_str = make_multi_service_manifest(r#"depends_on = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let main = plan.services.iter().find(|s| s.name == "main").unwrap();
+        assert!(
+            main.depends_on.contains(&"db".to_string()),
+            "main service should depend on db via target-level depends_on"
+        );
+    }
+
+    #[test]
+    fn recipe_depends_on_also_accepts_needs_alias() {
+        let manifest_str = make_multi_service_manifest(r#"needs = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let main = plan.services.iter().find(|s| s.name == "main").unwrap();
+        assert!(
+            main.depends_on.contains(&"db".to_string()),
+            "main service should depend on db via target-level needs alias"
+        );
+    }
+
+    #[test]
+    fn recipe_target_depends_on_creates_implicit_service() {
+        let manifest_str = make_multi_service_manifest(r#"depends_on = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        assert!(
+            plan.services.iter().any(|s| s.name == "db"),
+            "implicit db service should be created from target depends_on"
+        );
+    }
+
+    #[test]
+    fn service_graph_topological_order_puts_dependencies_before_dependents() {
+        let manifest_str = make_multi_service_manifest(r#"depends_on = ["db"]"#);
+        let dir = write_manifest(&manifest_str);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let db_pos = plan
+            .startup_order
+            .iter()
+            .position(|s| s == "db")
+            .expect("db in startup order");
+        let main_pos = plan
+            .startup_order
+            .iter()
+            .position(|s| s == "main")
+            .expect("main in startup order");
+        assert!(
+            db_pos < main_pos,
+            "db must start before main (db_pos={db_pos}, main_pos={main_pos})"
+        );
+    }
+
+    #[test]
+    fn recipe_depends_on_cycle_rejected() {
+        // app → db → app is a cycle
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "cyclic"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+
+[services.db]
+target = "db"
+depends_on = ["main"]
+
+[services.main]
+target = "app"
+depends_on = ["db"]
+"#,
+        );
+        // Cyclic dependency should be rejected either at route_manifest or resolve_services.
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        let is_rejected = result.is_err()
+            || result
+                .as_ref()
+                .map(|d| d.plan.resolve_services().is_err())
+                .unwrap_or(false);
+        assert!(is_rejected, "cyclic depends_on should be rejected");
+    }
+
+    #[test]
+    fn recipe_depends_on_unknown_target_rejected() {
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "unknown-dep"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+
+[services.main]
+target = "app"
+depends_on = ["nonexistent"]
+"#,
+        );
+        // Unknown dependency should be rejected either at route_manifest or resolve_services.
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        let is_rejected = result.is_err()
+            || result
+                .as_ref()
+                .map(|d| d.plan.resolve_services().is_err())
+                .unwrap_or(false);
+        assert!(is_rejected, "unknown dependency should be rejected");
+    }
+
+    #[test]
+    fn existing_single_service_recipes_unaffected_by_depends_on_change() {
+        // A plain single-service recipe with no depends_on should still work.
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "simple"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3000" }
+"#,
+        );
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        assert_eq!(plan.services.len(), 1);
+        assert!(plan.startup_order.contains(&"main".to_string()));
+    }
+
+    #[test]
+    fn state_binding_service_target_routes_mount_to_correct_service() {
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "mnt-routing"
+version = "1.0.0"
+type = "app"
+default_target = "app"
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16-alpine"
+port = 5432
+
+[targets.app]
+runtime = "oci"
+image = "example/app:1.0"
+port = 3000
+depends_on = ["db"]
+
+[state.db-data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "PostgreSQL data"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[services.main]
+target = "app"
+
+[[services.main.state_bindings]]
+state = "db-data"
+target = "/var/lib/postgresql/data"
+service_target = "db"
+"#,
+        );
+        let decision = route_manifest_with_state_overrides(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+            [(
+                "db-data".to_string(),
+                "/var/lib/ato/persistent/mnt-routing/db-data".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        // db service should have the mount, main service should not.
+        let db_svc = plan.services.iter().find(|s| s.name == "db").unwrap();
+        let main_svc = plan.services.iter().find(|s| s.name == "main").unwrap();
+        assert!(
+            !db_svc.runtime.runtime().mounts.is_empty(),
+            "db service should receive the mount routed via service_target"
+        );
+        assert!(
+            main_svc.runtime.runtime().mounts.is_empty(),
+            "main service should NOT receive the mount"
+        );
+    }
+
+    #[test]
+    fn shared_state_same_capsule_produces_identical_mount_source() {
+        let dir = write_manifest(
+            r#"schema_version = "0.3"
+name = "shared-state-app"
+version = "1.0.0"
+type = "app"
+default_target = "api"
+
+[targets.api]
+runtime = "oci"
+image = "example/api:1.0"
+port = 8080
+
+[targets.worker]
+runtime = "oci"
+image = "example/worker:1.0"
+port = 8081
+
+[state.uploads]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared-uploads"
+attach = "explicit"
+schema_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+sharing = "same-capsule"
+
+[services.main]
+target = "api"
+
+[services.api]
+target = "api"
+[[services.api.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+
+[services.worker]
+target = "worker"
+[[services.worker.state_bindings]]
+state = "uploads"
+target = "/app/storage"
+"#,
+        );
+        let state_override = "/var/lib/ato/persistent/shared-state-app/uploads";
+        let decision = route_manifest_with_state_overrides(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+            [("uploads".to_string(), state_override.to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+
+        let api_svc = plan.services.iter().find(|s| s.name == "api").unwrap();
+        let worker_svc = plan.services.iter().find(|s| s.name == "worker").unwrap();
+
+        let api_mount = api_svc
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .find(|m| m.target == "/app/storage")
+            .expect("api must mount shared state");
+        let worker_mount = worker_svc
+            .runtime
+            .runtime()
+            .mounts
+            .iter()
+            .find(|m| m.target == "/app/storage")
+            .expect("worker must mount shared state");
+
+        assert_eq!(
+            api_mount.source, worker_mount.source,
+            "shared state must produce identical mount source for both services"
+        );
+        assert_eq!(
+            api_mount.source, state_override,
+            "mount source must match the state override"
+        );
+        assert!(!api_mount.readonly, "shared state mount must be writable");
+        assert!(
+            !worker_mount.readonly,
+            "shared state mount must be writable"
+        );
+    }
+
+    // ── Readiness timing tests ─────────────────────────────────────────────────
+
+    fn readiness_timing_manifest(probe_extra: &str) -> String {
+        format!(
+            r#"schema_version = "0.3"
+name = "test-app"
+version = "1.0.0"
+type = "app"
+default_target = "main"
+
+[targets.main]
+runtime = "oci"
+image = "example/app:1.0"
+port = 8080
+{probe_extra}
+[services.main]
+target = "main"
+"#
+        )
+    }
+
+    fn readiness_timing_probe(fields: &str) -> String {
+        readiness_timing_manifest(&format!(
+            "[targets.main.readiness_probe]\nhttp_get = \"/\"\nport = \"8080\"\n{fields}\n"
+        ))
+    }
+
+    #[test]
+    fn readiness_probe_parses_initial_delay_timeout_interval() {
+        let toml = readiness_timing_probe(
+            "initial_delay_seconds = 10\ntimeout_seconds = 300\ninterval_seconds = 5",
+        );
+        let dir = write_manifest(&toml);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let svc = plan.services.first().expect("service");
+        let probe = svc.readiness_probe.as_ref().expect("probe");
+        assert_eq!(probe.initial_delay_seconds, 10);
+        assert_eq!(probe.timeout_seconds, 300);
+        assert_eq!(probe.interval_seconds, 5);
+    }
+
+    #[test]
+    fn readiness_probe_defaults_are_conservative() {
+        let toml = readiness_timing_probe("");
+        let dir = write_manifest(&toml);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let svc = plan.services.first().expect("service");
+        let probe = svc.readiness_probe.as_ref().expect("probe");
+        assert_eq!(
+            probe.initial_delay_seconds, 0,
+            "default initial_delay must be 0"
+        );
+        assert_eq!(probe.timeout_seconds, 180, "default timeout must be 180s");
+        assert_eq!(probe.interval_seconds, 2, "default interval must be 2s");
+    }
+
+    #[test]
+    fn readiness_probe_rejects_zero_timeout() {
+        let toml = readiness_timing_probe("timeout_seconds = 0");
+        let dir = write_manifest(&toml);
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        assert!(result.is_err(), "zero timeout_seconds should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("timeout_seconds"),
+            "error should mention timeout_seconds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_rejects_zero_interval() {
+        let toml = readiness_timing_probe("interval_seconds = 0");
+        let dir = write_manifest(&toml);
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        assert!(result.is_err(), "zero interval_seconds should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("interval_seconds"),
+            "error should mention interval_seconds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_rejects_initial_delay_ge_timeout() {
+        let toml = readiness_timing_probe("initial_delay_seconds = 200\ntimeout_seconds = 100");
+        let dir = write_manifest(&toml);
+        let result = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "initial_delay >= timeout should be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("initial_delay_seconds"),
+            "error should mention initial_delay_seconds, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_timing_changes_execution_identity() {
+        let toml_a = readiness_timing_probe("timeout_seconds = 180");
+        let toml_b = readiness_timing_probe("timeout_seconds = 420");
+        let dir_a = write_manifest(&toml_a);
+        let dir_b = write_manifest(&toml_b);
+        let dec_a = route_manifest(
+            &dir_a.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route a");
+        let dec_b = route_manifest(
+            &dir_b.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route b");
+        let svc_a = dec_a
+            .plan
+            .resolve_services()
+            .unwrap()
+            .services
+            .into_iter()
+            .next()
+            .unwrap();
+        let svc_b = dec_b
+            .plan
+            .resolve_services()
+            .unwrap()
+            .services
+            .into_iter()
+            .next()
+            .unwrap();
+        let probe_a = svc_a.readiness_probe.as_ref().unwrap();
+        let probe_b = svc_b.readiness_probe.as_ref().unwrap();
+        assert_ne!(
+            probe_a.timeout_seconds, probe_b.timeout_seconds,
+            "different timeout must produce different probe repr"
+        );
+    }
+
+    #[test]
+    fn fast_default_readiness_no_regression() {
+        let toml = readiness_timing_probe("");
+        let dir = write_manifest(&toml);
+        let decision = route_manifest(
+            &dir.path().join("capsule.toml"),
+            ExecutionProfile::Dev,
+            None,
+        )
+        .expect("route manifest");
+        let plan = decision.plan.resolve_services().expect("resolve services");
+        let svc = plan.services.first().expect("service");
+        let probe = svc.readiness_probe.as_ref().expect("probe");
+        assert_eq!(
+            probe.timeout_seconds, 180,
+            "default timeout must be 180s, not higher"
+        );
+        assert_eq!(probe.interval_seconds, 2, "default interval must be 2s");
     }
 }

@@ -1,15 +1,15 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use capsule_core::foundation::types::command_spec::contains_shell_operators;
 use crate::cli::ImportArgs;
+use crate::runtime::process::{ImportPreviewSession, ProcessManager};
+use capsule_core::foundation::types::command_spec::contains_shell_operators;
 
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "ato-cli-source-import";
@@ -20,6 +20,8 @@ const LOCAL_SOURCE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_SOURCE_OVERRIDE";
 const LOCAL_REVISION_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_REVISION_ID";
 const LOCAL_TREE_OVERRIDE_ENV: &str = "ATO_IMPORT_LOCAL_TREE_HASH";
 const KEEP_WORKSPACE_ENV: &str = "ATO_IMPORT_KEEP_WORKSPACE";
+const IMPORT_PROBE_ID_ENV: &str = "ATO_IMPORT_PROBE_ID";
+const IMPORT_SESSION_ID_ENV: &str = "ATO_IMPORT_SESSION_ID";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NormalizedGitHubInput {
@@ -65,6 +67,31 @@ struct ImportRun {
     /// Shell kind used when `command_mode` is `"shell"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     shell_kind: Option<String>,
+    /// Cleanup result for probe-mode shadow runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_status: Option<String>,
+    /// Cleanup diagnostic when teardown was incomplete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_error: Option<String>,
+    /// Runtime log path for probe-mode shadow runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    process_group_ids: Vec<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shadow_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readiness_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleanup_policy: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,20 +181,174 @@ struct MaterializedSource {
 #[derive(Debug)]
 struct ImportWorkspace {
     root: PathBuf,
+    keep: bool,
 }
 
 impl Drop for ImportWorkspace {
     fn drop(&mut self) {
-        if std::env::var_os(KEEP_WORKSPACE_ENV).is_some() {
+        if self.keep || std::env::var_os(KEEP_WORKSPACE_ENV).is_some() {
             return;
         }
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup_import_workspace_root(&self.root);
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImportWorkspaceCleanupOutcome {
+    Removed,
+    SkippedActive { run_session_id: String },
+    SkippedOpenProcess { pid_or_pgid: String, reason: String },
+    SkippedUnknown { reason: String },
+    AlreadyGone,
+}
+
+fn cleanup_import_workspace_root(root: &Path) -> Result<ImportWorkspaceCleanupOutcome> {
+    cleanup_import_workspace_root_with(
+        root,
+        |workspace| {
+            let process_manager = ProcessManager::new()?;
+            Ok(process_manager
+                .active_import_preview_session_for_workspace(workspace)?
+                .map(|session| session.run_session_id))
+        },
+        workspace_open_process_guard,
+    )
+}
+
+fn cleanup_import_workspace_root_with<SessionGuard, OpenGuard>(
+    root: &Path,
+    session_guard: SessionGuard,
+    open_guard: OpenGuard,
+) -> Result<ImportWorkspaceCleanupOutcome>
+where
+    SessionGuard: FnOnce(&Path) -> Result<Option<String>>,
+    OpenGuard: FnOnce(&Path) -> Result<Option<WorkspaceOpenProcess>>,
+{
+    if !root.exists() {
+        return Ok(ImportWorkspaceCleanupOutcome::AlreadyGone);
+    }
+
+    match session_guard(root) {
+        Ok(Some(run_session_id)) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedActive { run_session_id });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedUnknown {
+                reason: error.to_string(),
+            });
+        }
+    }
+
+    match open_guard(root) {
+        Ok(Some(open_process)) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedOpenProcess {
+                pid_or_pgid: open_process.pid_or_pgid,
+                reason: open_process.reason,
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Ok(ImportWorkspaceCleanupOutcome::SkippedUnknown {
+                reason: error.to_string(),
+            });
+        }
+    }
+
+    fs::remove_dir_all(root).with_context(|| format!("failed to remove {}", root.display()))?;
+    Ok(ImportWorkspaceCleanupOutcome::Removed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceOpenProcess {
+    pid_or_pgid: String,
+    reason: String,
+}
+
+#[cfg(unix)]
+fn workspace_open_process_guard(root: &Path) -> Result<Option<WorkspaceOpenProcess>> {
+    workspace_open_process_guard_with(root, &process_rows(), process_current_working_dir_with_lsof)
+}
+
+#[cfg(not(unix))]
+fn workspace_open_process_guard(_root: &Path) -> Result<Option<WorkspaceOpenProcess>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn workspace_open_process_guard_with<F>(
+    root: &Path,
+    rows: &[ProcessRow],
+    cwd_lookup: F,
+) -> Result<Option<WorkspaceOpenProcess>>
+where
+    F: Fn(i32) -> Result<Option<PathBuf>>,
+{
+    let workspace = root.display().to_string();
+    for row in rows {
+        if row.command.contains(&workspace) {
+            return Ok(Some(WorkspaceOpenProcess {
+                pid_or_pgid: format!("pid:{}", row.pid),
+                reason: format!("command references {}", root.display()),
+            }));
+        }
+
+        if cwd_lookup(row.pid)?
+            .as_ref()
+            .is_some_and(|cwd| cwd.starts_with(root))
+        {
+            return Ok(Some(WorkspaceOpenProcess {
+                pid_or_pgid: format!("pid:{}", row.pid),
+                reason: format!("cwd is under {}", root.display()),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn process_current_working_dir_with_lsof(pid: i32) -> Result<Option<PathBuf>> {
+    if pid <= 0 {
+        return Ok(None);
+    }
+
+    let output = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
+        .output()
+        .with_context(|| format!("failed to execute lsof for pid {}", pid))?;
+
+    if !output.status.success() {
+        if output.stdout.is_empty() {
+            return Ok(None);
+        }
+        return Err(anyhow::anyhow!(
+            "lsof failed for pid {} with status {}",
+            pid,
+            output.status
+        ));
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix('n') {
+            if !path.is_empty() {
+                return Ok(Some(PathBuf::from(path)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
+    if args.keep_alive && !args.run {
+        bail!("--keep-alive requires --run");
+    }
+    if args.keep_alive && !args.emit_json {
+        bail!("--keep-alive requires --emit-json");
+    }
+
     let input = normalize_github_import_input(&args.repo)?;
-    let materialized = materialize_source(&input)?;
+    let mut materialized = materialize_source(&input)?;
 
     // Try remote recipe binding resolution before falling back to local inference.
     let mut recipe_resolution: Option<RecipeResolution> = None;
@@ -206,14 +387,19 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
                     fallback: Some(origin.clone()),
                     error_class: Some("api_unavailable".to_string()),
                 });
-                tracing::debug!(?error, "remote recipe resolution failed; falling back to inference");
+                tracing::debug!(
+                    ?error,
+                    "remote recipe resolution failed; falling back to inference"
+                );
                 (toml, origin)
             }
         }
     };
     let recipe_hash = blake3_label(recipe_toml.as_bytes());
     let target_label = infer_target_label(&recipe_toml);
-    let mut run = if args.run && args.readiness_only {
+    let mut run = if args.run && args.keep_alive {
+        run_shadow_workspace_keep_alive(&mut materialized, &recipe_toml)?
+    } else if args.run && (args.readiness_only || args.emit_json) {
         run_shadow_workspace_readiness_only(&materialized, &recipe_toml)?
     } else if args.run {
         run_shadow_workspace(&materialized, &recipe_toml)?
@@ -226,6 +412,17 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
             command_mode: None,
             requires_host_shell: None,
             shell_kind: None,
+            cleanup_status: None,
+            cleanup_error: None,
+            log_path: None,
+            run_session_id: None,
+            pid: None,
+            process_group_ids: Vec::new(),
+            primary_port: None,
+            primary_url: None,
+            shadow_dir: None,
+            readiness_state: None,
+            cleanup_policy: None,
         }
     };
     apply_shell_info(&mut run, &recipe_toml);
@@ -330,6 +527,7 @@ fn normalized(owner: &str, repo_raw: &str) -> NormalizedGitHubInput {
 fn materialize_source(input: &NormalizedGitHubInput) -> Result<MaterializedSource> {
     let workspace = ImportWorkspace {
         root: import_workspace_root(input)?,
+        keep: false,
     };
     let checkout_dir = workspace.root.join("source");
     let shadow_dir = workspace.root.join("shadow");
@@ -589,8 +787,8 @@ fn run_shadow_workspace(materialized: &MaterializedSource, recipe_toml: &str) ->
     Ok(import_run_from_output(&output))
 }
 
-/// Run the shadow workspace in background mode, wait for the readiness probe
-/// to pass, then return success. The server process continues running.
+/// Run the shadow workspace as a readiness probe and tear it down before
+/// returning.
 fn run_shadow_workspace_readiness_only(
     materialized: &MaterializedSource,
     recipe_toml: &str,
@@ -602,7 +800,8 @@ fn run_shadow_workspace_readiness_only(
     // Extract port from recipe for readiness waiting.
     // If the declared port is already in use, remap to a free port and inform
     // the child subprocess via ATO_UI_OVERRIDE_PORT so it binds the same port.
-    let declared_port = infer_port(recipe_toml).unwrap_or(1111);
+    let declared_port_from_recipe = infer_port(recipe_toml);
+    let declared_port = declared_port_from_recipe.unwrap_or(1111);
     let actual_port = if crate::runtime::port_manager::is_port_available(declared_port) {
         declared_port
     } else {
@@ -612,26 +811,38 @@ fn run_shadow_workspace_readiness_only(
             .unwrap_or(declared_port)
     };
     let ready_url = format!("http://127.0.0.1:{}/", actual_port);
+    let import_probe_id = new_import_run_id("probe", &materialized.source)?;
+    let log_path = import_run_log_path(&import_probe_id)?;
 
-    // Spawn ato run in background (detached, process lives on)
+    // Spawn `ato run` as a probe. It must not outlive this command unless a
+    // durable session handle owns it; readiness-only import has no such handle.
     let mut command = Command::new(std::env::current_exe()?);
+    apply_probe_stdio(&mut command, &log_path)?;
     command
         .arg("run")
         .arg(&materialized.shadow_dir)
         .arg("--yes")
         .current_dir(&materialized.shadow_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        .stdin(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
     if actual_port != declared_port {
         command.env("ATO_UI_OVERRIDE_PORT", actual_port.to_string());
     }
+    command.env(IMPORT_PROBE_ID_ENV, &import_probe_id);
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
-    let mut child = command.spawn().context("failed to spawn shadow workspace")?;
+    let child = command
+        .spawn()
+        .context("failed to spawn shadow workspace")?;
+    let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+    cleanup.observe();
 
-    // Poll readiness for up to 120s
+    // Poll readiness for up to 300s.
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -639,22 +850,233 @@ fn run_shadow_workspace_readiness_only(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     let mut ready = false;
     while std::time::Instant::now() < deadline {
+        cleanup.observe();
         if let Ok(resp) = client.get(&ready_url).send() {
             if resp.status().is_success() {
                 ready = true;
                 break;
             }
         }
-        if let Ok(Some(_)) = child.try_wait() {
-            // Process exited before readiness
-            let stdout = read_all(child.stdout.take());
-            let stderr = read_all(child.stderr.take());
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&stdout),
-                String::from_utf8_lossy(&stderr),
-            );
+        if let Ok(Some(status)) = cleanup.child_mut().try_wait() {
+            // Short-lived commands can complete before readiness. Treat a
+            // successful exit as a valid probe completion; failures still
+            // flow through normal classification.
+            let combined = read_error_excerpt_from_log(&log_path);
+            let cleanup_outcome = cleanup.cleanup();
+            if status.success() {
+                if declared_port_from_recipe.is_some() {
+                    return Ok(import_run_with_cleanup(
+                        ImportRun {
+                            status: "failed".to_string(),
+                            phase: Some("readiness".to_string()),
+                            error_class: Some("exited_before_readiness".to_string()),
+                            error_excerpt: Some(redact_error_excerpt(&format!(
+                                "process exited successfully before readiness probe {ready_url} passed\n{combined}",
+                            ))),
+                            command_mode: None,
+                            requires_host_shell: None,
+                            shell_kind: None,
+                            cleanup_status: None,
+                            cleanup_error: None,
+                            log_path: None,
+                            run_session_id: None,
+                            pid: None,
+                            process_group_ids: Vec::new(),
+                            primary_port: None,
+                            primary_url: None,
+                            shadow_dir: None,
+                            readiness_state: None,
+                            cleanup_policy: None,
+                        },
+                        cleanup_outcome,
+                        &log_path,
+                    ));
+                }
+                return Ok(import_run_with_cleanup(
+                    ImportRun {
+                        status: "passed".to_string(),
+                        phase: Some("completed".to_string()),
+                        error_class: None,
+                        error_excerpt: None,
+                        command_mode: None,
+                        requires_host_shell: None,
+                        shell_kind: None,
+                        cleanup_status: None,
+                        cleanup_error: None,
+                        log_path: None,
+                        run_session_id: None,
+                        pid: None,
+                        process_group_ids: Vec::new(),
+                        primary_port: None,
+                        primary_url: None,
+                        shadow_dir: None,
+                        readiness_state: None,
+                        cleanup_policy: None,
+                    },
+                    cleanup_outcome,
+                    &log_path,
+                ));
+            }
             let (phase, error_class) = classify_run_failure(&combined);
+            return Ok(import_run_with_cleanup(
+                ImportRun {
+                    status: "failed".to_string(),
+                    phase: Some(phase.to_string()),
+                    error_class: Some(error_class.to_string()),
+                    error_excerpt: Some(redact_error_excerpt(&combined)),
+                    command_mode: None,
+                    requires_host_shell: None,
+                    shell_kind: None,
+                    cleanup_status: None,
+                    cleanup_error: None,
+                    log_path: None,
+                    run_session_id: None,
+                    pid: None,
+                    process_group_ids: Vec::new(),
+                    primary_port: None,
+                    primary_url: None,
+                    shadow_dir: None,
+                    readiness_state: None,
+                    cleanup_policy: None,
+                },
+                cleanup_outcome,
+                &log_path,
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+    }
+
+    if !ready {
+        let cleanup_outcome = cleanup.cleanup();
+        let excerpt = read_error_excerpt_from_log(&log_path);
+        return Ok(import_run_with_cleanup(
+            ImportRun {
+                status: "failed".to_string(),
+                phase: Some("readiness".to_string()),
+                error_class: Some("readiness_timeout".to_string()),
+                error_excerpt: Some(redact_error_excerpt(&format!(
+                    "readiness probe {ready_url} did not pass within 300s\n{excerpt}",
+                ))),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: None,
+                run_session_id: None,
+                pid: None,
+                process_group_ids: Vec::new(),
+                primary_port: None,
+                primary_url: None,
+                shadow_dir: None,
+                readiness_state: None,
+                cleanup_policy: None,
+            },
+            cleanup_outcome,
+            &log_path,
+        ));
+    }
+
+    let cleanup_outcome = cleanup.cleanup();
+    let mut run = ImportRun {
+        status: "passed".to_string(),
+        phase: Some("readiness".to_string()),
+        error_class: None,
+        error_excerpt: None,
+        command_mode: None,
+        requires_host_shell: None,
+        shell_kind: None,
+        cleanup_status: None,
+        cleanup_error: None,
+        log_path: None,
+        run_session_id: None,
+        pid: None,
+        process_group_ids: Vec::new(),
+        primary_port: None,
+        primary_url: None,
+        shadow_dir: None,
+        readiness_state: None,
+        cleanup_policy: None,
+    };
+    if cleanup_outcome.error.is_some() {
+        run.status = "failed".to_string();
+        run.phase = Some("cleanup".to_string());
+        run.error_class = Some("cleanup_failed".to_string());
+        run.error_excerpt = cleanup_outcome.error.clone();
+    }
+    Ok(import_run_with_cleanup(run, cleanup_outcome, &log_path))
+}
+
+fn run_shadow_workspace_keep_alive(
+    materialized: &mut MaterializedSource,
+    recipe_toml: &str,
+) -> Result<ImportRun> {
+    let shadow_manifest = materialized.shadow_dir.join(CAPSULE_TOML);
+    fs::write(&shadow_manifest, recipe_toml)
+        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
+
+    let declared_port = infer_port(recipe_toml).unwrap_or(1111);
+    let actual_port = if crate::runtime::port_manager::is_port_available(declared_port) {
+        declared_port
+    } else {
+        (declared_port.saturating_add(1)..=u16::MAX)
+            .find(|&p| crate::runtime::port_manager::is_port_available(p))
+            .unwrap_or(declared_port)
+    };
+    let primary_url = format!("http://127.0.0.1:{actual_port}/");
+    let run_session_id = new_import_run_id("preview", &materialized.source)?;
+    let log_path = import_run_log_path(&run_session_id)?;
+
+    let mut command = Command::new(std::env::current_exe()?);
+    apply_probe_stdio(&mut command, &log_path)?;
+    command
+        .arg("run")
+        .arg(&materialized.shadow_dir)
+        .arg("--yes")
+        .current_dir(&materialized.shadow_dir)
+        .stdin(Stdio::null())
+        .env(IMPORT_SESSION_ID_ENV, &run_session_id);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    if actual_port != declared_port {
+        command.env("ATO_UI_OVERRIDE_PORT", actual_port.to_string());
+    }
+    if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
+        command.arg("--dangerously-skip-permissions");
+    }
+
+    let mut child = command
+        .spawn()
+        .context("failed to spawn keep-alive shadow workspace")?;
+    let pid = child.id() as i32;
+    let mut observed_pgids = std::collections::BTreeSet::new();
+    observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+    observed_pgids.insert(pid);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .context("failed to build HTTP client")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut readiness_state = "pending".to_string();
+    while std::time::Instant::now() < deadline {
+        observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+        if let Ok(resp) = client.get(&primary_url).send() {
+            if resp.status().is_success() {
+                readiness_state = "ready".to_string();
+                break;
+            }
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let combined = read_error_excerpt_from_log(&log_path);
+            let (phase, error_class) = if status.success() {
+                ("readiness", "exited_before_readiness")
+            } else {
+                classify_run_failure(&combined)
+            };
             return Ok(ImportRun {
                 status: "failed".to_string(),
                 phase: Some(phase.to_string()),
@@ -663,30 +1085,476 @@ fn run_shadow_workspace_readiness_only(
                 command_mode: None,
                 requires_host_shell: None,
                 shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: Some(log_path.display().to_string()),
+                run_session_id: Some(run_session_id),
+                pid: Some(pid),
+                process_group_ids: observed_pgids.into_iter().collect(),
+                primary_port: Some(actual_port),
+                primary_url: Some(primary_url),
+                shadow_dir: Some(materialized.shadow_dir.display().to_string()),
+                readiness_state: Some("exited".to_string()),
+                cleanup_policy: Some("not_started".to_string()),
             });
         }
         std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
-    if !ready {
-        let _ = child.kill();
-        let stderr = read_all(child.stderr.take());
-        anyhow::bail!(
-            "readiness probe {} did not pass within 120s\n{}",
-            ready_url,
-            String::from_utf8_lossy(&stderr).lines().take(20).collect::<Vec<_>>().join("\n"),
-        );
+    if readiness_state != "ready" {
+        let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+        cleanup.observed_pgids = observed_pgids;
+        let cleanup_outcome = cleanup.cleanup();
+        let excerpt = read_error_excerpt_from_log(&log_path);
+        return Ok(import_run_with_cleanup(
+            ImportRun {
+                status: "failed".to_string(),
+                phase: Some("readiness".to_string()),
+                error_class: Some("readiness_timeout".to_string()),
+                error_excerpt: Some(redact_error_excerpt(&format!(
+                    "readiness probe {primary_url} did not pass within 300s\n{excerpt}",
+                ))),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: None,
+                run_session_id: Some(run_session_id),
+                pid: Some(pid),
+                process_group_ids: cleanup.observed_pgids.iter().copied().collect(),
+                primary_port: Some(actual_port),
+                primary_url: Some(primary_url),
+                shadow_dir: Some(materialized.shadow_dir.display().to_string()),
+                readiness_state: Some("timeout".to_string()),
+                cleanup_policy: Some("failed_probe_teardown".to_string()),
+            },
+            cleanup_outcome,
+            &log_path,
+        ));
     }
 
-    Ok(ImportRun {
-        status: "passed".to_string(),
+    observed_pgids.extend(probe_pgids(pid, &materialized.shadow_dir));
+    let now = now_unix_ms()?;
+    let (owner_kind, owner_pid) = import_preview_owner();
+    let session = ImportPreviewSession {
+        run_session_id,
+        owner_kind,
+        owner_pid,
+        owner_process_start_time_unix_ms: owner_pid
+            .try_into()
+            .ok()
+            .and_then(ato_session_core::process::process_start_time_unix_ms),
+        ato_run_pid: pid,
+        ato_run_process_start_time_unix_ms: ato_session_core::process::process_start_time_unix_ms(
+            child.id(),
+        ),
+        process_group_ids: observed_pgids.into_iter().collect(),
+        primary_port: Some(actual_port),
+        primary_url: Some(primary_url),
+        shadow_dir: materialized.shadow_dir.clone(),
+        log_path: log_path.clone(),
+        created_at_unix_ms: now,
+        updated_at_unix_ms: now,
+        expires_at_unix_ms: None,
+        readiness_state,
+        cleanup_policy: "keep_until_explicit_stop".to_string(),
+        last_sweep_status: None,
+        last_sweep_error: None,
+    };
+    let process_manager = ProcessManager::new()?;
+    if let Err(error) = process_manager.write_import_preview_session(&session) {
+        let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+        cleanup.observed_pgids = session.process_group_ids.iter().copied().collect();
+        let cleanup_outcome = cleanup.cleanup();
+        return Ok(import_run_with_cleanup(
+            ImportRun {
+                status: "failed".to_string(),
+                phase: Some("session_store".to_string()),
+                error_class: Some("session_store_write_failed".to_string()),
+                error_excerpt: Some(redact_error_excerpt(&error.to_string())),
+                command_mode: None,
+                requires_host_shell: None,
+                shell_kind: None,
+                cleanup_status: None,
+                cleanup_error: None,
+                log_path: None,
+                run_session_id: Some(session.run_session_id),
+                pid: Some(session.ato_run_pid),
+                process_group_ids: session.process_group_ids,
+                primary_port: session.primary_port,
+                primary_url: session.primary_url,
+                shadow_dir: Some(session.shadow_dir.display().to_string()),
+                readiness_state: Some(session.readiness_state),
+                cleanup_policy: Some("failed_session_store_teardown".to_string()),
+            },
+            cleanup_outcome,
+            &log_path,
+        ));
+    }
+    let stored_session = match process_manager.read_import_preview_session(&session.run_session_id)
+    {
+        Ok(Some(stored_session)) => stored_session,
+        Ok(None) => {
+            let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+            cleanup.observed_pgids = session.process_group_ids.iter().copied().collect();
+            let _ = cleanup.cleanup();
+            anyhow::bail!("import preview session missing after store write");
+        }
+        Err(error) => {
+            let mut cleanup = ProbeRunGuard::new(child, materialized.shadow_dir.clone());
+            cleanup.observed_pgids = session.process_group_ids.iter().copied().collect();
+            let _ = cleanup.cleanup();
+            return Err(error);
+        }
+    };
+    materialized._workspace.keep = true;
+    Ok(import_run_from_import_preview_session(&stored_session))
+}
+
+fn import_run_from_import_preview_session(session: &ImportPreviewSession) -> ImportRun {
+    ImportRun {
+        status: "running".to_string(),
         phase: Some("readiness".to_string()),
         error_class: None,
         error_excerpt: None,
         command_mode: None,
         requires_host_shell: None,
         shell_kind: None,
-    })
+        cleanup_status: None,
+        cleanup_error: None,
+        log_path: Some(session.log_path.display().to_string()),
+        run_session_id: Some(session.run_session_id.clone()),
+        pid: Some(session.ato_run_pid),
+        process_group_ids: session.process_group_ids.clone(),
+        primary_port: session.primary_port,
+        primary_url: session.primary_url.clone(),
+        shadow_dir: Some(session.shadow_dir.display().to_string()),
+        readiness_state: Some(session.readiness_state.clone()),
+        cleanup_policy: Some(session.cleanup_policy.clone()),
+    }
+}
+
+fn import_preview_owner() -> (String, i32) {
+    if let Some(owner_pid) = std::env::var("ATO_DESKTOP_PARENT_PID")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|pid| *pid > 0)
+    {
+        return ("desktop".to_string(), owner_pid);
+    }
+    if std::env::var_os("ATO_DESKTOP_SESSION_ROOT").is_some() {
+        return ("desktop".to_string(), std::process::id() as i32);
+    }
+    ("cli".to_string(), cli_owner_pid())
+}
+
+#[cfg(unix)]
+fn cli_owner_pid() -> i32 {
+    unsafe { libc::getppid() }
+}
+
+#[cfg(not(unix))]
+fn cli_owner_pid() -> i32 {
+    std::process::id() as i32
+}
+
+fn now_unix_ms() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_millis() as u64)
+}
+
+#[derive(Debug, Clone)]
+struct ProbeCleanupOutcome {
+    status: String,
+    error: Option<String>,
+}
+
+struct ProbeRunGuard {
+    child: Option<Child>,
+    shadow_dir: PathBuf,
+    observed_pgids: std::collections::BTreeSet<i32>,
+    cleaned: bool,
+}
+
+impl ProbeRunGuard {
+    fn new(child: Child, shadow_dir: PathBuf) -> Self {
+        Self {
+            child: Some(child),
+            shadow_dir,
+            observed_pgids: std::collections::BTreeSet::new(),
+            cleaned: false,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("probe child accessed after cleanup")
+    }
+
+    fn cleanup(&mut self) -> ProbeCleanupOutcome {
+        if self.cleaned {
+            return ProbeCleanupOutcome {
+                status: "already_cleaned".to_string(),
+                error: None,
+            };
+        }
+        self.cleaned = true;
+        self.observe();
+        let Some(mut child) = self.child.take() else {
+            return ProbeCleanupOutcome {
+                status: "already_cleaned".to_string(),
+                error: None,
+            };
+        };
+
+        let outcome =
+            terminate_probe_process_tree(&mut child, &self.shadow_dir, &self.observed_pgids);
+        let _ = child.wait();
+        outcome
+    }
+
+    fn observe(&mut self) {
+        #[cfg(unix)]
+        if let Some(child) = self.child.as_ref() {
+            self.observed_pgids
+                .extend(probe_pgids(child.id() as i32, &self.shadow_dir));
+        }
+    }
+}
+
+impl Drop for ProbeRunGuard {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+fn import_run_with_cleanup(
+    mut run: ImportRun,
+    cleanup: ProbeCleanupOutcome,
+    log_path: &Path,
+) -> ImportRun {
+    run.cleanup_status = Some(cleanup.status);
+    run.cleanup_error = cleanup.error;
+    run.log_path = Some(log_path.display().to_string());
+    run
+}
+
+fn apply_probe_stdio(command: &mut Command, log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("failed to clone {}", log_path.display()))?;
+    command.stdout(Stdio::from(stdout));
+    command.stderr(Stdio::from(stderr));
+    Ok(())
+}
+
+fn new_import_run_id(prefix: &str, source: &ImportSource) -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system time before UNIX_EPOCH")?
+        .as_nanos();
+    Ok(format!(
+        "{}-{}-{}-{}-{now}",
+        prefix,
+        source.repo_namespace,
+        source.repo_name,
+        std::process::id()
+    ))
+}
+
+fn import_run_log_path(run_id: &str) -> Result<PathBuf> {
+    Ok(std::env::current_dir()?
+        .join(".tmp")
+        .join("ato-import-logs")
+        .join(format!("{run_id}.log")))
+}
+
+fn read_error_excerpt_from_log(log_path: &Path) -> String {
+    fs::read_to_string(log_path)
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(unix)]
+fn terminate_probe_process_tree(
+    child: &mut Child,
+    shadow_dir: &Path,
+    observed_pgids: &std::collections::BTreeSet<i32>,
+) -> ProbeCleanupOutcome {
+    let root_pid = child.id() as i32;
+    let mut pgids = observed_pgids.clone();
+    pgids.extend(probe_pgids(root_pid, shadow_dir));
+    pgids.insert(root_pid);
+    let had_live_processes = any_pgid_alive(&pgids);
+
+    if child.try_wait().ok().flatten().is_some() && !had_live_processes {
+        return ProbeCleanupOutcome {
+            status: "already_exited".to_string(),
+            error: None,
+        };
+    }
+
+    for pgid in &pgids {
+        signal_process_group(*pgid, libc::SIGTERM);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() && !any_pgid_alive(&pgids) {
+            return ProbeCleanupOutcome {
+                status: "terminated".to_string(),
+                error: None,
+            };
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    for pgid in probe_pgids(root_pid, shadow_dir) {
+        pgids.insert(pgid);
+    }
+    for pgid in &pgids {
+        signal_process_group(*pgid, libc::SIGKILL);
+    }
+
+    std::thread::sleep(Duration::from_millis(100));
+    if any_pgid_alive(&pgids) {
+        ProbeCleanupOutcome {
+            status: "failed".to_string(),
+            error: Some(format!(
+                "failed to terminate import probe process groups {:?} for {}",
+                pgids,
+                shadow_dir.display()
+            )),
+        }
+    } else {
+        ProbeCleanupOutcome {
+            status: "killed".to_string(),
+            error: None,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_probe_process_tree(
+    child: &mut Child,
+    _shadow_dir: &Path,
+    _observed_pgids: &std::collections::BTreeSet<i32>,
+) -> ProbeCleanupOutcome {
+    match child.try_wait() {
+        Ok(Some(_)) => ProbeCleanupOutcome {
+            status: "already_exited".to_string(),
+            error: None,
+        },
+        _ => match child.kill() {
+            Ok(()) => ProbeCleanupOutcome {
+                status: "killed".to_string(),
+                error: None,
+            },
+            Err(error) => ProbeCleanupOutcome {
+                status: "failed".to_string(),
+                error: Some(error.to_string()),
+            },
+        },
+    }
+}
+
+#[cfg(unix)]
+fn probe_pgids(root_pid: i32, shadow_dir: &Path) -> std::collections::BTreeSet<i32> {
+    let rows = process_rows();
+    let mut pending = vec![root_pid];
+    let mut descendants = std::collections::BTreeSet::new();
+    while let Some(parent) = pending.pop() {
+        for row in rows.iter().filter(|row| row.ppid == parent) {
+            if descendants.insert(row.pid) {
+                pending.push(row.pid);
+            }
+        }
+    }
+
+    let shadow_dir = shadow_dir.display().to_string();
+    rows.into_iter()
+        .filter(|row| {
+            row.pid == root_pid
+                || descendants.contains(&row.pid)
+                || (!shadow_dir.is_empty() && row.command.contains(&shadow_dir))
+        })
+        .filter_map(|row| (row.pgid > 0).then_some(row.pgid))
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn probe_pgids(_root_pid: i32, _shadow_dir: &Path) -> std::collections::BTreeSet<i32> {
+    std::collections::BTreeSet::new()
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct ProcessRow {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    command: String,
+}
+
+#[cfg(unix)]
+fn process_rows() -> Vec<ProcessRow> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid,ppid,pgid,command"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            Some(ProcessRow {
+                pid: parts.next()?.parse().ok()?,
+                ppid: parts.next()?.parse().ok()?,
+                pgid: parts.next()?.parse().ok()?,
+                command: parts.collect::<Vec<_>>().join(" "),
+            })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn any_pgid_alive(pgids: &std::collections::BTreeSet<i32>) -> bool {
+    pgids
+        .iter()
+        .any(|pgid| unsafe { libc::kill(-*pgid, 0) == 0 })
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: i32, signal: libc::c_int) {
+    if pgid > 0 {
+        unsafe {
+            libc::kill(-pgid, signal);
+        }
+    }
 }
 
 fn infer_port(recipe_toml: &str) -> Option<u16> {
@@ -725,7 +1593,9 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
     if std::env::var("CAPSULE_ALLOW_UNSAFE").ok().as_deref() == Some("1") {
         command.arg("--dangerously-skip-permissions");
     }
-    let mut child = command.spawn().context("failed to spawn shadow workspace")?;
+    let mut child = command
+        .spawn()
+        .context("failed to spawn shadow workspace")?;
     // Wait up to 120s for the run to complete, then time out gracefully.
     // Foreground servers (e.g. Bun) will keep running; we collect their
     // exit status or timeout output.
@@ -736,7 +1606,11 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
             Some(status) => {
                 let stdout = read_all(child.stdout.take());
                 let stderr = read_all(child.stderr.take());
-                return Ok(Output { status, stdout, stderr });
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             None if start.elapsed() >= timeout => {
                 let _ = child.kill();
@@ -746,7 +1620,11 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
                     "shadow workspace run timed out after {}s\n---stdout---\n{}\n---stderr---\n{}",
                     timeout.as_secs(),
                     String::from_utf8_lossy(&stdout),
-                    String::from_utf8_lossy(&stderr).lines().take(80).collect::<Vec<_>>().join("\n"),
+                    String::from_utf8_lossy(&stderr)
+                        .lines()
+                        .take(80)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 );
             }
             None => std::thread::sleep(std::time::Duration::from_millis(500)),
@@ -756,8 +1634,8 @@ fn run_ato_shadow(shadow_dir: &Path) -> Result<Output> {
 
 /// Attempt to resolve a verified recipe binding from the ato-api.
 fn resolve_remote_recipe(source: &ImportSource) -> Result<Option<(String, String)>> {
-    let api_base = std::env::var("ATO_STORE_API_URL")
-        .unwrap_or_else(|_| "https://api.ato.run".to_string());
+    let api_base =
+        std::env::var("ATO_STORE_API_URL").unwrap_or_else(|_| "https://api.ato.run".to_string());
     let api_base = api_base.trim_end_matches('/');
     let mut url = reqwest::Url::parse(&format!("{}/v1/source-imports/bindings/resolve", api_base))
         .context("invalid API base URL")?;
@@ -819,6 +1697,17 @@ fn import_run_from_output(output: &Output) -> ImportRun {
             command_mode: None,
             requires_host_shell: None,
             shell_kind: None,
+            cleanup_status: None,
+            cleanup_error: None,
+            log_path: None,
+            run_session_id: None,
+            pid: None,
+            process_group_ids: Vec::new(),
+            primary_port: None,
+            primary_url: None,
+            shadow_dir: None,
+            readiness_state: None,
+            cleanup_policy: None,
         };
     }
 
@@ -838,6 +1727,17 @@ fn import_run_from_output(output: &Output) -> ImportRun {
         command_mode: None,
         requires_host_shell: None,
         shell_kind: None,
+        cleanup_status: None,
+        cleanup_error: None,
+        log_path: None,
+        run_session_id: None,
+        pid: None,
+        process_group_ids: Vec::new(),
+        primary_port: None,
+        primary_url: None,
+        shadow_dir: None,
+        readiness_state: None,
+        cleanup_policy: None,
     }
 }
 
@@ -864,7 +1764,10 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
     {
         return ("run", "missing_required_env");
     }
-    if lowered.contains("database_url") && (lowered.contains("not set") || lowered.contains("missing") || lowered.contains("undefined"))
+    if lowered.contains("database_url")
+        && (lowered.contains("not set")
+            || lowered.contains("missing")
+            || lowered.contains("undefined"))
     {
         return ("run", "database_url_missing");
     }
@@ -882,11 +1785,13 @@ fn classify_run_failure(text: &str) -> (&'static str, &'static str) {
         if lowered.contains("failed migrations") || lowered.contains("p3009") {
             return ("prestart", "prisma_failed_migration_state");
         }
-        if lowered.contains("query engine") && (lowered.contains("could not locate") || lowered.contains("not found"))
+        if lowered.contains("query engine")
+            && (lowered.contains("could not locate") || lowered.contains("not found"))
         {
             return ("run", "prisma_query_engine_not_found");
         }
-        if lowered.contains("schema.prisma") && (lowered.contains("not found") || lowered.contains("does not exist"))
+        if lowered.contains("schema.prisma")
+            && (lowered.contains("not found") || lowered.contains("does not exist"))
         {
             return ("prestart", "prisma_schema_not_found");
         }
@@ -1090,6 +1995,7 @@ fn source_tree_hash_from_files(root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn normalizes_supported_github_inputs() {
@@ -1113,6 +2019,107 @@ mod tests {
         let error = normalize_github_import_input("capsule://store/foo/bar")
             .expect_err("capsule scheme rejected");
         assert!(error.to_string().contains("capsule:// imports"));
+    }
+
+    #[test]
+    fn cleanup_import_workspace_root_skips_active_session() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let outcome = cleanup_import_workspace_root_with(
+            &workspace,
+            |_| Ok(Some("preview-123".to_string())),
+            |_| Ok(None),
+        )
+        .expect("cleanup outcome");
+
+        assert_eq!(
+            outcome,
+            ImportWorkspaceCleanupOutcome::SkippedActive {
+                run_session_id: "preview-123".to_string()
+            }
+        );
+        assert!(workspace.exists());
+    }
+
+    #[test]
+    fn cleanup_import_workspace_root_removes_when_no_guards_match() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("shadow")).expect("workspace");
+
+        let outcome = cleanup_import_workspace_root_with(&workspace, |_| Ok(None), |_| Ok(None))
+            .expect("cleanup outcome");
+
+        assert_eq!(outcome, ImportWorkspaceCleanupOutcome::Removed);
+        assert!(!workspace.exists());
+    }
+
+    #[test]
+    fn cleanup_import_workspace_root_skips_when_session_guard_fails() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let outcome = cleanup_import_workspace_root_with(
+            &workspace,
+            |_| Err(anyhow::anyhow!("session store unavailable")),
+            |_| Ok(None),
+        )
+        .expect("cleanup outcome");
+
+        assert_eq!(
+            outcome,
+            ImportWorkspaceCleanupOutcome::SkippedUnknown {
+                reason: "session store unavailable".to_string()
+            }
+        );
+        assert!(workspace.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_open_process_guard_detects_command_reference() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let rows = vec![ProcessRow {
+            pid: 4242,
+            ppid: 1,
+            pgid: 4242,
+            command: format!("python3 {}", workspace.display()),
+        }];
+
+        let open_process = workspace_open_process_guard_with(&workspace, &rows, |_| Ok(None))
+            .expect("guard result")
+            .expect("open process");
+
+        assert_eq!(open_process.pid_or_pgid, "pid:4242");
+        assert!(open_process.reason.contains("command references"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_open_process_guard_detects_cwd_reference() {
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let shadow = workspace.join("shadow");
+        fs::create_dir_all(&shadow).expect("workspace");
+        let rows = vec![ProcessRow {
+            pid: 5151,
+            ppid: 1,
+            pgid: 5151,
+            command: "python3 server.py".to_string(),
+        }];
+
+        let open_process =
+            workspace_open_process_guard_with(&workspace, &rows, |_| Ok(Some(shadow.clone())))
+                .expect("guard result")
+                .expect("open process");
+
+        assert_eq!(open_process.pid_or_pgid, "pid:5151");
+        assert!(open_process.reason.contains("cwd is under"));
     }
 
     #[test]
@@ -1143,8 +2150,9 @@ mod tests {
 
     #[test]
     fn unknown_provider_failure_falls_through_to_unknown() {
-        let (phase, class) =
-            classify_run_failure("some completely unfamiliar error text that does not match any known pattern");
+        let (phase, class) = classify_run_failure(
+            "some completely unfamiliar error text that does not match any known pattern",
+        );
         assert_eq!(class, "unknown");
     }
 
@@ -1158,17 +2166,15 @@ mod tests {
 
     #[test]
     fn prisma_database_url_missing_classified() {
-        let (phase, class) = classify_run_failure(
-            "prisma:error Environment variable not found: DATABASE_URL",
-        );
+        let (phase, class) =
+            classify_run_failure("prisma:error Environment variable not found: DATABASE_URL");
         assert_eq!(class, "prisma_database_url_missing");
     }
 
     #[test]
     fn prisma_database_connection_failed_classified() {
-        let (phase, class) = classify_run_failure(
-            "prisma:error Can't reach database server at `localhost:5432`",
-        );
+        let (phase, class) =
+            classify_run_failure("prisma:error Can't reach database server at `localhost:5432`");
         assert_eq!(class, "prisma_database_connection_failed");
     }
 
@@ -1182,9 +2188,8 @@ mod tests {
 
     #[test]
     fn prisma_schema_not_found_classified() {
-        let (phase, class) = classify_run_failure(
-            "Prisma schema file prisma/schema.prisma not found",
-        );
+        let (phase, class) =
+            classify_run_failure("Prisma schema file prisma/schema.prisma not found");
         assert_eq!(class, "prisma_schema_not_found");
     }
 

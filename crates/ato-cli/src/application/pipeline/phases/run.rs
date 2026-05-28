@@ -24,6 +24,7 @@ use capsule_core::CapsuleReporter;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
+use crate::application::build_materialization as bm;
 use crate::application::dependency_credentials::{HostEnv, ProcessHostEnv, RedactionRegistry};
 use crate::application::dependency_materializer::{
     digest_file, AttestationStrategy, CacheStrategy, DependencyMaterializationRequest,
@@ -233,6 +234,10 @@ pub(crate) struct ConsumerRunRequest {
     pub(crate) cache_strategy: CacheStrategy,
     pub(crate) reporter: Arc<CliReporter>,
     pub(crate) preview_mode: bool,
+    /// Revision-pinned output directory set by `ato launch`. When `Some`,
+    /// `run_install_phase` bypasses `resolve_run_target_or_install` and uses
+    /// this frozen revision output dir directly as the run target.
+    pub(crate) pinned_revision_output_dir: Option<std::path::PathBuf>,
 }
 
 impl ConsumerRunRequest {
@@ -1339,8 +1344,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
     // `verify_lockfile_external_dependencies(manifest, lock)` stays
     // as a debug parity guard.
     {
-        let external_dependencies =
-            manifest_external_capsule_dependencies(&plan.manifest)?;
+        let external_dependencies = manifest_external_capsule_dependencies(&plan.manifest)?;
         let bundle = crate::application::graph_views::build_declared_only_bundle(
             &external_dependencies,
             Some(plan.manifest_path.display().to_string()),
@@ -1352,11 +1356,8 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             &compatibility_legacy_lock.lock,
         )?;
         debug_assert!(
-            verify_lockfile_external_dependencies(
-                &plan.manifest,
-                &compatibility_legacy_lock.lock,
-            )
-            .is_ok(),
+            verify_lockfile_external_dependencies(&plan.manifest, &compatibility_legacy_lock.lock,)
+                .is_ok(),
             "PR-4a parity: legacy verifier disagrees with bundle-derived verifier \
              at run.rs pre-spawn gate (compatibility branch)"
         );
@@ -1457,18 +1458,32 @@ where
 {
     progress.start(HourglassPhase::Install);
 
-    let resolved_target = crate::install::support::resolve_run_target_or_install(
-        request.target.clone(),
-        request.assume_yes,
-        request.provider_toolchain_requested,
-        request.explicit_commit.clone(),
-        request.keep_failed_artifacts,
-        request.auto_fix_mode,
-        request.allow_unverified,
-        request.registry.as_deref(),
-        request.reporter.clone(),
-    )
-    .await?;
+    let resolved_target = if let Some(pinned) = &request.pinned_revision_output_dir {
+        // Revision-pinned launch from `ato launch`: bypass `resolve_run_target_or_install`
+        // and the ~/.ato path guard. The output directory is a frozen, trusted revision
+        // root written by `InstallRevisionFinalizer`.
+        crate::install::support::ResolvedRunTarget {
+            path: pinned.clone(),
+            agent_local_root: None,
+            desktop_open_path: None,
+            export_request: request.export_request.clone(),
+            provider_workspace: None,
+            transient_workspace_root: None,
+        }
+    } else {
+        crate::install::support::resolve_run_target_or_install(
+            request.target.clone(),
+            request.assume_yes,
+            request.provider_toolchain_requested,
+            request.explicit_commit.clone(),
+            request.keep_failed_artifacts,
+            request.auto_fix_mode,
+            request.allow_unverified,
+            request.registry.as_deref(),
+            request.reporter.clone(),
+        )
+        .await?
+    };
     let manifest_outcome = crate::install::support::ensure_local_manifest_ready_for_run(
         &resolved_target,
         request.assume_yes,
@@ -2406,8 +2421,6 @@ pub(crate) async fn run_build_phase<P>(
 where
     P: ConsumerRunProgress,
 {
-    use crate::application::build_materialization as bm;
-
     progress.start(HourglassPhase::Build);
 
     let workspace_root = state.prepared.workspace_root.clone();
@@ -2419,6 +2432,18 @@ where
     );
     state.build_observation = prepared.observation.clone();
     state.build_decision_kind = Some(prepared.decision.result_kind);
+    let build_output_lock = if matches!(
+        &prepared.decision.action,
+        bm::DecisionAction::Project(_) | bm::DecisionAction::Execute | bm::DecisionAction::Fail
+    ) {
+        prepared
+            .observation
+            .as_ref()
+            .map(crate::application::phase_materializer::acquire_build_output_lock_for_observation)
+            .transpose()?
+    } else {
+        None
+    };
 
     match prepared.decision.action {
         bm::DecisionAction::Skip => {
@@ -2429,10 +2454,141 @@ where
             );
             return Ok(state);
         }
+        bm::DecisionAction::Project(layer) => {
+            let Some(observation) = prepared.observation.as_ref() else {
+                anyhow::bail!("build output projection requires a build observation");
+            };
+            match crate::application::phase_materializer::project_build_outputs(
+                &workspace_root,
+                observation,
+                &layer,
+            ) {
+                Ok(()) => {
+                    drop(build_output_lock);
+                    maybe_apply_dependency_materialization(request, &mut state).await?;
+                    progress.ok(
+                        HourglassPhase::Build,
+                        "build output layer projected — executor skipped",
+                    );
+                    return Ok(state);
+                }
+                Err(error) => {
+                    let no_build = matches!(
+                        request.build_policy,
+                        crate::application::build_materialization::BuildPolicy::NoBuild
+                    );
+                    if no_build {
+                        eprintln!(
+                            "ATO-WARN failed to project required local build output layer; \
+                             trying remote materialization: {error:#}"
+                        );
+                    } else {
+                        eprintln!(
+                            "ATO-WARN failed to project build output layer; trying remote \
+                             materialization before local build: {}",
+                            error
+                        );
+                    }
+                    match try_remote_build_output_projection(
+                        &state.decision.plan,
+                        &workspace_root,
+                        observation,
+                        request.reporter.is_json(),
+                    ) {
+                        Ok(true) => {
+                            drop(build_output_lock);
+                            maybe_apply_dependency_materialization(request, &mut state).await?;
+                            state.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                            progress.ok(
+                                HourglassPhase::Build,
+                                "remote build output layer projected — executor skipped",
+                            );
+                            return Ok(state);
+                        }
+                        Ok(false) => {}
+                        Err(remote_error) => {
+                            if no_build {
+                                eprintln!(
+                                    "ATO-ERROR failed to use remote build output \
+                                     materialization: {remote_error:#}"
+                                );
+                                return Err(remote_error
+                                    .context("failed to use remote build output materialization"));
+                            } else {
+                                eprintln!(
+                                    "ATO-WARN remote build output materialization unavailable; \
+                                     build will execute: {remote_error:#}"
+                                );
+                            }
+                        }
+                    }
+                    if no_build {
+                        eprintln!(
+                            "ATO-ERROR failed to project required build output layer: {error:#}"
+                        );
+                        return Err(error.context("failed to project required build output layer"));
+                    }
+                }
+            }
+        }
         bm::DecisionAction::Fail => {
+            let Some(observation) = prepared.observation.as_ref() else {
+                return Err(bm::no_build_error(&prepared.decision));
+            };
+            match try_remote_build_output_projection(
+                &state.decision.plan,
+                &workspace_root,
+                observation,
+                request.reporter.is_json(),
+            ) {
+                Ok(true) => {
+                    drop(build_output_lock);
+                    maybe_apply_dependency_materialization(request, &mut state).await?;
+                    state.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                    progress.ok(
+                        HourglassPhase::Build,
+                        "remote build output layer projected — executor skipped",
+                    );
+                    return Ok(state);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "ATO-ERROR failed to use remote build output materialization: {error:#}"
+                    );
+                    return Err(error.context("failed to use remote build output materialization"));
+                }
+            }
             return Err(bm::no_build_error(&prepared.decision));
         }
-        bm::DecisionAction::Execute => {}
+        bm::DecisionAction::Execute => {
+            if let Some(observation) = prepared.observation.as_ref() {
+                match try_remote_build_output_projection(
+                    &state.decision.plan,
+                    &workspace_root,
+                    observation,
+                    request.reporter.is_json(),
+                ) {
+                    Ok(true) => {
+                        drop(build_output_lock);
+                        maybe_apply_dependency_materialization(request, &mut state).await?;
+                        state.build_decision_kind = Some(bm::BuildResultKind::Materialized);
+                        progress.ok(
+                            HourglassPhase::Build,
+                            "remote build output layer projected — executor skipped",
+                        );
+                        return Ok(state);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "ATO-WARN remote build output materialization unavailable; \
+                             build will execute: {error:#}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     if let Err(error) = crate::commands::run::run_v03_lifecycle_steps(
@@ -2479,12 +2635,33 @@ where
     }
 
     if let Some(observation) = state.build_observation.as_ref() {
+        // Capture while the lock is still held so that workspace-output
+        // reading and state-record writing are inside the same lock region
+        // as the build executor.
+        let output_layer = build_output_lock.as_ref().and_then(|lock| {
+            match crate::application::phase_materializer::capture_build_outputs_locked(
+                lock,
+                &workspace_root,
+                observation,
+            ) {
+                Ok(layer) => layer,
+                Err(err) => {
+                    eprintln!(
+                        "ATO-WARN failed to capture build output layer for local \
+                         materialization: {err}"
+                    );
+                    None
+                }
+            }
+        });
         bm::persist_after_execute(
             &state.decision.plan,
             &workspace_root,
             observation,
             request.reporter.is_json(),
+            output_layer,
         );
+        drop(build_output_lock);
     }
 
     maybe_apply_dependency_materialization(request, &mut state).await?;
@@ -2519,6 +2696,36 @@ async fn maybe_apply_dependency_materialization(
             .with_injected_mounts(vec![materialization.mount]);
     }
     Ok(())
+}
+
+fn try_remote_build_output_projection(
+    plan: &capsule_core::router::ManifestData,
+    workspace_root: &std::path::Path,
+    observation: &bm::BuildObservation,
+    suppress_recommendation: bool,
+) -> Result<bool> {
+    let Some(layer) =
+        crate::application::phase_materializer_remote::lookup_remote_build_output_layer(
+            workspace_root,
+            observation,
+        )?
+    else {
+        return Ok(false);
+    };
+    crate::application::phase_materializer::project_build_outputs(
+        workspace_root,
+        observation,
+        &layer,
+    )
+    .context("failed to project imported remote build output layer")?;
+    bm::persist_after_remote_project(
+        plan,
+        workspace_root,
+        observation,
+        suppress_recommendation,
+        layer,
+    );
+    Ok(true)
 }
 
 pub(crate) async fn run_verify_phase<P>(
@@ -2755,10 +2962,7 @@ fn maybe_report_failed_provider_workspace(request: &ConsumerRunRequest, workspac
 /// Resolve `{{deps.<alias>.runtime_exports.<key>}}` templates using the
 /// dependency orchestrator's resolved exports. If the value is not a
 /// template, it is returned unchanged.
-fn resolve_dep_template_inner(
-    value: &str,
-    graph: &RunningGraph,
-) -> String {
+fn resolve_dep_template_inner(value: &str, graph: &RunningGraph) -> String {
     if !value.contains("deps.") || !value.contains("runtime_exports.") {
         return value.to_string();
     }
@@ -2815,6 +3019,33 @@ where
             anyhow::bail!("--background is not supported for orchestration mode");
         }
 
+        // OCI service graph: route to the official Podman-backed multi-service executor.
+        // This must be checked before the legacy Bollard orchestrator to avoid routing
+        // OCI services through the Docker-compatible path.
+        if decision.plan.all_services_are_oci() {
+            let exit = crate::executors::oci_multi_service::execute_multi_service(
+                &decision.plan,
+                request.reporter.clone(),
+                &launch_ctx,
+            )
+            .await?;
+            if exit != 0 {
+                if let Some(external_capsules) = external_capsules.as_mut() {
+                    external_capsules.shutdown_now();
+                }
+                if let Some(dep_contracts) = dep_contracts.as_mut() {
+                    dep_contracts.shutdown_now();
+                }
+                maybe_report_failed_provider_workspace(request, &prepared.workspace_root);
+                std::process::exit(exit);
+            }
+            progress.ok(
+                HourglassPhase::Execute,
+                "oci multi-service runtime completed",
+            );
+            return Ok(());
+        }
+
         let exit = crate::executors::orchestrator::execute(
             &decision.plan,
             &prepared,
@@ -2826,6 +3057,12 @@ where
                 dangerously_skip_permissions: request.dangerously_skip_permissions,
                 assume_yes: request.assume_yes,
                 nacelle: request.nacelle.clone(),
+                // Foreground `ato run` keeps the historical fixed-host-port
+                // publish for `services.main` so external tools (CLI users,
+                // shells, browser bookmarks) reach the recipe on the declared
+                // port. Sessions that own the only consumer (e.g. Desktop's
+                // WebView) opt into EphemeralMainService instead.
+                publish_policy: crate::executors::orchestrator::PublishPolicy::ExternalDefault,
             },
             attempt.as_deref_mut(),
         )
@@ -2851,9 +3088,12 @@ where
         }
 
         target_runner::preflight_required_environment_variables(&decision.plan, &launch_ctx)?;
-        let exit =
-            crate::executors::oci::execute(&decision.plan, request.reporter.clone(), &launch_ctx)
-                .await?;
+        let exit = crate::executors::oci_single_target::execute_single_target(
+            &decision.plan,
+            request.reporter.clone(),
+            &launch_ctx,
+        )
+        .await?;
         if exit != 0 {
             if let Some(external_capsules) = external_capsules.as_mut() {
                 external_capsules.shutdown_now();
@@ -3116,26 +3356,21 @@ where
         let plan_granted = crate::consent_store::has_consent(&execution_plan)?;
         debug_assert!(
             {
-                let consent_deps =
-                    capsule_core::lockfile::manifest_external_capsule_dependencies(
-                        &decision.plan.manifest,
-                    )
-                    .ok();
+                let consent_deps = capsule_core::lockfile::manifest_external_capsule_dependencies(
+                    &decision.plan.manifest,
+                )
+                .ok();
                 let view_granted = consent_deps.map(|deps| {
-                    let consent_input =
-                        capsule_core::engine::execution_graph::GraphConsentInput {
-                            scoped_id: execution_plan.consent.key.scoped_id.clone(),
-                            version: execution_plan.consent.key.version.clone(),
-                            target_label: execution_plan.consent.key.target_label.clone(),
-                            policy_segment_hash: execution_plan
-                                .consent
-                                .policy_segment_hash
-                                .clone(),
-                            provisioning_policy_hash: execution_plan
-                                .consent
-                                .provisioning_policy_hash
-                                .clone(),
-                        };
+                    let consent_input = capsule_core::engine::execution_graph::GraphConsentInput {
+                        scoped_id: execution_plan.consent.key.scoped_id.clone(),
+                        version: execution_plan.consent.key.version.clone(),
+                        target_label: execution_plan.consent.key.target_label.clone(),
+                        policy_segment_hash: execution_plan.consent.policy_segment_hash.clone(),
+                        provisioning_policy_hash: execution_plan
+                            .consent
+                            .provisioning_policy_hash
+                            .clone(),
+                    };
                     let bundle =
                         crate::application::graph_views::build_declared_only_bundle_with_consent(
                             &deps,
@@ -3145,9 +3380,7 @@ where
                             consent_input,
                         );
                     let view =
-                        crate::application::graph_views::ExecutionConsentView::from_bundle(
-                            &bundle,
-                        );
+                        crate::application::graph_views::ExecutionConsentView::from_bundle(&bundle);
                     crate::consent_store::has_consent_view(&view).unwrap_or(plan_granted)
                 });
                 view_granted
@@ -3234,15 +3467,20 @@ where
         let target_env: Vec<(String, String)> = decision.plan.execution_env().into_iter().collect();
         // Resolve {{deps.X.runtime_exports.Y}} templates from the running dep graph.
         let resolved_env: Vec<(String, String)> = {
-            let graph = dep_contracts.as_ref().and_then(DependencyContractGuard::graph);
-            target_env.into_iter().map(|(key, value)| {
-                let resolved = if let Some(g) = graph {
-                    resolve_dep_template_inner(&value, g)
-                } else {
-                    value.to_string()
-                };
-                (key, resolved)
-            }).collect()
+            let graph = dep_contracts
+                .as_ref()
+                .and_then(DependencyContractGuard::graph);
+            target_env
+                .into_iter()
+                .map(|(key, value)| {
+                    let resolved = if let Some(g) = graph {
+                        resolve_dep_template_inner(&value, g)
+                    } else {
+                        value.to_string()
+                    };
+                    (key, resolved)
+                })
+                .collect()
         };
         tracing::info!(%command, cwd=%prestart_cwd.display(), env_count=%resolved_env.len(), has_graph=%dep_contracts.as_ref().and_then(DependencyContractGuard::graph).is_some(), "running prestart command");
         // Debug: log DATABASE_URL value
@@ -3257,9 +3495,7 @@ where
         for (key, value) in &resolved_env {
             cmd.env(key, value);
         }
-        let mut child = cmd
-            .spawn()
-            .context("failed to spawn prestart command")?;
+        let mut child = cmd.spawn().context("failed to spawn prestart command")?;
         let status = child.wait().context("prestart command wait failed")?;
         if !status.success() {
             anyhow::bail!(
@@ -4050,8 +4286,7 @@ mod tests {
         reconcile_compat_manifest_targets, resolve_sandbox_grants, unavailable_service_message,
         validate_sandbox_grants_best_effort, ConsumerRunRequest, DerivedBridgeManifest,
         ExternalServiceContract, ExternalServiceHealthcheck, ExternalServiceHealthcheckKind,
-        ExternalServiceMode,
-        PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
+        ExternalServiceMode, PreparedRunContext, RunPipelineState, ServiceRequiredAsset,
     };
     use capsule_core::ato_lock::AtoLock;
     use capsule_core::types::{CapsuleManifest, ParamValue};
@@ -4611,6 +4846,7 @@ url = "http://127.0.0.1:8787/health"
             cache_strategy: crate::application::dependency_materializer::CacheStrategy::None,
             reporter: Arc::new(CliReporter::new(false)),
             preview_mode: false,
+            pinned_revision_output_dir: None,
         }
     }
 
@@ -4742,7 +4978,10 @@ node = "20"
             targets.contains_key("default"),
             "alias [targets.default] should have been inserted"
         );
-        let default_target = targets.get("default").and_then(toml::Value::as_table).unwrap();
+        let default_target = targets
+            .get("default")
+            .and_then(toml::Value::as_table)
+            .unwrap();
         assert_eq!(
             default_target.get("build").and_then(toml::Value::as_str),
             Some("npm install && npm run build")

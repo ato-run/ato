@@ -133,7 +133,11 @@ impl PackFilter {
         excludes.extend(exclude_patterns);
 
         let exclude = build_glob_set(&excludes)?;
-        Ok(Self { include, exclude, profile })
+        Ok(Self {
+            include,
+            exclude,
+            profile,
+        })
     }
 
     pub fn should_include_file(&self, relative_path: &Path) -> bool {
@@ -282,6 +286,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new(".ato/source-inference/provenance.json")));
@@ -329,6 +334,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new("node_modules/a.js")));
@@ -372,6 +378,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/**".to_string()],
@@ -421,6 +428,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["**/node_modules/**".to_string()],
@@ -468,6 +476,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -522,6 +531,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -570,6 +580,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         })
         .expect("filter")
     }
@@ -650,6 +661,7 @@ mod tests {
             tool_dependencies: Default::default(),
             foundation_requirements: None,
             host_capabilities: vec![],
+            ingress: None,
         };
         m.pack = Some(PackConfig { include, exclude });
         m
@@ -666,9 +678,8 @@ mod tests {
         let filter = PackFilter::from_manifest_with_profile(&manifest, PublishProfile::Source)
             .expect("filter");
         // The Next.js standalone subtree must NOT be allowed through Source profile.
-        assert!(!filter.should_include_file(Path::new(
-            ".next/standalone/node_modules/next/package.json"
-        )));
+        assert!(!filter
+            .should_include_file(Path::new(".next/standalone/node_modules/next/package.json")));
         assert!(!filter.should_include_file(Path::new(
             "apps/web/.next/standalone/apps/web/node_modules/react/index.js"
         )));
@@ -687,9 +698,8 @@ mod tests {
         );
         let filter = PackFilter::from_manifest_with_profile(&manifest, PublishProfile::Artifact)
             .expect("filter");
-        assert!(filter.should_include_file(Path::new(
-            ".next/standalone/node_modules/next/package.json"
-        )));
+        assert!(filter
+            .should_include_file(Path::new(".next/standalone/node_modules/next/package.json")));
         assert!(filter.should_include_file(Path::new(
             "apps/web/.next/standalone/apps/web/node_modules/react/index.js"
         )));
@@ -704,7 +714,8 @@ mod tests {
                 PackFilter::from_manifest_with_profile(&base_manifest, profile).expect("filter");
             // Python virtual envs
             assert!(
-                !filter.should_include_file(Path::new(".venv/lib/site-packages/requests/__init__.py")),
+                !filter
+                    .should_include_file(Path::new(".venv/lib/site-packages/requests/__init__.py")),
                 "{profile:?}: .venv should be excluded"
             );
             assert!(

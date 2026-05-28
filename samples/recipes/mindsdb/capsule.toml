@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "mindsdb"
+version = "25.4.4"
+type = "app"
+description = "AI database layer — query ML models with SQL"
+homepage = "https://github.com/mindsdb/mindsdb"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "mindsdb/mindsdb:v25.4.4.0"
+port = 47334
+env = { MINDSDB_STORAGE_DIR = "/mindsdb/var" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "mindsdb storage and models"
+attach = "explicit"
+schema_id = "sha256:mindsdb-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/api/status", port = "47334", timeout_seconds = 180 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/mindsdb/var"

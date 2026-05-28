@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::time::SystemTime;
 
+use anyhow::Result;
+
 use crate::orchestrator::GuestLaunchSession;
 
 // ── Client identity ─────────────────────────────────────────────────────────
@@ -45,6 +47,54 @@ pub enum LaunchVia {
     Desktop,
     /// Started manually via the CLI (`ato app session start`)
     Cli,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OciImportKind {
+    Compose,
+    DockerRunScript,
+    ExplicitOci,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OciSessionStatus {
+    Running,
+    Stopped,
+    StopFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DesktopSessionKind {
+    NativeSource,
+    Oci {
+        import_kind: OciImportKind,
+        status: OciSessionStatus,
+        endpoint_url: Option<String>,
+        service_count: usize,
+        source_path: Option<String>,
+        source_hash: Option<String>,
+    },
+}
+
+impl DesktopSessionKind {
+    fn is_oci(&self) -> bool {
+        matches!(self, Self::Oci { .. })
+    }
+}
+
+/// Safe OCI session fields read from the CLI `ato ps --json` boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OciSessionSnapshot {
+    pub id: String,
+    pub import_kind: OciImportKind,
+    pub status: OciSessionStatus,
+    pub endpoint_url: Option<String>,
+    pub service_count: usize,
+    pub source_path: Option<String>,
+    pub source_hash: Option<String>,
 }
 
 /// The canonical lifecycle state of a capsule *process*.
@@ -92,6 +142,7 @@ pub struct CapsuleSession {
     pub process_state: SessionProcessState,
     pub local_url: Option<String>,
     pub healthcheck_url: Option<String>,
+    pub session_kind: DesktopSessionKind,
     pub launch_context: CapsuleLaunchContext,
     pub launch_via: LaunchVia,
     pub created_at: SystemTime,
@@ -114,8 +165,50 @@ impl CapsuleSession {
             process_state: SessionProcessState::Ready,
             local_url: session.local_url.clone(),
             healthcheck_url: session.healthcheck_url.clone(),
+            session_kind: DesktopSessionKind::NativeSource,
             launch_context,
             launch_via: LaunchVia::Desktop,
+            created_at: SystemTime::now(),
+            last_seen_at: SystemTime::now(),
+        }
+    }
+
+    pub fn from_oci_snapshot(snapshot: OciSessionSnapshot) -> Self {
+        let source_label = snapshot
+            .source_path
+            .clone()
+            .unwrap_or_else(|| snapshot.id.clone());
+        let process_state = match &snapshot.status {
+            OciSessionStatus::Running => SessionProcessState::Ready,
+            OciSessionStatus::Stopped => SessionProcessState::Stopped,
+            OciSessionStatus::StopFailed => SessionProcessState::FailedToStop {
+                error: "OCI cleanup needs retry".to_string(),
+            },
+        };
+        Self {
+            session_id: snapshot.id.clone(),
+            handle: source_label.clone(),
+            canonical_handle: None,
+            title: source_label.clone(),
+            process_state,
+            local_url: snapshot.endpoint_url.clone(),
+            healthcheck_url: None,
+            session_kind: DesktopSessionKind::Oci {
+                import_kind: snapshot.import_kind,
+                status: snapshot.status,
+                endpoint_url: snapshot.endpoint_url,
+                service_count: snapshot.service_count,
+                source_path: snapshot.source_path,
+                source_hash: snapshot.source_hash,
+            },
+            launch_context: CapsuleLaunchContext {
+                handle_or_url: source_label,
+                target: None,
+                launch_configs: Vec::new(),
+                requested_client: SessionClientKind::Headless,
+                source: CapsuleOpenSource::CardSwitcher,
+            },
+            launch_via: LaunchVia::Cli,
             created_at: SystemTime::now(),
             last_seen_at: SystemTime::now(),
         }
@@ -208,6 +301,7 @@ pub struct SessionViewEntry {
     pub attached_clients: Vec<ClientSummary>,
     pub primary_window_id: Option<u64>,
     pub local_url: Option<String>,
+    pub session_kind: DesktopSessionKind,
 }
 
 // ── SessionRegistry ─────────────────────────────────────────────────────────
@@ -360,6 +454,32 @@ impl SessionRegistry {
         self.sessions.len()
     }
 
+    /// Replace the CLI-originated OCI projection without touching Desktop-owned
+    /// source sessions or their attached window clients.
+    pub fn sync_oci_sessions(&mut self, snapshots: Vec<OciSessionSnapshot>) {
+        let incoming_ids: Vec<String> =
+            snapshots.iter().map(|session| session.id.clone()).collect();
+        let stale_ids: Vec<String> = self
+            .sessions
+            .values()
+            .filter(|session| {
+                session.session_kind.is_oci() && !incoming_ids.contains(&session.session_id)
+            })
+            .map(|session| session.session_id.clone())
+            .collect();
+        for id in stale_ids {
+            self.remove_session(&id);
+        }
+        for snapshot in snapshots {
+            self.register_session(CapsuleSession::from_oci_snapshot(snapshot));
+        }
+    }
+
+    pub fn refresh_oci_sessions_from_cli(&mut self) -> Result<()> {
+        self.sync_oci_sessions(crate::orchestrator::list_oci_sessions()?);
+        Ok(())
+    }
+
     // ── lifecycle actions ──────────────────────────────────────────────
 
     /// Detach all clients associated with a GPUI window, without stopping
@@ -402,8 +522,18 @@ impl SessionRegistry {
         self.update_process_state(session_id, SessionProcessState::Stopping);
 
         let sid = session_id.to_string();
+        let is_oci = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.session_kind.is_oci())
+            .unwrap_or(false);
         std::thread::spawn(move || {
-            match crate::orchestrator::stop_guest_session(&sid) {
+            let stop_result = if is_oci {
+                crate::orchestrator::stop_oci_session(&sid).map(|()| true)
+            } else {
+                crate::orchestrator::stop_guest_session(&sid)
+            };
+            match stop_result {
                 Ok(true) => {
                     tracing::info!(session_id = %sid, "stop_session_once: stopped");
                 }
@@ -416,6 +546,29 @@ impl SessionRegistry {
             }
             // TODO(D4): post completion to UI thread to update process_state to Stopped
         });
+    }
+
+    pub fn stop_oci_session_and_refresh(&mut self, session_id: &str) -> Result<bool> {
+        let is_oci = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.session_kind.is_oci())
+            .unwrap_or(false);
+        if !is_oci {
+            return Ok(false);
+        }
+        self.update_process_state(session_id, SessionProcessState::Stopping);
+        if let Err(error) = crate::orchestrator::stop_oci_session(session_id) {
+            self.update_process_state(
+                session_id,
+                SessionProcessState::FailedToStop {
+                    error: error.to_string(),
+                },
+            );
+            return Err(error);
+        }
+        self.refresh_oci_sessions_from_cli()?;
+        Ok(true)
     }
 
     /// Stop every session that is still running (Starting or Ready).
@@ -476,6 +629,7 @@ impl SessionRegistry {
                     attached_clients: summaries,
                     primary_window_id,
                     local_url: session.local_url.clone(),
+                    session_kind: session.session_kind.clone(),
                 }
             })
             .collect();
@@ -602,6 +756,7 @@ mod tests {
             process_state: SessionProcessState::Ready,
             local_url: Some(format!("http://127.0.0.1:8080/{}", id)),
             healthcheck_url: None,
+            session_kind: DesktopSessionKind::NativeSource,
             launch_context: CapsuleLaunchContext {
                 handle_or_url: handle.to_string(),
                 target: None,
@@ -998,5 +1153,91 @@ mod tests {
 
         let count = reg.stop_all_running();
         assert_eq!(count, 0);
+    }
+
+    fn make_oci_snapshot(id: &str, status: OciSessionStatus) -> OciSessionSnapshot {
+        OciSessionSnapshot {
+            id: id.to_string(),
+            import_kind: OciImportKind::DockerRunScript,
+            status,
+            endpoint_url: Some("http://127.0.0.1:43123/".to_string()),
+            service_count: 2,
+            source_path: Some("/work/blinko/install.sh".to_string()),
+            source_hash: Some("blake3:source".to_string()),
+        }
+    }
+
+    #[test]
+    fn desktop_session_model_accepts_oci_kind() {
+        let session = CapsuleSession::from_oci_snapshot(make_oci_snapshot(
+            "oci-session",
+            OciSessionStatus::Running,
+        ));
+
+        assert!(matches!(
+            session.session_kind,
+            DesktopSessionKind::Oci {
+                import_kind: OciImportKind::DockerRunScript,
+                service_count: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn oci_running_session_is_visible_in_running_apps_model() {
+        let mut registry = SessionRegistry::default();
+        registry.sync_oci_sessions(vec![make_oci_snapshot(
+            "oci-running",
+            OciSessionStatus::Running,
+        )]);
+
+        let entries = registry.view_entries();
+
+        assert!(matches!(
+            entries[0].session_kind,
+            DesktopSessionKind::Oci {
+                status: OciSessionStatus::Running,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn oci_stop_failed_session_is_retryable() {
+        let mut registry = SessionRegistry::default();
+        registry.sync_oci_sessions(vec![make_oci_snapshot(
+            "oci-stop-failed",
+            OciSessionStatus::StopFailed,
+        )]);
+
+        let entries = registry.view_entries();
+
+        assert!(matches!(
+            entries[0].session_kind,
+            DesktopSessionKind::Oci {
+                status: OciSessionStatus::StopFailed,
+                ..
+            }
+        ));
+        assert_eq!(entries[0].presentation_state, PresentationState::Failed);
+    }
+
+    #[test]
+    fn normal_native_source_sessions_unaffected() {
+        let mut registry = SessionRegistry::default();
+        registry.register_session(make_session("native", "capsule://native"));
+        registry.sync_oci_sessions(vec![make_oci_snapshot("oci", OciSessionStatus::Running)]);
+
+        let native = registry
+            .view_entries()
+            .into_iter()
+            .find(|entry| entry.session_id == "native")
+            .expect("native entry should remain");
+        assert!(matches!(
+            native.session_kind,
+            DesktopSessionKind::NativeSource
+        ));
+        assert_eq!(native.handle, "capsule://native");
     }
 }

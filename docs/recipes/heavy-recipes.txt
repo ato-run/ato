@@ -1,0 +1,12 @@
+# Heavy recipes — large images or long startup times
+# These pass AODD but require patience (>2 min startup)
+# At least 8GB RAM and 10GB free disk recommended
+
+samples/recipes/anything-llm    # 2.79 GB image, ~300s startup
+samples/recipes/superset         # ~240s startup, heavy Python
+samples/recipes/langflow         # ~360s startup, needs 420s timeout
+samples/recipes/dify             # ~15 min cold, 6 services, 3.5 GB images
+samples/recipes/dbgate           # ~171s startup, large image
+samples/recipes/bytebase         # ~141s startup, first-run DB init
+samples/recipes/kavita           # ~151s startup, large image
+samples/recipes/pingvin-share    # ~150s startup

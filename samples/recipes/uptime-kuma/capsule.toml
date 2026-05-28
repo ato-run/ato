@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "uptime-kuma"
+version = "1.23.16"
+type = "app"
+description = "Self-hosted monitoring UI — track uptime for websites, APIs, services"
+homepage = "https://github.com/louislam/uptime-kuma"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "louislam/uptime-kuma:1"
+port = 3001
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "monitor configs, history, alerts"
+attach = "explicit"
+schema_id = "sha256:ce8cb764fc1a9195cb557e278445baf21cb140a59d2c8c0070bbe219899e60f5"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3001" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/app/data"

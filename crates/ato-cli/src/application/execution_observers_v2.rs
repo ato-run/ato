@@ -17,6 +17,7 @@ use capsule_core::execution_plan::model::ExecutionPlan;
 use capsule_core::launch_spec::LaunchSpec;
 use capsule_core::lockfile::CapsuleLock;
 use capsule_core::router::ManifestData;
+use capsule_core::types::StateSharing;
 use serde::Serialize;
 
 use crate::application::build_materialization::BuildObservation;
@@ -653,10 +654,23 @@ pub(crate) fn observe_filesystem_v2(
     let mut persistent_state: Vec<StateBindingIdentity> = plan
         .state_source_overrides
         .iter()
-        .map(|(name, locator)| StateBindingIdentity {
-            name: name.clone(),
-            kind: classify_state_binding(locator),
-            identity: Tracked::known(locator.clone()),
+        .map(|(name, locator)| {
+            let sharing = plan
+                .typed_manifest()
+                .ok()
+                .and_then(|m| m.state.get(name).map(|r| r.sharing))
+                .filter(|s| *s != StateSharing::Exclusive);
+            let schema_id = plan
+                .typed_manifest()
+                .ok()
+                .and_then(|m| m.state.get(name).and_then(|r| r.schema_id.clone()));
+            StateBindingIdentity {
+                name: name.clone(),
+                kind: classify_state_binding(locator),
+                identity: Tracked::known(locator.clone()),
+                sharing,
+                schema_id,
+            }
         })
         .collect();
     persistent_state.sort_by(|a, b| a.name.cmp(&b.name));

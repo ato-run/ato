@@ -17,9 +17,7 @@ use crate::importer::{
 use crate::packers::runtime_fetcher::RuntimeFetcher;
 use crate::reporter::CapsuleReporter;
 
-use super::lockfile_support::{
-    cached_sha256, ensure_node, ensure_uv, metadata_cache_path,
-};
+use super::lockfile_support::{cached_sha256, ensure_node, ensure_uv, metadata_cache_path};
 use super::{
     artifact_root, read_dependencies_path, read_target_entrypoint, reset_dir, sha256_dir,
     ArtifactEntry, RuntimeArtifact, RuntimeEntry, RuntimePlatform, ToolArtifact, ToolTargets,
@@ -328,7 +326,9 @@ pub(super) async fn prepare_node_artifacts(
     let pnpm_handle = ensure_runtime_tool(
         &PNPM,
         None,
-        &ToolDeps { node_bin: Some(node_path.clone()) },
+        &ToolDeps {
+            node_bin: Some(node_path.clone()),
+        },
         reporter.clone(),
     )
     .await
@@ -357,13 +357,13 @@ pub(super) async fn prepare_node_artifacts(
 
     let mut cmd = std::process::Command::new(&pnpm_bin);
     cmd.args([
-            "fetch",
-            "--ignore-scripts",
-            "--silent",
-            "--store-dir",
-            store_dir.to_string_lossy().as_ref(),
-        ])
-        .current_dir(temp_path);
+        "fetch",
+        "--ignore-scripts",
+        "--silent",
+        "--store-dir",
+        store_dir.to_string_lossy().as_ref(),
+    ])
+    .current_dir(temp_path);
     let status = run_command_inner_with_manifest_env(cmd, Some(manifest)).await?;
     if !status.success() {
         return Err(CapsuleError::Pack("pnpm fetch failed".to_string()));

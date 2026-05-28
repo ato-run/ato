@@ -1,0 +1,17 @@
+schema_version = "0.3"
+name = "superset"
+version = "4.1.2"
+type = "app"
+description = "Apache Superset — open-source BI / analytics platform"
+homepage = "https://github.com/apache/superset"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "apache/superset:4.1.2"
+port = 8088
+env = { SUPERSET_SECRET_KEY = "demo-secret-key-32-chars-here!!!", ADMIN_USERNAME = "admin", ADMIN_FIRSTNAME = "Admin", ADMIN_LASTNAME = "User", ADMIN_EMAIL = "admin@example.com", ADMIN_PASSWORD = "admin", CYPRESS_CONFIG = "false", FLASK_DEBUG = "0" }
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/health", port = "8088", timeout_seconds = 180 }

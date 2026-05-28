@@ -31,6 +31,10 @@
 //!
 //! So calling this collector before the launch loop's provisioning
 //! phase is safe and observably side-effect-free.
+//!
+//! The exception is [`preflight_oci_provider_readiness`], which is used by
+//! the actual OCI launch path and may call `ensure_ready()`. On macOS/Windows
+//! that can auto-start a single stopped Podman machine before launch.
 
 #![allow(clippy::result_large_err)]
 
@@ -39,6 +43,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::runtime::oci_provider::{
+    OciImageResolutionMode, OciImageResolutionRequest, OciPlatformPolicy, OciProvider,
+    OciProviderError, OciProviderProbe, OciProviderSelector, OciResolvedImage,
+};
 use capsule_core::execution_plan::derive::compile_execution_plan;
 use capsule_core::execution_plan::error::AtoExecutionError;
 use capsule_core::interactive_resolution::{
@@ -46,8 +54,11 @@ use capsule_core::interactive_resolution::{
 };
 use capsule_core::lockfile::manifest_external_capsule_dependencies;
 use capsule_core::router::ExecutionProfile;
-use capsule_core::types::{ConfigField, ConfigKind};
+use capsule_core::types::{ConfigField, ConfigKind, OciProviderKind, OciProviderMode};
 
+use crate::app_control::sample_recipes::{
+    resolve_sample_recipe_for_github, resolve_sample_recipe_for_input,
+};
 use crate::application::auth::consent_store::{consent_summary, has_consent};
 use crate::application::graph_views::{build_declared_only_bundle, PreflightView};
 
@@ -80,6 +91,161 @@ impl AggregatePreflightResult {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciProviderReadinessMode {
+    Required,
+    BestEffort,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OciProviderReadinessRequirements {
+    pub rootless: OciRootlessRequirement,
+}
+
+impl Default for OciProviderReadinessRequirements {
+    fn default() -> Self {
+        Self {
+            rootless: OciRootlessRequirement::Any,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OciRootlessRequirement {
+    Any,
+    Required,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OciProviderReadinessOutcome {
+    Ready(OciProviderProbe),
+    NotReady(OciProviderError),
+}
+
+#[allow(dead_code)]
+pub(crate) async fn preflight_oci_provider_readiness<S>(
+    selector: &S,
+    mode: OciProviderReadinessMode,
+    requirements: OciProviderReadinessRequirements,
+) -> Result<OciProviderReadinessOutcome, OciProviderError>
+where
+    S: OciProviderSelector,
+{
+    let provider = selector.select_provider();
+    // Auto-start a stopped machine (macOS/Windows) or verify binary is present (Linux).
+    // Any ensure_ready failure is treated the same as a not-ready probe result so that
+    // BestEffort callers still get OciProviderReadinessOutcome::NotReady rather than Err.
+    match provider.ensure_ready().await {
+        Err(err) => oci_provider_readiness_failure(mode, err),
+        Ok(()) => evaluate_oci_provider_readiness(provider.probe().await, mode, requirements),
+    }
+}
+
+fn evaluate_oci_provider_readiness(
+    probe: Result<OciProviderProbe, OciProviderError>,
+    mode: OciProviderReadinessMode,
+    requirements: OciProviderReadinessRequirements,
+) -> Result<OciProviderReadinessOutcome, OciProviderError> {
+    let probe = match probe {
+        Ok(probe) => probe,
+        Err(error) => return oci_provider_readiness_failure(mode, error),
+    };
+
+    if !probe.ready {
+        let error = probe
+            .require_ready()
+            .expect_err("non-ready OCI provider probe must produce a typed readiness error");
+        return oci_provider_readiness_failure(mode, error);
+    }
+
+    if let Err(error) = validate_oci_provider_readiness_requirements(&probe, requirements) {
+        return oci_provider_readiness_failure(mode, error);
+    }
+
+    Ok(OciProviderReadinessOutcome::Ready(probe))
+}
+
+fn oci_provider_readiness_failure(
+    mode: OciProviderReadinessMode,
+    error: OciProviderError,
+) -> Result<OciProviderReadinessOutcome, OciProviderError> {
+    match mode {
+        OciProviderReadinessMode::Required => Err(error),
+        OciProviderReadinessMode::BestEffort => Ok(OciProviderReadinessOutcome::NotReady(error)),
+    }
+}
+
+fn validate_oci_provider_readiness_requirements(
+    probe: &OciProviderProbe,
+    requirements: OciProviderReadinessRequirements,
+) -> Result<(), OciProviderError> {
+    if requirements.rootless == OciRootlessRequirement::Required
+        && probe.inventory.mode != OciProviderMode::Rootless
+    {
+        return Err(OciProviderError::CapabilityUnsupported {
+            provider: oci_provider_name(probe.inventory.kind),
+            capability: "rootless",
+            detected: format!("{:?}", probe.inventory.mode),
+        });
+    }
+
+    Ok(())
+}
+
+fn oci_provider_name(kind: OciProviderKind) -> &'static str {
+    match kind {
+        OciProviderKind::Podman => "podman",
+        OciProviderKind::DockerCompatible => "docker-compatible",
+        OciProviderKind::AtoNative => "ato-native",
+    }
+}
+
+/// Resolved images and per-target failures from an image resolution pass.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OciImageResolutionReport {
+    pub resolved: Vec<OciResolvedImage>,
+    /// `(target_label, error)` pairs for targets that failed to resolve.
+    pub failures: Vec<(String, OciProviderError)>,
+}
+
+/// Resolve OCI images for every request using the provider from `selector`.
+///
+/// - `Required`: returns `Err` on the first resolution failure.
+/// - `BestEffort`: continues collecting failures and returns `Ok` with a
+///   report that may contain both resolved images and failures.
+#[allow(dead_code)]
+pub(crate) async fn preflight_oci_image_resolution<S>(
+    selector: &S,
+    requests: &[OciImageResolutionRequest],
+    mode: OciImageResolutionMode,
+) -> Result<OciImageResolutionReport, OciProviderError>
+where
+    S: OciProviderSelector,
+{
+    let provider = selector.select_provider();
+    let mut resolved = Vec::new();
+    let mut failures: Vec<(String, OciProviderError)> = Vec::new();
+
+    for request in requests {
+        match provider.resolve_image(request).await {
+            Ok(image) => resolved.push(image),
+            Err(error) => match mode {
+                OciImageResolutionMode::Required => return Err(error),
+                OciImageResolutionMode::BestEffort => {
+                    failures.push((request.target_label.clone(), error));
+                }
+            },
+        }
+    }
+
+    Ok(OciImageResolutionReport { resolved, failures })
+}
+
 /// Errors specific to the preflight collector. Anything that prevents
 /// the walk from producing a complete answer becomes one of these.
 /// Manifest-load failures are surfaced as-is (so the caller can
@@ -92,6 +258,9 @@ pub enum PreflightError {
 
     #[error("unsupported preflight target '{input}': {reason}")]
     UnsupportedTarget { input: String, reason: String },
+
+    #[error("failed to materialize bundled sample recipe for '{input}': {reason}")]
+    SampleRecipeMaterialize { input: String, reason: String },
 
     #[error("failed to load capsule manifest at {path}: {source}")]
     ManifestLoad {
@@ -396,7 +565,13 @@ pub fn collect_aggregate_requirements(
 ///
 /// Resolution policy:
 ///
-/// 1. **`capsule://github.com/<owner>/<repo>`**: look only under
+/// 1. **Existing local path**: directory inputs append `capsule.toml`; file
+///    inputs are used as-is. Local paths intentionally win over bundled sample
+///    recipe aliases with the same name.
+/// 2. **Bundled sample recipe alias / GitHub mapping**: materialize the embedded
+///    recipe manifest locally and use it for preflight. This write is
+///    deterministic and does not fetch from the network.
+/// 3. **`capsule://github.com/<owner>/<repo>`**: look only under
 ///    `${ATO_HOME}/external-capsules/github/<owner>/<repo>/*`. When the
 ///    repo segment is pinned as `repo@<sha>`, only the exact
 ///    `<sha>/capsule.toml` cache entry is valid; no mtime fallback is
@@ -405,39 +580,50 @@ pub fn collect_aggregate_requirements(
 ///    already cached the capsule once before — first-time fetching is
 ///    intentionally out of scope for this slice (avoiding new network/git
 ///    side effects in the preflight path is what makes preflight safe).
-/// 2. **`github.com/<owner>/<repo>`**: normalize it exactly the way
+/// 4. **`github.com/<owner>/<repo>`**: normalize it exactly the way
 ///    `ato run` does, then reuse the same cache lookup.
-/// 3. **Local directory**: append `capsule.toml`.
-/// 4. **Local file**: use as-is.
 /// 5. **Registry refs / provider refs**: rejected. Side-effect-free
 ///    preflight must not fetch from registries or materialize
 ///    provider-backed workspaces.
 fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError> {
+    let expanded = crate::local_input::expand_local_path(target);
+    if expanded.exists() {
+        return resolve_existing_local_manifest(expanded);
+    }
+
     if let Some(rest) = target.strip_prefix("capsule://github.com/") {
+        if let Some(manifest) = resolve_sample_recipe_manifest_for_github_rest(rest)? {
+            return Ok(manifest);
+        }
         return resolve_cached_github_capsule(rest);
     }
 
-    let expanded = crate::local_input::expand_local_path(target);
+    if let Some(resolved) = resolve_sample_recipe_for_input(target).map_err(|err| {
+        PreflightError::SampleRecipeMaterialize {
+            input: target.to_string(),
+            reason: err.to_string(),
+        }
+    })? {
+        return Ok(resolved.manifest_path);
+    }
+
     match crate::application::engine::install::provider_target::classify_run_target(target, &expanded)
     {
         Ok(crate::application::engine::install::provider_target::ParsedRunTarget::GitHubRepository(
             repository,
-        )) => resolve_cached_github_capsule(&repository),
+        )) => {
+            if let Some(manifest) = resolve_sample_recipe_manifest_for_github_rest(&repository)? {
+                return Ok(manifest);
+            }
+            resolve_cached_github_capsule(&repository)
+        }
         Ok(crate::application::engine::install::provider_target::ParsedRunTarget::LocalPath(_)) => {
             if !expanded.exists() {
                 return Err(PreflightError::ManifestMissing {
                     path: expanded.clone(),
                 });
             }
-            let manifest = if expanded.is_dir() {
-                expanded.join("capsule.toml")
-            } else {
-                expanded
-            };
-            if !manifest.exists() {
-                return Err(PreflightError::ManifestMissing { path: manifest });
-            }
-            Ok(manifest)
+            resolve_existing_local_manifest(expanded)
         }
         Ok(crate::application::engine::install::provider_target::ParsedRunTarget::Provider(
             provider_target,
@@ -461,6 +647,38 @@ fn resolve_offline_manifest_path(target: &str) -> Result<PathBuf, PreflightError
             reason: err.to_string(),
         }),
     }
+}
+
+fn resolve_existing_local_manifest(path: PathBuf) -> Result<PathBuf, PreflightError> {
+    let manifest = if path.is_dir() {
+        path.join("capsule.toml")
+    } else {
+        path
+    };
+    if !manifest.exists() {
+        return Err(PreflightError::ManifestMissing { path: manifest });
+    }
+    Ok(manifest)
+}
+
+fn resolve_sample_recipe_manifest_for_github_rest(
+    rest: &str,
+) -> Result<Option<PathBuf>, PreflightError> {
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 2 {
+        return Ok(None);
+    }
+    let owner = parts[0];
+    let repo = parts[1];
+    if repo.contains('@') {
+        return Ok(None);
+    }
+    Ok(resolve_sample_recipe_for_github(owner, repo)
+        .map_err(|err| PreflightError::SampleRecipeMaterialize {
+            input: format!("github.com/{owner}/{repo}"),
+            reason: err.to_string(),
+        })?
+        .map(|resolved| resolved.manifest_path))
 }
 
 /// Resolve a `capsule://github.com/<owner>/<repo>` ref to a cached
@@ -621,7 +839,13 @@ fn config_field_for_env(name: &str, description: &str) -> ConfigField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::oci_provider::{
+        CommandOutput, OciCommandRunner, OciProviderMachineStatus, PodmanProbePlatform,
+        PodmanProvider,
+    };
+    use std::collections::HashMap;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     /// Writes a multi-target capsule.toml that mimics the shape of
@@ -673,7 +897,358 @@ egress_allow = ["smtp.gmail.com"]
         path
     }
 
-    /// The collector must visit BOTH targets and return ONE
+    #[derive(Clone, Default)]
+    struct FakeRunner {
+        outputs: Arc<Mutex<HashMap<String, std::io::Result<CommandOutput>>>>,
+    }
+
+    impl FakeRunner {
+        fn with_output(self, command: &[&str], output: CommandOutput) -> Self {
+            self.outputs
+                .lock()
+                .unwrap()
+                .insert(command.join(" "), Ok(output));
+            self
+        }
+
+        fn with_error(self, command: &[&str], error: std::io::Error) -> Self {
+            self.outputs
+                .lock()
+                .unwrap()
+                .insert(command.join(" "), Err(error));
+            self
+        }
+    }
+
+    impl OciCommandRunner for FakeRunner {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            let key = std::iter::once(program)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut outputs = self.outputs.lock().unwrap();
+            match outputs.remove(&key) {
+                Some(result) => result,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing fake command: {key}"),
+                )),
+            }
+        }
+    }
+
+    struct TestOciProviderSelector {
+        runner: FakeRunner,
+        platform: PodmanProbePlatform,
+    }
+
+    impl crate::runtime::oci_provider::OciProviderSelector for TestOciProviderSelector {
+        type Provider = PodmanProvider<FakeRunner>;
+
+        fn select_provider(&self) -> Self::Provider {
+            PodmanProvider::with_runner(self.runner.clone(), self.platform.clone())
+        }
+    }
+
+    fn output(status: i32, stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            status,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    fn selector(runner: FakeRunner, platform: PodmanProbePlatform) -> TestOciProviderSelector {
+        TestOciProviderSelector { runner, platform }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_fails_when_podman_missing() {
+        let selector = selector(
+            FakeRunner::default().with_error(
+                &["podman", "--version"],
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing podman"),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let error = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements::default(),
+        )
+        .await
+        .expect_err("required readiness must fail");
+
+        assert_eq!(error.code(), "oci_provider_missing");
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_best_effort_reports_missing_without_failing() {
+        let selector = selector(
+            FakeRunner::default().with_error(
+                &["podman", "--version"],
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing podman"),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let outcome = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::BestEffort,
+            OciProviderReadinessRequirements::default(),
+        )
+        .await
+        .expect("best-effort readiness should not fail parent operation");
+
+        match outcome {
+            OciProviderReadinessOutcome::NotReady(error) => {
+                assert_eq!(error.code(), "oci_provider_missing");
+            }
+            OciProviderReadinessOutcome::Ready(probe) => {
+                panic!("expected missing provider diagnostic, got ready probe: {probe:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_fails_when_podman_machine_not_running() {
+        let selector = selector(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "machine", "list", "--format", "json"],
+                    output(
+                        0,
+                        r#"[{"Name":"podman-machine-default","MachineId":"volatile","Running":false}]"#,
+                        "",
+                    ),
+                ),
+            PodmanProbePlatform::Macos,
+        );
+
+        let error = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements::default(),
+        )
+        .await
+        .expect_err("required readiness must fail");
+
+        assert_eq!(error.code(), "oci_provider_not_ready");
+        match error {
+            OciProviderError::NotReady {
+                inventory: Some(inventory),
+                ..
+            } => {
+                assert_eq!(
+                    inventory.machine,
+                    OciProviderMachineStatus::MachineNotRunning
+                );
+            }
+            other => panic!("expected not-ready inventory, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_succeeds_when_podman_rootless_ready() {
+        let selector = selector(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(0, "true\n", ""),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let outcome = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements {
+                rootless: OciRootlessRequirement::Required,
+            },
+        )
+        .await
+        .expect("required readiness");
+
+        match outcome {
+            OciProviderReadinessOutcome::Ready(probe) => {
+                assert!(probe.ready);
+                assert_eq!(probe.inventory.mode, OciProviderMode::Rootless);
+            }
+            OciProviderReadinessOutcome::NotReady(error) => {
+                panic!("expected ready provider, got {error:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oci_provider_readiness_required_rootless_rejects_ambiguous_mode() {
+        let selector = selector(
+            FakeRunner::default()
+                .with_output(
+                    &["podman", "--version"],
+                    output(0, "podman version 5.2.1\n", ""),
+                )
+                .with_output(
+                    &["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                    output(0, "not-a-bool\n", ""),
+                ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let error = preflight_oci_provider_readiness(
+            &selector,
+            OciProviderReadinessMode::Required,
+            OciProviderReadinessRequirements {
+                rootless: OciRootlessRequirement::Required,
+            },
+        )
+        .await
+        .expect_err("ambiguous rootless mode must not satisfy a rootless requirement");
+
+        assert_eq!(error.code(), "oci_provider_capability_unsupported");
+    }
+
+    // ── OCI image resolution preflight tests ─────────────────────────────────
+
+    fn resolution_selector(runner: FakeRunner) -> TestOciProviderSelector {
+        selector(runner, PodmanProbePlatform::Linux)
+    }
+
+    fn multi_arch_manifest_json() -> &'static str {
+        r#"{
+          "schemaVersion": 2,
+          "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+          "manifests": [
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "platform": { "os": "linux", "architecture": "amd64" }
+            },
+            {
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "platform": { "os": "linux", "architecture": "arm64", "variant": "v8" }
+            }
+          ]
+        }"#
+    }
+
+    #[tokio::test]
+    async fn preflight_image_resolution_required_mode_fails_on_first_error() {
+        use crate::runtime::oci_provider::{OciImageResolutionMode, OciImageResolutionRequest};
+        use capsule_core::types::OciPlatform;
+
+        let selector = resolution_selector(
+            FakeRunner::default()
+                // First request: bad ref, will fail before hitting the runner
+                // (malformed ref)
+                .with_output(
+                    &["podman", "manifest", "inspect", "postgres:14"],
+                    output(0, multi_arch_manifest_json(), ""),
+                ),
+        );
+
+        let requests = vec![
+            OciImageResolutionRequest {
+                target_label: "db".to_string(),
+                declared_ref: "has space".to_string(), // malformed
+                requested_platform: None,
+                resolution_mode: OciImageResolutionMode::Required,
+                importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
+            },
+            OciImageResolutionRequest {
+                target_label: "app".to_string(),
+                declared_ref: "postgres:14".to_string(),
+                requested_platform: Some(OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                }),
+                resolution_mode: OciImageResolutionMode::Required,
+                importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
+            },
+        ];
+
+        let err =
+            preflight_oci_image_resolution(&selector, &requests, OciImageResolutionMode::Required)
+                .await
+                .expect_err("required mode must fail on first error");
+        assert_eq!(err.code(), "oci_image_ref_malformed");
+    }
+
+    #[tokio::test]
+    async fn preflight_image_resolution_best_effort_collects_all_failures() {
+        use crate::runtime::oci_provider::{OciImageResolutionMode, OciImageResolutionRequest};
+        use capsule_core::types::OciPlatform;
+
+        let selector = resolution_selector(FakeRunner::default().with_output(
+            &["podman", "manifest", "inspect", "postgres:14"],
+            output(0, multi_arch_manifest_json(), ""),
+        ));
+
+        let requests = vec![
+            OciImageResolutionRequest {
+                target_label: "db".to_string(),
+                declared_ref: "has space".to_string(), // malformed
+                requested_platform: None,
+                resolution_mode: OciImageResolutionMode::BestEffort,
+                importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
+            },
+            OciImageResolutionRequest {
+                target_label: "app".to_string(),
+                declared_ref: "postgres:14".to_string(),
+                requested_platform: Some(OciPlatform {
+                    os: "linux".to_string(),
+                    architecture: "amd64".to_string(),
+                    variant: None,
+                }),
+                resolution_mode: OciImageResolutionMode::BestEffort,
+                importer_input_hash: None,
+                platform_policy: OciPlatformPolicy::NativeOnly,
+            },
+        ];
+
+        let report = preflight_oci_image_resolution(
+            &selector,
+            &requests,
+            OciImageResolutionMode::BestEffort,
+        )
+        .await
+        .expect("best effort must not fail");
+
+        assert_eq!(report.failures.len(), 1, "one failure expected");
+        assert_eq!(report.failures[0].0, "db", "failure is for 'db'");
+        assert_eq!(report.failures[0].1.code(), "oci_image_ref_malformed");
+        assert_eq!(report.resolved.len(), 1, "one resolved image");
+        assert_eq!(report.resolved[0].declared_ref, "postgres:14");
+    }
+
+    #[tokio::test]
+    async fn preflight_image_resolution_empty_requests_returns_empty_report() {
+        use crate::runtime::oci_provider::OciImageResolutionMode;
+
+        let selector = resolution_selector(FakeRunner::default());
+
+        let report =
+            preflight_oci_image_resolution(&selector, &[], OciImageResolutionMode::Required)
+                .await
+                .expect("empty requests must succeed");
+
+        assert!(report.resolved.is_empty());
+        assert!(report.failures.is_empty());
+    }
     /// aggregate envelope rather than emitting them serially via
     /// E103/E302 errors.
     ///
@@ -1040,6 +1615,90 @@ contract = "service@1"
     }
 
     #[test]
+    #[serial_test::serial]
+    fn internal_preflight_resolves_sample_recipe_alias() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let resolved = resolve_offline_manifest_path("memos")
+            .expect("sample recipe alias should materialize for preflight");
+
+        assert!(resolved.ends_with("sample-recipes/memos/capsule.toml"));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_preflight_resolves_sample_recipe_github_handle() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+
+        let resolved = resolve_offline_manifest_path("capsule://github.com/usememos/memos")
+            .expect("sample recipe github handle should materialize for preflight");
+
+        assert!(resolved.ends_with("sample-recipes/memos/capsule.toml"));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_preflight_preserves_existing_local_path_precedence() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let parent = tempfile::TempDir::new().expect("parent");
+        let local = parent.path().join("memos");
+        std::fs::create_dir_all(&local).expect("create local alias dir");
+        std::fs::write(
+            local.join("capsule.toml"),
+            r#"
+schema_version = "0.3"
+name = "local-memos"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "nginx:alpine"
+port = 80
+"#,
+        )
+        .expect("write local manifest");
+
+        let _ato_guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let _cwd_guard = CwdGuard::enter(parent.path());
+
+        let resolved =
+            resolve_offline_manifest_path("memos").expect("local dir should win over alias");
+
+        assert_eq!(resolved, PathBuf::from("memos").join("capsule.toml"));
+        let content = std::fs::read_to_string(&resolved).expect("read resolved local manifest");
+        assert!(content.contains("local-memos"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn internal_preflight_does_not_fall_back_to_cached_github_when_sample_recipe_exists() {
+        let ato_home = tempfile::TempDir::new().expect("ato_home");
+        let cached = ato_home
+            .path()
+            .join("external-capsules")
+            .join("github")
+            .join("usememos")
+            .join("memos")
+            .join("cached-sha");
+        std::fs::create_dir_all(&cached).expect("create cache");
+        std::fs::write(cached.join("capsule.toml"), "[package]\nname=\"cached\"\n")
+            .expect("write cached manifest");
+
+        let _guard = scoped_env("ATO_HOME", Some(ato_home.path().to_string_lossy().as_ref()));
+        let resolved = resolve_offline_manifest_path("github.com/usememos/memos")
+            .expect("sample recipe should win over cached github snapshot");
+
+        assert!(resolved.ends_with("sample-recipes/memos/capsule.toml"));
+        assert_ne!(resolved, cached.join("capsule.toml"));
+    }
+
+    #[test]
     fn offline_manifest_resolver_rejects_registry_refs() {
         let err = resolve_offline_manifest_path("acme/demo").expect_err("registry ref must fail");
         match err {
@@ -1051,6 +1710,24 @@ contract = "service@1"
                 );
             }
             other => panic!("expected unsupported target error, got {other:?}"),
+        }
+    }
+
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(path: &Path) -> Self {
+            let previous = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
         }
     }
 }

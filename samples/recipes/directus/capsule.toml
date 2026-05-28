@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "directus"
+version = "11.8.0"
+type = "app"
+description = "Headless CMS and data platform with visual editor"
+homepage = "https://github.com/directus/directus"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "directus/directus:11.8.0"
+port = 8055
+env = { KEY = "changeme-key", SECRET = "changeme-secret", ADMIN_EMAIL = "admin@example.com", ADMIN_PASSWORD = "admin-password", DB_CLIENT = "sqlite3", DB_FILENAME = "/directus/database/data.db" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "SQLite database, uploads"
+attach = "explicit"
+schema_id = "sha256:directus-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/server/health", port = "8055", timeout_seconds = 120 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/directus/database"
