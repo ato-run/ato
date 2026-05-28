@@ -183,6 +183,12 @@ fn bundle_windows_app(target: &str) -> Result<PathBuf> {
         rust_target,
         &paths.target_root,
     )?;
+    run_cargo_build(
+        &paths.netd_manifest,
+        "ato-netd",
+        rust_target,
+        &paths.target_root,
+    )?;
 
     let staging = paths.desktop_root.join("dist").join(target).join("Ato");
     if staging.exists() {
@@ -1062,9 +1068,9 @@ fn copy_dir_recursive_excluding(from: &Path, to: &Path, excluded_dirs: &[&str]) 
 
 fn render_info_plist(version: &str) -> String {
     format!(
-        r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
   <dict>
     <key>CFBundleName</key>
     <string>{APP_NAME}</string>
@@ -1246,6 +1252,13 @@ mod tests {
         let plist = render_info_plist("1.2.3");
         assert!(plist.contains("run.ato.desktop"));
         assert!(plist.contains("1.2.3"));
+    }
+
+    #[test]
+    fn info_plist_does_not_escape_quotes_inside_raw_string() {
+        let plist = render_info_plist("1.2.3");
+        assert!(plist.contains(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
+        assert!(!plist.contains("\\\""));
     }
 
     #[test]
