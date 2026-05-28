@@ -1,0 +1,19 @@
+schema_version = "0.3"
+name = "pgweb"
+version = "0.17.0"
+type = "app"
+description = "Web-based PostgreSQL client — connect to any Postgres database from the browser"
+homepage = "https://github.com/sosedoff/pgweb"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Runs standalone; shows connection form without a pre-configured DATABASE_URL.
+# To connect to a Postgres instance, set PGWEB_DATABASE_URL at runtime.
+image = "sosedoff/pgweb:0.17.0"
+port = 8081
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8081" }

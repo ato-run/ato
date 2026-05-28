@@ -480,9 +480,7 @@ pub(crate) fn append_orchestration_services_to_graph_with_deps(
 /// Sessions written before PR-5a (no `depends_on` edges, no
 /// completeness facts populated) naturally return `false` here and
 /// take the legacy teardown path.
-pub(crate) fn graph_complete_for_teardown(
-    record: &ato_session_core::StoredSessionInfo,
-) -> bool {
+pub(crate) fn graph_complete_for_teardown(record: &ato_session_core::StoredSessionInfo) -> bool {
     let Some(graph) = record.graph.as_ref() else {
         return false;
     };
@@ -761,11 +759,9 @@ mod tests {
         };
         let mut needs: BTreeMap<String, Vec<String>> = BTreeMap::new();
         needs.insert("cache".to_string(), vec!["db".to_string()]);
-        let graph = populate_graph_from_dependency_contracts_with_needs(
-            Some(&contracts),
-            Some(&needs),
-        )
-        .expect("populate returns Some");
+        let graph =
+            populate_graph_from_dependency_contracts_with_needs(Some(&contracts), Some(&needs))
+                .expect("populate returns Some");
         let depends_on: Vec<&StoredGraphEdge> = graph
             .edges
             .iter()
@@ -780,16 +776,13 @@ mod tests {
     /// orchestration manifest with service-to-provider dependencies.
     #[test]
     fn service_uses_provider_edges_round_trip() {
-        use ato_session_core::{
-            StoredOrchestrationService, StoredOrchestrationServices,
-        };
+        use ato_session_core::{StoredOrchestrationService, StoredOrchestrationServices};
 
         let contracts = StoredDependencyContracts {
             consumer_pid: 4242,
             providers: vec![provider("db", 1)],
         };
-        let graph =
-            populate_graph_from_dependency_contracts(Some(&contracts)).expect("graph");
+        let graph = populate_graph_from_dependency_contracts(Some(&contracts)).expect("graph");
 
         let services = StoredOrchestrationServices {
             wrapper_pid: 5555,
@@ -801,6 +794,7 @@ mod tests {
                 host_ports: Default::default(),
                 published_port: Some(3000),
             }],
+            network_name: None,
         };
 
         let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -813,8 +807,11 @@ mod tests {
         )
         .expect("Some graph");
 
-        let uses: Vec<&StoredGraphEdge> =
-            graph.edges.iter().filter(|e| e.kind == EDGE_KIND_USES).collect();
+        let uses: Vec<&StoredGraphEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EDGE_KIND_USES)
+            .collect();
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].source, "web");
         assert_eq!(uses[0].target, "db");
@@ -824,9 +821,7 @@ mod tests {
     /// orchestration manifest with inter-service dependencies.
     #[test]
     fn service_depends_on_service_edges_round_trip() {
-        use ato_session_core::{
-            StoredOrchestrationService, StoredOrchestrationServices,
-        };
+        use ato_session_core::{StoredOrchestrationService, StoredOrchestrationServices};
 
         let services = StoredOrchestrationServices {
             wrapper_pid: 5555,
@@ -848,6 +843,7 @@ mod tests {
                     published_port: Some(3000),
                 },
             ],
+            network_name: None,
         };
         let mut service_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
         service_deps.insert("web".to_string(), vec!["main".to_string()]);
@@ -873,7 +869,9 @@ mod tests {
     /// populated record and false for any missing facet.
     #[test]
     fn graph_complete_for_teardown_requires_every_facet() {
-        use ato_session_core::{StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo};
+        use ato_session_core::{
+            StoredOrchestrationService, StoredOrchestrationServices, StoredSessionInfo,
+        };
         use capsule_core::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
 
         let provider_node = StoredGraphNode {
@@ -964,10 +962,16 @@ mod tests {
                         host_ports: Default::default(),
                         published_port: None,
                     }],
+                    network_name: None,
                 }),
                 schema_version: None,
                 launch_digest: None,
                 process_start_time_unix_ms: None,
+                installed_app_id: None,
+                install_profile_id: None,
+                install_profile_key: None,
+                install_revision_id: None,
+                capsule_instance_key: None,
             }
         };
 
@@ -975,13 +979,19 @@ mod tests {
         assert!(graph_complete_for_teardown(&make_record(true, true, true)));
 
         // Provider count mismatch.
-        assert!(!graph_complete_for_teardown(&make_record(false, true, true)));
+        assert!(!graph_complete_for_teardown(&make_record(
+            false, true, true
+        )));
 
         // Provider missing pid.
-        assert!(!graph_complete_for_teardown(&make_record(true, false, true)));
+        assert!(!graph_complete_for_teardown(&make_record(
+            true, false, true
+        )));
 
         // Service missing both pid and container_id.
-        assert!(!graph_complete_for_teardown(&make_record(true, true, false)));
+        assert!(!graph_complete_for_teardown(&make_record(
+            true, true, false
+        )));
     }
 
     /// PR-5b-fix: multi-provider session with no depends_on edges
@@ -1060,6 +1070,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         // No ordering edges between db and cache → must reject.
@@ -1179,10 +1194,16 @@ mod tests {
                         published_port: None,
                     },
                 ],
+                network_name: None,
             }),
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         // Only uses-edges (service→provider); no service→service ordering.
@@ -1313,10 +1334,16 @@ mod tests {
                     host_ports: Default::default(),
                     published_port: None,
                 }],
+                network_name: None,
             }),
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
 
         assert!(

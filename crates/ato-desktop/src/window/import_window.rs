@@ -25,6 +25,7 @@ use wry::{Rect, WebView, WebViewBuilder};
 use crate::localization::{compose_init_script, resolve_locale};
 use crate::source_import_api::ApiCreds;
 use crate::source_import_session::{GitHubImportSession, SessionSnapshot};
+use crate::system_capsule::broker::SystemCapsuleId;
 use crate::system_capsule::ipc as system_ipc;
 use crate::window::webview_paste::{WebViewPasteShell, WebViewPasteSupport};
 use crate::{impl_focusable_via_paste, paste_render_wrap};
@@ -163,7 +164,9 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
         if let Some(handle) = slot.window {
             // Try to bring the existing window forward. If activation
             // fails (handle is stale), fall through and reopen.
-            let activate_ok = handle.update(cx, |_, window, _| window.activate_window()).is_ok();
+            let activate_ok = handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok();
             if activate_ok {
                 return Ok(handle);
             }
@@ -206,7 +209,10 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
         let webview = WebViewBuilder::new()
             .with_html(IMPORT_HTML)
             .with_initialization_script(&composed)
-            .with_ipc_handler(system_ipc::make_ipc_handler(queue_for_closure))
+            .with_ipc_handler(system_ipc::make_ipc_handler_for_capsule(
+                SystemCapsuleId::AtoImport,
+                queue_for_closure,
+            ))
             .with_bounds(webview_rect)
             .build_as_child(window)
             .expect("build_as_child must succeed for the Import window");
@@ -222,6 +228,8 @@ pub fn open_import_window(cx: &mut App) -> Result<AnyWindowHandle> {
         cx.new(|cx| gpui_component::Root::new(shell, window, cx))
     })?;
 
+    cx.global_mut::<crate::system_capsule::window_registry::SystemCapsuleWindowRegistry>()
+        .register(SystemCapsuleId::AtoImport, *handle);
     system_ipc::spawn_drain_loop(cx, queue, *handle);
 
     let shell = shell_slot

@@ -351,6 +351,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_command_restart_active_session_takes_no_args() {
+        let params = serde_json::json!({});
+        let cmd = super::parse_command("restart_active_session", &params).expect("parse");
+        assert!(matches!(cmd, super::AutomationCommand::RestartActiveSession));
+    }
+
+    #[test]
+    fn parse_command_restart_active_session_ignores_unknown_params() {
+        let params = serde_json::json!({"pane_id": 0, "extra": "ignored"});
+        let cmd = super::parse_command("restart_active_session", &params).expect("parse");
+        assert!(matches!(cmd, super::AutomationCommand::RestartActiveSession));
+    }
+
+    #[test]
     fn reap_orphan_sockets_removes_dead_pid_socket_only() {
         use std::fs;
         let temp = tempfile::tempdir().expect("tempdir");
@@ -617,9 +631,15 @@ fn parse_command(method: &str, params: &Value) -> Result<AutomationCommand, Stri
         // entry points, so MCP and UI exit through the exact same
         // code path (refs #92 AC-step 6).
         "stop_active_session" => Ok(AutomationCommand::StopActiveSession),
+        // Unit variant: ignores params. Stops then reopens the same app
+        // (CapsuleHandle/CapsuleUrl routes only); root Focus View stays open.
+        "restart_active_session" => Ok(AutomationCommand::RestartActiveSession),
         "host_dispatch_action" => Ok(AutomationCommand::HostDispatchAction {
             action: s("action")?,
-            url: params.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            url: params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }),
         "list_sessions" => Ok(AutomationCommand::ListSessions),
         "auth_status" => Ok(AutomationCommand::AuthStatus),

@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use capsule_core::common::paths::ato_path_or_workspace_tmp;
 use gpui::{AnyWindowHandle, AppContext, AsyncApp, Window};
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST};
+use http::header::{CONTENT_TYPE, COOKIE};
 use http::{HeaderMap, HeaderValue};
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
@@ -46,7 +46,6 @@ use crate::orchestrator::{
     stop_guest_session, take_pending_cli_command, take_pending_share_terminal, GuestLaunchSession,
     LaunchError, SpawnKind, SpawnSpec,
 };
-use crate::stable_origin_proxy::{logical_capsule_key_for_stable_origin, StableOriginRouteTable};
 use crate::state::{
     session::SessionRegistry, ActiveWebPane, ActivityTone, AppState, AuthMode, AuthPolicyRegistry,
     AuthSessionStatus, BrowserCommandKind, CapabilityGrant, GuestRoute, PaneBounds, PaneId,
@@ -195,7 +194,6 @@ pub struct WebViewManager {
     /// Whether the dock window is currently open. Used by `ListPanes`
     /// to expose the dock pane to automation callers.
     dock_is_open: bool,
-    stable_origin_routes: StableOriginRouteTable,
 }
 
 /// Reserved pane ID for the dock window's WebView.
@@ -213,6 +211,12 @@ struct ManagedWebView {
     route_key: String,
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
+    /// The stable ingress key registered with `ato-netd` for this WebView.
+    /// Set on successful registration; `None` when the route did not go
+    /// through `ato-netd` (e.g. external URL, terminal, or fallback).
+    /// Used by `stop_launched_session` and `stop_active_session` to
+    /// deregister the route on session teardown.
+    stable_ingress_key: Option<String>,
     webview: WebView,
     #[cfg(target_os = "macos")]
     frame_host: Option<Retained<NSView>>,
@@ -454,7 +458,6 @@ impl WebViewManager {
             webview_retention: WebViewRetentionTable::with_defaults(),
             handle_to_session: HashMap::new(),
             dock_is_open: false,
-            stable_origin_routes: StableOriginRouteTable::default(),
         }
     }
 
@@ -679,10 +682,7 @@ impl WebViewManager {
                             self.views.insert(active.pane_id, webview);
                         }
                         Err(error) => {
-                            state.sync_web_session_state(
-                                active.pane_id,
-                                WebSessionState::Closed,
-                            );
+                            state.sync_web_session_state(active.pane_id, WebSessionState::Closed);
                             state.push_activity(
                                 ActivityTone::Error,
                                 format!("Failed to build child webview: {error}"),
@@ -1041,6 +1041,15 @@ impl WebViewManager {
                     })));
                     continue;
                 }
+                RestartActiveSession => {
+                    // In standard (non-Focus) WebView mode, restart is not yet
+                    // implemented. Return a typed error so callers can distinguish
+                    // this from a generic failure and fall back to stop + reopen.
+                    req.send(Err(
+                        "restart_active_session is only supported in Focus mode".to_string(),
+                    ));
+                    continue;
+                }
                 HostDispatchAction { action, .. } => {
                     // Push onto the queue; `DesktopShell::render` drains
                     // it on the next paint and invokes the matching
@@ -1076,10 +1085,7 @@ impl WebViewManager {
                 AuthStatus => {
                     let status = match crate::orchestrator::resolve_ato_binary() {
                         Ok(ato_bin) => {
-                            match Command::new(&ato_bin)
-                                .arg("desktop-auth-handoff")
-                                .output()
-                            {
+                            match Command::new(&ato_bin).arg("desktop-auth-handoff").output() {
                                 Ok(output) if output.status.success() => {
                                     auth_status_from_handoff_stdout(&output.stdout)
                                 }
@@ -1090,8 +1096,9 @@ impl WebViewManager {
                     };
                     match serde_json::to_value(status) {
                         Ok(json) => req.send(Ok(json)),
-                        Err(_) => req.send(Ok(serde_json::to_value(signed_out_auth_status())
-                            .unwrap_or_default())),
+                        Err(_) => req.send(Ok(
+                            serde_json::to_value(signed_out_auth_status()).unwrap_or_default()
+                        )),
                     };
                     continue;
                 }
@@ -1927,9 +1934,7 @@ impl WebViewManager {
         let window_handle = self.window_handle;
 
         // Collect secrets granted for this capsule handle before moving into the async block.
-        let secrets: Vec<SecretEntry> = state
-            .secret_store
-            .secrets_for_capsule(&handle);
+        let secrets: Vec<SecretEntry> = state.secret_store.secrets_for_capsule(&handle);
         // Same idea for plaintext config — capture a snapshot now so
         // the background thread doesn't reach back into AppState.
         let plain_configs: Vec<(String, String)> =
@@ -2030,6 +2035,7 @@ impl WebViewManager {
         let mut inject_window_ready_signal = false;
 
         let pane_binding = Arc::new(AtomicUsize::new(pane.pane_id));
+        let mut ingress_key: Option<String> = None;
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
                 session,
@@ -2066,7 +2072,7 @@ impl WebViewManager {
                 RouteContent::External,
                 None,
             ),
-            GuestRoute::CapsuleHandle { .. } => {
+            GuestRoute::CapsuleHandle { .. } | GuestRoute::LocalManifest(_) => {
                 let session = local_session.ok_or_else(|| {
                     anyhow::anyhow!("capsule webview build requires resolved guest session")
                 })?;
@@ -2113,7 +2119,6 @@ impl WebViewManager {
                 // we inject a minimal window.onload script + dedicated IPC handler so SessionReady
                 // only fires after all scripts have run and the page has actually rendered.
                 if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-                    let mut use_stable_origin_proxy = false;
                     build_flags = BuildFlags {
                         inject_bridge: false,
                         enable_ipc: false,
@@ -2125,37 +2130,39 @@ impl WebViewManager {
                     let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    let url = match stable_origin_url_for_capsule_web_url(
-                        &pane.route,
-                        &scheme,
-                        &local_url,
-                        &self.stable_origin_routes,
-                    ) {
-                        Ok(Some(stable_url)) => {
-                            use_stable_origin_proxy = true;
-                            stable_url
-                        }
-                        Ok(None) => local_url,
-                        Err(error) => {
-                            warn!(
-                                route = %pane.route,
-                                session_id = %session.session_id,
-                                error = %error,
-                                "failed to configure stable-origin proxy route; falling back to direct local_url"
-                            );
+                    let url =
+                        if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
+                            match crate::netd::register_stable_ingress(&key, &local_url) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd ingress route"
+                                    );
+                                    ingress_key = Some(key);
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register ato-netd ingress route; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
+                            }
+                        } else {
                             local_url
-                        }
-                    };
-                    build_flags.enable_custom_protocol = use_stable_origin_proxy;
+                        };
                     (
                         url,
                         None,
                         Vec::new(),
-                        if use_stable_origin_proxy {
-                            RouteContent::StableOriginProxy(self.stable_origin_routes.clone())
-                        } else {
-                            RouteContent::External
-                        },
+                        RouteContent::External,
                         None,
                     )
                 } else {
@@ -2535,6 +2542,7 @@ impl WebViewManager {
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
             launched_session,
+            stable_ingress_key: ingress_key,
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
@@ -2825,7 +2833,10 @@ impl WebViewManager {
         // lets the launch re-arm — that is exactly what the user's
         // omnibar entry / `browser_navigate` MCP call does, and it is
         // what #112 needs from this fix.
-        if let Some(_previous) = self.views.remove(&active_pane_id) {
+        if let Some(previous) = self.views.remove(&active_pane_id) {
+            if let Some(key) = previous.stable_ingress_key.as_deref() {
+                crate::netd::deregister_stable_ingress(key);
+            }
             self.automation.fail_requests_for_pane(active_pane_id);
             self.automation.mark_page_unloaded(active_pane_id);
             tracing::debug!(
@@ -2848,43 +2859,11 @@ impl WebViewManager {
             {
                 drop(retained);
             }
-        };
-
-        // Stop SUCCEEDED (Ok(true) = process terminated) or the session
-        // was already inactive (Ok(false) = workload was gone before
-        // the call). Mirror the cleanup that the Rebuild branch in
-        // `sync_from_state` runs (`webview.rs:504-509`): drop the
-        // cached WebView, fail any pending automation requests for the
-        // pane, mark the page unloaded.
-        //
-        // Sync `WebSessionState::LaunchFailed` (NOT `Closed`) on the
-        // pane: with the cached view evicted, the next render would
-        // otherwise enter `sync_from_state`'s Rebuild branch and call
-        // `ensure_pending_local_launch` immediately, auto-relaunching
-        // the capsule the user just stopped. The same gate at
-        // `webview.rs:1521-1525` already uses LaunchFailed as the
-        // sentinel that blocks re-fire (the comment at the launch-fail
-        // site reads "Use LaunchFailed (not Closed) to prevent
-        // ensure_pending_local_launch from re-firing"). An explicit
-        // `state.navigate_to_url(<url>)` resets the surface to
-        // `WebSessionState::Resolving`, which clears LaunchFailed and
-        // lets the launch re-arm — that is exactly what the user's
-        // omnibar entry / `browser_navigate` MCP call does, and it is
-        // what #112 needs from this fix.
-        if let Some(_previous) = self.views.remove(&active_pane_id) {
-            self.automation.fail_requests_for_pane(active_pane_id);
-            self.automation.mark_page_unloaded(active_pane_id);
-            tracing::debug!(
-                pane_id = active_pane_id,
-                session_id = %session_id,
-                "stop_active_session: evicted cached WebView so same-URL re-navigate retriggers Rebuild"
-            );
         }
         state.sync_web_session_state(active_pane_id, WebSessionState::LaunchFailed);
 
         stopped
     }
-
 
     /// Drain every retained session and graceful-stop each in a
     /// background thread. Active panes (`self.views`) are
@@ -2969,6 +2948,11 @@ impl WebViewManager {
     }
 
     fn stop_launched_session(&mut self, webview: &ManagedWebView, state: &mut AppState) {
+        // Deregister the ato-netd ingress route before stopping the session.
+        if let Some(key) = webview.stable_ingress_key.as_deref() {
+            crate::netd::deregister_stable_ingress(key);
+        }
+
         let Some(session) = &webview.launched_session else {
             return;
         };
@@ -3492,7 +3476,9 @@ fn build_flags_for_route(route: &GuestRoute) -> BuildFlags {
             page_load_behavior: PageLoadBehavior::UpdateExternalUrl,
             observe_title_changes: true,
         },
-        GuestRoute::Capsule { .. } | GuestRoute::CapsuleHandle { .. } => BuildFlags {
+        GuestRoute::Capsule { .. }
+        | GuestRoute::CapsuleHandle { .. }
+        | GuestRoute::LocalManifest(_) => BuildFlags {
             inject_bridge: true,
             enable_ipc: true,
             enable_custom_protocol: true,
@@ -3711,7 +3697,6 @@ enum RouteContent {
     GuestAssets(GuestLaunchSession),
     External,
     TerminalAssets,
-    StableOriginProxy(StableOriginRouteTable),
 }
 
 impl ProtocolRouter {
@@ -3727,19 +3712,6 @@ impl ProtocolRouter {
     ) {
         let host = request.uri().host().unwrap_or("welcome").to_string();
         let path = request.uri().path().to_string();
-
-        if let RouteContent::StableOriginProxy(routes) = &content {
-            let response =
-                handle_stable_origin_proxy_request(request, routes).unwrap_or_else(|error| {
-                    Response::builder()
-                        .status(500)
-                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .body(Cow::Owned(error.to_string().into_bytes()))
-                        .expect("stable-origin proxy error response should build")
-                });
-            responder.respond(response);
-            return;
-        }
 
         // Bridge RPC is routed separately from asset serving because it carries structured host messages.
         if path == "/__ato/bridge" {
@@ -3794,11 +3766,6 @@ impl ProtocolRouter {
                 "text/plain; charset=utf-8",
             ),
             RouteContent::TerminalAssets => serve_terminal_asset(path),
-            RouteContent::StableOriginProxy(_) => build_plain_response(
-                500,
-                "stable-origin proxy should be handled in async request path".to_string(),
-                "text/plain; charset=utf-8",
-            ),
         }
     }
 
@@ -3922,95 +3889,6 @@ fn serve_terminal_asset(path: &str) -> Result<Response<Cow<'static, [u8]>>> {
         )
         .body(Cow::Borrowed(body))
         .context("failed to build terminal asset response")
-}
-
-fn stable_origin_url_for_capsule_web_url(
-    route: &GuestRoute,
-    scheme: &str,
-    local_url: &str,
-    stable_routes: &StableOriginRouteTable,
-) -> Result<Option<String>> {
-    let Some(logical_key) = logical_capsule_key_for_stable_origin(route) else {
-        return Ok(None);
-    };
-
-    let upstream = url::Url::parse(local_url)
-        .with_context(|| format!("invalid local_url for stable-origin proxy: {local_url}"))?;
-    let route = stable_routes
-        .register_or_swap(logical_key, upstream.clone())
-        .with_context(|| format!("failed to register stable-origin proxy route for {upstream}"))?;
-
-    let mut stable_url = url::Url::parse(&format!("{scheme}://{}/", route.stable_host_label))
-        .context("failed to build stable-origin URL")?;
-    stable_url.set_path(upstream.path());
-    stable_url.set_query(upstream.query());
-    Ok(Some(stable_url.to_string()))
-}
-
-fn handle_stable_origin_proxy_request(
-    request: Request<Vec<u8>>,
-    routes: &StableOriginRouteTable,
-) -> Result<Response<Cow<'static, [u8]>>> {
-    let host = request
-        .uri()
-        .host()
-        .ok_or_else(|| anyhow::anyhow!("stable-origin request is missing host"))?;
-    let resolved = routes.validate_and_resolve_host(host)?;
-    let target_url = stable_origin_proxy_target_url(&resolved.upstream, request.uri())?;
-
-    let mut upstream_request = ureq::request(request.method().as_str(), target_url.as_str());
-    for (name, value) in request.headers() {
-        if name == HOST || name == CONTENT_LENGTH {
-            continue;
-        }
-        if let Ok(value) = value.to_str() {
-            upstream_request = upstream_request.set(name.as_str(), value);
-        }
-    }
-
-    let upstream_response = if request.body().is_empty() {
-        upstream_request.call()
-    } else {
-        upstream_request.send_bytes(request.body())
-    };
-
-    let (status, response) = match upstream_response {
-        Ok(response) => (response.status(), response),
-        Err(ureq::Error::Status(status, response)) => (status, response),
-        Err(ureq::Error::Transport(error)) => {
-            return build_plain_response(
-                502,
-                format!("stable-origin upstream transport error: {error}"),
-                "text/plain; charset=utf-8",
-            );
-        }
-    };
-
-    let content_type = response
-        .header("content-type")
-        .map(str::to_string)
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let mut reader = response.into_reader();
-    let mut body = Vec::new();
-    reader
-        .read_to_end(&mut body)
-        .context("failed to read stable-origin upstream response body")?;
-
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, content_type)
-        .body(Cow::Owned(body))
-        .context("failed to build stable-origin proxy response")
-}
-
-fn stable_origin_proxy_target_url(
-    upstream: &url::Url,
-    request_uri: &http::Uri,
-) -> Result<url::Url> {
-    let mut target = upstream.clone();
-    target.set_path(request_uri.path());
-    target.set_query(request_uri.query());
-    Ok(target)
 }
 
 fn build_plain_response(
@@ -4322,6 +4200,7 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(handle.clone()),
         GuestRoute::CapsuleUrl { handle, .. } => Some(handle.clone()),
+        GuestRoute::LocalManifest(local) => Some(local.source_handle.clone()),
         GuestRoute::Capsule { .. } | GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => {
             None
         }
@@ -4331,7 +4210,8 @@ fn route_handle(route: &GuestRoute) -> Option<String> {
 fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
     match route {
         GuestRoute::CapsuleHandle { handle, .. } => Some(format!("handle:{handle}")),
-        GuestRoute::CapsuleUrl { handle, .. } => Some(format!("handle:{handle}")),
+        GuestRoute::CapsuleUrl { handle, .. } => Some(format!("url:{handle}")),
+        GuestRoute::LocalManifest(local) => Some(format!("handle:{}", local.source_handle)),
         GuestRoute::Capsule { session, .. } => Some(format!("session:{session}")),
         GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => None,
     }
@@ -4342,6 +4222,7 @@ fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
         route,
         GuestRoute::Capsule { .. }
             | GuestRoute::CapsuleHandle { .. }
+            | GuestRoute::LocalManifest(_)
             | GuestRoute::CapsuleUrl { .. }
     )
 }
@@ -4903,6 +4784,7 @@ pub(crate) fn dispatch_automation_command(
         | SetCapsuleSecrets { .. }
         | ApproveExecutionPlanConsent { .. }
         | StopActiveSession
+        | RestartActiveSession
         | HostDispatchAction { .. }
         | ListSessions
         | AuthStatus => {
@@ -5243,9 +5125,10 @@ mod tests {
             stable_origin_key_for_route(&handle_route),
             Some("handle:capsule://org/demo@1.0.0".to_string())
         );
+        // CapsuleUrl uses "url:" prefix to avoid collision with CapsuleHandle
         assert_eq!(
             stable_origin_key_for_route(&url_route),
-            Some("handle:capsule://org/demo@1.0.0".to_string())
+            Some("url:capsule://org/demo@1.0.0".to_string())
         );
     }
 
@@ -5259,66 +5142,6 @@ mod tests {
 
         assert_eq!(stable_origin_key_for_route(&external), None);
         assert_eq!(stable_origin_key_for_route(&terminal), None);
-    }
-
-    #[test]
-    fn stable_origin_web_url_is_created_for_capsule_handle_routes() {
-        let route = GuestRoute::CapsuleHandle {
-            handle: "capsule://org/demo@1.0.0".to_string(),
-            label: "demo".to_string(),
-        };
-        let table = StableOriginRouteTable::default();
-
-        let stable_url = stable_origin_url_for_capsule_web_url(
-            &route,
-            "capsuletest",
-            "http://127.0.0.1:4173/app?mode=dev",
-            &table,
-        )
-        .expect("stable origin URL should resolve")
-        .expect("capsule route should be in stable-origin scope");
-
-        let parsed = url::Url::parse(&stable_url).expect("stable URL should parse");
-        let expected_host = crate::stable_origin_proxy::stable_host_label_for_key(
-            "handle:capsule://org/demo@1.0.0",
-        );
-        assert_eq!(parsed.scheme(), "capsuletest");
-        assert_eq!(parsed.path(), "/app");
-        assert_eq!(parsed.query(), Some("mode=dev"));
-        assert_eq!(parsed.host_str(), Some(expected_host.as_str()));
-    }
-
-    #[test]
-    fn stable_origin_web_url_scope_excludes_capsule_url_and_external_routes() {
-        let capsule_url_route = GuestRoute::CapsuleUrl {
-            handle: "capsule://org/demo@1.0.0".to_string(),
-            label: "demo".to_string(),
-            url: url::Url::parse("http://127.0.0.1:4173/app").expect("url"),
-        };
-        let external_route =
-            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
-        let table = StableOriginRouteTable::default();
-
-        assert_eq!(
-            stable_origin_url_for_capsule_web_url(
-                &capsule_url_route,
-                "capsuletest",
-                "http://127.0.0.1:4173/app",
-                &table,
-            )
-            .expect("capsule url route should return Ok(None)"),
-            None
-        );
-        assert_eq!(
-            stable_origin_url_for_capsule_web_url(
-                &external_route,
-                "capsuletest",
-                "https://example.com",
-                &table,
-            )
-            .expect("external route should return Ok(None)"),
-            None
-        );
     }
 
     #[test]
@@ -5946,219 +5769,5 @@ mod tests {
         let json = serde_json::to_value(&status).unwrap();
         assert!(json.get("session_token").is_none());
         assert!(json.get("token").is_none());
-    }
-
-    // ── apply_capsule_secrets (used by automation MCP `set_capsule_secrets`) ──
-    //
-    // These tests pin the contract that the MCP path is wire-compatible with
-    // the modal Save handler in `ui/mod.rs::save_pending_config`. They share
-    // an env_lock because save_secrets reads ATO_HOME, and parallel tests
-    // would otherwise see each other's tempdir.
-    mod apply_capsule_secrets {
-        use super::*;
-        use crate::state::PendingConfigRequest;
-        use std::ffi::OsString;
-        use std::sync::{Mutex, MutexGuard, OnceLock};
-
-        fn env_lock() -> MutexGuard<'static, ()> {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            LOCK.get_or_init(|| Mutex::new(()))
-                .lock()
-                .expect("env lock")
-        }
-
-        struct EnvVarGuard {
-            key: &'static str,
-            previous: Option<OsString>,
-        }
-
-        impl EnvVarGuard {
-            fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-                let previous = std::env::var_os(key);
-                std::env::set_var(key, value);
-                Self { key, previous }
-            }
-        }
-
-        impl Drop for EnvVarGuard {
-            fn drop(&mut self) {
-                if let Some(value) = &self.previous {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-
-        fn isolated_state() -> (tempfile::TempDir, EnvVarGuard, AppState) {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let ato_home = temp.path().join("ato-home");
-            std::fs::create_dir_all(ato_home.join("run")).expect("run dir");
-            let guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
-            // load_secrets / load_config / load_capsule_configs read under
-            // ATO_HOME — initial() returns a state with no secrets pre-set.
-            let state = AppState::initial();
-            (temp, guard, state)
-        }
-
-        fn pending(handle: &str) -> PendingConfigRequest {
-            PendingConfigRequest {
-                handle: handle.to_string(),
-                target: None,
-                fields: Vec::new(),
-                original_secrets: Vec::new(),
-            }
-        }
-
-        #[test]
-        fn persists_each_secret_grants_to_handle_and_returns_keys_in_order() {
-            let _lock = env_lock();
-            let (_tmp, _guard, mut state) = isolated_state();
-
-            let secrets = vec![
-                ("PG_PASSWORD".to_string(), "pgpw".to_string()),
-                ("SECRET_KEY".to_string(), "sk".to_string()),
-            ];
-
-            let applied =
-                apply_capsule_secrets(&mut state, "github.com/Koh0920/WasedaP2P", &secrets, true)
-                    .expect("apply");
-
-            assert_eq!(applied, vec!["PG_PASSWORD", "SECRET_KEY"]);
-
-            let granted = state
-                .secret_store
-                .secrets_for_capsule("github.com/Koh0920/WasedaP2P");
-            let mut keys: Vec<&str> = granted.iter().map(|e| e.key.as_str()).collect();
-            keys.sort();
-            assert_eq!(keys, vec!["PG_PASSWORD", "SECRET_KEY"]);
-        }
-
-        #[test]
-        fn clears_pending_config_when_handle_matches_and_flag_is_true() {
-            let _lock = env_lock();
-            let (_tmp, _guard, mut state) = isolated_state();
-            state.set_pending_config(pending("h"));
-
-            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], true)
-                .expect("apply");
-
-            assert!(state.pending_config.is_none(), "pending_config must clear");
-        }
-
-        #[test]
-        fn leaves_pending_config_intact_when_flag_is_false() {
-            let _lock = env_lock();
-            let (_tmp, _guard, mut state) = isolated_state();
-            state.set_pending_config(pending("h"));
-
-            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], false)
-                .expect("apply");
-
-            assert!(
-                state.pending_config.is_some(),
-                "pending_config must persist when flag=false"
-            );
-        }
-
-        #[test]
-        fn leaves_pending_config_intact_when_handle_mismatches() {
-            let _lock = env_lock();
-            let (_tmp, _guard, mut state) = isolated_state();
-            state.set_pending_config(pending("other"));
-
-            apply_capsule_secrets(&mut state, "h", &[("K".into(), "v".into())], true)
-                .expect("apply");
-
-            assert!(
-                state.pending_config.is_some(),
-                "modal for a different handle must not be dismissed"
-            );
-        }
-    }
-
-    // ── apply_capsule_consent (UI handler + MCP automation share path) ───
-    //
-    // These tests exercise the routing logic in `apply_capsule_consent`
-    // — the handle-match check, the "no pending consent" error path,
-    // and the success-path side effects on AppState. The actual CLI
-    // invocation (`ato internal consent approve-execution-plan`) is
-    // out of unit-test scope: it lives in `crate::orchestrator::
-    // approve_execution_plan_consent`, gated behind `resolve_ato_binary`,
-    // and is covered by an integration test (`tests/...`) that drives
-    // the full plumbing surface.
-    mod apply_capsule_consent {
-        use super::*;
-        use crate::state::PendingConsentRequest;
-
-        fn pending(handle: &str) -> PendingConsentRequest {
-            PendingConsentRequest {
-                handle: handle.to_string(),
-                scoped_id: "publisher/app".to_string(),
-                version: "1.0.0".to_string(),
-                target_label: "app".to_string(),
-                policy_segment_hash: "blake3:aaa".to_string(),
-                provisioning_policy_hash: "blake3:bbb".to_string(),
-                summary: "Capsule: publisher/app@1.0.0".to_string(),
-                original_secrets: Vec::new(),
-            }
-        }
-
-        #[test]
-        fn errors_when_no_pending_consent_matches_handle() {
-            let mut state = AppState::initial();
-            // No pending_consent at all.
-            let err = apply_capsule_consent(&mut state, "any-handle").unwrap_err();
-            assert!(
-                err.contains("no pending ExecutionPlan consent"),
-                "expected no-match error, got: {err}"
-            );
-
-            // Pending consent for a *different* handle must also reject —
-            // approving by accident would leak consent to a capsule the
-            // user never reviewed.
-            state.set_pending_consent(pending("other-handle"));
-            let err = apply_capsule_consent(&mut state, "wrong-handle").unwrap_err();
-            assert!(
-                err.contains("no pending ExecutionPlan consent"),
-                "handle mismatch must error, got: {err}"
-            );
-        }
-
-        /// Regression for the v0.5.0 per-target budget bug surfaced
-        /// by #92 verification: a multi-target orchestration capsule
-        /// (WasedaP2P → app + web) trips one E302 per target, each
-        /// with its own policy hashes. Approving target=app must NOT
-        /// poison the budget for target=web on the same handle.
-        #[test]
-        fn retry_budget_is_per_target_not_per_handle() {
-            let mut state = AppState::initial();
-            let handle = "capsule://github.com/Koh0920/WasedaP2P";
-
-            // No budget consumed at the start.
-            assert!(!state.consent_retry_already_consumed(handle, "app"));
-            assert!(!state.consent_retry_already_consumed(handle, "web"));
-
-            // Approving target=app marks ONLY (handle, "app") as
-            // consumed. (handle, "web") is still untouched — its
-            // E302 must still surface the modal next time.
-            state.mark_consent_retry_consumed(handle, "app");
-            assert!(state.consent_retry_already_consumed(handle, "app"));
-            assert!(
-                !state.consent_retry_already_consumed(handle, "web"),
-                "web budget must NOT be poisoned by app's approve"
-            );
-
-            // Now approve target=web too.
-            state.mark_consent_retry_consumed(handle, "web");
-            assert!(state.consent_retry_already_consumed(handle, "app"));
-            assert!(state.consent_retry_already_consumed(handle, "web"));
-
-            // Reset (e.g. on Cancel or successful launch) clears
-            // ALL targets under the handle.
-            state.reset_consent_retry_budget(handle);
-            assert!(!state.consent_retry_already_consumed(handle, "app"));
-            assert!(!state.consent_retry_already_consumed(handle, "web"));
-        }
     }
 }

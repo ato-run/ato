@@ -1,3 +1,6 @@
+pub mod compose;
+pub mod docker_run_script;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

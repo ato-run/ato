@@ -14,6 +14,7 @@
 
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
+use objc2::runtime::AnyClass;
 use objc2_app_kit::{NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -202,6 +203,52 @@ pub fn resize_window_in_handler(window: &mut Window, new_w: f32, new_h: f32) {
     }
 }
 
+/// Hide the NSWindow backing `window` without destroying it.
+/// Call this inside `window.on_window_should_close(...)` to implement
+/// hide-instead-of-close — the GPUI window stays alive, so the next
+/// dock / settings / switcher button click only needs to order the
+/// window back on-screen without recreating the WebView or re-running
+/// heavy initialisation.
+pub fn hide_window_in_handler(window: &mut Window) {
+    let rwh = match window.window_handle() {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(error = %e, "hide_window_in_handler: window_handle failed");
+            return;
+        }
+    };
+    match rwh.as_raw() {
+        RawWindowHandle::AppKit(h) => {
+            let view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
+            if let Some(nswindow) = view.window() {
+                unsafe { nswindow.orderOut(None) };
+            }
+        }
+        other => {
+            warn!(handle = ?other, "hide_window_in_handler: not AppKit");
+        }
+    }
+}
+
+/// Hide an NSWindow identified by `handle` via `orderOut:`.
+/// Call from outside any `handle.update()` (e.g. action handler)
+/// to avoid GPUI reentrancy.
+#[cfg(target_os = "macos")]
+pub fn hide_ns_window(cx: &mut App, handle: AnyWindowHandle) {
+    if let Some(nswindow) = ns_window_for(cx, handle) {
+        unsafe { nswindow.orderOut(None) };
+    }
+}
+
+/// Show (unhide) an NSWindow identified by `handle` via
+/// `makeKeyAndOrderFront:`. Call from outside any `handle.update()`.
+#[cfg(target_os = "macos")]
+pub fn show_ns_window(cx: &mut App, handle: AnyWindowHandle) {
+    if let Some(nswindow) = ns_window_for(cx, handle) {
+        unsafe { nswindow.makeKeyAndOrderFront(None) };
+    }
+}
+
 /// Make `child` a real AppKit child of `parent` via
 /// `[parent addChildWindow:child ordered:NSWindowAbove]`. Also bumps
 /// the child window's level to `NSFloatingWindowLevel` so it paints
@@ -230,4 +277,101 @@ pub fn attach_as_child(
     }
     tracing::info!("addChildWindow attached Control Bar to AppWindow");
     Ok(())
+}
+
+// ── WKWebView screenshot helpers ──────────────────────────────────
+//
+// `screencapture -l <windowID>` cannot capture Metal-backed windows
+// (GPUI renders via Metal). For these windows we fall through to
+// WKWebView's own snapshot API, which captures the WebView content
+// directly without needing CGWindowListCreateImage.
+
+/// Find a WKWebView in the NSView hierarchy rooted at `content`.
+/// Wry mounts the WKWebView as a child of the GPUI content view, so
+/// we walk `contentView.subviews()` recursively looking for any view
+/// whose class is `WKWebView` (or subclass).
+fn find_wkwebview_in_content(content: &NSView) -> Option<Retained<NSView>> {
+    use objc2::msg_send;
+
+    static WK_CLASS: std::sync::OnceLock<Option<&'static AnyClass>> = std::sync::OnceLock::new();
+    let wk_class = *WK_CLASS.get_or_init(|| {
+        let name = std::ffi::CStr::from_bytes_with_nul(b"WKWebView\0").unwrap();
+        AnyClass::get(name)
+    });
+    let wk_class = wk_class?;
+
+    for sv in content.subviews().iter() {
+        let is_wk: bool = unsafe { msg_send![&sv, isKindOfClass: wk_class] };
+        if is_wk {
+            return Some(sv);
+        }
+        if let Some(found) = find_wkwebview_in_content(&sv) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Dispatch a WKWebView screenshot request for the NSWindow that
+/// backs `handle`. The result (a `data:image/png;base64,...` URL or
+/// `None` on failure) is sent to `tx` when WKWebView's async snapshot
+/// API completes.
+///
+/// On the main thread this calls `takeSnapshotWithConfiguration:` and
+/// returns immediately — the completion handler runs asynchronously on
+/// the main queue. No run-loop pumping is performed, so this is safe
+/// to call from within GPUI event handlers.
+pub fn request_wkwebview_snapshot(
+    cx: &mut App,
+    handle: AnyWindowHandle,
+    tx: std::sync::mpsc::Sender<Option<String>>,
+) {
+    let Some(nswindow) = ns_window_for(cx, handle) else {
+        let _ = tx.send(None);
+        return;
+    };
+    let Some(content) = nswindow.contentView() else {
+        let _ = tx.send(None);
+        return;
+    };
+    let Some(wk_view) = find_wkwebview_in_content(&content) else {
+        let _ = tx.send(None);
+        return;
+    };
+
+    use base64::Engine;
+    use block2::RcBlock;
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+    use objc2_foundation::{NSDictionary, NSString};
+
+    let handler = RcBlock::new(move |image: *mut NSImage, _error: *mut AnyObject| {
+        let data_url = if !image.is_null() {
+            let img = unsafe { &*image };
+            let tiff = unsafe { img.TIFFRepresentation() };
+            let rep = tiff
+                .as_ref()
+                .and_then(|t| unsafe { NSBitmapImageRep::imageRepWithData(t) });
+            let empty = NSDictionary::<NSString, AnyObject>::new();
+            let png = rep.as_ref().and_then(|r| unsafe {
+                r.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
+            });
+            png.map(|data| {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&data.to_vec());
+                format!("data:image/png;base64,{}", b64)
+            })
+        } else {
+            None
+        };
+        let _ = tx.send(data_url);
+    });
+
+    unsafe {
+        let _: () = msg_send![
+            &*wk_view,
+            takeSnapshotWithConfiguration: std::ptr::null_mut::<AnyObject>(),
+            completionHandler: &*handler
+        ];
+    }
 }

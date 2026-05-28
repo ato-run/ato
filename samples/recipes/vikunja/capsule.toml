@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "vikunja"
+version = "0.24.6"
+type = "app"
+description = "Open-source task and project manager"
+homepage = "https://github.com/go-vikunja/vikunja"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "vikunja/vikunja:0.24.6"
+port = 3456
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "SQLite database, file attachments"
+attach = "explicit"
+schema_id = "sha256:vikunja-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3456", timeout_seconds = 300 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/app/vikunja/files"

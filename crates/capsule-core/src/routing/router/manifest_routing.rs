@@ -70,6 +70,7 @@ pub(super) fn synthesize_runtime_model_from_manifest(
         name: "main".to_string(),
         target_label: selected_target.to_string(),
         runtime: runtime.clone(),
+        oci_image: None,
         depends_on: Vec::new(),
         readiness_probe: named_target.readiness_probe,
     };
@@ -243,23 +244,53 @@ pub(super) fn synthesize_runtime_model_from_v03(
             .map(|s| ReadinessProbe {
                 http_get: Some(s.to_string()),
                 tcp_connect: None,
-                port: "PORT".to_string(),
+                exec: None,
+                port: Some("PORT".to_string()),
+                initial_delay_seconds: 0,
+                timeout_seconds: 180,
+                interval_seconds: 2,
             })
             .or_else(|| {
-                v.as_table().map(|table| ReadinessProbe {
-                    http_get: table
-                        .get("http_get")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    tcp_connect: table
-                        .get("tcp_connect")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                    port: table
-                        .get("port")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("PORT")
-                        .to_string(),
+                v.as_table().map(|table| {
+                    let initial_delay_seconds = table
+                        .get("initial_delay_seconds")
+                        .and_then(|v| v.as_integer())
+                        .map(|n| n as u32)
+                        .unwrap_or(0);
+                    let timeout_seconds = table
+                        .get("timeout_seconds")
+                        .and_then(|v| v.as_integer())
+                        .map(|n| n as u32)
+                        .unwrap_or(180);
+                    let interval_seconds = table
+                        .get("interval_seconds")
+                        .and_then(|v| v.as_integer())
+                        .map(|n| n as u32)
+                        .unwrap_or(2);
+                    ReadinessProbe {
+                        http_get: table
+                            .get("http_get")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        tcp_connect: table
+                            .get("tcp_connect")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        exec: table.get("exec").and_then(|v| {
+                            v.as_array().map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| s.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                        }),
+                        port: table
+                            .get("port")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        initial_delay_seconds,
+                        timeout_seconds,
+                        interval_seconds,
+                    }
                 })
             })
     });
@@ -288,6 +319,7 @@ pub(super) fn synthesize_runtime_model_from_v03(
         name: "main".to_string(),
         target_label: selected_target.to_string(),
         runtime: resolved_runtime,
+        oci_image: None,
         depends_on: Vec::new(),
         readiness_probe,
     };

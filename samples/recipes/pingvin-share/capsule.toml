@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "pingvin-share"
+version = "1.6.0"
+type = "app"
+description = "Self-hosted file sharing platform — lightweight Wetransfer alternative"
+homepage = "https://github.com/stonith404/pingvin-share"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "stonith404/pingvin-share:1.6.0"
+port = 3000
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "shared files, thumbnails, app data"
+attach = "explicit"
+schema_id = "sha256:pingvin-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3000", timeout_seconds = 90 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/opt/app/backend/data"

@@ -1,7 +1,11 @@
 pub(crate) mod executors;
 pub(crate) mod external_capsule;
+pub(crate) mod ingress_router;
 pub(crate) mod manager;
+pub(crate) mod oci_provider;
+pub(crate) mod oci_session_store;
 pub(crate) mod overrides;
+pub(crate) mod podman_machine;
 pub(crate) mod port_manager;
 pub(crate) mod process;
 pub(crate) mod provider_workspace;

@@ -214,6 +214,11 @@ mod tests {
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("d".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_000_000),
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         }
     }
 

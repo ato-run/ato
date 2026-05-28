@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 
 use capsule_core::router::ExecutionProfile;
 
+use crate::adapters::runtime::process::ProcessManager;
 use crate::application::auth::consent_store::approve_execution_plan_consent;
 use crate::application::preflight::collect_aggregate_requirements;
 use crate::cli::{ConsentInternalCommands, InternalCommands};
@@ -12,6 +13,9 @@ pub(crate) fn execute_internal_command(command: InternalCommands) -> Result<()> 
     match command {
         InternalCommands::Consent { command } => execute_consent_command(command),
         InternalCommands::Preflight { target, json } => execute_preflight_command(target, json),
+        InternalCommands::ImportPreviewSweep { force, json } => {
+            execute_import_preview_sweep_command(force, json)
+        }
     }
 }
 
@@ -64,6 +68,35 @@ fn execute_preflight_command(target: String, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn execute_import_preview_sweep_command(force: bool, json: bool) -> Result<()> {
+    let process_manager = ProcessManager::new()?;
+    let report = process_manager.sweep_import_preview_sessions(force)?;
+    let ok = report.stale_sessions_failed == 0;
+    if json {
+        let payload = serde_json::json!({
+            "ok": ok,
+            "import_preview": report,
+        });
+        println!("{payload}");
+    } else {
+        println!(
+            "import-preview sweep: kept={}, stopped={}, already_gone={}, failed={}, env_groups_stopped={}",
+            report.active_sessions_kept,
+            report.stale_sessions_stopped,
+            report.stale_sessions_already_gone,
+            report.stale_sessions_failed,
+            report.env_process_groups_stopped
+        );
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "import-preview sweep reported stale session cleanup failures"
+        ))
+    }
 }
 
 fn execute_consent_command(command: ConsentInternalCommands) -> Result<()> {

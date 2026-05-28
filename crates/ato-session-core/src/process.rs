@@ -66,6 +66,75 @@ pub fn pid_is_alive(_pid: u32) -> bool {
     false
 }
 
+/// Environment variable that opts back into the docker fallback for OCI
+/// runtime probes. Setting it to `1` makes ato consult `docker` after
+/// `podman` for `inspect` / `network rm` style operations.
+///
+/// Default behavior (env unset or any value other than `1`) is
+/// **podman-only**: docker is never spawned. This avoids a hang seen in
+/// the wild where the `docker` CLI is installed but the daemon is not
+/// running — `docker inspect` then waits on the unix socket with no
+/// internal timeout, blocking the entire `ato` startup sweep (which is
+/// invoked from every CLI subcommand, including `internal preflight`
+/// that the Desktop consent screen depends on).
+pub const ATO_ENABLE_DOCKER_ENV: &str = "ATO_ENABLE_DOCKER";
+
+/// Ordered list of OCI runtime binaries to try when probing container or
+/// network state. Always includes `podman`; appends `docker` only when
+/// the caller has opted in via [`ATO_ENABLE_DOCKER_ENV`]. See the env-var
+/// docs for the failure mode this guard prevents.
+pub fn oci_probe_runtimes() -> &'static [&'static str] {
+    oci_probe_runtimes_for(std::env::var(ATO_ENABLE_DOCKER_ENV).ok().as_deref())
+}
+
+/// Pure helper that decides the runtime list from an env-var-value
+/// string. Split out from [`oci_probe_runtimes`] so the decision is
+/// testable without process-wide env-var mutation.
+fn oci_probe_runtimes_for(value: Option<&str>) -> &'static [&'static str] {
+    if value == Some("1") {
+        &["podman", "docker"]
+    } else {
+        &["podman"]
+    }
+}
+
+/// Returns `true` when the given OCI container ID is currently running.
+///
+/// Tries the runtimes returned by [`oci_probe_runtimes`] in order. Uses
+/// `--format '{{.State.Running}}'` from `inspect` to avoid parsing full
+/// JSON output. Falls back to `true` (preserve) if no runtime gave a
+/// definitive answer — it is safer to retain a possibly-stale record
+/// than to prematurely delete an active session.
+///
+/// `DOCKER_HOST` from the environment is inherited automatically by the
+/// child process when docker probing is enabled.
+pub fn oci_container_is_running(container_id: &str) -> bool {
+    if container_id.is_empty() {
+        return false;
+    }
+    for runtime in oci_probe_runtimes() {
+        let result = std::process::Command::new(runtime)
+            .args(["inspect", "--format", "{{.State.Running}}", container_id])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {
+                // Definitive answer from this runtime: "true" or "false".
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return stdout.trim() == "true";
+            }
+            // Non-zero exit: the container may not exist in *this* runtime
+            // (e.g., it's in Docker not Podman), or the daemon is unavailable.
+            // Do not treat as a definitive "stopped" — try the next runtime.
+            Ok(_) | Err(_) => continue,
+        }
+    }
+    // No runtime gave a definitive answer (both absent/unavailable).
+    // Preserve the record conservatively to avoid false-negative deletes.
+    true
+}
+
 /// Best-effort process creation time (milliseconds since UNIX epoch).
 ///
 /// Returns `None` when the platform is unsupported or the OS rejects
@@ -217,6 +286,31 @@ mod tests {
     #[test]
     fn pid_is_alive_returns_true_for_self() {
         assert!(pid_is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn oci_probe_runtimes_defaults_to_podman_only() {
+        // Default behavior (env unset). The docker fallback was the source
+        // of an `ato` startup hang when docker CLI was installed but its
+        // daemon was not — see `ATO_ENABLE_DOCKER_ENV` docs.
+        assert_eq!(oci_probe_runtimes_for(None), &["podman"]);
+    }
+
+    #[test]
+    fn oci_probe_runtimes_appends_docker_when_explicitly_enabled() {
+        assert_eq!(oci_probe_runtimes_for(Some("1")), &["podman", "docker"]);
+    }
+
+    #[test]
+    fn oci_probe_runtimes_treats_other_values_as_disabled() {
+        // Only the literal "1" opts in. Any other value — including
+        // truthy-looking strings — stays podman-only. Aligns with the
+        // existing `CAPSULE_ALLOW_UNSAFE=1` / `ATO_LEGACY_SUPERVISOR=1`
+        // pattern in this codebase.
+        assert_eq!(oci_probe_runtimes_for(Some("0")), &["podman"]);
+        assert_eq!(oci_probe_runtimes_for(Some("true")), &["podman"]);
+        assert_eq!(oci_probe_runtimes_for(Some("yes")), &["podman"]);
+        assert_eq!(oci_probe_runtimes_for(Some("")), &["podman"]);
     }
 
     #[test]

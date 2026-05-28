@@ -91,7 +91,9 @@ impl PersistedRoute {
             }),
             // capsule://… session-bound routes and Terminal panes
             // depend on runtime state we cannot rebuild from disk.
-            GuestRoute::Capsule { .. } | GuestRoute::Terminal { .. } => None,
+            GuestRoute::Capsule { .. }
+            | GuestRoute::LocalManifest(_)
+            | GuestRoute::Terminal { .. } => None,
         }
     }
 
@@ -307,6 +309,7 @@ fn derive_partition_id(route: &GuestRoute) -> String {
         GuestRoute::CapsuleHandle { handle, .. } | GuestRoute::CapsuleUrl { handle, .. } => {
             handle.replace('/', "_")
         }
+        GuestRoute::LocalManifest(local) => local.source_handle.replace('/', "_"),
         _ => "default".to_string(),
     }
 }

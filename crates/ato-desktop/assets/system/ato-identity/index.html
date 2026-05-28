@@ -205,7 +205,7 @@
   const POST = (window.ipc && window.ipc.postMessage)
     ? (m) => window.ipc.postMessage(JSON.stringify(m))
     : (m) => console.log('[no bridge]', m);
-  const BRIDGE = (command) => POST({ capsule: 'ato-identity', command });
+  const BRIDGE = (command) => POST({ capsule: 'identity', command });
 
   // Identity rendering rule (locked):
   //   The header reflects ONLY what `ato whoami` returns. The host

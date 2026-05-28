@@ -121,6 +121,31 @@ pub struct StoredSessionInfo {
     /// record without depending on per-process `session_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_key: Option<String>,
+
+    // Install lifecycle identifiers (set when launched via `ato launch <install_profile_key>`).
+    // All fields are `Option` for forward-compat with sessions not originating from an installed app.
+    /// Stable identity of the installed app instance (`app_<32hex>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_app_id: Option<String>,
+
+    /// Launch profile within the installed app (`default` or user-defined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_profile_id: Option<String>,
+
+    /// Stable shortcut/dashboard key for the profile (`ipk_<32hex>`).
+    /// Invariant across revision changes — safe for OS shortcuts and dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_profile_key: Option<String>,
+
+    /// Immutable revision that was executed (`rev_<32hex>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_revision_id: Option<String>,
+
+    /// Exact-replay key for this session (`cik_<32hex>`).
+    /// Encodes profile_key + revision_id + execution_id — uniquely identifies
+    /// the full execution closure (receipt / session / replay boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_instance_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +215,13 @@ pub struct StoredOrchestrationServices {
     /// Services in topological start order.
     #[serde(default)]
     pub services: Vec<StoredOrchestrationService>,
+    /// Docker/Podman network created by the OCI orchestrator for this
+    /// session. Stored so `stop_session` can remove it after all
+    /// containers have stopped (closes #273). `None` for sessions that
+    /// did not create a custom network (non-OCI, single-service, or
+    /// records written before this field was added).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +421,11 @@ mod tests {
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("a".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_000_000),
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
@@ -471,10 +508,16 @@ mod tests {
                         published_port: Some(5173),
                     },
                 ],
+                network_name: Some("ato-orch-abc12345-7777".to_string()),
             }),
             schema_version: Some(SCHEMA_VERSION_V2),
             launch_digest: Some("b".repeat(64)),
             process_start_time_unix_ms: Some(1_700_000_001_000),
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&json).expect("parse");
@@ -495,6 +538,30 @@ mod tests {
         assert_eq!(services.services[1].container_id, None);
 
         assert!(parsed.dependency_contracts.is_none());
+        // #273: network_name round-trips through serde.
+        assert_eq!(
+            services.network_name.as_deref(),
+            Some("ato-orch-abc12345-7777")
+        );
+        // Verify network_name is included in the serialized JSON.
+        assert!(json.contains("network_name"));
+    }
+
+    /// #273: `network_name: None` must be omitted from JSON
+    /// (`skip_serializing_if`), and a record without the field must
+    /// deserialize cleanly with `network_name = None`.
+    #[test]
+    fn orchestration_services_network_name_omitted_when_none() {
+        use std::collections::BTreeMap;
+        let services = StoredOrchestrationServices {
+            wrapper_pid: 42,
+            services: vec![],
+            network_name: None,
+        };
+        let json = serde_json::to_string(&services).expect("serialize");
+        assert!(!json.contains("network_name"), "None must be omitted");
+        let parsed: StoredOrchestrationServices = serde_json::from_str(&json).expect("parse");
+        assert!(parsed.network_name.is_none());
     }
 
     /// A schema=1 record with orchestration_services explicitly set to null
@@ -582,6 +649,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");
@@ -634,6 +706,11 @@ mod tests {
             schema_version: None,
             launch_digest: None,
             process_start_time_unix_ms: None,
+            installed_app_id: None,
+            install_profile_id: None,
+            install_profile_key: None,
+            install_revision_id: None,
+            capsule_instance_key: None,
         };
         let first = serde_json::to_string(&original).expect("serialize");
         let parsed: StoredSessionInfo = serde_json::from_str(&first).expect("parse");

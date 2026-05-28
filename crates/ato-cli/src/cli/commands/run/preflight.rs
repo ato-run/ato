@@ -1,6 +1,9 @@
 use super::*;
 
-use crate::adapters::runtime::provisioning::dependency_root;
+use crate::adapters::runtime::provisioning::{
+    build_lifecycle_path_plan, dependency_root, materialize_lifecycle_toolchains,
+    LifecyclePathPlan, LifecyclePhase,
+};
 use crate::application::pipeline::phases::run::PreparedRunContext;
 #[cfg(test)]
 use crate::executors::target_runner;
@@ -263,92 +266,126 @@ pub(crate) async fn run_v03_lifecycle_steps(
     // to None and `npm ci` for the Vite frontend never runs).
     let typed_manifest = plan.typed_manifest().ok();
 
+    let lifecycle_targets = build_lifecycle_targets(plan, &targets_to_provision)?;
+    let root_install_plan = build_root_install_plan(&lifecycle_targets)?;
+    let lifecycle_roots = root_order(&lifecycle_targets);
+    let typed_manifest = typed_manifest.as_ref();
+
     let mut provisioned_roots = std::collections::HashSet::new();
-    for target_label in targets_to_provision {
-        let target_plan = plan.with_selected_target(target_label.clone());
-        let working_dir = dependency_root(&target_plan);
+    for root in root_order(&lifecycle_targets) {
+        let Some(root_target) = lifecycle_targets
+            .iter()
+            .find(|target| target.working_dir == root)
+        else {
+            continue;
+        };
+        let target_plan = plan.with_selected_target(root_target.label.clone());
 
         // Log lifecycle phase context for debugging workspace isolation issues.
         // Gate behind ATO_DEBUG_LIFECYCLE=1 to avoid verbose output in normal runs.
         if std::env::var_os("ATO_DEBUG_LIFECYCLE").as_deref() == Some(std::ffi::OsStr::new("1")) {
-            let which_bun = std::process::Command::new("which").arg("bun").output().ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
-            let node_modules_at_cwd = working_dir.join("node_modules").is_dir();
+            let which_bun = std::process::Command::new("which")
+                .arg("bun")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            let node_modules_at_cwd = root.join("node_modules").is_dir();
             tracing::info!(
-                phase = "pre-install", %target_label,
+                phase = "pre-install", target_label = %root_target.label,
                 workspace_root = %plan.workspace_root.display(),
                 manifest_dir = %plan.manifest_dir.display(),
-                cwd = %working_dir.display(),
+                cwd = %root.display(),
                 which_bun = %which_bun.trim(),
                 node_modules_at_cwd = %node_modules_at_cwd,
             );
         }
 
-        // Run install_command before provision (e.g. `bun install` to set up
-        // the package manager before dependency provisioning).
-        if let Some(command) = target_plan
-            .install_command_string()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(install) = root_install_plan.get(&root) {
             reporter
-                .notify(format!("⚙️  Install [{}]: {}", target_label, command))
+                .notify(format!(
+                    "⚙️  Install [{}]: {}",
+                    install.label, install.command
+                ))
                 .await?;
-            let extra_path =
-                ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            let install_plan = plan.with_selected_target(install.label.clone());
+            let path_plan = build_lifecycle_phase_path_plan(
+                &install_plan,
+                LifecyclePhase::Install,
+                &install.command,
+                &lifecycle_roots,
+                reporter,
+            )
+            .await?;
             run_lifecycle_shell_command(
-                &target_plan,
+                &install_plan,
                 launch_ctx,
-                &command,
+                &install.command,
                 "install",
-                &working_dir,
-                extra_path.as_deref(),
+                &root,
+                &path_plan,
             )?;
-        }
-
-        let cmd_opt = match plan_v03_provision_command(&target_plan)? {
-            Some(cmd) => Some(cmd),
-            None => fallback_provision_command_from_manifest(
-                typed_manifest.as_ref(),
-                &target_label,
-                &working_dir,
-            )?,
-        };
-
-        if provisioned_roots.insert(working_dir.clone()) {
+        } else if provisioned_roots.insert(root.clone()) {
+            let cmd_opt = match plan_v03_provision_command(&target_plan)? {
+                Some(cmd) => Some(cmd),
+                None => fallback_provision_command_from_manifest(
+                    typed_manifest,
+                    &root_target.label,
+                    &root,
+                )?,
+            };
             if let Some(command) = cmd_opt {
                 reporter
-                    .notify(format!("⚙️  Provision [{}]: {}", target_label, command))
+                    .notify(format!(
+                        "⚙️  Provision [{}]: {}",
+                        root_target.label, command
+                    ))
                     .await?;
-                let extra_path =
-                    ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+                let path_plan = build_lifecycle_phase_path_plan(
+                    &target_plan,
+                    LifecyclePhase::Install,
+                    &command,
+                    &lifecycle_roots,
+                    reporter,
+                )
+                .await?;
                 run_lifecycle_shell_command(
                     &target_plan,
                     launch_ctx,
                     &command,
                     "provision",
-                    &working_dir,
-                    extra_path.as_deref(),
+                    &root,
+                    &path_plan,
                 )?;
             }
         }
+    }
 
+    for target in &lifecycle_targets {
+        let target_plan = plan.with_selected_target(target.label.clone());
         if let Some(command) = target_plan
             .build_lifecycle_build()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
         {
             reporter
-                .notify(format!("🏗️  Build [{}]: {}", target_label, command))
+                .notify(format!("🏗️  Build [{}]: {}", target.label, command))
                 .await?;
-            let extra_path = ensure_lifecycle_extra_path(&target_plan, &command, reporter).await?;
+            let path_plan = build_lifecycle_phase_path_plan(
+                &target_plan,
+                LifecyclePhase::Build,
+                &command,
+                &lifecycle_roots,
+                reporter,
+            )
+            .await?;
             run_lifecycle_shell_command(
                 &target_plan,
                 launch_ctx,
                 &command,
                 "build",
-                &working_dir,
-                extra_path.as_deref(),
+                &target.working_dir,
+                &path_plan,
             )?;
         }
     }
@@ -356,48 +393,142 @@ pub(crate) async fn run_v03_lifecycle_steps(
     Ok(())
 }
 
-/// Returns an optional directory that must be prepended to PATH for the given
-/// lifecycle command. Looks up the command's leading token in the unified
-/// runtime tools registry (`capsule_core::tools`); if it matches a known tool
-/// (e.g. `pnpm`), the tool is provisioned and the shim directory is returned
-/// for PATH prepending. This is what lets capsules with `pnpm-lock.yaml` run
-/// on hosts with only `ato` installed.
-async fn ensure_lifecycle_extra_path(
+#[derive(Debug, Clone)]
+struct LifecycleTarget {
+    label: String,
+    working_dir: PathBuf,
+    install: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RootInstallCommand {
+    label: String,
+    command: String,
+}
+
+fn build_lifecycle_targets(
     plan: &capsule_core::router::ManifestData,
-    command: &str,
-    reporter: &Arc<CliReporter>,
-) -> Result<Option<PathBuf>> {
-    let leading = command
-        .split_whitespace()
-        .next()
-        .map(|tok| tok.trim_matches(|c: char| c == '"' || c == '\''))
-        .unwrap_or("");
-    let Some(spec) = capsule_core::tools::lookup(leading) else {
-        return Ok(None);
-    };
+    target_labels: &[String],
+) -> Result<Vec<LifecycleTarget>> {
+    target_labels
+        .iter()
+        .map(|label| {
+            let target_plan = plan.with_selected_target(label.clone());
+            Ok(LifecycleTarget {
+                label: label.clone(),
+                working_dir: dependency_root(&target_plan),
+                install: explicit_install_command_string(&target_plan)?,
+            })
+        })
+        .collect()
+}
 
-    let version_override = capsule_core::tools::read_tool_version(
-        &plan.manifest,
-        plan.selected_target_label(),
-        spec.name,
-    );
+fn root_order(targets: &[LifecycleTarget]) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut roots = Vec::new();
+    for target in targets {
+        if seen.insert(target.working_dir.clone()) {
+            roots.push(target.working_dir.clone());
+        }
+    }
+    roots
+}
 
-    let mut deps = capsule_core::tools::ToolDeps::default();
-    if spec.depends_on.contains(&"node") {
-        deps.node_bin = Some(runtime_manager::ensure_node_binary_with_authority(
-            plan, None,
-        )?);
+fn build_root_install_plan(
+    targets: &[LifecycleTarget],
+) -> Result<std::collections::HashMap<PathBuf, RootInstallCommand>> {
+    let mut by_root = std::collections::HashMap::<PathBuf, RootInstallCommand>::new();
+    for target in targets {
+        let Some(command) = target.install.as_ref() else {
+            continue;
+        };
+        if let Some(existing) = by_root.get(&target.working_dir) {
+            if existing.command != *command {
+                return Err(AtoExecutionError::execution_contract_invalid(
+                    format!(
+                        "conflicting install lifecycle commands for dependency root '{}': target '{}' declares '{}', target '{}' declares '{}'. Use one root-level install command for targets that share a dependency root.",
+                        target.working_dir.display(),
+                        existing.label,
+                        existing.command,
+                        target.label,
+                        command
+                    ),
+                    Some("targets.<label>.install"),
+                    Some(&target.label),
+                )
+                .into());
+            }
+            continue;
+        }
+        by_root.insert(
+            target.working_dir.clone(),
+            RootInstallCommand {
+                label: target.label.clone(),
+                command: command.clone(),
+            },
+        );
+    }
+    Ok(by_root)
+}
+
+pub(crate) fn explicit_install_command_string(
+    plan: &capsule_core::router::ManifestData,
+) -> Result<Option<String>> {
+    let target_command =
+        install_command_from_scope(&plan.manifest, &["targets", plan.selected_target_label()])?;
+    let top_level_command = install_command_from_scope(&plan.manifest, &[])?;
+    Ok(target_command.or(top_level_command))
+}
+
+fn install_command_from_scope(manifest: &toml::Value, path: &[&str]) -> Result<Option<String>> {
+    let mut scope = manifest;
+    for segment in path {
+        let Some(next) = scope.get(*segment) else {
+            return Ok(None);
+        };
+        scope = next;
     }
 
-    let reporter_dyn: Arc<dyn capsule_core::reporter::CapsuleReporter + 'static> = reporter.clone();
-    let handle = capsule_core::tools::ensure_runtime_tool(
-        spec,
-        version_override.as_deref(),
-        &deps,
-        reporter_dyn,
-    )
-    .await?;
-    Ok(Some(handle.bin_dir))
+    let has_install = scope.get("install").is_some();
+    let has_install_command = scope.get("install_command").is_some();
+    if has_install && has_install_command {
+        let field = if path.is_empty() {
+            "install/install_command".to_string()
+        } else {
+            format!("{}.install/install_command", path.join("."))
+        };
+        return Err(AtoExecutionError::execution_contract_invalid(
+            format!(
+                "install and install_command are aliases and cannot both be declared in the same scope ({field})"
+            ),
+            Some(&field),
+            path.last().copied(),
+        )
+        .into());
+    }
+
+    let value = scope
+        .get("install")
+        .or_else(|| scope.get("install_command"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok(value)
+}
+
+/// Build the phase-aware PATH plan used by both consent preview and session start.
+/// Install runs with managed toolchains only; build/run are allowed to see
+/// dependency output bins materialized by the completed install phase.
+async fn build_lifecycle_phase_path_plan(
+    plan: &capsule_core::router::ManifestData,
+    phase: LifecyclePhase,
+    command: &str,
+    lifecycle_roots: &[PathBuf],
+    reporter: &Arc<CliReporter>,
+) -> Result<LifecyclePathPlan> {
+    let toolchains = materialize_lifecycle_toolchains(plan, command, reporter)?;
+    build_lifecycle_path_plan(plan, phase, command, lifecycle_roots, toolchains, reporter).await
 }
 
 pub(super) fn plan_v03_provision_command(
@@ -623,63 +754,19 @@ fn run_lifecycle_shell_command(
     command: &str,
     phase: &str,
     working_dir: &Path,
-    extra_path: Option<&Path>,
+    path_plan: &LifecyclePathPlan,
 ) -> Result<()> {
-    // Prepend the ato-managed Node bin dir to PATH inside the command string itself
-    // (#294). We cannot rely on setting PATH in the subprocess env because `sh -l`
-    // sources login profile scripts (e.g. /etc/profile) which unconditionally reset
-    // PATH. By prefixing "export PATH=<dir>:$PATH;" we run after the profile reset
-    // and guarantee the managed npm/node are found first.
-    // Use `ensure_node_binary_with_authority(plan, None)` so provider-backed targets
-    // (npm:pkg) that store runtime_version in capsule.toml are handled correctly —
-    // `ensure_node_binary` alone requires capsule.lock.json which providers don't create.
-    let managed_node_dir = runtime_manager::ensure_node_binary_with_authority(plan, None)
-        .ok()
-        .and_then(|node_bin| node_bin.parent().map(Path::to_path_buf));
-    let mut path_prefix_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(extra) = extra_path {
-        path_prefix_dirs.push(extra.to_path_buf());
-    }
-    if let Some(dir) = managed_node_dir {
-        path_prefix_dirs.push(dir);
-    }
-    let managed_node_path_prefix = if path_prefix_dirs.is_empty() {
-        String::new()
-    } else {
-        #[cfg(windows)]
-        {
-            // On Windows, `cmd /C` doesn't understand `export` or `:` separators.
-            // Use `set PATH=<dir>;<dir>;%PATH%&` which cmd.exe does understand.
-            let joined = path_prefix_dirs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(";");
-            format!("set \"PATH={joined};%PATH%\"& ")
-        }
-        #[cfg(not(windows))]
-        {
-            let joined = path_prefix_dirs
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(":");
-            format!("export PATH={joined}:$PATH; ")
-        }
-    };
-    let effective_command = format!("{}{}", managed_node_path_prefix, command);
-
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/C", &effective_command]);
+        cmd.args(["/C", command]);
         cmd
     };
 
     #[cfg(not(windows))]
     let mut cmd = {
         let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", &effective_command]);
+        cmd.args(["-c", command]);
         cmd
     };
 
@@ -695,7 +782,8 @@ fn run_lifecycle_shell_command(
         // Skip git-hooks managers (husky, lefthook, etc.): the capsule workspace
         // has no .git dir so their prepare/postinstall scripts would fail with exit 128.
         .env("HUSKY", "0")
-        .env("LEFTHOOK", "0");
+        .env("LEFTHOOK", "0")
+        .env("PATH", path_plan.path_env()?);
 
     for (key, value) in runtime_overrides::merged_env(plan.execution_env()) {
         cmd.env(key, value);
@@ -1298,7 +1386,8 @@ pub(super) fn resolve_python_dependency_lock_path(dependency_root: &Path) -> Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_required_glibc_from_lock, plan_v03_provision_command, preflight_glibc_compat,
+        build_lifecycle_targets, build_root_install_plan, detect_required_glibc_from_lock,
+        explicit_install_command_string, plan_v03_provision_command, preflight_glibc_compat,
         preflight_single_script_effective_cwd_compat,
     };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
@@ -1339,6 +1428,113 @@ mod tests {
     // unified resolver itself in `provisioning/dependency_root.rs`.
     // Removing the duplicates here keeps the fixture-heavy filesystem
     // tests in one place and prevents the two suites from drifting.
+
+    #[test]
+    fn same_root_identical_install_is_deduped() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("package.json"), "{}\n").expect("write package");
+        fs::write(dir.path().join("bun.lock"), "# lock\n").expect("write lock");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+install = "bun install --ignore-scripts"
+run_command = "bun run start"
+package_dependencies = ["worker"]
+
+[targets.worker]
+runtime = "source"
+driver = "node"
+install = "bun install --ignore-scripts"
+run_command = "bun run worker"
+"#,
+        );
+        let targets =
+            build_lifecycle_targets(&plan, &["default".to_string(), "worker".to_string()])
+                .expect("lifecycle targets");
+        let root_plan = build_root_install_plan(&targets).expect("root install plan");
+
+        assert_eq!(root_plan.len(), 1);
+        let command = root_plan
+            .values()
+            .next()
+            .expect("root install")
+            .command
+            .as_str();
+        assert_eq!(command, "bun install --ignore-scripts");
+        assert_eq!(
+            plan_v03_provision_command(&plan)
+                .expect("auto provision command")
+                .as_deref(),
+            Some("bun install")
+        );
+    }
+
+    #[test]
+    fn same_root_conflicting_install_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("package.json"), "{}\n").expect("write package");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+install = "bun install --ignore-scripts"
+run_command = "bun run start"
+package_dependencies = ["worker"]
+
+[targets.worker]
+runtime = "source"
+driver = "node"
+install = "pnpm install"
+run_command = "pnpm worker"
+"#,
+        );
+        let targets =
+            build_lifecycle_targets(&plan, &["default".to_string(), "worker".to_string()])
+                .expect("lifecycle targets");
+        let err = build_root_install_plan(&targets).expect_err("conflicting install should fail");
+
+        assert!(err
+            .to_string()
+            .contains("conflicting install lifecycle commands"));
+    }
+
+    #[test]
+    fn install_aliases_in_same_scope_are_rejected() {
+        let dir = tempdir().expect("tempdir");
+        let plan = build_plan(
+            dir.path(),
+            r#"
+name = "demo"
+type = "app"
+default_target = "default"
+
+[targets.default]
+runtime = "source"
+driver = "node"
+install = "bun install --ignore-scripts"
+install_command = "bun install"
+run_command = "bun run start"
+"#,
+        );
+        let err = explicit_install_command_string(&plan).expect_err("alias conflict should fail");
+
+        assert!(err
+            .to_string()
+            .contains("install and install_command are aliases"));
+    }
 
     #[test]
     fn provision_command_uses_explicit_python_working_dir_requirements() {
