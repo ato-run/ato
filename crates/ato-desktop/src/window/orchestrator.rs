@@ -49,6 +49,7 @@ fn short_title_from_route(route: &GuestRoute) -> String {
         GuestRoute::CapsuleHandle { label, .. } | GuestRoute::CapsuleUrl { label, .. } => {
             label.clone()
         }
+        GuestRoute::LocalManifest(local) => local.label.clone(),
         GuestRoute::ExternalUrl(url) => url
             .host_str()
             .map(|h| h.to_string())
@@ -74,6 +75,7 @@ fn url_for_route(route: &GuestRoute) -> SharedString {
     let s = match route {
         R::ExternalUrl(_) => "capsule://desktop.ato.run/web-viewer".to_string(),
         R::CapsuleHandle { handle, .. } => format!("capsule://{handle}"),
+        R::LocalManifest(local) => format!("capsule://{}", local.source_handle),
         R::CapsuleUrl { handle, url, .. } => format!("capsule://{handle}/{url}"),
         R::Capsule { session, .. } => format!("capsule://{session}/"),
         R::Terminal { session_id } => format!("terminal://{session_id}/"),
@@ -89,6 +91,7 @@ fn title_subtitle_for_route(route: &GuestRoute) -> (SharedString, SharedString) 
     use crate::state::GuestRoute as R;
     let (title, subtitle) = match route {
         R::CapsuleHandle { handle, label } => (label.clone(), handle.clone()),
+        R::LocalManifest(local) => (local.label.clone(), local.source_handle.clone()),
         R::CapsuleUrl { label, url, .. } => (label.clone(), url.to_string()),
         R::ExternalUrl(url) => (
             url.host_str()
@@ -629,6 +632,10 @@ fn start_capsule_input_for_route(
                 configs: launch_configs,
             })
         }
+        GuestRoute::LocalManifest(local) => Some(CapsuleBootInput::Launch {
+            input: crate::orchestrator::DesktopLaunchInput::from_local_manifest(local),
+            configs: launch_configs,
+        }),
         _ => None,
     }
 }
@@ -764,6 +771,18 @@ fn open_app_window_with_capsule_input(
                     .clone()
                     .unwrap_or(CapsuleBootInput::Start {
                         handle,
+                        configs: Vec::new(),
+                    });
+                let shell = cx.new(|cx| AppCapsuleShell::new_with_input(input, window, cx));
+                *capsule_shell_slot_for_window.borrow_mut() = Some(shell.clone());
+                window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
+                cx.new(|cx| gpui_component::Root::new(shell, window, cx))
+            }
+            crate::state::GuestRoute::LocalManifest(local) => {
+                let input = capsule_input_for_window
+                    .clone()
+                    .unwrap_or(CapsuleBootInput::Launch {
+                        input: crate::orchestrator::DesktopLaunchInput::from_local_manifest(&local),
                         configs: Vec::new(),
                     });
                 let shell = cx.new(|cx| AppCapsuleShell::new_with_input(input, window, cx));

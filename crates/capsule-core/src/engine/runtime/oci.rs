@@ -4,6 +4,7 @@ use bollard::container::{
     StartContainerOptions, StatsOptions, StopContainerOptions, WaitContainerOptions,
 };
 use bollard::errors::Error as BollardError;
+use bollard::exec::{CreateExecOptions, StartExecOptions};
 use bollard::image::CreateImageOptions;
 use bollard::models::{EndpointSettings, HostConfig, PortBinding};
 use bollard::network::{ConnectNetworkOptions, CreateNetworkOptions};
@@ -17,6 +18,7 @@ use tokio::sync::{mpsc, Mutex};
 use crate::error::{CapsuleError, Result};
 use crate::metrics::{MetricsSession, ResourceStats, RuntimeMetadata, UnifiedMetrics};
 use crate::runtime::{Measurable, RuntimeHandle};
+use crate::types::OciPlatform;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciPortSpec {
@@ -51,6 +53,14 @@ pub struct OciContainerRequest {
     pub ports: Vec<OciPortSpec>,
     pub network: Option<String>,
     pub aliases: Vec<String>,
+    /// Optional platform override for emulated execution (e.g., linux/amd64 on arm64 host).
+    /// When set and different from host platform, the provider must pass `--platform` to create.
+    pub platform: Option<OciPlatform>,
+    /// Additional `/etc/hosts` entries injected via `--add-host`.
+    ///
+    /// Each entry is in `name:address` form as accepted by `podman create --add-host`.
+    /// Use `host.containers.internal:host-gateway` to let containers reach the host.
+    pub extra_hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,6 +89,7 @@ pub trait OciRuntimeClient: Send + Sync {
         container_id: &str,
         follow: bool,
     ) -> Result<mpsc::Receiver<Result<OciLogChunk>>>;
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> Result<i64>;
     async fn wait_container(&self, container_id: &str) -> Result<i64>;
     async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()>;
     async fn remove_container(&self, container_id: &str, force: bool) -> Result<()>;
@@ -98,6 +109,19 @@ impl BollardOciRuntimeClient {
 
     pub fn docker(&self) -> &Docker {
         &self.docker
+    }
+
+    async fn is_podman_engine(&self) -> bool {
+        let Ok(version) = self.docker.version().await else {
+            return false;
+        };
+        let platform = version
+            .platform
+            .map(|platform| platform.name)
+            .unwrap_or_default();
+        let version = version.version.unwrap_or_default();
+        let marker = format!("{platform} {version}").to_ascii_lowercase();
+        marker.contains("podman")
     }
 }
 
@@ -119,7 +143,7 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
     }
 
     async fn create_network(&self, request: &OciNetworkRequest) -> Result<String> {
-        let response = self
+        let response = match self
             .docker
             .create_network(CreateNetworkOptions {
                 name: request.name.clone(),
@@ -134,7 +158,13 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
                 labels: request.labels.clone(),
             })
             .await
-            .map_err(map_bollard_error)?;
+        {
+            Ok(response) => response,
+            Err(err) if is_bollard_eof(&err) && self.is_podman_engine().await => {
+                return create_podman_network_cli(request).await;
+            }
+            Err(err) => return Err(map_bollard_error(err)),
+        };
 
         response
             .id
@@ -145,10 +175,13 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
     }
 
     async fn remove_network(&self, network_name: &str) -> Result<()> {
-        self.docker
-            .remove_network(network_name)
-            .await
-            .map_err(map_bollard_error)
+        match self.docker.remove_network(network_name).await {
+            Ok(()) => Ok(()),
+            Err(err) if is_bollard_eof(&err) && self.is_podman_engine().await => {
+                remove_podman_network_cli(network_name).await
+            }
+            Err(err) => Err(map_bollard_error(err)),
+        }
     }
 
     async fn create_container(&self, request: &OciContainerRequest) -> Result<String> {
@@ -178,6 +211,7 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
                     .collect()
             }),
             port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
+            extra_hosts: (!request.extra_hosts.is_empty()).then(|| request.extra_hosts.clone()),
             ..Default::default()
         };
 
@@ -369,6 +403,51 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
         }
     }
 
+    async fn exec_container(&self, container_id: &str, cmd: &[String]) -> Result<i64> {
+        let exec = self
+            .docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    attach_stdin: Some(false),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    tty: Some(false),
+                    cmd: Some(cmd.to_vec()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(map_bollard_error)?;
+
+        self.docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(map_bollard_error)?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let inspect = self
+                .docker
+                .inspect_exec(&exec.id)
+                .await
+                .map_err(map_bollard_error)?;
+            if !inspect.running.unwrap_or(false) {
+                return Ok(inspect.exit_code.unwrap_or(1));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(1);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()> {
         self.docker
             .stop_container(container_id, Some(StopContainerOptions { t: timeout_secs }))
@@ -547,6 +626,62 @@ fn map_bollard_error(err: BollardError) -> CapsuleError {
         return CapsuleError::ContainerEngine(message);
     }
     CapsuleError::Runtime(message)
+}
+
+fn is_bollard_eof(err: &BollardError) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("eof while parsing a value")
+}
+
+async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String> {
+    let mut args = vec!["network".to_string(), "create".to_string()];
+    for (key, value) in &request.labels {
+        args.push("--label".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    args.push(request.name.clone());
+
+    let output = tokio::process::Command::new("podman")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|err| {
+            CapsuleError::ContainerEngine(format!("failed to run podman network create: {err}"))
+        })?;
+    if !output.status.success() {
+        return Err(CapsuleError::Runtime(format!(
+            "podman network create failed for '{}': {}",
+            request.name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        Ok(request.name.clone())
+    } else {
+        Ok(id)
+    }
+}
+
+async fn remove_podman_network_cli(network_name: &str) -> Result<()> {
+    let output = tokio::process::Command::new("podman")
+        .args(["network", "rm", network_name])
+        .output()
+        .await
+        .map_err(|err| {
+            CapsuleError::ContainerEngine(format!("failed to run podman network rm: {err}"))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    Err(CapsuleError::Runtime(format!(
+        "podman network rm failed for '{}': {}",
+        network_name,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
 }
 
 pub fn connect_docker_default() -> Result<Docker> {

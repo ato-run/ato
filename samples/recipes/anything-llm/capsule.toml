@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "anything-llm"
+version = "1.7.6"
+type = "app"
+description = "All-in-one open-source RAG and AI workspace with local LLM support"
+homepage = "https://github.com/Mintplex-Labs/anything-llm"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "mintplexlabs/anythingllm:1.7.6"
+port = 3001
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "vector store, documents, settings"
+attach = "explicit"
+schema_id = "sha256:anythingllm-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "3001", timeout_seconds = 120 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/app/server/storage"

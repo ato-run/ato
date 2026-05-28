@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+use crate::adapters::runtime::provisioning::dependency_root;
 use crate::application::producer_input::resolve_producer_authoritative_input;
 use crate::application::source_inventory::{
     collect_source_files, native_lockfiles, normalize_outputs, OutputSpec,
@@ -813,21 +814,40 @@ fn run_v03_build_lifecycle_steps(
         return Ok(());
     }
 
-    let mut provisioned_roots = std::collections::HashSet::new();
-    for target_label in plan.selected_target_package_order()? {
-        let target_plan = plan.with_selected_target(target_label.clone());
-        let working_dir = target_plan.execution_working_directory();
+    let target_labels = plan.selected_target_package_order()?;
+    let lifecycle_targets = build_lifecycle_targets(plan, &target_labels)?;
+    let root_install_plan = build_root_install_plan(&lifecycle_targets)?;
 
-        if provisioned_roots.insert(working_dir.clone()) {
+    let mut provisioned_roots = std::collections::HashSet::new();
+    for root in root_order(&lifecycle_targets) {
+        let Some(root_target) = lifecycle_targets
+            .iter()
+            .find(|target| target.working_dir == root)
+        else {
+            continue;
+        };
+        let target_plan = plan.with_selected_target(root_target.label.clone());
+        if let Some(install) = root_install_plan.get(&root) {
+            let install_plan = plan.with_selected_target(install.label.clone());
+            futures::executor::block_on(reporter.notify(format!(
+                "⚙️  Install [{}]: {}",
+                install.label, install.command
+            )))?;
+            run_build_lifecycle_shell_command(&install_plan, &install.command, "install")?;
+        } else if provisioned_roots.insert(root.clone()) {
             if let Some(command) = plan_v03_build_provision_command(&target_plan, strict_lockfile)?
             {
-                futures::executor::block_on(
-                    reporter.notify(format!("⚙️  Provision [{}]: {}", target_label, command)),
-                )?;
+                futures::executor::block_on(reporter.notify(format!(
+                    "⚙️  Provision [{}]: {}",
+                    root_target.label, command
+                )))?;
                 run_build_lifecycle_shell_command(&target_plan, &command, "provision")?;
             }
         }
+    }
 
+    for target in lifecycle_targets {
+        let target_plan = plan.with_selected_target(target.label.clone());
         if let Some(command) = target_plan
             .build_lifecycle_build()
             .map(|value| value.trim().to_string())
@@ -838,7 +858,7 @@ fn run_v03_build_lifecycle_steps(
                 if build_cache.restore_outputs()? {
                     futures::executor::block_on(reporter.notify(format!(
                         "♻️  Build cache hit [{}]: restored {}",
-                        target_label,
+                        target.label,
                         build_cache.describe_outputs()
                     )))?;
                     continue;
@@ -846,7 +866,7 @@ fn run_v03_build_lifecycle_steps(
             }
 
             futures::executor::block_on(
-                reporter.notify(format!("🏗️  Build [{}]: {}", target_label, command)),
+                reporter.notify(format!("🏗️  Build [{}]: {}", target.label, command)),
             )?;
             run_build_lifecycle_shell_command(&target_plan, &command, "build")?;
 
@@ -854,13 +874,13 @@ fn run_v03_build_lifecycle_steps(
                 if build_cache.capture_outputs()? {
                     futures::executor::block_on(reporter.notify(format!(
                         "💾 Build cache saved [{}]: {}",
-                        target_label,
+                        target.label,
                         build_cache.describe_outputs()
                     )))?;
                 } else {
                     futures::executor::block_on(reporter.warn(format!(
                         "⚠️  Build cache skipped [{}]: declared outputs were not produced",
-                        target_label
+                        target.label
                     )))?;
                 }
             }
@@ -868,6 +888,84 @@ fn run_v03_build_lifecycle_steps(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct BuildLifecycleTarget {
+    label: String,
+    working_dir: PathBuf,
+    install: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct BuildRootInstallCommand {
+    label: String,
+    command: String,
+}
+
+fn build_lifecycle_targets(
+    plan: &capsule_core::router::ManifestData,
+    target_labels: &[String],
+) -> Result<Vec<BuildLifecycleTarget>> {
+    target_labels
+        .iter()
+        .map(|label| {
+            let target_plan = plan.with_selected_target(label.clone());
+            Ok(BuildLifecycleTarget {
+                label: label.clone(),
+                working_dir: dependency_root(&target_plan),
+                install: crate::commands::run::explicit_install_command_string(&target_plan)?,
+            })
+        })
+        .collect()
+}
+
+fn root_order(targets: &[BuildLifecycleTarget]) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut roots = Vec::new();
+    for target in targets {
+        if seen.insert(target.working_dir.clone()) {
+            roots.push(target.working_dir.clone());
+        }
+    }
+    roots
+}
+
+fn build_root_install_plan(
+    targets: &[BuildLifecycleTarget],
+) -> Result<std::collections::HashMap<PathBuf, BuildRootInstallCommand>> {
+    let mut by_root = std::collections::HashMap::<PathBuf, BuildRootInstallCommand>::new();
+    for target in targets {
+        let Some(command) = target.install.as_ref() else {
+            continue;
+        };
+        if let Some(existing) = by_root.get(&target.working_dir) {
+            if existing.command != *command {
+                return Err(AtoExecutionError::execution_contract_invalid(
+                    format!(
+                        "conflicting install lifecycle commands for dependency root '{}': target '{}' declares '{}', target '{}' declares '{}'. Use one root-level install command for targets that share a dependency root.",
+                        target.working_dir.display(),
+                        existing.label,
+                        existing.command,
+                        target.label,
+                        command
+                    ),
+                    Some("targets.<label>.install"),
+                    Some(&target.label),
+                )
+                .into());
+            }
+            continue;
+        }
+        by_root.insert(
+            target.working_dir.clone(),
+            BuildRootInstallCommand {
+                label: target.label.clone(),
+                command: command.clone(),
+            },
+        );
+    }
+    Ok(by_root)
 }
 
 fn plan_v03_build_provision_command(
@@ -1795,6 +1893,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
             selected_target: "default".to_string(),
             runtime_model,
             state_source_overrides: std::collections::HashMap::new(),
+            ingress: None,
         }
     }
 }

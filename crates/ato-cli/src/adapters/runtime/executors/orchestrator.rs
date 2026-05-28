@@ -38,10 +38,19 @@ use crate::application::services::{
 use crate::reporters::CliReporter;
 use crate::runtime::overrides as runtime_overrides;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_INTERVAL: Duration = Duration::from_millis(250);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const OCI_STOP_TIMEOUT_SECS: i64 = 5;
+const RUN_ONCE_TIMEOUT_SECS_DEFAULT: u64 = 300;
+
+fn run_once_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("ATO_OCI_RUN_ONCE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(RUN_ONCE_TIMEOUT_SECS_DEFAULT),
+    )
+}
 
 /// Process-wide flag set by entry points that reserve stdout
 /// exclusively for a structured envelope (today: `ato app session
@@ -77,6 +86,49 @@ fn service_stdout_should_route_to_stderr() -> bool {
     REDIRECT_SERVICE_STDOUT_TO_STDERR.load(Ordering::Relaxed)
 }
 
+/// Caller-driven policy for how the `services.main` leaf publishes its port
+/// to the host. Policy is selected by the *caller context*, not by the
+/// recipe or app — recipes still declare a port and `network.publish`, but
+/// the caller decides whether the historical "main → fixed host port"
+/// special case applies for this run.
+///
+/// Historically the orchestrator special-cases `service.name == "main"` to
+/// `PublishMode::Fixed` so `ato run` exposes the recipe's declared port to
+/// the host for CLI users and external tools. That model breaks any caller
+/// that owns the only consumer and runs multiple sessions concurrently:
+/// two recipes both declaring `[services.main]` with `port = 8080` (e.g.
+/// Open WebUI and Excalidraw) compete for host:8080, and the second
+/// session's caller ends up pointed at the first session's still-running
+/// container.
+///
+/// `EphemeralMainService` opts the leaf out of the fixed-port special case
+/// so the OCI runtime assigns a free host port per session. Callers that
+/// pick this policy are responsible for reading the resolved host port
+/// back from the runtime (e.g. `DetachedServiceSnapshot.host_ports`) when
+/// they construct any user-facing URL.
+///
+/// For *non-main* services, `network.publish = true` is an explicit
+/// recipe-level request for a stable host port and wins over this policy
+/// (e.g. a sidecar API a recipe wants externally addressable). For the
+/// `services.main` leaf, this policy decides exclusively — the router
+/// auto-sets `network.publish = true` for every main with a port, so it
+/// cannot be used as a per-recipe escape hatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PublishPolicy {
+    /// `ato run` / CLI default. `services.main` publishes to the declared
+    /// host port so external consumers (shells, browsers, scripts) can
+    /// reach the recipe on a stable address.
+    #[default]
+    ExternalDefault,
+    /// `services.main` publishes to an ephemeral host port chosen by the
+    /// OCI runtime. Eliminates the cross-session host-port collision
+    /// (#289) for callers that own the only consumer and may run multiple
+    /// sessions concurrently. Currently used by the Desktop session path;
+    /// the name is caller-agnostic so any future caller with the same
+    /// shape (single consumer, concurrent sessions) can opt in.
+    EphemeralMainService,
+}
+
 #[derive(Debug, Clone)]
 pub struct OrchestratorOptions {
     pub enforcement: String,
@@ -84,6 +136,7 @@ pub struct OrchestratorOptions {
     pub dangerously_skip_permissions: bool,
     pub assume_yes: bool,
     pub nacelle: Option<PathBuf>,
+    pub publish_policy: PublishPolicy,
 }
 
 impl OrchestratorOptions {
@@ -246,7 +299,15 @@ where
     C: OciRuntimeClient + Clone + Send + Sync + 'static,
 {
     let orchestration = plan.resolve_services()?;
-    let graph = ServiceGraphPlan::from_services(&plan.services())?;
+    // Build the layered start order from the resolved orchestration so that
+    // target-level `depends_on` (merged into ResolvedService.depends_on by the
+    // router) and any cross-service edges materialized as `connections` are
+    // both reflected. `from_services` would only see the raw [services.*]
+    // table, which is empty for recipes like AFFiNE that declare depends_on
+    // on targets — leaving sibling leaves (e.g. redis vs db for migration)
+    // in a single layer with alphabetic start order that races the
+    // connection-resolution check. See AODD PR #262.
+    let graph = ServiceGraphPlan::from_orchestration(&orchestration)?;
     let session_id = session_id(plan);
     let client = Arc::new(client);
     let network_name = if orchestration
@@ -265,7 +326,8 @@ where
                 name: network_name.clone(),
                 labels: session_labels(plan, &session_id),
             })
-            .await?;
+            .await
+            .with_context(|| format!("failed to create OCI network '{network_name}'"))?;
     }
 
     let runtime = OrchestratorStartupRuntime::new(
@@ -529,9 +591,13 @@ async fn launch_service<C: OciRuntimeClient>(
                     anyhow::anyhow!("service '{}' is missing OCI image", service.name)
                 })?;
 
-            client.pull_image(&image).await?;
+            client
+                .pull_image(&image)
+                .await
+                .with_context(|| format!("failed to pull image for service '{}'", service.name))?;
 
-            let publish_mode = determine_publish_mode(orchestration, service);
+            let publish_mode =
+                determine_publish_mode(orchestration, service, options.publish_policy);
             let host_port = if matches!(publish_mode, PublishMode::Fixed) {
                 runtime.port
             } else {
@@ -570,9 +636,19 @@ async fn launch_service<C: OciRuntimeClient>(
                     ports,
                     network: network_name.map(str::to_string),
                     aliases: service.network.aliases.clone(),
+                    platform: None,
+                    extra_hosts: vec![],
                 })
-                .await?;
-            client.start_container(&container_id).await?;
+                .await
+                .with_context(|| {
+                    format!("failed to create container for service '{}'", service.name)
+                })?;
+            client
+                .start_container(&container_id)
+                .await
+                .with_context(|| {
+                    format!("failed to start container for service '{}'", service.name)
+                })?;
 
             let inspect = client
                 .inspect_container(&container_id)
@@ -887,12 +963,30 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
         })?
     };
 
+    let mut completed_run_once = false;
     let result = async {
+        if service.service.run_once {
+            wait_run_once_service(service_name, &mut service, client).await?;
+            stop_service(&mut service, client)
+                .await
+                .with_context(|| format!("failed to clean up run_once service '{service_name}'"))?;
+            drain_service(&mut service);
+            completed_run_once = true;
+            return Ok(());
+        }
+
         let Some(probe) = service.service.readiness_probe.clone() else {
             return Ok(());
         };
 
-        let deadline = Instant::now() + READINESS_TIMEOUT;
+        let initial_delay = readiness_initial_delay(&probe);
+        if !initial_delay.is_zero() {
+            tokio::time::sleep(initial_delay).await;
+        }
+
+        let timeout = readiness_timeout(&probe);
+        let interval = readiness_interval(&probe);
+        let deadline = Instant::now() + timeout;
         loop {
             if let RunningHandle::Local(local) = &mut service.handle {
                 match poll_local_readiness_events(local)? {
@@ -917,9 +1011,15 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
             }
 
             if !uses_event_driven_readiness(&service) {
-                let port = resolve_probe_port(&service, &probe)?;
-                if readiness_probe_ok(&probe, port)? {
-                    return Ok(());
+                if let Some(cmd) = probe.exec.as_ref().filter(|cmd| !cmd.is_empty()) {
+                    let container_id = exec_readiness_container_id(&service)?;
+                    if exec_readiness_probe_ok(client, &container_id, cmd).await? {
+                        return Ok(());
+                    }
+                } else if let Some(port) = resolve_probe_port(&service, &probe)? {
+                    if readiness_probe_ok(&probe, port)? {
+                        return Ok(());
+                    }
                 }
             }
 
@@ -927,21 +1027,55 @@ async fn wait_until_ready_in_state<C: OciRuntimeClient>(
                 anyhow::bail!(
                     "service '{}' readiness check timed out after {}s",
                     service_name,
-                    READINESS_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 );
             }
 
-            tokio::time::sleep(READINESS_INTERVAL).await;
+            tokio::time::sleep(interval).await;
         }
     }
     .await;
 
     let mut state = state.lock().await;
-    state.running.insert(service_name.to_string(), service);
+    if !completed_run_once {
+        state.running.insert(service_name.to_string(), service);
+    }
     if result.is_ok() {
         state.ready.insert(service_name.to_string());
     }
     result
+}
+
+async fn wait_run_once_service<C: OciRuntimeClient>(
+    service_name: &str,
+    service: &mut RunningService,
+    client: &C,
+) -> Result<()> {
+    let timeout = run_once_timeout();
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if let Some(exit_code) = try_wait(service, client).await? {
+            if exit_code == 0 {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "oci_run_once_failed: init container '{}' exited with non-zero status {}",
+                service_name,
+                exit_code
+            );
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "oci_run_once_timeout: init container '{}' did not complete within {}s",
+                service_name,
+                timeout.as_secs()
+            );
+        }
+
+        tokio::time::sleep(READINESS_INTERVAL).await;
+    }
 }
 
 async fn monitor_until_exit<C: OciRuntimeClient>(
@@ -1003,6 +1137,39 @@ fn uses_event_driven_readiness(service: &RunningService) -> bool {
         &service.handle,
         RunningHandle::Local(local) if local.event_rx.is_some()
     )
+}
+
+fn readiness_initial_delay(probe: &ReadinessProbe) -> Duration {
+    Duration::from_secs(probe.initial_delay_seconds as u64)
+}
+
+fn readiness_timeout(probe: &ReadinessProbe) -> Duration {
+    Duration::from_secs(probe.timeout_seconds.max(1) as u64)
+}
+
+fn readiness_interval(probe: &ReadinessProbe) -> Duration {
+    if probe.interval_seconds == 0 {
+        return READINESS_INTERVAL;
+    }
+    Duration::from_secs(probe.interval_seconds as u64)
+}
+
+fn exec_readiness_container_id(service: &RunningService) -> Result<String> {
+    match &service.handle {
+        RunningHandle::Oci(oci) => Ok(oci.container_id.clone()),
+        RunningHandle::Local(_) => anyhow::bail!(
+            "service '{}' uses readiness_probe.exec, which is only supported for OCI services",
+            service.service.name
+        ),
+    }
+}
+
+async fn exec_readiness_probe_ok<C: OciRuntimeClient>(
+    client: &C,
+    container_id: &str,
+    cmd: &[String],
+) -> Result<bool> {
+    Ok(client.exec_container(container_id, cmd).await? == 0)
 }
 
 fn poll_local_readiness_events(local: &mut RunningLocalService) -> Result<LocalReadinessState> {
@@ -1149,39 +1316,50 @@ async fn try_wait<C: OciRuntimeClient>(
     }
 }
 
-fn resolve_probe_port(service: &RunningService, probe: &ReadinessProbe) -> Result<u16> {
-    let key = probe.port.trim();
-    if key.is_empty() {
-        anyhow::bail!(
-            "services.{}.readiness_probe.port must be a non-empty env placeholder",
-            service.service.name
-        );
+fn resolve_probe_port(service: &RunningService, probe: &ReadinessProbe) -> Result<Option<u16>> {
+    // Exec probes do not use a port.
+    if probe.exec.is_some() {
+        return Ok(None);
     }
+    let key = probe
+        .port
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "services.{}.readiness_probe.port must be a non-empty env placeholder",
+                service.service.name
+            )
+        })?;
 
-    let value = service.env.get(key).ok_or_else(|| {
-        anyhow::anyhow!(
-            "services.{}.readiness_probe.port '{}' is not defined in service env",
-            service.service.name,
-            key
-        )
-    })?;
-    let container_port = value.parse::<u16>().map_err(|_| {
-        anyhow::anyhow!(
-            "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
-            service.service.name,
-            key,
-            value
-        )
-    })?;
+    let container_port = match service.env.get(key) {
+        Some(value) => value.parse::<u16>().map_err(|_| {
+            anyhow::anyhow!(
+                "services.{}.readiness_probe.port '{}' resolved to non-numeric value '{}'",
+                service.service.name,
+                key,
+                value
+            )
+        })?,
+        None => key.parse::<u16>().map_err(|_| {
+            anyhow::anyhow!(
+                "services.{}.readiness_probe.port '{}' is neither defined in service env nor a numeric port literal",
+                service.service.name,
+                key
+            )
+        })?,
+    };
 
-    match &service.handle {
-        RunningHandle::Local(_) => Ok(container_port),
-        RunningHandle::Oci(oci) => Ok(oci
+    let host_port = match &service.handle {
+        RunningHandle::Local(_) => container_port,
+        RunningHandle::Oci(oci) => oci
             .host_ports
             .get(&container_port)
             .copied()
-            .unwrap_or(container_port)),
-    }
+            .unwrap_or(container_port),
+    };
+    Ok(Some(host_port))
 }
 
 fn resolve_host_port(service: &RunningService, container_port: u16) -> Result<u16> {
@@ -1200,8 +1378,30 @@ fn resolve_host_port(service: &RunningService, container_port: u16) -> Result<u1
 fn determine_publish_mode(
     orchestration: &OrchestrationPlan,
     service: &ResolvedService,
+    publish_policy: PublishPolicy,
 ) -> PublishMode {
-    if service.name == "main" || service.network.publish {
+    // `services.main` is the leaf consumers reach. The caller's session
+    // policy decides exclusively here — the router auto-sets
+    // `network.publish = true` for every main service with a port
+    // (see `routing/router/services.rs::resolve_services`), so checking
+    // `network.publish` first would short-circuit the policy and force
+    // Fixed for every recipe. CLI / external callers (`ExternalDefault`)
+    // still get the historical fixed-host-port behavior; Desktop sessions
+    // (`EphemeralMainService`) get a podman-assigned ephemeral host port
+    // so two recipes both declaring `[services.main]` with the same port
+    // (e.g. Open WebUI vs Excalidraw at 8080) don't collide on host:8080
+    // (#289).
+    if service.name == "main" {
+        return match publish_policy {
+            PublishPolicy::ExternalDefault => PublishMode::Fixed,
+            PublishPolicy::EphemeralMainService => PublishMode::Ephemeral,
+        };
+    }
+
+    // For non-main services, `network.publish = true` is an explicit
+    // recipe-level request for a host-stable port (e.g. a sidecar API the
+    // recipe wants exposed). Honor it regardless of the session policy.
+    if service.network.publish {
         return PublishMode::Fixed;
     }
 
@@ -1222,7 +1422,7 @@ fn determine_publish_mode(
     PublishMode::None
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublishMode {
     None,
     Fixed,
@@ -1276,7 +1476,7 @@ fn readiness_probe_ok(probe: &ReadinessProbe, port: u16) -> Result<bool> {
     {
         return Ok(tcp_probe(target, port));
     }
-    anyhow::bail!("readiness_probe must define http_get or tcp_connect");
+    anyhow::bail!("readiness_probe must define http_get, tcp_connect, or exec");
 }
 
 fn http_probe(path: &str, port: u16) -> bool {
@@ -1512,6 +1712,7 @@ mod tests {
     use super::execute_with_client;
     use super::*;
     use capsule_core::runtime::oci::OciContainerInspect;
+    use capsule_core::types::ResolvedTargetRuntime;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -1574,7 +1775,11 @@ mod tests {
                 FakeState {
                     service: service.clone(),
                     running: false,
-                    exit_code: if service == "main" { 0 } else { 1 },
+                    exit_code: if matches!(service.as_str(), "main" | "migration") {
+                        0
+                    } else {
+                        1
+                    },
                     inspect_calls: 0,
                     host_ports: request
                         .ports
@@ -1614,7 +1819,7 @@ mod tests {
             let mut states = self.states.lock().unwrap();
             let state = states.get_mut(container_id).expect("state");
             state.inspect_calls += 1;
-            if state.service == "main" && state.inspect_calls > 1 {
+            if matches!(state.service.as_str(), "main" | "migration") && state.inspect_calls > 1 {
                 state.running = false;
             }
             Ok(OciContainerInspect {
@@ -1632,6 +1837,18 @@ mod tests {
         {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             Ok(rx)
+        }
+
+        async fn exec_container(
+            &self,
+            container_id: &str,
+            cmd: &[String],
+        ) -> capsule_core::Result<i64> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("container:exec:{container_id}:{}", cmd.join(" ")));
+            Ok(0)
         }
 
         async fn wait_container(&self, _container_id: &str) -> capsule_core::Result<i64> {
@@ -1676,6 +1893,89 @@ mod tests {
             HashMap::new(),
         )
         .expect("execution descriptor")
+    }
+
+    fn http_probe(port: &str) -> ReadinessProbe {
+        ReadinessProbe {
+            http_get: Some("/".to_string()),
+            tcp_connect: None,
+            exec: None,
+            port: Some(port.to_string()),
+            initial_delay_seconds: 0,
+            timeout_seconds: 1,
+            interval_seconds: 1,
+        }
+    }
+
+    #[test]
+    fn readiness_timing_uses_manifest_probe_fields() {
+        let probe = ReadinessProbe {
+            initial_delay_seconds: 3,
+            timeout_seconds: 60,
+            interval_seconds: 2,
+            ..http_probe("1111")
+        };
+
+        assert_eq!(readiness_initial_delay(&probe), Duration::from_secs(3));
+        assert_eq!(readiness_timeout(&probe), Duration::from_secs(60));
+        assert_eq!(readiness_interval(&probe), Duration::from_secs(2));
+    }
+
+    fn oci_running_service(
+        env: HashMap<String, String>,
+        host_ports: HashMap<u16, u16>,
+    ) -> RunningService {
+        RunningService {
+            service: ResolvedService {
+                name: "main".to_string(),
+                depends_on: Vec::new(),
+                connections: Vec::new(),
+                readiness_probe: None,
+                network: Default::default(),
+                run_once: false,
+                runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                    target: "app".to_string(),
+                    runtime: "oci".to_string(),
+                    driver: None,
+                    runtime_version: None,
+                    image: Some("example/app:latest".to_string()),
+                    entrypoint: String::new(),
+                    run_command: None,
+                    cmd: Vec::new(),
+                    env: HashMap::new(),
+                    working_dir: None,
+                    source_layout: None,
+                    port: Some(1111),
+                    required_env: Vec::new(),
+                    mounts: Vec::new(),
+                }),
+            },
+            env,
+            handle: RunningHandle::Oci(RunningOciService {
+                container_id: "container-main".to_string(),
+                log_task: None,
+                host_ports,
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_probe_port_accepts_numeric_literal_and_maps_to_oci_host_port() {
+        let service = oci_running_service(HashMap::new(), HashMap::from([(1111, 49111)]));
+        let port =
+            resolve_probe_port(&service, &http_probe("1111")).expect("literal port should resolve");
+        assert_eq!(port, Some(49111));
+    }
+
+    #[test]
+    fn resolve_probe_port_keeps_env_placeholder_precedence() {
+        let service = oci_running_service(
+            HashMap::from([("APP_PORT".to_string(), "1111".to_string())]),
+            HashMap::from([(1111, 49111)]),
+        );
+        let port = resolve_probe_port(&service, &http_probe("APP_PORT"))
+            .expect("env placeholder should resolve");
+        assert_eq!(port, Some(49111));
     }
 
     #[tokio::test]
@@ -1724,6 +2024,7 @@ target = "db"
             dangerously_skip_permissions: false,
             assume_yes: true,
             nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
         };
 
         let exit = execute_with_client(
@@ -1790,6 +2091,280 @@ target = "db"
         );
     }
 
+    #[tokio::test]
+    async fn orchestrator_cleans_up_partial_oci_start_on_readiness_error() {
+        let plan = manifest_data(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16"
+port = 5432
+
+[services.main]
+target = "app"
+depends_on = ["db"]
+
+[services.db]
+target = "db"
+readiness_probe = { http_get = "/", port = "MISSING_PORT", timeout_seconds = 1 }
+"#,
+        );
+        let client = FakeClient::default();
+        let reporter = Arc::new(CliReporter::new(false));
+        let launch_ctx = RuntimeLaunchContext::empty();
+        let options = OrchestratorOptions {
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
+        };
+
+        let err = execute_with_client(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from("/tmp"),
+                effective_state: None,
+                execution_override: None,
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect_err("readiness error should fail startup");
+        assert!(
+            err.to_string().contains("MISSING_PORT"),
+            "unexpected error: {err}"
+        );
+
+        let events = client.events.lock().unwrap().clone();
+        let db_create = events
+            .iter()
+            .position(|event| event.contains("container:create:db"))
+            .expect("db create");
+        let db_stop = events
+            .iter()
+            .position(|event| event.contains("container:stop:") && event.contains("db"))
+            .expect("db stop");
+        let db_remove = events
+            .iter()
+            .position(|event| event.contains("container:remove:") && event.contains("db"))
+            .expect("db remove");
+        let network_remove = events
+            .iter()
+            .position(|event| event.starts_with("network:remove:"))
+            .expect("network remove");
+        assert!(db_create < db_stop);
+        assert!(db_stop < db_remove);
+        assert!(db_remove < network_remove);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_exec_readiness_probe_starts_dependent_service() {
+        let plan = manifest_data(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16"
+port = 5432
+
+[services.main]
+target = "app"
+depends_on = ["db"]
+
+[services.db]
+target = "db"
+readiness_probe = { exec = ["pg_isready", "-U", "postgres"], timeout_seconds = 60, interval_seconds = 1 }
+"#,
+        );
+        let client = FakeClient::default();
+        let reporter = Arc::new(CliReporter::new(false));
+        let launch_ctx = RuntimeLaunchContext::empty();
+        let options = OrchestratorOptions {
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
+        };
+
+        let _handle = execute_until_ready_and_detach(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from("/tmp"),
+                effective_state: None,
+                execution_override: None,
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect("exec readiness should allow startup");
+
+        let events = client.events.lock().unwrap().clone();
+        let db_exec = events
+            .iter()
+            .position(|event| event.contains("container:exec:") && event.contains("pg_isready"))
+            .expect("db exec readiness probe");
+        let main_create = events
+            .iter()
+            .position(|event| event.contains("container:create:main"))
+            .expect("main create after db readiness");
+        assert!(db_exec < main_create);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_run_once_completion_starts_dependent_service() {
+        let plan = manifest_data(
+            r#"
+schema_version = "0.3"
+name = "demo-app"
+version = "0.1.0"
+type = "app"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+port = 8080
+
+[targets.db]
+runtime = "oci"
+image = "postgres:16"
+port = 5432
+
+[targets.migration]
+runtime = "oci"
+image = "ghcr.io/example/app:latest"
+run_once = true
+cmd = ["node", "./scripts/migrate.js"]
+
+[services.main]
+target = "app"
+depends_on = ["migration"]
+
+[services.db]
+target = "db"
+
+[services.migration]
+target = "migration"
+depends_on = ["db"]
+"#,
+        );
+        let client = FakeClient::default();
+        let reporter = Arc::new(CliReporter::new(false));
+        let launch_ctx = RuntimeLaunchContext::empty();
+        let options = OrchestratorOptions {
+            enforcement: "strict".to_string(),
+            sandbox_mode: true,
+            dangerously_skip_permissions: false,
+            assume_yes: true,
+            nacelle: None,
+            publish_policy: PublishPolicy::ExternalDefault,
+        };
+
+        let handle = execute_until_ready_and_detach(
+            &plan,
+            &PreparedRunContext {
+                authoritative_lock: None,
+                lock_path: None,
+                workspace_root: PathBuf::from(".tmp/orchestrator-run-once-test"),
+                effective_state: None,
+                execution_override: None,
+                bridge_manifest:
+                    crate::application::pipeline::phases::run::DerivedBridgeManifest::new(
+                        plan.manifest.clone(),
+                    ),
+                validation_mode: capsule_core::types::ValidationMode::Strict,
+                engine_override_declared: false,
+                compatibility_legacy_lock: None,
+            },
+            reporter,
+            &launch_ctx,
+            &options,
+            None,
+            client.clone(),
+        )
+        .await
+        .expect("run_once completion should allow startup");
+
+        let events = client.events.lock().unwrap().clone();
+        let migration_create = events
+            .iter()
+            .position(|event| event.contains("container:create:migration"))
+            .expect("migration create");
+        let migration_remove = events
+            .iter()
+            .position(|event| event.contains("container:remove:") && event.contains("migration"))
+            .expect("migration remove");
+        let main_create = events
+            .iter()
+            .position(|event| event.contains("container:create:main"))
+            .expect("main create");
+
+        assert!(migration_create < migration_remove);
+        assert!(migration_remove < main_create);
+        assert!(
+            !handle
+                .services
+                .iter()
+                .any(|service| service.name == "migration"),
+            "completed run_once services must not be retained in detached session snapshot"
+        );
+        assert!(handle.services.iter().any(|service| service.name == "main"));
+    }
+
     /// Regression for #106: `ato app session start --json` reserves
     /// stdout for the SessionStartEnvelope. The orchestrator stream
     /// pumper must therefore route service stdout to the parent's
@@ -1806,6 +2381,90 @@ target = "db"
     /// pumper requires a `Read` stream + thread join and is covered
     /// end-to-end by the #92 verification harness on a clean
     /// `ATO_HOME`.
+    #[test]
+    fn determine_publish_mode_respects_ephemeral_main_service_policy() {
+        use capsule_core::types::{
+            OrchestrationPlan, ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime,
+            ResolvedTargetRuntime,
+        };
+
+        // Minimal `[services.main]` shaped like Open WebUI / Excalidraw:
+        // OCI runtime, declared port 8080, no readiness_probe, no explicit
+        // `network.publish`. The bug under #289 is that this shape always
+        // bound host:8080 under PublishMode::Fixed regardless of caller.
+        let service = ResolvedService {
+            name: "main".to_string(),
+            depends_on: Vec::new(),
+            connections: Vec::new(),
+            readiness_probe: None,
+            network: ResolvedServiceNetwork::default(),
+            run_once: false,
+            runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
+                target: "app".to_string(),
+                runtime: "oci".to_string(),
+                driver: None,
+                runtime_version: None,
+                image: Some("ghcr.io/example/app:latest".to_string()),
+                entrypoint: String::new(),
+                run_command: None,
+                cmd: Vec::new(),
+                env: Default::default(),
+                working_dir: None,
+                source_layout: None,
+                port: Some(8080),
+                required_env: Vec::new(),
+                mounts: Vec::new(),
+            }),
+        };
+        let plan = OrchestrationPlan {
+            startup_order: vec!["main".to_string()],
+            services: vec![service.clone()],
+        };
+
+        assert_eq!(
+            super::determine_publish_mode(&plan, &service, PublishPolicy::ExternalDefault),
+            super::PublishMode::Fixed,
+            "ato run / CLI path must keep main on the declared host port"
+        );
+        assert_eq!(
+            super::determine_publish_mode(&plan, &service, PublishPolicy::EphemeralMainService),
+            super::PublishMode::Ephemeral,
+            "EphemeralMainService must hand main an ephemeral host port so two recipes sharing port 8080 do not collide (#289)"
+        );
+
+        // For non-main services, `network.publish = true` is an explicit
+        // recipe-level request for a stable host port and must win over the
+        // policy. (For `main` services the policy decides exclusively — see
+        // the comment in `determine_publish_mode`. The router auto-sets
+        // `network.publish = true` for every main with a port, so honoring
+        // it on main would defeat the policy.)
+        let sidecar = ResolvedService {
+            name: "api".to_string(),
+            depends_on: Vec::new(),
+            connections: Vec::new(),
+            readiness_probe: None,
+            network: ResolvedServiceNetwork {
+                publish: true,
+                ..Default::default()
+            },
+            run_once: false,
+            runtime: service.runtime.clone(),
+        };
+        let plan_with_sidecar = OrchestrationPlan {
+            startup_order: vec!["main".to_string(), "api".to_string()],
+            services: vec![service.clone(), sidecar.clone()],
+        };
+        assert_eq!(
+            super::determine_publish_mode(
+                &plan_with_sidecar,
+                &sidecar,
+                PublishPolicy::EphemeralMainService
+            ),
+            super::PublishMode::Fixed,
+            "non-main service with explicit network.publish=true must keep the recipe-level fixed host port even under EphemeralMainService"
+        );
+    }
+
     #[test]
     fn envelope_mode_flag_round_trips() {
         // The flag is process-wide; serialize the test against itself

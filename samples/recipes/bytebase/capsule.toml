@@ -1,0 +1,29 @@
+schema_version = "0.3"
+name = "bytebase"
+version = "3.7.0"
+type = "app"
+description = "Database DevOps and CI/CD platform for teams"
+homepage = "https://github.com/bytebase/bytebase"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "bytebase/bytebase:3.7.0"
+port = 8080
+command = ["bytebase", "--data", "/var/opt/bytebase", "--port", "8080"]
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "instance metadata, migration history, settings"
+attach = "explicit"
+schema_id = "sha256:bytebase-data-v1"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/", port = "8080", timeout_seconds = 120 }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/var/opt/bytebase"

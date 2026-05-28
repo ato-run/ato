@@ -1,0 +1,31 @@
+schema_version = "0.3"
+name = "n8n"
+version = "1.0.0"
+type = "app"
+description = "Workflow automation with AI integrations. NOTE: single-user / demo mode — N8N_ENCRYPTION_KEY is not auto-generated in this recipe. Not recommended for production without adding a generated secret."
+homepage = "https://github.com/n8n-io/n8n"
+
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+# Pin note: proposed pin to n8nio/n8n:1.93.0 — not yet AODD-confirmed
+# AODD digest (2026-05-22): sha256:10bb1df216497fed1671c8c4c725bba913b99d32075dcdf3f0ec6ffb1df4a556
+image = "n8nio/n8n:latest"
+port = 5678
+env = { N8N_PORT = "5678", N8N_HOST = "0.0.0.0", N8N_PROTOCOL = "http", GENERIC_TIMEZONE = "UTC", TZ = "UTC", N8N_ENCRYPTION_KEY = "changeme-demo-encryption-key" }
+
+[state.data]
+kind = "filesystem"
+durability = "persistent"
+purpose = "workflows, credentials, execution history"
+attach = "explicit"
+schema_id = "sha256:50f51f3915549cc94bf28d09969170bd33b97756b741184e09b4e26f2eb321af"
+
+[services.main]
+target = "app"
+readiness_probe = { http_get = "/healthz", port = "5678" }
+
+[[services.main.state_bindings]]
+state = "data"
+target = "/home/node/.n8n"

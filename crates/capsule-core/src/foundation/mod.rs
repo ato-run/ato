@@ -5,6 +5,7 @@ pub mod common;
 pub mod dependency_contracts;
 pub mod error;
 pub mod hardware;
+pub mod install_lifecycle;
 pub mod interactive_resolution;
 pub mod metrics;
 pub mod reporter;

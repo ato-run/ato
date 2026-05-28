@@ -54,6 +54,58 @@ pub fn http_get_ok(url: &str, timeout: Duration) -> Result<bool> {
     Ok(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"))
 }
 
+/// Returns `true` when `url` responds to an HTTP GET with *any* valid HTTP
+/// response within `timeout`.  Unlike `http_get_ok`, this accepts any status
+/// code (2xx, 3xx, 4xx, 5xx) — if the server is speaking HTTP at all, it is
+/// considered "up" for the purpose of upstream readiness probing.
+///
+/// Use this instead of `http_get_ok` when you need to know whether the server
+/// process is alive, not whether it is functionally serving requests. A 302
+/// redirect to `/auth` or a 401 Unauthorized both indicate the server is up;
+/// only `false` (connection refused / timeout / garbled response) means it
+/// is not yet ready.
+pub fn http_is_responsive(url: &str, timeout: Duration) -> bool {
+    let parsed = match parse_http_url(url) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let address = (parsed.host.as_str(), parsed.port);
+    let socket_addr = match address.to_socket_addrs() {
+        Ok(mut iter) => match iter.next() {
+            Some(addr) => addr,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&socket_addr, timeout) else {
+        return false;
+    };
+    if stream.set_read_timeout(Some(timeout)).is_err()
+        || stream.set_write_timeout(Some(timeout)).is_err()
+    {
+        return false;
+    }
+    if write!(
+        stream,
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        parsed.path, parsed.host
+    )
+    .is_err()
+        || stream.flush().is_err()
+    {
+        return false;
+    }
+    // Read just the status line — we only need to know the server responded.
+    let mut buf = [0u8; 16];
+    match stream.read(&mut buf) {
+        Ok(n) if n >= 9 => {
+            let prefix = &buf[..n];
+            prefix.starts_with(b"HTTP/1.1 ") || prefix.starts_with(b"HTTP/1.0 ")
+        }
+        _ => false,
+    }
+}
+
 struct ParsedHttpUrl {
     host: String,
     port: u16,
