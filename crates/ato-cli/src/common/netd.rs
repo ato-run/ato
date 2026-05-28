@@ -14,9 +14,12 @@
 //! [`EgressProxyError::NotSupported`].
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use ato_net::control::SyncClient;
 
 /// Environment variable that overrides the `ato-netd` binary path.
