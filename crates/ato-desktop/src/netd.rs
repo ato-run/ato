@@ -13,15 +13,16 @@
 //! Mirrors `orchestrator::resolve_ato_binary` for the `ato-netd` binary:
 //!   1. `ATO_DESKTOP_NETD_BIN` env override
 //!   2. `{exe_dir}/../Helpers/ato-netd`  (macOS app bundle)
-//!   3. Monorepo dev target via `ATO_DESKTOP_DEV_HELPER_TARGET`
-//!   4. `PATH` lookup
+//!   3. `{exe_dir}/ato-netd`              (Linux/AppImage sibling helper)
+//!   4. Monorepo dev target via `ATO_DESKTOP_DEV_HELPER_TARGET`
+//!   5. `PATH` lookup
 //!
 //! # Platform note
 //! `ato-netd` is Unix-only in slices A-C. On non-Unix hosts
 //! [`register_stable_ingress`] returns [`IngressError::NotSupported`] and
 //! callers fall back to the direct `local_url`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
@@ -87,11 +88,9 @@ pub(crate) fn logical_key_for_route(route: &GuestRoute) -> Option<String> {
         GuestRoute::CapsuleHandle { handle, .. } => {
             Some(ato_net::stable_origin::logical_key_for_handle(handle))
         }
-        GuestRoute::LocalManifest(local) => {
-            Some(ato_net::stable_origin::logical_key_for_handle(
-                &local.source_handle,
-            ))
-        }
+        GuestRoute::LocalManifest(local) => Some(ato_net::stable_origin::logical_key_for_handle(
+            &local.source_handle,
+        )),
         GuestRoute::Capsule { session, .. } => {
             Some(ato_net::stable_origin::logical_key_for_session(session))
         }
@@ -263,24 +262,22 @@ pub(crate) fn resolve_netd_binary() -> Result<PathBuf, IngressError> {
 
     // 2. macOS app bundle: `{exe}/../Helpers/ato-netd`.
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
-            let bundled = macos_dir
-                .parent()
-                .map(|contents| contents.join("Helpers").join("ato-netd"));
-            if let Some(path) = bundled {
-                if path.is_file() {
-                    return Ok(path);
-                }
-            }
+        if let Some(path) = bundled_macos_netd_binary(&exe) {
+            return Ok(path);
+        }
+
+        // 3. Linux/AppImage sibling helper: `{exe_dir}/ato-netd`.
+        if let Some(path) = sibling_netd_binary(&exe) {
+            return Ok(path);
         }
     }
 
-    // 3. Monorepo dev build: `{ATO_DESKTOP_DEV_HELPER_TARGET}/{profile}/ato-netd`.
+    // 4. Monorepo dev build: `{ATO_DESKTOP_DEV_HELPER_TARGET}/{profile}/ato-netd`.
     if let Some(path) = dev_workspace_netd_binary() {
         return Ok(path);
     }
 
-    // 4. PATH lookup.
+    // 5. PATH lookup.
     if let Some(path) = which_in_path("ato-netd") {
         return Ok(path);
     }
@@ -297,6 +294,21 @@ fn dev_workspace_netd_binary() -> Option<PathBuf> {
         "release"
     };
     let candidate = PathBuf::from(target_root).join(profile).join("ato-netd");
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(unix)]
+fn bundled_macos_netd_binary(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent()?;
+    let candidate = contents_dir.join("Helpers").join("ato-netd");
+    candidate.is_file().then_some(candidate)
+}
+
+#[cfg(unix)]
+fn sibling_netd_binary(exe: &Path) -> Option<PathBuf> {
+    let exe_dir = exe.parent()?;
+    let candidate = exe_dir.join("ato-netd");
     candidate.is_file().then_some(candidate)
 }
 
@@ -345,6 +357,9 @@ fn map_daemon_error(key: &str, code: &str, message: &str) -> IngressError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    use tempfile::TempDir;
 
     #[test]
     fn logical_key_capsule_handle() {
@@ -401,8 +416,7 @@ mod tests {
 
     #[test]
     fn logical_key_none_for_external_url() {
-        let route =
-            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
         assert_eq!(logical_key_for_route(&route), None);
     }
 
@@ -458,7 +472,10 @@ mod tests {
             "could not bind 127.0.0.1:19002: address already in use",
         );
         assert!(
-            matches!(err, IngressError::Control(ato_net::control::Error::DaemonError { .. })),
+            matches!(
+                err,
+                IngressError::Control(ato_net::control::Error::DaemonError { .. })
+            ),
             "non-claimed error should pass through as Control"
         );
     }
@@ -497,5 +514,39 @@ mod tests {
             normalize_upstream_url("http://0.0.0.0:9000/app/ui?debug=1"),
             "http://127.0.0.1:9000/app/ui?debug=1"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_macos_netd_binary_prefers_helpers_path() {
+        let temp = TempDir::new().expect("temp dir");
+        let macos_dir = temp.path().join("Ato Desktop.app/Contents/MacOS");
+        let helpers_dir = temp.path().join("Ato Desktop.app/Contents/Helpers");
+        fs::create_dir_all(&macos_dir).expect("macos dir");
+        fs::create_dir_all(&helpers_dir).expect("helpers dir");
+
+        let exe = macos_dir.join("ato-desktop");
+        let netd = helpers_dir.join("ato-netd");
+        fs::write(&exe, "").expect("exe placeholder");
+        fs::write(&netd, "").expect("netd placeholder");
+
+        let resolved = bundled_macos_netd_binary(&exe).expect("helper should resolve");
+        assert_eq!(resolved, netd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sibling_netd_binary_resolves_linux_appimage_layout() {
+        let temp = TempDir::new().expect("temp dir");
+        let bin_dir = temp.path().join("usr/bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let exe = bin_dir.join("ato-desktop");
+        let netd = bin_dir.join("ato-netd");
+        fs::write(&exe, "").expect("exe placeholder");
+        fs::write(&netd, "").expect("netd placeholder");
+
+        let resolved = sibling_netd_binary(&exe).expect("sibling should resolve");
+        assert_eq!(resolved, netd);
     }
 }
