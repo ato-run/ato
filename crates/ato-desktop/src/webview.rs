@@ -2505,14 +2505,19 @@ impl WebViewManager {
 
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
-        let desktop_auth_handoff = if should_install_ato_auth_cookies(&url) {
-            Some(
-                load_desktop_auth_handoff()
-                    .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
-            )
-        } else {
-            None
-        };
+        // Only inject ato.run auth cookies for system (non-capsule) routes.
+        // Capsule routes use an ephemeral WebContext and must never receive
+        // ato.run session cookies, even if the capsule URL happens to match
+        // the ato.run/dock pattern.
+        let desktop_auth_handoff =
+            if !is_webview_retention_eligible_route(&pane.route) && should_install_ato_auth_cookies(&url) {
+                Some(
+                    load_desktop_auth_handoff()
+                        .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
+                )
+            } else {
+                None
+            };
 
         let builder = if let Some(handoff) = &desktop_auth_handoff {
             builder.with_url_and_headers(&url, auth_initial_request_headers(handoff)?)
