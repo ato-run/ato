@@ -193,6 +193,91 @@ pub(crate) fn deregister_stable_ingress(key: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Ephemeral ingress (transient capsule sessions)
+// ---------------------------------------------------------------------------
+
+/// Tracks how an ingress route was registered so the correct deregister call
+/// can be issued when the session stops.
+#[derive(Debug, Clone)]
+pub(crate) struct IngressRegistration {
+    pub key: String,
+    pub kind: IngressRegistrationKind,
+}
+
+/// Whether the ingress route is stable (persisted) or ephemeral (in-memory).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IngressRegistrationKind {
+    /// Stable ingress: port is persisted in `stable_origin_ports.json`.
+    Stable,
+    /// Ephemeral ingress: port is in-memory only, session-unique.
+    Ephemeral,
+}
+
+/// Register an ephemeral ingress route with `ato-netd` and return the
+/// allocated port. If `ato-netd` is not running, it will be spawned.
+///
+/// The assigned port is **not** persisted to `stable_origin_ports.json`.
+/// A new port is guaranteed to differ from all currently-active ephemeral
+/// ports and all stable ports. Within the same daemon lifetime, a released
+/// port will not be immediately reassigned.
+#[cfg(unix)]
+pub(crate) fn register_ephemeral_ingress(
+    key: &str,
+    upstream_url: &str,
+) -> Result<u16, IngressError> {
+    let normalized = normalize_upstream_url(upstream_url);
+    tracing::info!(
+        key = %key,
+        upstream_url = %normalized,
+        "registering ato-netd ephemeral ingress"
+    );
+    let mut client = ensure_netd_connected()?;
+    match client.register_ephemeral_ingress(key, &normalized) {
+        Ok(info) => Ok(info.port),
+        Err(ato_net::control::Error::DaemonError { code, message }) => {
+            Err(map_daemon_error(key, &code, &message))
+        }
+        Err(other) => Err(IngressError::Control(other)),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn register_ephemeral_ingress(
+    _key: &str,
+    _upstream_url: &str,
+) -> Result<u16, IngressError> {
+    Err(IngressError::NotSupported)
+}
+
+/// Deregister an ephemeral ingress route. Best-effort: logs a warning on
+/// failure but never panics. Safe to call if the daemon is already stopped.
+pub(crate) fn deregister_ephemeral_ingress(key: &str) {
+    #[cfg(unix)]
+    {
+        match SyncClient::connect_default() {
+            Ok(mut client) => match client.deregister_ephemeral_ingress(key) {
+                Ok(()) => tracing::debug!(key = %key, "deregistered ato-netd ephemeral ingress route"),
+                Err(err) => tracing::warn!(
+                    key = %key,
+                    error = %err,
+                    "failed to deregister ato-netd ephemeral ingress route (best-effort)"
+                ),
+            },
+            Err(ato_net::control::Error::NotRunning { .. }) => {
+                // Daemon already stopped — nothing to deregister.
+            }
+            Err(err) => tracing::warn!(
+                key = %key,
+                error = %err,
+                "failed to connect to ato-netd for ephemeral deregistration (best-effort)"
+            ),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = key;
+}
+
+// ---------------------------------------------------------------------------
 // Internal: connect or spawn + retry
 // ---------------------------------------------------------------------------
 
@@ -548,5 +633,32 @@ mod tests {
 
         let resolved = sibling_netd_binary(&exe).expect("sibling should resolve");
         assert_eq!(resolved, netd);
+    }
+
+    #[test]
+    fn ingress_registration_kind_ephemeral_and_stable_are_distinct() {
+        let stable = IngressRegistration {
+            key: "handle:test".to_string(),
+            kind: IngressRegistrationKind::Stable,
+        };
+        let ephemeral = IngressRegistration {
+            key: "ephemeral:session-1".to_string(),
+            kind: IngressRegistrationKind::Ephemeral,
+        };
+        assert_ne!(stable.kind, ephemeral.kind);
+        assert_eq!(stable.kind, IngressRegistrationKind::Stable);
+        assert_eq!(ephemeral.kind, IngressRegistrationKind::Ephemeral);
+    }
+
+    #[test]
+    fn ephemeral_key_format_uses_session_prefix() {
+        // The ephemeral key format must use "ephemeral:" prefix so it never
+        // collides with stable "handle:" or "session:" keys.
+        let session_id = "abc-123-def";
+        let ephemeral_key = format!("ephemeral:{session_id}");
+        assert!(ephemeral_key.starts_with("ephemeral:"));
+        // Must not look like a stable key
+        assert!(!ephemeral_key.starts_with("handle:"));
+        assert!(!ephemeral_key.starts_with("session:"));
     }
 }
