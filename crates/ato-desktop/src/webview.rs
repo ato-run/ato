@@ -212,6 +212,11 @@ struct ManagedWebView {
     route_key: String,
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
+    /// The WebView store class in use for this WebView, recorded at build time.
+    /// Used by `sync_from_state` to detect store-class transitions (e.g.
+    /// `CapsuleEphemeral` → `CapsuleProfile` when `install_profile_key` arrives)
+    /// and force a `Rebuild` rather than keeping the mismatched store.
+    store_class: WebViewStoreClass,
     /// The stable ingress key registered with `ato-netd` for this WebView.
     /// Tracks the ato-netd ingress registration for this WebView so the
     /// correct deregister call can be issued on session teardown.
@@ -614,6 +619,39 @@ impl WebViewManager {
             })
             .unwrap_or(WebViewReuseAction::Rebuild);
 
+        // Detect store-class transitions: if the route says Keep but the new
+        // identity (e.g. install_profile_key just arrived) maps to a different
+        // store class than the live WebView was built with, force a Rebuild so
+        // the WebView gets the correct persistent store.
+        let reuse_action = if matches!(reuse_action, WebViewReuseAction::Keep) {
+            let new_identity = WebViewStoreIdentity {
+                route: active.route.clone(),
+                trust_state: active.trust_state.clone(),
+                install_profile_key: active.install_profile_key.clone(),
+                publisher_identity: None,
+                source_identity: active.canonical_handle.clone(),
+                snapshot_label: active.snapshot_label.clone(),
+            };
+            let new_class = store_class_for_identity(&new_identity);
+            if self
+                .views
+                .get(&active.pane_id)
+                .map(|v| v.store_class != new_class)
+                .unwrap_or(false)
+            {
+                tracing::debug!(
+                    pane_id = active.pane_id,
+                    ?new_class,
+                    "store class changed — forcing WebView rebuild"
+                );
+                WebViewReuseAction::Rebuild
+            } else {
+                reuse_action
+            }
+        } else {
+            reuse_action
+        };
+
         // Tracks whether the Navigate branch's `load_url` call below failed,
         // so the post-reuse `Mounted` cleanup can skip force-promoting a
         // pane whose new navigation never actually started (#143 review).
@@ -627,7 +665,16 @@ impl WebViewManager {
                 state.sync_web_session_state(previous.pane_id, WebSessionState::Closed);
             }
 
-            let retention_key = webview_retention_key_for_route(&active.route);
+            let active_identity = WebViewStoreIdentity {
+                route: active.route.clone(),
+                trust_state: active.trust_state.clone(),
+                install_profile_key: active.install_profile_key.clone(),
+                publisher_identity: None,
+                source_identity: active.canonical_handle.clone(),
+                snapshot_label: active.snapshot_label.clone(),
+            };
+            let retention_key = webview_retention_key_for_identity(&active_identity)
+                .or_else(|| webview_retention_key_for_route(&active.route));
             if let Some(mut retained) = retention_key
                 .as_deref()
                 .and_then(|key| self.webview_retention.take_by_key(key))
@@ -1572,6 +1619,7 @@ impl WebViewManager {
                                 healthcheck_url: None,
                                 invoke_url: None,
                                 served_by: None,
+                                install_profile_key: None,
                                 auth_flow: false,
                                 bounds: active.bounds.clone(),
                             };
@@ -2042,8 +2090,8 @@ impl WebViewManager {
         let pane_identity = WebViewStoreIdentity {
             route: pane.route.clone(),
             trust_state: pane.trust_state.clone(),
-            install_profile_key: None, // #350 activation: plumb from ActiveWebPane
-            publisher_identity: None,  // #350 activation: plumb from ActiveWebPane
+            install_profile_key: pane.install_profile_key.clone(),
+            publisher_identity: None,  // not yet plumbed; will be added when store record carries publisher
             source_identity: pane.canonical_handle.clone(),
             snapshot_label: pane.snapshot_label.clone(),
         };
@@ -2177,6 +2225,40 @@ impl WebViewManager {
                                         session_id = %session.session_id,
                                         error = %err,
                                         "failed to register ephemeral ingress; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
+                            }
+                        } else if let WebViewStoreClass::CapsuleProfile { ref uuid } =
+                            route_store_class
+                        {
+                            // Stable profile-aligned ingress: the key is derived from the
+                            // profile UUID so that storage partition and origin are 1:1.
+                            // Two installed profiles of the same handle get different ports.
+                            let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+                            let profile_key = format!("profile:{hex}");
+                            match crate::netd::register_stable_ingress(&profile_key, &local_url) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %profile_key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd stable profile ingress route"
+                                    );
+                                    ingress_registration = Some(IngressRegistration {
+                                        key: profile_key,
+                                        kind: IngressRegistrationKind::Stable,
+                                    });
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register profile ingress; \
                                          falling back to direct local_url"
                                     );
                                     local_url
@@ -2635,6 +2717,7 @@ impl WebViewManager {
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
             launched_session,
+            store_class: store_class_for_identity(&pane_identity),
             // Disarm the rollback guard: the registration now lives in
             // ManagedWebView and will be deregistered by the explicit stop /
             // eviction paths instead.
@@ -3248,6 +3331,7 @@ fn apply_launch_session_metadata(
         session.healthcheck_url.clone(),
         session.invoke_url.clone(),
         session.served_by.clone(),
+        session.install_profile_key.clone(),
     );
 }
 
@@ -4655,8 +4739,25 @@ fn webview_retention_key_for_route(route: &GuestRoute) -> Option<String> {
     }
 }
 
+/// Compute the retention key for a route with full identity context.
+///
+/// For `CapsuleProfile` routes, the key is `"profile:{uuid_hex}"` derived from
+/// the install_profile_key/source/publisher — NOT the handle string — so two
+/// installed profiles of the same handle get distinct retention entries.
+/// For `CapsuleEphemeral`, falls back to route-only key (handle-based).
+fn webview_retention_key_for_identity(identity: &WebViewStoreIdentity) -> Option<String> {
+    match store_class_for_identity(identity) {
+        WebViewStoreClass::System => None,
+        WebViewStoreClass::CapsuleEphemeral => stable_origin_key_for_route(&identity.route),
+        WebViewStoreClass::CapsuleProfile { uuid } => {
+            let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+            Some(format!("profile:{hex}"))
+        }
+    }
+}
+
 fn stable_origin_key_for_webview(view: &ManagedWebView) -> Option<String> {
-    match store_class_for_route(&view.route) {
+    match &view.store_class {
         WebViewStoreClass::System => None,
         WebViewStoreClass::CapsuleEphemeral => {
             // Prefer session.handle so the retained WebView can be found
@@ -5300,6 +5401,7 @@ mod tests {
             healthcheck_url: None,
             invoke_url: None,
             served_by: None,
+            install_profile_key: None,
             auth_flow: false,
             bounds: PaneBounds::empty(),
         }
@@ -6804,5 +6906,51 @@ mod tests {
             )),
             WebViewStoreClass::System
         );
+    }
+
+    #[test]
+    fn identity_retention_key_for_capsule_profile_uses_profile_prefix() {
+        let id = installed_trusted_identity(capsule_handle_route());
+        let key = webview_retention_key_for_identity(&id);
+        assert!(
+            key.as_deref()
+                .map(|k| k.starts_with("profile:"))
+                .unwrap_or(false),
+            "CapsuleProfile retention key must start with 'profile:', got {key:?}"
+        );
+    }
+
+    #[test]
+    fn identity_retention_key_for_ephemeral_does_not_use_profile_prefix() {
+        let id = minimal_identity(capsule_handle_route());
+        let key = webview_retention_key_for_identity(&id);
+        assert!(
+            key.as_deref()
+                .map(|k| !k.starts_with("profile:"))
+                .unwrap_or(true),
+            "CapsuleEphemeral retention key must not start with 'profile:', got {key:?}"
+        );
+    }
+
+    #[test]
+    fn identity_retention_key_is_stable_across_snapshot_changes() {
+        let make_id = |snap: Option<&str>| installed_trusted_identity_with_snap(snap);
+        let key_v1 = webview_retention_key_for_identity(&make_id(Some("v1.0")));
+        let key_v2 = webview_retention_key_for_identity(&make_id(Some("v2.0")));
+        assert_eq!(
+            key_v1, key_v2,
+            "retention key must be stable across snapshot changes (UUID excludes snapshot)"
+        );
+    }
+
+    fn installed_trusted_identity_with_snap(snap: Option<&str>) -> WebViewStoreIdentity {
+        WebViewStoreIdentity {
+            route: capsule_handle_route(),
+            trust_state: Some("local".to_string()),
+            install_profile_key: Some("ipk_aabbcc".to_string()),
+            publisher_identity: Some("github.com/org".to_string()),
+            source_identity: Some("capsule://ato.run/org/app".to_string()),
+            snapshot_label: snap.map(str::to_string),
+        }
     }
 }

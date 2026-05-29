@@ -219,6 +219,12 @@ pub struct CapsuleLaunchSession {
     /// signal fires. `None` only on launch paths that pre-date Phase 0
     /// instrumentation.
     pub click_origin: Option<ClickOrigin>,
+    /// Install profile key for this session, `ipk_<32hex>`, written by
+    /// the CLI into the session record when launching via `ato launch
+    /// <ipk>`. `None` for transient / preview / LocalManifest runs.
+    /// Used by the WebView store classifier to assign `CapsuleProfile`
+    /// instead of `CapsuleEphemeral` for installed trusted capsules.
+    pub install_profile_key: Option<String>,
 }
 
 impl CapsuleLaunchSession {
@@ -2106,6 +2112,7 @@ fn build_launch_session(
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2173,6 +2180,7 @@ fn build_launch_session_from_started(started: SessionStartInfo) -> Result<Capsul
         execution_id: started.execution_id,
         execution_receipt_schema_version: started.execution_receipt_schema_version,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -2443,6 +2451,7 @@ fn build_launch_session_from_stored(
         execution_id: None,
         execution_receipt_schema_version: None,
         click_origin: None,
+        install_profile_key: stored.install_profile_key.clone(),
     })
 }
 
@@ -2845,6 +2854,7 @@ fn start_web_service_from_workspace(
         execution_id: None,
         execution_receipt_schema_version: None,
         click_origin: None,
+        install_profile_key: None,
     })
 }
 
@@ -3057,6 +3067,7 @@ fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession>
                 execution_id: None,
                 execution_receipt_schema_version: None,
                 click_origin: None,
+                install_profile_key: None,
             })
         }
         capsule_core::share::ShareExecutionResult::Completed { exit_code } => {
