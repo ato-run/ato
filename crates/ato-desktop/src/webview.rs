@@ -2140,41 +2140,34 @@ impl WebViewManager {
                     let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    let url =
-                        if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
-                            match crate::netd::register_stable_ingress(&key, &local_url) {
-                                Ok(port) => {
-                                    let ingress_url = format!("http://127.0.0.1:{port}/");
-                                    info!(
-                                        key = %key,
-                                        port = port,
-                                        local_url = %local_url,
-                                        "registered ato-netd ingress route"
-                                    );
-                                    ingress_key = Some(key);
-                                    ingress_url
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        route = %pane.route,
-                                        session_id = %session.session_id,
-                                        error = %err,
-                                        "failed to register ato-netd ingress route; \
-                                         falling back to direct local_url"
-                                    );
-                                    local_url
-                                }
+                    let url = if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
+                        match crate::netd::register_stable_ingress(&key, &local_url) {
+                            Ok(port) => {
+                                let ingress_url = format!("http://127.0.0.1:{port}/");
+                                info!(
+                                    key = %key,
+                                    port = port,
+                                    local_url = %local_url,
+                                    "registered ato-netd ingress route"
+                                );
+                                ingress_key = Some(key);
+                                ingress_url
                             }
-                        } else {
-                            local_url
-                        };
-                    (
-                        url,
-                        None,
-                        Vec::new(),
-                        RouteContent::External,
-                        None,
-                    )
+                            Err(err) => {
+                                warn!(
+                                    route = %pane.route,
+                                    session_id = %session.session_id,
+                                    error = %err,
+                                    "failed to register ato-netd ingress route; \
+                                     falling back to direct local_url"
+                                );
+                                local_url
+                            }
+                        }
+                    } else {
+                        local_url
+                    };
+                    (url, None, Vec::new(), RouteContent::External, None)
                 } else {
                     let session_id = session.session_id.clone();
                     let frontend_path = session
@@ -2212,19 +2205,23 @@ impl WebViewManager {
         // WKWebsiteDataStore — so cookies, localStorage, and service-worker
         // registrations from one capsule can never bleed into another.
         //
+        // Determine the store class for this route.  The store class is the
+        // single authoritative source for both WebContext selection and
+        // auth-cookie injection policy; see `store_class_for_route`.
+        let store_class = store_class_for_route(&pane.route);
+
         // System routes (ExternalUrl, Terminal) share the persistent
         // WebViewManager::web_context so ato.run sign-in cookies survive
         // tab close/reopen and cross-pane (dock ↔ store ↔ settings).
         //
-        // `is_webview_retention_eligible_route` maps exactly to the set
-        // of routes that represent user-launched capsules, so we reuse it
-        // here rather than duplicating the match arms.
-        let mut ephemeral_ctx: Option<WebContext> =
-            if is_webview_retention_eligible_route(&pane.route) {
-                Some(WebContext::new(None))
-            } else {
-                None
-            };
+        // Capsule routes (`CapsuleEphemeral`) each get their own in-process
+        // ephemeral WebContext so no WebKit state leaks across capsule
+        // boundaries.
+        let mut ephemeral_ctx: Option<WebContext> = if store_class.uses_ephemeral_context() {
+            Some(WebContext::new(None))
+        } else {
+            None
+        };
         let mut builder = if let Some(ctx) = ephemeral_ctx.as_mut() {
             WebViewBuilder::new_with_web_context(ctx)
         } else {
@@ -2505,19 +2502,23 @@ impl WebViewManager {
 
         builder = builder.with_new_window_req_handler(|_, _| NewWindowResponse::Allow);
 
-        // Only inject ato.run auth cookies for system (non-capsule) routes.
-        // Capsule routes use an ephemeral WebContext and must never receive
-        // ato.run session cookies, even if the capsule URL happens to match
-        // the ato.run/dock pattern.
-        let desktop_auth_handoff =
-            if !is_webview_retention_eligible_route(&pane.route) && should_install_ato_auth_cookies(&url) {
-                Some(
-                    load_desktop_auth_handoff()
-                        .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
-                )
-            } else {
-                None
-            };
+        // Auth cookie injection is gated on BOTH the route's store class
+        // (must be System) and the URL pattern (ato.run/dock).  The store-
+        // class gate is the hard structural guard: even if a CapsuleUrl
+        // happens to point at https://ato.run/dock, `allows_ato_auth_cookies`
+        // returns false for CapsuleEphemeral routes and cookie injection is
+        // skipped.  The URL predicate is a secondary filter that limits
+        // injection to the specific system pages that need it.
+        let desktop_auth_handoff = if store_class.allows_ato_auth_cookies()
+            && should_install_ato_auth_cookies(&url)
+        {
+            Some(
+                load_desktop_auth_handoff()
+                    .with_context(|| format!("unable to prepare ato.run auth cookies for {url}"))?,
+            )
+        } else {
+            None
+        };
 
         let builder = if let Some(handoff) = &desktop_auth_handoff {
             builder.with_url_and_headers(&url, auth_initial_request_headers(handoff)?)
@@ -4253,14 +4254,62 @@ fn stable_origin_key_for_route(route: &GuestRoute) -> Option<String> {
     }
 }
 
-fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
-    matches!(
-        route,
+/// Which WebKit storage store a WebView may use, and the host-level
+/// policies that govern it.
+///
+/// `System` — the shared persistent `WKWebsiteDataStore`.  Used by
+/// `ExternalUrl` (ato.run dock, Store, sign-in panes) and `Terminal`.
+/// ato.run auth cookies may be injected here.
+///
+/// `CapsuleEphemeral` — a per-instance non-persistent store
+/// (`WKWebsiteDataStore.nonPersistent()` on macOS via
+/// `WebContext::new(None)`).  Used by every capsule route.  ato.run auth
+/// cookies must **never** enter this store, regardless of the URL loaded.
+///
+/// `CapsuleProfile` — reserved for a future profile-keyed persistent
+/// store for trusted installed capsules (#350).  Not yet constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebViewStoreClass {
+    System,
+    CapsuleEphemeral,
+    #[allow(dead_code)] // reserved: profile-keyed persistent store (#350)
+    CapsuleProfile,
+}
+
+impl WebViewStoreClass {
+    /// Returns `true` only when it is safe to inject ato.run auth cookies
+    /// into this store.  Capsule stores must never receive first-party
+    /// ato.run session cookies.
+    fn allows_ato_auth_cookies(self) -> bool {
+        matches!(self, WebViewStoreClass::System)
+    }
+
+    /// Returns `true` when the route requires an in-process ephemeral
+    /// `WebContext` (`WebContext::new(None)`) rather than the shared
+    /// persistent context.
+    fn uses_ephemeral_context(self) -> bool {
+        matches!(self, WebViewStoreClass::CapsuleEphemeral)
+    }
+}
+
+/// Maps a `GuestRoute` to its `WebViewStoreClass`.
+///
+/// This is the single authoritative place that decides which store a
+/// WebView receives — ephemeral (capsule) or shared-persistent (system).
+fn store_class_for_route(route: &GuestRoute) -> WebViewStoreClass {
+    match route {
         GuestRoute::Capsule { .. }
-            | GuestRoute::CapsuleHandle { .. }
-            | GuestRoute::LocalManifest(_)
-            | GuestRoute::CapsuleUrl { .. }
-    )
+        | GuestRoute::CapsuleHandle { .. }
+        | GuestRoute::LocalManifest(_)
+        | GuestRoute::CapsuleUrl { .. } => WebViewStoreClass::CapsuleEphemeral,
+        // System routes share the persistent context so ato.run sign-in
+        // cookies survive tab close/reopen.
+        GuestRoute::ExternalUrl(_) | GuestRoute::Terminal { .. } => WebViewStoreClass::System,
+    }
+}
+
+fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
+    store_class_for_route(route).uses_ephemeral_context()
 }
 
 fn stable_origin_key_for_webview(view: &ManagedWebView) -> Option<String> {
@@ -4909,6 +4958,100 @@ mod tests {
         ));
         assert!(!should_install_ato_auth_cookies("https://ato.run/auth"));
         assert!(!should_install_ato_auth_cookies("https://example.com/dock"));
+    }
+
+    /// Capsule routes must always use the ephemeral store and must never
+    /// receive ato.run auth cookies — even if their URL looks like
+    /// `https://ato.run/dock...`.  This is the regression guard for #352.
+    #[test]
+    fn capsule_routes_are_ephemeral_and_deny_auth_cookies() {
+        let ato_dock_url = url::Url::parse("https://ato.run/dock").expect("url");
+
+        let capsule_routes: &[GuestRoute] = &[
+            GuestRoute::Capsule {
+                session: "s1".into(),
+                entry_path: "/index.html".into(),
+            },
+            GuestRoute::CapsuleHandle {
+                handle: "capsule://ato.run/koh0920/blinko".into(),
+                label: "Blinko".into(),
+            },
+            GuestRoute::CapsuleUrl {
+                handle: "capsule://ato.run/koh0920/hello".into(),
+                label: "hello".into(),
+                url: ato_dock_url.clone(), // deliberately points at ato.run/dock
+            },
+            GuestRoute::LocalManifest(crate::state::LocalManifestRoute {
+                manifest_path: "/tmp/capsule.toml".into(),
+                source_handle: "capsule://ato.run/koh0920/local".into(),
+                label: "local".into(),
+                requested_ref: "main".into(),
+                resolved_commit: "abc".into(),
+                manifest_source: crate::state::ManifestSource::Repo,
+                manifest_hash: "hash".into(),
+                draft_id: "d1".into(),
+            }),
+        ];
+
+        for route in capsule_routes {
+            let cls = store_class_for_route(route);
+            assert_eq!(
+                cls,
+                WebViewStoreClass::CapsuleEphemeral,
+                "route {route} should be CapsuleEphemeral"
+            );
+            assert!(
+                cls.uses_ephemeral_context(),
+                "route {route} should use ephemeral WebContext"
+            );
+            assert!(
+                !cls.allows_ato_auth_cookies(),
+                "route {route} must not allow ato.run auth cookie injection"
+            );
+        }
+    }
+
+    /// ExternalUrl pointing at ato.run/dock is a system route and is the
+    /// only kind of route that may receive ato.run auth cookies.
+    #[test]
+    fn external_url_ato_run_dock_is_system_and_allows_auth_cookies() {
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://ato.run/dock").expect("url"));
+        let cls = store_class_for_route(&route);
+        assert_eq!(cls, WebViewStoreClass::System);
+        assert!(!cls.uses_ephemeral_context());
+        assert!(cls.allows_ato_auth_cookies());
+        // Combined predicate matches what build_webview checks:
+        assert!(
+            cls.allows_ato_auth_cookies()
+                && should_install_ato_auth_cookies("https://ato.run/dock")
+        );
+    }
+
+    /// ExternalUrl pointing at a non-ato.run host is system-class (shared
+    /// context) but should_install_ato_auth_cookies returns false.
+    #[test]
+    fn external_url_non_dock_is_system_but_no_auth_cookie_injection() {
+        let route = GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url"));
+        let cls = store_class_for_route(&route);
+        assert_eq!(cls, WebViewStoreClass::System);
+        assert!(cls.allows_ato_auth_cookies());
+        // URL predicate blocks injection even though store class permits it.
+        assert!(!should_install_ato_auth_cookies("https://example.com"));
+    }
+
+    /// Terminal is a system route and must not inject ato.run auth cookies
+    /// (the URL predicate already returns false for terminal:// but the
+    /// store-class check is the structural guard).
+    #[test]
+    fn terminal_route_is_system_class() {
+        let route = GuestRoute::Terminal {
+            session_id: "sess-1".into(),
+        };
+        let cls = store_class_for_route(&route);
+        assert_eq!(cls, WebViewStoreClass::System);
+        assert!(!cls.uses_ephemeral_context());
+        // terminal:// does not match ato.run/dock so no injection.
+        assert!(!should_install_ato_auth_cookies("terminal://sess-1/"));
     }
 
     #[test]
