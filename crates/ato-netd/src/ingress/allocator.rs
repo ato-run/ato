@@ -390,4 +390,32 @@ mod tests {
             "ephemeral must not pick a stable-occupied port"
         );
     }
+
+    /// Verifies that the bind-failure rollback path in `register_ephemeral`
+    /// (which calls `ephemeral_alloc.release` after a failed `bind_listener`)
+    /// leaves the allocator in a clean state: the key is gone from
+    /// `active_map` so a subsequent registration for the same key tries a new
+    /// port.
+    #[test]
+    fn ephemeral_release_after_assign_removes_key_from_active_map() {
+        let mut ea = EphemeralAllocator::new();
+        let stable: HashSet<u16> = HashSet::new();
+        let port = ea.assign("session:gamma", &stable).unwrap();
+        assert!(
+            ea.get("session:gamma").is_some(),
+            "key should be active after assign"
+        );
+        // Simulate bind failure: caller rolls back the allocation.
+        ea.release("session:gamma");
+        assert!(
+            ea.get("session:gamma").is_none(),
+            "key must be removed after release"
+        );
+        // Re-assigning the same key returns a fresh port (not the released one).
+        let port2 = ea.assign("session:gamma", &stable).unwrap();
+        assert_ne!(
+            port, port2,
+            "re-assigned port must differ from the released port within same daemon lifetime"
+        );
+    }
 }

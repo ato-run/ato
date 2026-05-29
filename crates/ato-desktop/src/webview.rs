@@ -2247,6 +2247,20 @@ impl WebViewManager {
             ),
         };
 
+        // Rollback guard: if any step below returns Err after an ingress
+        // route has been registered in ato-netd, call
+        // `deregister_ingress_if_registered` before propagating the error so
+        // the daemon does not hold a stale ephemeral (or stable) route
+        // indefinitely.  The guard is disarmed on the success path by taking
+        // the value out via `reg_guard.0.take()` just before `Ok(...)`.
+        struct IngressRollback(Option<crate::netd::IngressRegistration>);
+        impl Drop for IngressRollback {
+            fn drop(&mut self) {
+                deregister_ingress_if_registered(&self.0);
+            }
+        }
+        let mut reg_guard = IngressRollback(ingress_registration);
+
         let webview_bounds = content_bounds(pane.bounds);
 
         // Capsule routes (CapsuleHandle, CapsuleUrl, LocalManifest, Capsule)
@@ -2627,7 +2641,10 @@ impl WebViewManager {
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
             launched_session,
-            ingress_registration,
+            // Disarm the rollback guard: the registration now lives in
+            // ManagedWebView and will be deregistered by the explicit stop /
+            // eviction paths instead.
+            ingress_registration: reg_guard.0.take(),
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
@@ -2751,6 +2768,9 @@ impl WebViewManager {
             },
             Instant::now(),
         );
+        for entry in &evicted {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
         drop(evicted);
     }
 
@@ -2772,6 +2792,9 @@ impl WebViewManager {
 
     fn sweep_expired_webview_retention(&mut self) {
         let evicted = self.webview_retention.evict_expired(Instant::now());
+        for entry in &evicted {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
         drop(evicted);
     }
 
@@ -2936,11 +2959,13 @@ impl WebViewManager {
         if stopped {
             self.handle_to_session.remove(&handle);
             if let Some(retained) = self.webview_retention.take_by_session_id(&session_id) {
+                deregister_ingress_if_registered(&retained.webview.ingress_registration);
                 drop(retained);
             } else if let Some(retained) = self
                 .webview_retention
                 .take_by_key(&format!("handle:{handle}"))
             {
+                deregister_ingress_if_registered(&retained.webview.ingress_registration);
                 drop(retained);
             }
         }
@@ -2955,7 +2980,9 @@ impl WebViewManager {
     /// before the underlying session can be stopped via this path.
     /// Returns the number of sessions queued for stop.
     pub fn stop_all_retained_sessions(&mut self) -> usize {
-        self.webview_retention.drain();
+        for entry in self.webview_retention.drain() {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
         let drained = self.retention.drain();
         let count = drained.len();
         for (entry, _reason) in drained {
@@ -3177,10 +3204,13 @@ impl Drop for WebViewManager {
             );
             let _ = stop_guest_session(&entry.session_id);
         }
-        self.webview_retention.drain();
+        for entry in self.webview_retention.drain() {
+            deregister_ingress_if_registered(&entry.webview.ingress_registration);
+        }
 
         // Best-effort shutdown so orphaned guest sessions do not survive process exit.
         for existing in self.views.drain().map(|(_, existing)| existing) {
+            deregister_ingress_if_registered(&existing.ingress_registration);
             if let Some(session) = existing.launched_session.as_ref() {
                 let _ = stop_guest_session(&session.session_id);
             }
@@ -6010,5 +6040,68 @@ mod tests {
         let json = serde_json::to_value(&status).unwrap();
         assert!(json.get("session_token").is_none());
         assert!(json.get("token").is_none());
+    }
+
+    /// `deregister_ingress_if_registered` must be a no-op for `None` and not
+    /// panic. Regression guard: any refactor that breaks this check will cause
+    /// the guard drop in `build_webview` to panic on every WebView creation
+    /// for routes without ingress registration.
+    #[test]
+    fn deregister_ingress_if_registered_noop_for_none() {
+        deregister_ingress_if_registered(&None);
+    }
+
+    /// The ingress selection in `build_webview` is driven by `store_class_for_route`.
+    /// `build_webview` dispatches ingress registration based on store class,
+    /// not on `logical_key_for_route` alone.  For `CapsuleEphemeral` routes,
+    /// ephemeral ingress is always chosen — even when a logical key exists
+    /// (e.g. `CapsuleHandle` does derive a stable key from its handle).
+    ///
+    /// This test verifies that the store-class → ingress dispatch invariant
+    /// holds for the routes that matter most, and that `System` routes
+    /// (`ExternalUrl`, `Terminal`) are never classified as `CapsuleEphemeral`.
+    #[test]
+    fn store_class_drives_ingress_dispatch() {
+        use crate::netd::logical_key_for_route;
+
+        // Capsule routes → CapsuleEphemeral (ephemeral ingress branch chosen
+        // by build_webview regardless of whether a logical key exists).
+        let capsule_routes = [
+            GuestRoute::CapsuleHandle {
+                handle: "capsule://org/demo@1.0.0".into(),
+                label: "demo".into(),
+            },
+            GuestRoute::CapsuleUrl {
+                handle: "capsule://org/demo@1.0.0".into(),
+                label: "demo".into(),
+                url: url::Url::parse("http://127.0.0.1:3000").expect("url"),
+            },
+        ];
+        for route in &capsule_routes {
+            assert_eq!(
+                store_class_for_route(route),
+                WebViewStoreClass::CapsuleEphemeral,
+                "route {route} must be CapsuleEphemeral"
+            );
+        }
+
+        // System routes → never CapsuleEphemeral (stable or no-ingress branch).
+        let system_routes = [
+            GuestRoute::ExternalUrl(url::Url::parse("https://example.com").expect("url")),
+            GuestRoute::ExternalUrl(url::Url::parse("https://ato.run/dock").expect("url")),
+        ];
+        for route in &system_routes {
+            assert_ne!(
+                store_class_for_route(route),
+                WebViewStoreClass::CapsuleEphemeral,
+                "route {route} must NOT be CapsuleEphemeral"
+            );
+            // System routes with ato.run/dock URL have no logical key and thus
+            // no ingress registration.
+            assert!(
+                logical_key_for_route(route).is_none(),
+                "ExternalUrl routes must not have a stable ingress key"
+            );
+        }
     }
 }
