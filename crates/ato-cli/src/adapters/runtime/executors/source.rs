@@ -1927,6 +1927,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn nacelle_manifest_sweep_removes_stale_files() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
@@ -1949,6 +1950,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn nacelle_manifest_sweep_preserves_fresh_files() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
@@ -1971,6 +1973,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn nacelle_manifest_sweep_preserves_active_process_manifest() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
@@ -1998,6 +2001,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn nacelle_manifest_sweep_rejects_pid_reuse_when_start_time_mismatches() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
@@ -2021,6 +2025,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn write_normalized_manifest_sweeps_stale_pool_before_new_write() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let temp = tempdir().expect("tempdir");
         let ato_home = temp.path().join("ato-home");
         let _ato_home_guard = EnvVarGuard::set_path("ATO_HOME", &ato_home);
@@ -2053,6 +2058,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_uses_selected_target() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2090,6 +2096,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_anchors_single_script_entrypoint_for_cwd_override() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2117,6 +2124,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_respects_runtime_version_for_anchored_python_targets() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2146,6 +2154,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_omits_python_selector_without_runtime_version() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2172,6 +2181,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_preserves_python_module_invocation() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2212,6 +2222,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_write_normalized_manifest_carries_network_egress_and_dep_endpoints() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2271,6 +2282,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_adapter_includes_ipc_socket_paths() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let plan = plan_from_manifest(
             &dir,
@@ -2315,6 +2327,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_adapter_includes_mounts_and_trailing_args() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("input.txt");
         fs::write(&input_path, "hello").unwrap();
