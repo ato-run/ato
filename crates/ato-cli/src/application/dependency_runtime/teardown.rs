@@ -491,6 +491,7 @@ mod tests {
         teardown_reverse_topological(targets, Duration::from_millis(100)).expect("noop");
     }
 
+    #[cfg(unix)]
     #[test]
     fn teardown_kills_a_real_child_via_sigterm() {
         // Spawn a long-running child, take its pid, ensure teardown stops it.
