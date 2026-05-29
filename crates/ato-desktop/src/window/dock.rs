@@ -684,6 +684,7 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
             .try_global::<crate::automation::AutomationHost>()
             .cloned();
 
+        let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let webview = WebViewBuilder::new()
             .with_asynchronous_custom_protocol(
                 DOCK_SCHEME.to_string(),
@@ -859,6 +860,9 @@ fn spawn_dock_event_loop(cx: &mut App, queue: DockEventQueue, host: AnyWindowHan
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             let drained = match queue.lock() {
                 Ok(mut events) => std::mem::take(&mut *events),
                 Err(_) => continue,

@@ -271,6 +271,12 @@ fn spawn_drain_loop_inner(
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            // Defer while a Wry `build_as_child` is pumping the Win32 message
+            // loop on the main thread (Windows): resuming and calling `update`
+            // here would re-borrow the GPUI `App` and panic.
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             let drained: Vec<(SystemCapsuleId, SystemCommand, Option<u64>)> = match queue.lock() {
                 Ok(mut q) => std::mem::take(&mut *q),
                 Err(_) => continue,

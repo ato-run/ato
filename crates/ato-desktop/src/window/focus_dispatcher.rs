@@ -57,6 +57,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
     fe.spawn(async move {
         loop {
             be.timer(Duration::from_millis(50)).await;
+            // While a Wry `build_as_child` is pumping the Win32 message loop
+            // on the main thread (Windows), an outer GPUI `App` borrow may be
+            // held. Resuming here and calling `update` would double-borrow and
+            // panic, so defer this drain until the guard clears.
+            if crate::webview_init_guard::WebviewInitGuard::is_active() {
+                continue;
+            }
             // Drain only when the socket flagged work OR something
             // slipped into the queue without flagging (defensive
             // against missed wakeups on the polling boundary).
