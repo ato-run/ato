@@ -1030,9 +1030,7 @@ pub fn start_boot_launch(
             })),
         );
         if let Ok(ref session) = result {
-            if session.display_strategy
-                == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl
-            {
+            if session.display_strategy == capsule_wire::handle::CapsuleDisplayStrategy::WebUrl {
                 super::app_capsule_shell::wait_for_session_upstream_ready(
                     session,
                     &abort_for_thread,
