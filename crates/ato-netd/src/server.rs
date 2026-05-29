@@ -1,5 +1,5 @@
-//! Control-socket server. Binds a UDS at the configured path, accepts
-//! connections, and dispatches `ato_net::control::Request` verbs.
+//! Control transport server. Binds the configured local control endpoint,
+//! accepts connections, and dispatches `ato_net::control::Request` verbs.
 //!
 //! The wire layer mirrors `Client`: newline-delimited JSON, one
 //! request-response per line.
@@ -11,8 +11,11 @@ use ato_net::control::{
     ErrorPayload, ListenerInfo, Request, Response, ResponseResult, StatusReport,
 };
 use ato_net::resolver::SystemResolver;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{split, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 use tracing::{debug, info, warn};
 
 use crate::state::DaemonState;
@@ -37,13 +40,16 @@ pub enum StartError {
 }
 
 pub struct Daemon {
+    #[cfg(unix)]
     listener: UnixListener,
+    #[cfg(windows)]
+    listener: NamedPipeServer,
     socket_path: PathBuf,
     state: DaemonState,
     /// Held so `Drop` can unlink the socket file on the normal exit
-    /// path. The `Drop` is best-effort; SIGKILL / panics leave the
-    /// file behind, but the next start's `AlreadyRunning` probe is
-    /// designed to handle that case (see `start`).
+    /// path. The `Drop` is best-effort; crashes leave the file behind,
+    /// but the next start's `AlreadyRunning` probe is designed to
+    /// handle that case.
     _socket_guard: SocketFileGuard,
 }
 
@@ -54,43 +60,51 @@ impl Daemon {
     /// JSON persistence file:
     /// `${ato_home}/state/netd/stable_origin_ports.json`.
     pub async fn start(socket_path: PathBuf, ato_home: PathBuf) -> Result<Self, StartError> {
-        if let Some(parent) = socket_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
+        #[cfg(unix)]
+        let listener = {
+            if let Some(parent) = socket_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
 
-        // Probe: if a socket file already exists, see whether a daemon
-        // owns it. The cheapest check is to try connecting as a client
-        // — if it accepts and answers `status`, someone is alive; we
-        // surface `AlreadyRunning`. If the connect fails (ECONNREFUSED
-        // / ENOENT), the file is stale and we unlink it before bind.
-        if socket_path.exists() {
-            match probe_existing_daemon(&socket_path).await {
-                Some(pid) => {
-                    return Err(StartError::AlreadyRunning {
-                        pid,
-                        path: socket_path,
-                    })
-                }
-                None => {
-                    // Stale socket file from a crashed predecessor.
-                    // Unlink so `bind` can succeed.
-                    if let Err(err) = tokio::fs::remove_file(&socket_path).await {
-                        if err.kind() != std::io::ErrorKind::NotFound {
-                            return Err(StartError::Io(err));
+            if socket_path.exists() {
+                match probe_existing_daemon(&socket_path).await {
+                    Some(pid) => {
+                        return Err(StartError::AlreadyRunning {
+                            pid,
+                            path: socket_path.clone(),
+                        })
+                    }
+                    None => {
+                        if let Err(err) = tokio::fs::remove_file(&socket_path).await {
+                            if err.kind() != std::io::ErrorKind::NotFound {
+                                return Err(StartError::Io(err));
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let listener = UnixListener::bind(&socket_path)?;
-        info!(socket = %socket_path.display(), "ato-netd: control socket bound");
+            let listener = UnixListener::bind(&socket_path)?;
+            info!(socket = %socket_path.display(), "ato-netd: control socket bound");
+            listener
+        };
+
+        #[cfg(windows)]
+        let listener = {
+            if let Some(pid) = probe_existing_daemon(&socket_path).await {
+                return Err(StartError::AlreadyRunning {
+                    pid,
+                    path: socket_path.clone(),
+                });
+            }
+
+            let listener = create_named_pipe_listener(&socket_path, true)?;
+            info!(socket = %socket_path.display(), "ato-netd: control socket bound");
+            listener
+        };
 
         let state = DaemonState::new(ato_home).await?;
 
-        // Start the egress CONNECT proxy using the system DNS resolver.
-        // Failure here is a hard startup error — the daemon is not useful
-        // without an egress proxy for slice E+.
         let resolver = Arc::new(
             SystemResolver::new()
                 .map_err(|e| anyhow::anyhow!("failed to create system resolver: {e}"))?,
@@ -116,61 +130,94 @@ impl Daemon {
         } = self;
 
         let shutdown_signal = state.clone();
-        loop {
-            tokio::select! {
-                _ = shutdown_signal.wait_for_shutdown() => {
-                    info!("ato-netd: shutdown signal received; exiting accept loop");
-                    break;
-                }
-                accept = listener.accept() => {
-                    match accept {
-                        Ok((stream, _addr)) => {
-                            let state = state.clone();
-                            tokio::spawn(async move {
-                                if let Err(err) = handle_connection(stream, state).await {
-                                    warn!(error = %err, "ato-netd: connection handler failed");
-                                }
-                            });
-                        }
-                        Err(err) => {
-                            // Accept errors on UDS are typically benign
-                            // (peer closed, EMFILE). Log and continue.
-                            warn!(error = %err, "ato-netd: accept failed");
+
+        #[cfg(unix)]
+        {
+            loop {
+                tokio::select! {
+                    _ = shutdown_signal.wait_for_shutdown() => {
+                        info!("ato-netd: shutdown signal received; exiting accept loop");
+                        break;
+                    }
+                    accept = listener.accept() => {
+                        match accept {
+                            Ok((stream, _addr)) => {
+                                let state = state.clone();
+                                tokio::spawn(async move {
+                                    if let Err(err) = handle_connection(stream, state).await {
+                                        warn!(error = %err, "ato-netd: connection handler failed");
+                                    }
+                                });
+                            }
+                            Err(err) => {
+                                warn!(error = %err, "ato-netd: accept failed");
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Gracefully drain all ingress connections before exit.
+        #[cfg(windows)]
+        {
+            let mut listener = listener;
+            loop {
+                tokio::select! {
+                    _ = shutdown_signal.wait_for_shutdown() => {
+                        info!("ato-netd: shutdown signal received; exiting accept loop");
+                        break;
+                    }
+                    accept = listener.connect() => {
+                        match accept {
+                            Ok(()) => {
+                                let next_listener = create_named_pipe_listener(&socket_path, false)?;
+                                let connected = listener;
+                                listener = next_listener;
+                                let state = state.clone();
+                                tokio::spawn(async move {
+                                    if let Err(err) = handle_connection(connected, state).await {
+                                        warn!(error = %err, "ato-netd: connection handler failed");
+                                    }
+                                });
+                            }
+                            Err(err) => {
+                                warn!(error = %err, "ato-netd: accept failed");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         state.shutdown_egress().await;
         state.shutdown_ingress().await;
 
         info!(socket = %socket_path.display(), "ato-netd: daemon exiting cleanly");
-        // _socket_guard is dropped here → unlink.
         Ok(())
     }
 }
 
-/// Probe an existing socket file to determine whether a live daemon
-/// owns it. Returns the daemon's PID if so, `None` if the file is
+/// Probe an existing control endpoint to determine whether a live daemon
+/// owns it. Returns the daemon's PID if so, `None` if the endpoint is
 /// stale or unreachable. Used during `start` to choose between
-/// `AlreadyRunning` and "unlink + retry".
+/// `AlreadyRunning` and rebind.
 async fn probe_existing_daemon(socket_path: &Path) -> Option<u32> {
-    // Use the same client every consumer uses — if it can't reach a
-    // live daemon at this path, the file is treated as stale.
     let mut client = ato_net::control::Client::connect(socket_path).await.ok()?;
     let report = client.status().await.ok()?;
     Some(report.pid)
 }
 
-async fn handle_connection(stream: UnixStream, state: DaemonState) -> std::io::Result<()> {
-    let (read_half, mut writer) = stream.into_split();
+async fn handle_connection<T>(stream: T, state: DaemonState) -> std::io::Result<()>
+where
+    T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let (read_half, mut writer) = split(stream);
     let mut reader = BufReader::new(read_half).lines();
 
     while let Some(line) = reader.next_line().await? {
-        let response: Response = match serde_json::from_str::<Request>(&line) {
-            Ok(req) => dispatch(req, &state).await,
+        let request = serde_json::from_str::<Request>(&line);
+        let response: Response = match &request {
+            Ok(req) => dispatch(req.clone(), &state).await,
             Err(err) => Response::Error {
                 error: ErrorPayload {
                     code: "invalid_request".into(),
@@ -190,15 +237,7 @@ async fn handle_connection(stream: UnixStream, state: DaemonState) -> std::io::R
         writer.write_all(b"\n").await?;
         writer.flush().await?;
 
-        // For `Shutdown` we want to ack the client before tearing
-        // down the listener, but we don't need to wait for further
-        // commands on this connection — the daemon is going away.
-        if matches!(response, Response::Ok { .. })
-            && matches!(
-                serde_json::from_str::<Request>(&line),
-                Ok(Request::Shutdown)
-            )
-        {
+        if matches!(request, Ok(Request::Shutdown)) && matches!(response, Response::Ok { .. }) {
             debug!("ato-netd: shutdown ack flushed; signalling accept loop");
             state.signal_shutdown();
             break;
@@ -259,15 +298,31 @@ async fn build_status_report(state: &DaemonState) -> StatusReport {
     }
 }
 
+#[cfg(windows)]
+fn create_named_pipe_listener(
+    socket_path: &Path,
+    first_instance: bool,
+) -> std::io::Result<NamedPipeServer> {
+    let mut options = ServerOptions::new();
+    options.access_inbound(true);
+    options.access_outbound(true);
+    options.reject_remote_clients(true);
+    if first_instance {
+        options.first_pipe_instance(true);
+    }
+    options.create(socket_path)
+}
+
 /// Best-effort cleanup of the socket file when the daemon exits via
-/// normal `Drop`. SIGKILL bypasses this; the next start's probe handles
-/// the stale-file case.
+/// normal `Drop`. Windows named pipes disappear when their handles are
+/// dropped, so cleanup is only needed on Unix.
 struct SocketFileGuard {
     path: PathBuf,
 }
 
 impl Drop for SocketFileGuard {
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.path);
     }
 }

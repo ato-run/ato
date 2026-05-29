@@ -7,14 +7,12 @@
 //!
 //! ## Transport
 //!
-//! Slice **A** uses **newline-delimited JSON over a Unix domain
-//! socket** at `${ATO_HOME}/run/netd.sock`. The wire types
-//! ([`Request`], [`Response`], [`StatusReport`], [`Error`], etc.) are
-//! cross-platform — they are just data structures — but the [`Client`]
-//! itself and [`default_socket_path`] are `#[cfg(unix)]`. The "UDS
-//! where supported, fallback to `127.0.0.1:<ephemeral>`" behavior #296
-//! mentions for non-Unix hosts lands in a follow-up before Windows
-//! support is real; tracked under umbrella issue #294.
+//! Slice **A** uses **newline-delimited JSON over a local control
+//! transport**. Unix uses the canonical `${ATO_HOME}/run/netd.sock`
+//! Unix-domain socket; Windows uses the well-known
+//! `\\.\pipe\ato-netd-control` named pipe. The wire types
+//! ([`Request`], [`Response`], [`StatusReport`], [`Error`], etc.) stay
+//! shared across both transports.
 //!
 //! ## Verbs in slice A
 //!
@@ -28,26 +26,24 @@
 //! serialize via `serde_json` tagged enums; older clients ignore new
 //! variants.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 
 #[cfg(unix)]
-use std::path::Path;
-#[cfg(unix)]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(unix)]
-use tokio::net::UnixStream;
+type AsyncTransport = tokio::net::UnixStream;
+#[cfg(windows)]
+type AsyncTransport = tokio::net::windows::named_pipe::NamedPipeClient;
 
-/// Default path of the `ato-netd` control socket inside the user's
-/// `ATO_HOME` tree. The same path is computed by the daemon when it
-/// binds, so clients constructed via [`Client::connect_default`] and
-/// daemons started without an explicit override always meet.
-///
-/// Unix-only in slice A. On non-Unix targets the function would have
-/// to resolve a TCP fallback (`127.0.0.1:<ephemeral>` plus a discovery
-/// file); that work is tracked under umbrella issue #294 and is
-/// intentionally not in this slice.
+#[cfg(unix)]
+type SyncTransport = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type SyncTransport = std::fs::File;
+
+/// Default path of the `ato-netd` control endpoint. On Unix this is the
+/// canonical socket path inside `ATO_HOME`; on Windows this is the
+/// well-known local named-pipe path used by `ato-netd`.
 #[cfg(unix)]
 pub fn default_socket_path() -> Result<PathBuf, Error> {
     capsule_core::common::paths::ato_path("run/netd.sock").map_err(|err| Error::PathResolve {
@@ -55,12 +51,71 @@ pub fn default_socket_path() -> Result<PathBuf, Error> {
     })
 }
 
+#[cfg(windows)]
+pub fn default_socket_path() -> Result<PathBuf, Error> {
+    Ok(PathBuf::from(r"\\.\pipe\ato-netd-control"))
+}
+
+fn map_connect_error(socket_path: &Path, err: std::io::Error) -> Error {
+    #[cfg(windows)]
+    if err.raw_os_error() == Some(231) {
+        return Error::NotRunning {
+            path: socket_path.to_path_buf(),
+            source: err,
+        };
+    }
+
+    match err.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => Error::NotRunning {
+            path: socket_path.to_path_buf(),
+            source: err,
+        },
+        std::io::ErrorKind::PermissionDenied => Error::PermissionDenied {
+            path: socket_path.to_path_buf(),
+            source: err,
+        },
+        _ => Error::Io(err),
+    }
+}
+
+async fn connect_async_transport(socket_path: &Path) -> Result<AsyncTransport, Error> {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(socket_path)
+            .await
+            .map_err(|err| map_connect_error(socket_path, err))
+    }
+
+    #[cfg(windows)]
+    {
+        tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(socket_path)
+            .map_err(|err| map_connect_error(socket_path, err))
+    }
+}
+
+fn connect_sync_transport(socket_path: &Path) -> Result<SyncTransport, Error> {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(socket_path)
+            .map_err(|err| map_connect_error(socket_path, err))
+    }
+
+    #[cfg(windows)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(socket_path)
+            .map_err(|err| map_connect_error(socket_path, err))
+    }
+}
+
 /// Typed errors returned by [`Client`]. Matchable; consumers should
 /// pattern-match (do not parse messages).
 ///
-/// The variants are cross-platform even though [`Client`] itself is
-/// Unix-only in slice A — keeping the error surface stable lets
-/// consumers write portable error-handling code today.
+/// The variants are cross-platform so consumers can share portable
+/// error-handling logic across Unix sockets and Windows named pipes.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Control socket exists / does not exist but no daemon is
@@ -224,18 +279,18 @@ pub struct ErrorPayload {
 /// consumers that need concurrent access should construct multiple
 /// clients (the daemon accepts many concurrent connections).
 ///
-/// Unix-only in slice **A**. See the module docs for the rationale and
-/// the planned TCP fallback path.
-#[cfg(unix)]
+/// The transport is a Unix domain socket on Unix and a local named
+/// pipe on Windows. Each [`Client`] owns one connection and is not
+/// `Clone`; consumers that need concurrent access should construct
+/// multiple clients.
 pub struct Client {
     /// Path the client connected to. Recorded so error messages can
     /// surface the path the consumer actually used.
     socket_path: PathBuf,
-    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: tokio::net::unix::OwnedWriteHalf,
+    reader: BufReader<ReadHalf<AsyncTransport>>,
+    writer: WriteHalf<AsyncTransport>,
 }
 
-#[cfg(unix)]
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
@@ -244,7 +299,6 @@ impl std::fmt::Debug for Client {
     }
 }
 
-#[cfg(unix)]
 impl Client {
     /// Connect to the default control socket ([`default_socket_path`]).
     pub async fn connect_default() -> Result<Self, Error> {
@@ -253,42 +307,12 @@ impl Client {
     }
 
     /// Connect to a control socket at the given path. Returns
-    /// [`Error::NotRunning`] when the socket is absent or refuses
-    /// connections (daemon not running or stale socket file);
-    /// [`Error::PermissionDenied`] when the OS denied access while the
-    /// daemon is likely running. Consumers branch on these variants
-    /// to print actionable hints without inspecting kernel error
-    /// codes.
+    /// [`Error::NotRunning`] when the control endpoint is absent or
+    /// refuses connections and [`Error::PermissionDenied`] when the OS
+    /// denied access while the daemon is likely running.
     pub async fn connect(socket_path: &Path) -> Result<Self, Error> {
-        let stream = UnixStream::connect(socket_path).await.map_err(|err| {
-            match err.kind() {
-                // ENOENT: socket file absent — daemon never started or
-                // cleaned up cleanly.
-                // ECONNREFUSED: socket file present but no listener —
-                // daemon crashed leaving a stale file.
-                // Both map to NotRunning for the consumer's purposes.
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                    Error::NotRunning {
-                        path: socket_path.to_path_buf(),
-                        source: err,
-                    }
-                }
-                // EACCES / EPERM: the daemon is likely running but the
-                // caller's credentials cannot reach it. Keep this
-                // distinct from NotRunning so Desktop / CLI can render
-                // a "running as another user / check ATO_HOME perms"
-                // hint instead of a "start the daemon" hint.
-                std::io::ErrorKind::PermissionDenied => Error::PermissionDenied {
-                    path: socket_path.to_path_buf(),
-                    source: err,
-                },
-                // Anything else (EMFILE, etc.) surfaces as generic Io
-                // — these are environmental failures the consumer
-                // should log verbatim.
-                _ => Error::Io(err),
-            }
-        })?;
-        let (read_half, writer) = stream.into_split();
+        let stream = connect_async_transport(socket_path).await?;
+        let (read_half, writer) = split(stream);
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
             reader: BufReader::new(read_half),
@@ -385,23 +409,15 @@ impl Client {
 
 /// Synchronous (blocking) client for the `ato-netd` control plane.
 ///
-/// Identical wire protocol to [`Client`] but uses
-/// [`std::os::unix::net::UnixStream`] (blocking I/O) so it can be called
-/// from non-async contexts such as the GPUI event loop in `ato-desktop`.
-///
-/// Each [`SyncClient`] owns one UDS connection. Construct a new client for
-/// each request sequence; the daemon accepts many concurrent connections.
-///
-/// Unix-only in slice **C**. The TCP fallback tracked in #294 would add a
-/// symmetric implementation for non-Unix hosts.
-#[cfg(unix)]
+/// Identical wire protocol to [`Client`] but uses blocking I/O so it can
+/// be called from non-async contexts such as the GPUI event loop in
+/// `ato-desktop`.
 pub struct SyncClient {
     socket_path: PathBuf,
-    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
-    writer: std::os::unix::net::UnixStream,
+    reader: std::io::BufReader<SyncTransport>,
+    writer: SyncTransport,
 }
 
-#[cfg(unix)]
 impl std::fmt::Debug for SyncClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncClient")
@@ -410,7 +426,6 @@ impl std::fmt::Debug for SyncClient {
     }
 }
 
-#[cfg(unix)]
 impl SyncClient {
     /// Connect to the default control socket ([`default_socket_path`]).
     pub fn connect_default() -> Result<Self, Error> {
@@ -420,20 +435,7 @@ impl SyncClient {
 
     /// Connect to a control socket at the given path.
     pub fn connect(socket_path: &Path) -> Result<Self, Error> {
-        use std::os::unix::net::UnixStream;
-        let stream = UnixStream::connect(socket_path).map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                Error::NotRunning {
-                    path: socket_path.to_path_buf(),
-                    source: err,
-                }
-            }
-            std::io::ErrorKind::PermissionDenied => Error::PermissionDenied {
-                path: socket_path.to_path_buf(),
-                source: err,
-            },
-            _ => Error::Io(err),
-        })?;
+        let stream = connect_sync_transport(socket_path)?;
         let writer = stream.try_clone().map_err(Error::Io)?;
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
