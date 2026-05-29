@@ -229,7 +229,9 @@ fn resize_bar_window_in_handler(window: &mut Window, expanded: bool) {
     };
     #[cfg(target_os = "macos")]
     super::macos::resize_window_in_handler(window, new_w, new_h);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    super::windows::resize_window_in_handler(window, new_w, new_h);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (new_w, new_h, window);
 }
 
@@ -245,7 +247,9 @@ fn resize_bar_window(cx: &mut App, expanded: bool) {
     };
     #[cfg(target_os = "macos")]
     super::macos::resize_window_to(cx, handle, new_w, new_h);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    super::windows::resize_window_to(cx, handle, new_w, new_h);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (new_w, new_h, handle);
 }
 
@@ -1348,6 +1352,20 @@ fn open_control_bar_inner(
         // window so macOS orders them correctly and they move together.
         if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
             if let Err(err) = super::macos::attach_as_child(cx, entry.handle, *handle) {
+                tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let initial_h = if cx.global::<ControlBarController>().should_render_expanded() {
+            BAR_HEIGHT
+        } else {
+            COMPACT_HEIGHT
+        };
+        super::windows::round_window_corners(cx, *handle, (initial_h / 2.0) as f64);
+        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost() {
+            if let Err(err) = super::windows::attach_as_child(cx, entry.handle, *handle) {
                 tracing::warn!(error = %err, "attach_as_child: could not attach Control Bar");
             }
         }
