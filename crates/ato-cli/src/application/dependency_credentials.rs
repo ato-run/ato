@@ -486,6 +486,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn temp_file_channel_writes_with_mode_0600_and_unlinks_on_drop() {
         let dir = tempfile::tempdir().expect("temp dir");

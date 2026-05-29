@@ -60,6 +60,7 @@
 - [Platform Architecture Spec](draft/PLATFORM_ARCHITECTURE_SPEC.md)
 - [Pure Transforms and Lock Layers](draft/PURE_TRANSFORMS_AND_LOCK_LAYERS.md)
 - [Refactor Layer Proposal](draft/REFACTOR_LAYER_PROPOSAL.md)
+- [Run and Install Semantics](draft/run-install-semantics.md)
 - [Spec AI Agent Execution Env](draft/SPEC_AI_AGENT_EXECUTION_ENV.md)
 - [Spec Demo Capsule Packs](draft/SPEC_DEMO_CAPSULE_PACKS.md)
 - [Spec Secret Auto Injection](draft/SPEC_SECRET_AUTO_INJECTION.md)

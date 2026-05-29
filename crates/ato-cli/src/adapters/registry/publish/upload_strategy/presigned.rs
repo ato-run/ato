@@ -644,6 +644,7 @@ mod tests {
         key
     }
 
+    #[serial_test::serial]
     #[test]
     #[serial]
     fn presigned_strategy_round_trip_uses_unsigned_put_and_finalize() {
@@ -735,6 +736,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial]
     #[test]
     #[serial]
     fn presigned_strategy_preserves_allow_existing_and_already_existed() {

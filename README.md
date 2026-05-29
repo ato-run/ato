@@ -5,7 +5,9 @@
 Run software from recipes.
 
 `ato` is a source-native runtime for running local projects, GitHub repositories,
-and shared recipes in a controlled local environment.
+and shared recipes in a controlled local environment. `ato run` is an ephemeral
+local production rehearsal: it resolves, materializes, launches, and records a
+session without registering a durable installed app.
 
 A recipe describes how source inputs become an execution: which source tree to
 use, which tools and runtimes to prepare, what to build, what services to start,
@@ -80,7 +82,8 @@ ato run .
 ```
 
 Ato looks for a local recipe such as `capsule.toml`. If one is not present, it
-can infer a basic recipe from the source tree.
+can infer a basic recipe from the source tree. This creates a run session, not
+an installed app.
 
 ### Run a GitHub Repository
 
@@ -206,6 +209,20 @@ policy, runtime, or state changes.
 
 Execution receipts are stored by `execution_id` and can be used by collaborators,
 CI, Desktop, and agents to compare launch conditions.
+
+## Run vs Install
+
+`ato run` is for rehearsing a resolved launch locally. It may leave session
+records, logs, receipts, and reusable cache/materialization entries, but it does
+not silently register a durable app.
+
+`ato install` is for keeping an app locally. It creates or updates installed-app
+identity, profile state, and immutable install revisions that future launches
+can address through the installed-app lifecycle.
+
+`ato dev` is not part of this contract yet. File watching and hot reload remain
+experimental run options or target-owned behavior until a separate development
+mode is specified.
 
 ## Ato Desktop
 
@@ -393,8 +410,9 @@ or inspect the repository first.
 ## Common Commands
 
 ```bash
-ato run .                  # run a local project
-ato run github.com/o/r     # run a GitHub repository
+ato run .                  # rehearse a local project in an ephemeral session
+ato run github.com/o/r     # rehearse a GitHub repository
+ato install publisher/slug # register a durable local app
 ato lock .                 # generate a lock file
 ato encap .                # create a shareable recipe description
 ato decap <share> --into . # materialize a shared recipe
