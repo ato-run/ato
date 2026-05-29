@@ -31,6 +31,8 @@ pub mod webview_paste;
 // `ato-settings` system capsule.
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 pub mod onboarding_window;
 pub mod orchestrator;
 pub mod settings_window;
