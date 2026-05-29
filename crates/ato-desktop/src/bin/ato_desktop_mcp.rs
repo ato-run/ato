@@ -141,7 +141,11 @@ fn discover_socket() -> PathBuf {
 
     #[cfg(windows)]
     {
-        PathBuf::from(r"\\.\pipe\ato-desktop")
+        // Named pipes have no filesystem representation that can be enumerated.
+        // Without a valid discovery JSON we cannot determine which
+        // `\\.\pipe\ato-desktop-<pid>` to connect to. Return a sentinel that
+        // does not exist, producing a clear "not running" error at connect time.
+        PathBuf::from(r"\\.\pipe\ato-desktop-not-running")
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -1629,7 +1633,7 @@ fn send_automation_command(
     params: serde_json::Value,
     response_timeout: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead as _, Write};
     use std::time::Instant;
 
     let deadline = Instant::now() + response_timeout;
@@ -1676,10 +1680,28 @@ fn send_automation_command(
     file.write_all(line.as_bytes())
         .map_err(|e| format!("send failed: {e}"))?;
 
-    let mut response_line = String::new();
-    BufReader::new(file)
-        .read_line(&mut response_line)
-        .map_err(|e| format!("receive failed: {e}"))?;
+    // `std::fs::File` (named pipe) has no `set_read_timeout`. Bound the
+    // receive with a helper thread + channel timeout instead.
+    let timeout_remaining = deadline.saturating_duration_since(Instant::now());
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let mut response_line = String::new();
+        let result = std::io::BufReader::new(file)
+            .read_line(&mut response_line)
+            .map(|_| response_line)
+            .map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    let response_line = match rx.recv_timeout(timeout_remaining) {
+        Ok(Ok(line)) => line,
+        Ok(Err(e)) => return Err(format!("receive failed: {e}")),
+        Err(_) => {
+            return Err(format!(
+                "timed out waiting for ato-desktop response ({}ms)",
+                response_timeout.as_millis()
+            ))
+        }
+    };
 
     let response: serde_json::Value =
         serde_json::from_str(&response_line).map_err(|e| format!("invalid JSON response: {e}"))?;
