@@ -748,7 +748,7 @@ fn handle_host_take_screenshot(
             (0, 0, -1, -1)
         };
 
-        let ps_path = path.display().to_string().replace('\\', "\\\\");
+        let ps_path = escape_ps_single_quoted(&path.display().to_string());
         let script = if w < 0 {
             format!(
                 r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing;
@@ -866,9 +866,9 @@ fn handle_host_activate_app(id: serde_json::Value, args: &serde_json::Value) -> 
 
     #[cfg(windows)]
     {
+        let ps_process_name = escape_ps_single_quoted(process_name);
         let script = format!(
-            "(New-Object -ComObject WScript.Shell).AppActivate((Get-Process -Name '{}' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Id))",
-            process_name
+            "(New-Object -ComObject WScript.Shell).AppActivate((Get-Process | Where-Object {{ $_.ProcessName -eq '{ps_process_name}' }} | Select-Object -First 1 -ExpandProperty Id))",
         );
         match std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -1335,6 +1335,12 @@ fn is_safe_applescript_literal(s: &str) -> bool {
     !s.chars().any(|c| matches!(c, '"' | '\\' | '\n' | '\r'))
 }
 
+/// Escapes a string for safe embedding inside a PowerShell single-quoted literal.
+/// In PS single-quoted strings, only `'` is special and must be doubled as `''`.
+fn escape_ps_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 fn automation_client_response_timeout(
     method: &str,
     params: &serde_json::Value,
@@ -1734,7 +1740,7 @@ fn send_automation_command(
 
 static TOOLS: &str = r#"[
   {"name":"browser_snapshot","description":"Returns an accessibility tree snapshot of the active WebView page.","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer","description":"Target pane ID (0 = active pane)"}},"required":[]}},
-  {"name":"browser_take_screenshot","description":"Takes a PNG screenshot of the active WebView (macOS only).","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":[]}},
+  {"name":"browser_take_screenshot","description":"Takes a PNG screenshot of the active WebView (macOS via WKWebView snapshotting; Windows via WebView2 CapturePreview).","inputSchema":{"type":"object","properties":{"pane_id":{"type":"integer"}},"required":[]}},
   {"name":"browser_click","description":"Clicks an element by its stable ref from browser_snapshot.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref"]}},
   {"name":"browser_fill","description":"Sets the value of an input by ref (clears first).","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"value":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref","value"]}},
   {"name":"browser_type","description":"Types text character-by-character into an element.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"text":{"type":"string"},"pane_id":{"type":"integer"}},"required":["ref","text"]}},
@@ -1762,6 +1768,6 @@ static TOOLS: &str = r#"[
   {"name":"host_take_screenshot","description":"Captures the full display as PNG on macOS (via `screencapture`) and Windows (via PowerShell + .NET Graphics), writing it under `${ATO_HOME:-~/.ato}/aodd/`. Returns `{ok:true, path:'<abs>'}`. This is the AODD visual-inspection primitive for ato-desktop's GPUI host surfaces, which are not reachable via the `browser_*` tools because those target embedded WebView content only.","inputSchema":{"type":"object","properties":{"region":{"type":"string","description":"Optional region in 'x,y,w,h' format. When omitted captures the whole main display."}},"required":[]}},
   {"name":"host_activate_app","description":"Brings an application to the foreground on macOS (via osascript + System Events) and Windows (via PowerShell AppActivate). Required before `host_press_key` so keystrokes route to ato-desktop, not whatever else has focus. Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"process_name":{"type":"string","description":"Process name as shown in Activity Monitor or Task Manager (default: 'ato-desktop')."}},"required":[]}},
   {"name":"host_press_key","description":"Sends a keyboard event to the currently focused application on macOS (osascript/System Events) and Windows (PowerShell SendKeys). Pair with `host_activate_app` first. `key` accepts a single character (e.g. 'n', '1') or a named key ('Escape', 'Return', 'Tab', 'Space'). `modifiers` is an array drawn from ['command','shift','option','control'] (Windows ignores command). Returns `{ok:true}` on success.","inputSchema":{"type":"object","properties":{"key":{"type":"string","description":"Single character or named key."},"modifiers":{"type":"array","items":{"type":"string"},"description":"Modifier keys to hold."}},"required":["key"]}},
-  {"name":"cleanup_host_resources","description":"Preview and clean up stale provider processes (postgres, bun) and System V shared memory segments owned by the current user. Uses TERM only — no SIGKILL. Set dry_run=true to only preview without killing.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"If true, only preview without killing (default: false)"}},"required":[]}},
+  {"name":"cleanup_host_resources","description":"Preview and clean up stale provider processes (postgres, bun) owned by the current user. On Unix also removes System V shared memory segments; on Unix sends SIGTERM (no SIGKILL), on Windows uses `taskkill /F` (force-kill, no graceful shutdown). Set dry_run=true to only preview without killing.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"If true, only preview without killing (default: false)"}},"required":[]}},
   {"name":"host_dispatch_action","description":"Queues a host-level GPUI action by name onto the ato-desktop automation socket. Valid actions: 'NavigateToUrl' (requires `url` parameter), 'ForceApprovePending', 'FocusControlBarInput', 'OpenStartWindow', 'OpenStoreWindow', 'OpenCardSwitcher', 'CompleteOnboarding', 'SkipOnboarding', 'ShowSettings', and others. The desktop drains the queue on its next render pass and invokes the matching handler in-process. Returns `{ok:true, queued_action:'<name>'}`.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"Action name to dispatch."},"url":{"type":"string","description":"URL parameter required for NavigateToUrl action (e.g. 'capsule://github.com/Koh0920/hello-capsule')."}},"required":["action"]}}
 ]"#;
