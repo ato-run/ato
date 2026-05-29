@@ -48,6 +48,7 @@ permissions:
 jobs:
   bundle-macos:
     name: bundle macOS (${{ matrix.target }})
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +85,11 @@ jobs:
           # ato-store dist is committed; verify it's present
           test -f crates/ato-desktop/assets/system/ato-store/dist/index.html || { echo "ERROR: ato-store/dist/index.html missing from repo"; exit 1; }
 
+      - name: Build ato-cli + nacelle helpers
+        # Build helpers once at the top level so ato-desktop/build.rs
+        # doesn't recursively invoke cargo during bundle packaging.
+        run: cargo build --release -p ato-cli -p nacelle
+
       - name: Bundle, sign, and package .zip
         # xtask resolves CodesignMode at runtime: ad-hoc when
         # MAC_DEVELOPER_ID_NAME is unset (v0.5 default), Developer ID
@@ -92,6 +98,7 @@ jobs:
         # the Safari/curl quarantine attribute does not get attached
         # on download (.dmg gets tainted, .zip from curl does not).
         env:
+          ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
           MAC_DEVELOPER_ID_NAME: ${{ secrets.MAC_DEVELOPER_ID_NAME }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -113,6 +120,7 @@ jobs:
 
   bundle-windows:
     name: bundle Windows (${{ matrix.target }})
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -165,12 +173,16 @@ jobs:
             choco install wixtoolset --version=3.14.0 --no-progress --allow-downgrade --force
           }
 
+      - name: Build ato-cli + nacelle helpers
+        run: cargo build --release -p ato-cli -p nacelle
+
       - name: Bundle and package .msi + .zip
         # signtool gating: WINDOWS_CODESIGN_PFX/PASSWORD are unset by
         # default for v0.5 (D-4) — xtask emits an unsigned MSI.
         # We also emit a .zip alongside so install.sh can curl + extract
         # without invoking the MSI installer.
         env:
+          ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
           WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
           WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
         working-directory: crates/ato-desktop/xtask
@@ -187,6 +199,7 @@ jobs:
 
   bundle-linux:
     name: bundle Linux (${{ matrix.target }})
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -248,7 +261,12 @@ jobs:
           chmod +x "$RUNNER_TEMP/appimagetool"
           sudo mv "$RUNNER_TEMP/appimagetool" /usr/local/bin/appimagetool
 
+      - name: Build ato-cli + nacelle helpers
+        run: cargo build --release -p ato-cli -p nacelle
+
       - name: Bundle and package .AppImage
+        env:
+          ATO_DESKTOP_SKIP_HELPER_BUILD: "1"
         working-directory: crates/ato-desktop/xtask
         run: cargo run --release -- bundle --target ${{ matrix.target }} --appimage
 
@@ -261,6 +279,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
+    timeout-minutes: 30
     needs: [bundle-macos, bundle-windows, bundle-linux]
     if: startsWith(github.ref, 'refs/tags/ato-desktop-v') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04

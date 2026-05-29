@@ -1387,7 +1387,7 @@ pub(super) fn resolve_python_dependency_lock_path(dependency_root: &Path) -> Opt
 mod tests {
     use super::{
         build_lifecycle_targets, build_root_install_plan, detect_required_glibc_from_lock,
-        explicit_install_command_string, plan_v03_provision_command, preflight_glibc_compat,
+        install_command_from_scope, plan_v03_provision_command, preflight_glibc_compat,
         preflight_single_script_effective_cwd_compat,
     };
     use crate::application::pipeline::phases::run::DerivedBridgeManifest;
@@ -1511,29 +1511,63 @@ run_command = "pnpm worker"
             .contains("conflicting install lifecycle commands"));
     }
 
+    /// `install` and `install_command` are TOML-level aliases for the same
+    /// concept; declaring both in the same scope must be rejected with a
+    /// targeted error rather than the generic "not a valid target table"
+    /// surface that the typed `NamedTarget` deserializer produces (the
+    /// `#[serde(alias = "install")]` attribute on `NamedTarget::install_command`
+    /// makes the typed parse reject the duplicate before reaching the
+    /// production check we want to pin here).
+    ///
+    /// We therefore exercise `install_command_from_scope` directly with a
+    /// raw `toml::Value`, which is what `explicit_install_command_string`
+    /// itself dispatches to once a `ManifestData` is available. This keeps
+    /// the test honest about which layer owns the alias-conflict diagnostic.
     #[test]
     fn install_aliases_in_same_scope_are_rejected() {
-        let dir = tempdir().expect("tempdir");
-        let plan = build_plan(
-            dir.path(),
-            r#"
-name = "demo"
-type = "app"
-default_target = "default"
-
-[targets.default]
-runtime = "source"
-driver = "node"
-install = "bun install --ignore-scripts"
-install_command = "bun install"
-run_command = "bun run start"
-"#,
+        let mut target_table = toml::map::Map::new();
+        target_table.insert(
+            "runtime".to_string(),
+            toml::Value::String("source".to_string()),
         );
-        let err = explicit_install_command_string(&plan).expect_err("alias conflict should fail");
+        target_table.insert(
+            "driver".to_string(),
+            toml::Value::String("node".to_string()),
+        );
+        target_table.insert(
+            "install".to_string(),
+            toml::Value::String("bun install --ignore-scripts".to_string()),
+        );
+        target_table.insert(
+            "install_command".to_string(),
+            toml::Value::String("bun install".to_string()),
+        );
+        target_table.insert(
+            "run_command".to_string(),
+            toml::Value::String("bun run start".to_string()),
+        );
 
-        assert!(err
-            .to_string()
-            .contains("install and install_command are aliases"));
+        let mut targets = toml::map::Map::new();
+        targets.insert("default".to_string(), toml::Value::Table(target_table));
+
+        let mut manifest = toml::map::Map::new();
+        manifest.insert("name".to_string(), toml::Value::String("demo".to_string()));
+        manifest.insert("type".to_string(), toml::Value::String("app".to_string()));
+        manifest.insert(
+            "default_target".to_string(),
+            toml::Value::String("default".to_string()),
+        );
+        manifest.insert("targets".to_string(), toml::Value::Table(targets));
+        let manifest = toml::Value::Table(manifest);
+
+        let err = install_command_from_scope(&manifest, &["targets", "default"])
+            .expect_err("alias conflict in same scope should fail");
+
+        assert!(
+            err.to_string()
+                .contains("install and install_command are aliases"),
+            "alias conflict diagnostic must mention aliases, got: {err}"
+        );
     }
 
     #[test]

@@ -758,12 +758,19 @@ pub fn open_dock_window(cx: &mut App) -> Result<AnyWindowHandle> {
     // stay alive, so the next dock click only needs to call
     // makeKeyAndOrderFront + activate_window without running
     // `fetch_identity`, creating a new WebView, or loading the page.
-    let close_handle = *handle;
     handle.update(cx, |_, window, app_cx| {
         window.on_window_should_close(app_cx, move |window, _app| {
-            tracing::info!("dock: close intercepted, hiding instead of destroying");
-            crate::window::macos::hide_window_in_handler(window);
-            false
+            #[cfg(target_os = "macos")]
+            {
+                tracing::info!("dock: close intercepted, hiding instead of destroying");
+                crate::window::macos::hide_window_in_handler(window);
+                false
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = window;
+                true
+            }
         });
     });
 
