@@ -14,6 +14,7 @@
 //! [`EgressProxyError::NotSupported`].
 
 use std::path::PathBuf;
+
 #[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
