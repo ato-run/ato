@@ -69,7 +69,7 @@ pub(crate) fn pid_is_alive(pid: u32) -> bool {
     }
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle == 0 {
+    if handle == std::ptr::null_mut() {
         return false;
     }
     unsafe { CloseHandle(handle) };
@@ -384,14 +384,20 @@ mod tests {
     fn parse_command_restart_active_session_takes_no_args() {
         let params = serde_json::json!({});
         let cmd = super::parse_command("restart_active_session", &params).expect("parse");
-        assert!(matches!(cmd, super::AutomationCommand::RestartActiveSession));
+        assert!(matches!(
+            cmd,
+            super::AutomationCommand::RestartActiveSession
+        ));
     }
 
     #[test]
     fn parse_command_restart_active_session_ignores_unknown_params() {
         let params = serde_json::json!({"pane_id": 0, "extra": "ignored"});
         let cmd = super::parse_command("restart_active_session", &params).expect("parse");
-        assert!(matches!(cmd, super::AutomationCommand::RestartActiveSession));
+        assert!(matches!(
+            cmd,
+            super::AutomationCommand::RestartActiveSession
+        ));
     }
 
     #[test]
@@ -428,9 +434,9 @@ pub fn start_socket_listener(
     use std::os::windows::io::FromRawHandle;
 
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-        PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
 
     let path = socket_path();
@@ -445,7 +451,7 @@ pub fn start_socket_listener(
         let _ = fs::write(current_instance_file(), json);
     }
 
-     let pipe_name_wide: Vec<u16> = path
+    let pipe_name_wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
         .chain(std::iter::once(0))
