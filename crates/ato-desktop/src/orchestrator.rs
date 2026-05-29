@@ -5710,9 +5710,7 @@ mod launch_error_display_tests {
         ));
         assert!(is_tracing_noise_line("  DEBUG ato_cli: some message"));
         assert!(is_tracing_noise_line("TRACE ato_cli: fine grained"));
-        assert!(is_tracing_noise_line(
-            "INFO ato_cli: informational only"
-        ));
+        assert!(is_tracing_noise_line("INFO ato_cli: informational only"));
     }
 
     #[test]
