@@ -25,7 +25,7 @@ pub mod proxy;
 
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use allocator::{AllocError, PortAllocator};
+use allocator::{AllocError, EphemeralAllocator, PortAllocator};
 use anyhow::Context as _;
 use ato_net::control::IngressInfo;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -71,6 +71,10 @@ struct RouteHandle {
 pub struct IngressManager {
     alloc: PortAllocator,
     routes: HashMap<String, RouteHandle>,
+    /// Ephemeral routes (transient capsule sessions). Ports are allocated
+    /// in-memory only and never written to `stable_origin_ports.json`.
+    ephemeral_routes: HashMap<String, RouteHandle>,
+    ephemeral_alloc: EphemeralAllocator,
 }
 
 impl IngressManager {
@@ -83,6 +87,8 @@ impl IngressManager {
         Ok(Self {
             alloc,
             routes: HashMap::new(),
+            ephemeral_routes: HashMap::new(),
+            ephemeral_alloc: EphemeralAllocator::new(),
         })
     }
 
@@ -110,25 +116,7 @@ impl IngressManager {
 
         // New route: allocate port, bind, and start accept loop.
         let port = self.alloc.get_or_assign(key).await?;
-
-        let listener = {
-            let addr = SocketAddr::from(([127, 0, 0, 1], port));
-            let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
-                .map_err(|e| IngressError::Bind { port, source: e })?;
-            sock.set_reuse_address(true)
-                .map_err(|e| IngressError::Bind { port, source: e })?;
-            #[cfg(unix)]
-            sock.set_reuse_port(true)
-                .map_err(|e| IngressError::Bind { port, source: e })?;
-            sock.set_nonblocking(true)
-                .map_err(|e| IngressError::Bind { port, source: e })?;
-            sock.bind(&addr.into())
-                .map_err(|e| IngressError::Bind { port, source: e })?;
-            sock.listen(128)
-                .map_err(|e| IngressError::Bind { port, source: e })?;
-            TcpListener::from_std(sock.into())
-                .map_err(|e| IngressError::Bind { port, source: e })?
-        };
+        let listener = bind_listener(port)?;
 
         let upstream = Arc::new(RwLock::new(upstream_url));
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -198,10 +186,87 @@ impl IngressManager {
         }
     }
 
-    /// Snapshot of registered routes: key → port.
+    // ── Ephemeral routes (transient capsule sessions) ─────────────────────
+
+    /// Register a session-unique ephemeral ingress route.
+    ///
+    /// The assigned port is **not** persisted to `stable_origin_ports.json`.
+    /// Use this for transient capsule sessions where a stable origin is
+    /// undesirable. The returned port is guaranteed to differ from all
+    /// currently-stable ports and all other active ephemeral ports.
+    pub async fn register_ephemeral(
+        &mut self,
+        session_key: &str,
+        upstream_url_str: &str,
+    ) -> Result<IngressInfo, IngressError> {
+        let upstream_url = Url::parse(upstream_url_str).map_err(|e| IngressError::InvalidUrl {
+            url: upstream_url_str.to_string(),
+            source: e,
+        })?;
+
+        if let Some(handle) = self.ephemeral_routes.get(session_key) {
+            // Already registered (idempotent): swap upstream, return port.
+            let mut upstream = handle.upstream.write().await;
+            *upstream = upstream_url;
+            return Ok(IngressInfo { port: handle.port });
+        }
+
+        let stable_occupied: std::collections::HashSet<u16> =
+            self.alloc.snapshot().values().copied().collect();
+        let port = self.ephemeral_alloc.assign(session_key, &stable_occupied)?;
+
+        let listener = bind_listener(port)?;
+        let upstream = Arc::new(RwLock::new(upstream_url));
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let join_set = Arc::new(tokio::sync::Mutex::new(JoinSet::<()>::new()));
+
+        {
+            let upstream_clone = Arc::clone(&upstream);
+            let join_set_clone = Arc::clone(&join_set);
+            let key_clone = session_key.to_string();
+            tokio::spawn(run_ingress_listener(
+                listener,
+                upstream_clone,
+                join_set_clone,
+                cancel_rx,
+                key_clone,
+            ));
+        }
+
+        self.ephemeral_routes.insert(
+            session_key.to_string(),
+            RouteHandle {
+                port,
+                upstream,
+                cancel_tx,
+                join_set,
+            },
+        );
+
+        Ok(IngressInfo { port })
+    }
+
+    /// Deregister an ephemeral ingress route. No-op if key is unknown.
+    ///
+    /// The released port is moved to a recently-freed set and will not be
+    /// reassigned to another ephemeral route within this daemon lifetime.
+    pub async fn deregister_ephemeral(&mut self, session_key: &str) {
+        if let Some(handle) = self.ephemeral_routes.remove(session_key) {
+            let _ = handle.cancel_tx.send(true);
+            let mut js = handle.join_set.lock().await;
+            while js.join_next().await.is_some() {}
+            self.ephemeral_alloc.release(session_key);
+            debug!("ephemeral ingress route {session_key:?} deregistered");
+        }
+    }
+
+    // ── Common helpers ────────────────────────────────────────────────────
+
+    /// Snapshot of all registered routes (stable + ephemeral): key → port.
     pub fn listener_infos(&self) -> Vec<(String, u16)> {
         self.routes
             .iter()
+            .chain(self.ephemeral_routes.iter())
             .map(|(k, v)| (k.clone(), v.port))
             .collect()
     }
@@ -214,10 +279,35 @@ impl IngressManager {
             while js.join_next().await.is_some() {}
             debug!("ingress route {key:?} shut down");
         }
+        for (key, handle) in self.ephemeral_routes.drain() {
+            let _ = handle.cancel_tx.send(true);
+            let mut js = handle.join_set.lock().await;
+            while js.join_next().await.is_some() {}
+            debug!("ephemeral ingress route {key:?} shut down");
+        }
     }
 }
 
 // ── Accept loop ────────────────────────────────────────────────────────────
+
+/// Bind a TCP listener on `127.0.0.1:<port>`.
+fn bind_listener(port: u16) -> Result<TcpListener, IngressError> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+        .map_err(|e| IngressError::Bind { port, source: e })?;
+    sock.set_reuse_address(true)
+        .map_err(|e| IngressError::Bind { port, source: e })?;
+    #[cfg(unix)]
+    sock.set_reuse_port(true)
+        .map_err(|e| IngressError::Bind { port, source: e })?;
+    sock.set_nonblocking(true)
+        .map_err(|e| IngressError::Bind { port, source: e })?;
+    sock.bind(&addr.into())
+        .map_err(|e| IngressError::Bind { port, source: e })?;
+    sock.listen(128)
+        .map_err(|e| IngressError::Bind { port, source: e })?;
+    TcpListener::from_std(sock.into()).map_err(|e| IngressError::Bind { port, source: e })
+}
 
 async fn run_ingress_listener(
     listener: TcpListener,

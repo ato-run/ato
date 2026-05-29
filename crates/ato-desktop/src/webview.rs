@@ -212,11 +212,11 @@ struct ManagedWebView {
     bounds: PaneBounds,
     launched_session: Option<GuestLaunchSession>,
     /// The stable ingress key registered with `ato-netd` for this WebView.
-    /// Set on successful registration; `None` when the route did not go
-    /// through `ato-netd` (e.g. external URL, terminal, or fallback).
-    /// Used by `stop_launched_session` and `stop_active_session` to
-    /// deregister the route on session teardown.
-    stable_ingress_key: Option<String>,
+    /// Tracks the ato-netd ingress registration for this WebView so the
+    /// correct deregister call can be issued on session teardown.
+    /// `None` when the route did not go through `ato-netd` (e.g. external
+    /// URL, terminal, or fallback to direct `local_url`).
+    ingress_registration: Option<crate::netd::IngressRegistration>,
     webview: WebView,
     #[cfg(target_os = "macos")]
     frame_host: Option<Retained<NSView>>,
@@ -2045,7 +2045,7 @@ impl WebViewManager {
         let mut inject_window_ready_signal = false;
 
         let pane_binding = Arc::new(AtomicUsize::new(pane.pane_id));
-        let mut ingress_key: Option<String> = None;
+        let mut ingress_registration: Option<crate::netd::IngressRegistration> = None;
         let (url, bridge_endpoint, allowlist, route_content, guest_payload) = match &pane.route {
             GuestRoute::Capsule {
                 session,
@@ -2140,32 +2140,81 @@ impl WebViewManager {
                     let local_url = session.local_url.clone().ok_or_else(|| {
                         anyhow::anyhow!("WebUrl session has no local_url: {}", session.session_id)
                     })?;
-                    let url = if let Some(key) = crate::netd::logical_key_for_route(&pane.route) {
-                        match crate::netd::register_stable_ingress(&key, &local_url) {
-                            Ok(port) => {
-                                let ingress_url = format!("http://127.0.0.1:{port}/");
-                                info!(
-                                    key = %key,
-                                    port = port,
-                                    local_url = %local_url,
-                                    "registered ato-netd ingress route"
-                                );
-                                ingress_key = Some(key);
-                                ingress_url
+                    let url = {
+                        use crate::netd::{
+                            IngressRegistration, IngressRegistrationKind,
+                        };
+
+                        // CapsuleEphemeral routes use a session-unique ephemeral port
+                        // (not persisted in stable_origin_ports.json). System routes
+                        // use stable ingress for consistent origin across restarts.
+                        let route_store_class = store_class_for_route(&pane.route);
+                        if route_store_class == WebViewStoreClass::CapsuleEphemeral {
+                            // Ephemeral key is scoped to this session so it never collides
+                            // with stable keys or another capsule's ephemeral key.
+                            let ephemeral_key =
+                                format!("ephemeral:{}", session.session_id);
+                            match crate::netd::register_ephemeral_ingress(
+                                &ephemeral_key,
+                                &local_url,
+                            ) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %ephemeral_key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd ephemeral ingress route"
+                                    );
+                                    ingress_registration = Some(IngressRegistration {
+                                        key: ephemeral_key,
+                                        kind: IngressRegistrationKind::Ephemeral,
+                                    });
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register ephemeral ingress; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
                             }
-                            Err(err) => {
-                                warn!(
-                                    route = %pane.route,
-                                    session_id = %session.session_id,
-                                    error = %err,
-                                    "failed to register ato-netd ingress route; \
-                                     falling back to direct local_url"
-                                );
-                                local_url
+                        } else if let Some(key) =
+                            crate::netd::logical_key_for_route(&pane.route)
+                        {
+                            match crate::netd::register_stable_ingress(&key, &local_url) {
+                                Ok(port) => {
+                                    let ingress_url = format!("http://127.0.0.1:{port}/");
+                                    info!(
+                                        key = %key,
+                                        port = port,
+                                        local_url = %local_url,
+                                        "registered ato-netd stable ingress route"
+                                    );
+                                    ingress_registration = Some(IngressRegistration {
+                                        key,
+                                        kind: IngressRegistrationKind::Stable,
+                                    });
+                                    ingress_url
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        route = %pane.route,
+                                        session_id = %session.session_id,
+                                        error = %err,
+                                        "failed to register ato-netd ingress route; \
+                                         falling back to direct local_url"
+                                    );
+                                    local_url
+                                }
                             }
+                        } else {
+                            local_url
                         }
-                    } else {
-                        local_url
                     };
                     (url, None, Vec::new(), RouteContent::External, None)
                 } else {
@@ -2578,7 +2627,7 @@ impl WebViewManager {
             route_key: pane.route.to_string(),
             bounds: webview_bounds,
             launched_session,
-            stable_ingress_key: ingress_key,
+            ingress_registration,
             webview,
             #[cfg(target_os = "macos")]
             frame_host,
@@ -2871,9 +2920,7 @@ impl WebViewManager {
         // omnibar entry / `browser_navigate` MCP call does, and it is
         // what #112 needs from this fix.
         if let Some(previous) = self.views.remove(&active_pane_id) {
-            if let Some(key) = previous.stable_ingress_key.as_deref() {
-                crate::netd::deregister_stable_ingress(key);
-            }
+            deregister_ingress_if_registered(&previous.ingress_registration);
             self.automation.fail_requests_for_pane(active_pane_id);
             self.automation.mark_page_unloaded(active_pane_id);
             tracing::debug!(
@@ -2986,9 +3033,7 @@ impl WebViewManager {
 
     fn stop_launched_session(&mut self, webview: &ManagedWebView, state: &mut AppState) {
         // Deregister the ato-netd ingress route before stopping the session.
-        if let Some(key) = webview.stable_ingress_key.as_deref() {
-            crate::netd::deregister_stable_ingress(key);
-        }
+        deregister_ingress_if_registered(&webview.ingress_registration);
 
         let Some(session) = &webview.launched_session else {
             return;
@@ -4310,6 +4355,23 @@ fn store_class_for_route(route: &GuestRoute) -> WebViewStoreClass {
 
 fn is_webview_retention_eligible_route(route: &GuestRoute) -> bool {
     store_class_for_route(route).uses_ephemeral_context()
+}
+
+/// Deregister the ato-netd ingress route recorded on a `ManagedWebView`,
+/// dispatching to the correct stable or ephemeral deregister function.
+/// No-op when `registration` is `None`.
+fn deregister_ingress_if_registered(
+    registration: &Option<crate::netd::IngressRegistration>,
+) {
+    let Some(reg) = registration else { return };
+    match reg.kind {
+        crate::netd::IngressRegistrationKind::Stable => {
+            crate::netd::deregister_stable_ingress(&reg.key);
+        }
+        crate::netd::IngressRegistrationKind::Ephemeral => {
+            crate::netd::deregister_ephemeral_ingress(&reg.key);
+        }
+    }
 }
 
 fn stable_origin_key_for_webview(view: &ManagedWebView) -> Option<String> {

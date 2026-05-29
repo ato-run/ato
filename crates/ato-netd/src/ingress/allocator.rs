@@ -23,7 +23,7 @@
 //! error.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -178,6 +178,86 @@ fn tmp_path_for(path: &Path) -> PathBuf {
     tmp
 }
 
+// ---------------------------------------------------------------------------
+// Ephemeral port allocator (in-memory, no persistence)
+// ---------------------------------------------------------------------------
+
+/// In-memory port allocator for ephemeral (transient) capsule sessions.
+///
+/// Unlike [`PortAllocator`], ephemeral ports are **never** written to
+/// `stable_origin_ports.json`. This prevents transient runs from polluting
+/// the stable origin table.
+///
+/// # Port reuse protection
+///
+/// When an ephemeral port is released via [`EphemeralAllocator::release`],
+/// it is moved to `recently_freed` and will not be reassigned within the
+/// current daemon lifetime. This prevents the scenario where capsule A's
+/// port is immediately handed to capsule B.
+///
+/// # Collision avoidance
+///
+/// The allocator receives a snapshot of stable-allocated ports at assignment
+/// time so it never picks a port already in use by a stable route.
+#[derive(Debug, Default)]
+pub struct EphemeralAllocator {
+    /// Currently active ephemeral routes: session key → port.
+    active_map: HashMap<String, u16>,
+    /// Fast reverse lookup for collision detection.
+    active_ports: HashSet<u16>,
+    /// Ports freed this daemon lifetime — blocked from immediate reuse.
+    recently_freed: HashSet<u16>,
+}
+
+impl EphemeralAllocator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Assign a port for `session_key`. Avoids `stable_occupied` ports,
+    /// currently active ports, and recently-freed ports. Idempotent for
+    /// the same key.
+    pub fn assign(
+        &mut self,
+        session_key: &str,
+        stable_occupied: &HashSet<u16>,
+    ) -> Result<u16, AllocError> {
+        if let Some(&port) = self.active_map.get(session_key) {
+            return Ok(port);
+        }
+        for port in PORT_RANGE_START..=PORT_RANGE_END {
+            if !stable_occupied.contains(&port)
+                && !self.active_ports.contains(&port)
+                && !self.recently_freed.contains(&port)
+            {
+                self.active_map.insert(session_key.to_string(), port);
+                self.active_ports.insert(port);
+                return Ok(port);
+            }
+        }
+        Err(AllocError::RangeExhausted)
+    }
+
+    /// Release the port for `session_key`. Moves it to `recently_freed`
+    /// to prevent immediate reuse within this daemon lifetime.
+    pub fn release(&mut self, session_key: &str) {
+        if let Some(port) = self.active_map.remove(session_key) {
+            self.active_ports.remove(&port);
+            self.recently_freed.insert(port);
+        }
+    }
+
+    /// Return the active port for `session_key`, if any.
+    pub fn get(&self, session_key: &str) -> Option<u16> {
+        self.active_map.get(session_key).copied()
+    }
+
+    /// Snapshot of all active ephemeral routes: session key → port.
+    pub fn snapshot(&self) -> HashMap<String, u16> {
+        self.active_map.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +332,62 @@ mod tests {
                 Err(AllocError::PersistedPortTaken { port: 40000, .. })
             ),
             "expected PersistedPortTaken, got: {result:?}",
+        );
+    }
+
+    // ── EphemeralAllocator tests ──────────────────────────────────────────────
+
+    #[test]
+    fn ephemeral_two_keys_get_different_ports() {
+        let mut ea = EphemeralAllocator::new();
+        let stable: HashSet<u16> = HashSet::new();
+        let p1 = ea.assign("session:alpha", &stable).unwrap();
+        let p2 = ea.assign("session:beta", &stable).unwrap();
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn ephemeral_same_key_is_idempotent() {
+        let mut ea = EphemeralAllocator::new();
+        let stable: HashSet<u16> = HashSet::new();
+        let p1 = ea.assign("session:alpha", &stable).unwrap();
+        let p2 = ea.assign("session:alpha", &stable).unwrap();
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn ephemeral_avoids_stable_occupied_ports() {
+        let mut ea = EphemeralAllocator::new();
+        // Block every port in the range except the last one.
+        let stable: HashSet<u16> = (PORT_RANGE_START..PORT_RANGE_END).collect();
+        let port = ea.assign("session:alpha", &stable).unwrap();
+        assert_eq!(port, PORT_RANGE_END, "should pick the only free port");
+    }
+
+    #[test]
+    fn ephemeral_released_port_not_immediately_reused() {
+        let mut ea = EphemeralAllocator::new();
+        let stable: HashSet<u16> = HashSet::new();
+        let p1 = ea.assign("session:alpha", &stable).unwrap();
+        ea.release("session:alpha");
+        // The released port should be in recently_freed — a new session must
+        // get a different port.
+        let p2 = ea.assign("session:beta", &stable).unwrap();
+        assert_ne!(
+            p1, p2,
+            "released port must not be immediately reused within same daemon lifetime"
+        );
+    }
+
+    #[test]
+    fn ephemeral_stable_and_ephemeral_ports_do_not_collide() {
+        let mut ea = EphemeralAllocator::new();
+        // Simulate stable allocator holding port 40000.
+        let stable: HashSet<u16> = [PORT_RANGE_START].into();
+        let ep = ea.assign("session:alpha", &stable).unwrap();
+        assert_ne!(
+            ep, PORT_RANGE_START,
+            "ephemeral must not pick a stable-occupied port"
         );
     }
 }

@@ -179,6 +179,28 @@ pub enum Request {
         /// Key previously passed to `RegisterIngress`.
         key: String,
     },
+    /// Register a session-unique ephemeral ingress route.
+    ///
+    /// Unlike `RegisterIngress`, ephemeral routes are **not** persisted to
+    /// `stable_origin_ports.json`. Ports are assigned in-memory only and
+    /// cannot be reused by a different capsule within the same daemon
+    /// lifetime (see [`DeregisterEphemeralIngress`]). Use this for
+    /// transient capsule sessions where a stable origin is undesirable.
+    RegisterEphemeralIngress {
+        /// Session-unique key (e.g. `"ephemeral:<session_id>"`).
+        session_key: String,
+        /// Upstream base URL. Must be `http://` or `https://`.
+        upstream_url: String,
+    },
+    /// Remove a previously-registered ephemeral ingress route. Idempotent.
+    ///
+    /// The released port is moved to a recently-freed set and will not be
+    /// immediately reassigned to a new ephemeral route within the same
+    /// daemon lifetime.
+    DeregisterEphemeralIngress {
+        /// Key previously passed to `RegisterEphemeralIngress`.
+        session_key: String,
+    },
 }
 
 /// Tagged-enum response envelope mirroring [`Request`].
@@ -359,6 +381,47 @@ impl Client {
         }
     }
 
+    /// Register a session-unique ephemeral ingress route (not persisted).
+    ///
+    /// Returns [`IngressInfo`] with the assigned port. The port is
+    /// in-memory only and will not be reused immediately after
+    /// [`deregister_ephemeral_ingress`](Self::deregister_ephemeral_ingress).
+    pub async fn register_ephemeral_ingress(
+        &mut self,
+        session_key: &str,
+        upstream_url: &str,
+    ) -> Result<IngressInfo, Error> {
+        match self
+            .call(Request::RegisterEphemeralIngress {
+                session_key: session_key.to_string(),
+                upstream_url: upstream_url.to_string(),
+            })
+            .await?
+        {
+            ResponseResult::IngressRegistered(info) => Ok(info),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected IngressRegistered, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Remove a previously-registered ephemeral ingress route. Idempotent.
+    pub async fn deregister_ephemeral_ingress(&mut self, session_key: &str) -> Result<(), Error> {
+        match self
+            .call(Request::DeregisterEphemeralIngress {
+                session_key: session_key.to_string(),
+            })
+            .await?
+        {
+            ResponseResult::Empty {} => Ok(()),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected Empty, got: {other:?}"),
+            }),
+        }
+    }
+
     /// Low-level request/response helper. Public for tests and future
     /// verbs; consumers should prefer the verb-specific methods above.
     pub async fn call(&mut self, request: Request) -> Result<ResponseResult, Error> {
@@ -466,6 +529,39 @@ impl SyncClient {
     pub fn deregister_ingress(&mut self, key: &str) -> Result<(), Error> {
         match self.call(Request::DeregisterIngress {
             key: key.to_string(),
+        })? {
+            ResponseResult::Empty {} => Ok(()),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected Empty, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Register a session-unique ephemeral ingress route (not persisted).
+    ///
+    /// Returns [`IngressInfo`] with the assigned port.
+    pub fn register_ephemeral_ingress(
+        &mut self,
+        session_key: &str,
+        upstream_url: &str,
+    ) -> Result<IngressInfo, Error> {
+        match self.call(Request::RegisterEphemeralIngress {
+            session_key: session_key.to_string(),
+            upstream_url: upstream_url.to_string(),
+        })? {
+            ResponseResult::IngressRegistered(info) => Ok(info),
+            other => Err(Error::DaemonError {
+                code: "unexpected_response".into(),
+                message: format!("expected IngressRegistered, got: {other:?}"),
+            }),
+        }
+    }
+
+    /// Remove a previously-registered ephemeral ingress route. Idempotent.
+    pub fn deregister_ephemeral_ingress(&mut self, session_key: &str) -> Result<(), Error> {
+        match self.call(Request::DeregisterEphemeralIngress {
+            session_key: session_key.to_string(),
         })? {
             ResponseResult::Empty {} => Ok(()),
             other => Err(Error::DaemonError {
