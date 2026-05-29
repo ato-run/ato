@@ -115,7 +115,7 @@ impl Daemon {
             listener,
             socket_path: socket_path.clone(),
             state,
-            _socket_guard: SocketFileGuard { path: socket_path },
+            _socket_guard: SocketFileGuard::new(socket_path),
         })
     }
 
@@ -317,7 +317,17 @@ fn create_named_pipe_listener(
 /// normal `Drop`. Windows named pipes disappear when their handles are
 /// dropped, so cleanup is only needed on Unix.
 struct SocketFileGuard {
+    #[cfg(unix)]
     path: PathBuf,
+}
+
+impl SocketFileGuard {
+    fn new(_path: PathBuf) -> Self {
+        Self {
+            #[cfg(unix)]
+            path: _path,
+        }
+    }
 }
 
 impl Drop for SocketFileGuard {
